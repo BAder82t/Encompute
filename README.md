@@ -98,3 +98,10 @@ veil bench score.veil --mode encrypted
 | `crates/veil-cli` | `veil` command |
 | `crates/veil-py`, `python/veil` | Python SDK: extension module and tracing frontend |
 | `examples/` | The two v0.1 demos |
+
+## License
+
+AGPL-3.0-only, with commercial licenses available: see [LICENSING.md](LICENSING.md).
+Veil statically links OpenFHE (BSD 2-Clause); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Security reports: [SECURITY.md](SECURITY.md).
+
