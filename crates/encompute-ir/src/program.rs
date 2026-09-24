@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::error::{type_error, Code, Error, Result};
-use crate::types::{Range, Shape, Type, ValueId, Visibility};
+use crate::types::{Elem, Range, Shape, Type, ValueId, Visibility};
 
 /// An IR operation. Operands always refer to earlier nodes.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +32,49 @@ pub enum Op {
     /// the analyzed input range. MLIR: `math` ops, approximated by HEIR's
     /// `polynomial-approximation` pass.
     Sigmoid(ValueId),
+
+    // --- exact scalar ops (0.3); lowered to TFHE, never to CKKS ---------------
+    /// Comparison → bool. MLIR: `arith.cmpi`.
+    Cmp(CmpOp, ValueId, ValueId),
+    /// Boolean logic on bools, bitwise on integers. MLIR: `arith.andi/ori/xori`.
+    Logic(LogicOp, ValueId, ValueId),
+    /// Boolean or bitwise not. MLIR: `arith.xori` with all-ones.
+    Not(ValueId),
+    /// Shift by a public amount. MLIR: `arith.shli` / `arith.shrsi|shrui`.
+    Shift { x: ValueId, left: bool, by: u32 },
+    /// MLIR: `arith.minsi/minui`.
+    Min(ValueId, ValueId),
+    /// MLIR: `arith.maxsi/maxui`.
+    Max(ValueId, ValueId),
+    /// `cond ? a : b` with an encrypted condition. MLIR: `arith.select`.
+    Select(ValueId, ValueId, ValueId),
+    /// `table[x]` for x in `0..table.len()`. MLIR: `tensor.extract` from a
+    /// constant (HEIR lowers to a programmable bootstrap).
+    Lookup { x: ValueId, table: Vec<f64> },
+    /// Integer width or signedness change (bool → int allowed); the value must
+    /// fit the target. MLIR: `arith.extsi/extui/trunci`.
+    Cast(ValueId),
+    /// Truncating division by a public non-zero constant. MLIR: `arith.divsi/divui`.
+    Div(ValueId, ValueId),
+    /// Remainder by a public non-zero constant. MLIR: `arith.remsi/remui`.
+    Rem(ValueId, ValueId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LogicOp {
+    And,
+    Or,
+    Xor,
 }
 
 impl Op {
@@ -49,6 +92,29 @@ impl Op {
             Op::MatVec(..) => "matvec",
             Op::Poly { .. } => "poly",
             Op::Sigmoid(..) => "sigmoid",
+            Op::Cmp(c, ..) => match c {
+                CmpOp::Eq => "eq",
+                CmpOp::Ne => "ne",
+                CmpOp::Lt => "lt",
+                CmpOp::Le => "le",
+                CmpOp::Gt => "gt",
+                CmpOp::Ge => "ge",
+            },
+            Op::Logic(l, ..) => match l {
+                LogicOp::And => "and",
+                LogicOp::Or => "or",
+                LogicOp::Xor => "xor",
+            },
+            Op::Not(..) => "not",
+            Op::Shift { left: true, .. } => "shl",
+            Op::Shift { left: false, .. } => "shr",
+            Op::Min(..) => "min",
+            Op::Max(..) => "max",
+            Op::Select(..) => "select",
+            Op::Lookup { .. } => "lookup",
+            Op::Cast(..) => "cast",
+            Op::Div(..) => "div",
+            Op::Rem(..) => "rem",
         }
     }
 
@@ -59,6 +125,14 @@ impl Op {
                 vec![*a, *b]
             }
             Op::Neg(a) | Op::Sum(a) | Op::Sigmoid(a) | Op::Poly { x: a, .. } => vec![*a],
+            Op::Cmp(_, a, b)
+            | Op::Logic(_, a, b)
+            | Op::Min(a, b)
+            | Op::Max(a, b)
+            | Op::Div(a, b)
+            | Op::Rem(a, b) => vec![*a, *b],
+            Op::Not(a) | Op::Cast(a) | Op::Shift { x: a, .. } | Op::Lookup { x: a, .. } => vec![*a],
+            Op::Select(c, a, b) => vec![*c, *a, *b],
         }
     }
 }
@@ -244,12 +318,19 @@ impl Builder {
 
     pub fn neg(&mut self, a: ValueId) -> Result<ValueId> {
         let t = self.secret_operand("neg", a)?;
+        if t.elem.is_exact() {
+            if !t.elem.is_int() {
+                return Err(type_error("neg on bool; use not"));
+            }
+            return Ok(self.push_typed(Op::Neg(a), Visibility::Secret, Shape::Scalar, t.elem));
+        }
         self.unary_shape("neg", t.shape)?;
         Ok(self.push(Op::Neg(a), Visibility::Secret, t.shape))
     }
 
     pub fn sum(&mut self, a: ValueId) -> Result<ValueId> {
         let t = self.secret_operand("sum", a)?;
+        self.approx_only("sum", &[a])?;
         match t.shape {
             Shape::Vector(_) => Ok(self.push(Op::Sum(a), Visibility::Secret, Shape::Scalar)),
             s => Err(type_error(format!("sum needs a vector, got {s}"))),
@@ -259,6 +340,7 @@ impl Builder {
     pub fn dot(&mut self, a: ValueId, b: ValueId) -> Result<ValueId> {
         let (ta, tb) = (self.ty(a)?, self.ty(b)?);
         self.any_secret("dot", ta, tb)?;
+        self.approx_only("dot", &[a, b])?;
         match (ta.shape, tb.shape) {
             (Shape::Vector(n), Shape::Vector(m)) if n == m => {
                 Ok(self.push(Op::Dot(a, b), Visibility::Secret, Shape::Scalar))
@@ -278,6 +360,7 @@ impl Builder {
             ));
         }
         self.any_secret("matvec", tm, tv)?;
+        self.approx_only("matvec", &[m, v])?;
         match (tm.shape, tv.shape) {
             (Shape::Matrix(r, c), Shape::Vector(n)) if c == n => {
                 Ok(self.push(Op::MatVec(m, v), Visibility::Secret, Shape::Vector(r)))
@@ -290,6 +373,7 @@ impl Builder {
 
     pub fn poly(&mut self, x: ValueId, coeffs: Vec<f64>) -> Result<ValueId> {
         let t = self.secret_operand("poly", x)?;
+        self.approx_only("poly", &[x])?;
         self.unary_shape("poly", t.shape)?;
         if coeffs.len() < 2 {
             return Err(type_error(
@@ -304,8 +388,220 @@ impl Builder {
 
     pub fn sigmoid(&mut self, x: ValueId) -> Result<ValueId> {
         let t = self.secret_operand("sigmoid", x)?;
+        self.approx_only("sigmoid", &[x])?;
         self.unary_shape("sigmoid", t.shape)?;
         Ok(self.push(Op::Sigmoid(x), Visibility::Secret, t.shape))
+    }
+
+    /// Exact scalar input. Without a range, the type's full range; bools are
+    /// always `[0, 1]`.
+    pub fn input_exact(&mut self, name: &str, elem: Elem, range: Option<Range>) -> Result<ValueId> {
+        check_ident("input name", name)?;
+        if !elem.is_exact() {
+            return Err(type_error("input_exact needs an exact type"));
+        }
+        let (min, max) = elem.bounds();
+        let range = match (elem, range) {
+            (Elem::Bool, _) => Range::new(0.0, 1.0),
+            // Values cross the API as f64: default ranges stop at ±2^53.
+            (_, None) => Range::new(min.max(-(1 << 53)) as f64, max.min(1 << 53) as f64),
+            (_, Some(r)) => r,
+        };
+        let integral = |x: f64| x.is_finite() && x.fract() == 0.0;
+        if !(integral(range.lo) && integral(range.hi) && range.lo <= range.hi)
+            || (range.lo as i128) < min
+            || (range.hi as i128) > max
+        {
+            return Err(Error::new(
+                Code::MissingRange,
+                format!(
+                    "input {name:?}: range [{}, {}] must be integers within {elem} [{min}, {max}]",
+                    range.lo, range.hi
+                ),
+            ));
+        }
+        if !self.input_names.insert(name.to_owned()) {
+            return Err(type_error(format!("duplicate input {name:?}")));
+        }
+        let op = Op::Input {
+            name: name.to_owned(),
+            range,
+        };
+        Ok(self.push_typed(op, Visibility::Secret, Shape::Scalar, elem))
+    }
+
+    /// Public exact scalar constant.
+    pub fn constant_exact(&mut self, elem: Elem, value: f64) -> Result<ValueId> {
+        let (min, max) = elem.bounds();
+        if !elem.is_exact()
+            || !value.is_finite()
+            || value.fract() != 0.0
+            || (value as i128) < min
+            || (value as i128) > max
+        {
+            return Err(type_error(format!(
+                "constant {value} is not a valid {elem}"
+            )));
+        }
+        Ok(self.push_typed(
+            Op::Const { data: vec![value] },
+            Visibility::Public,
+            Shape::Scalar,
+            elem,
+        ))
+    }
+
+    pub fn cmp(&mut self, op: CmpOp, a: ValueId, b: ValueId) -> Result<ValueId> {
+        let name = Op::Cmp(op, a, b).mnemonic();
+        let elem = self.exact_pair(name, a, b)?;
+        if elem == Elem::Bool && !matches!(op, CmpOp::Eq | CmpOp::Ne) {
+            return Err(type_error(format!(
+                "{name} on bool; only eq/ne compare bools"
+            )));
+        }
+        Ok(self.push_typed(
+            Op::Cmp(op, a, b),
+            Visibility::Secret,
+            Shape::Scalar,
+            Elem::Bool,
+        ))
+    }
+
+    pub fn logic(&mut self, op: LogicOp, a: ValueId, b: ValueId) -> Result<ValueId> {
+        let elem = self.exact_pair(Op::Logic(op, a, b).mnemonic(), a, b)?;
+        Ok(self.push_typed(Op::Logic(op, a, b), Visibility::Secret, Shape::Scalar, elem))
+    }
+
+    pub fn not(&mut self, a: ValueId) -> Result<ValueId> {
+        self.secret_operand("not", a)?;
+        let t = self.exact_operand("not", a)?;
+        Ok(self.push_typed(Op::Not(a), Visibility::Secret, Shape::Scalar, t.elem))
+    }
+
+    pub fn shift(&mut self, x: ValueId, left: bool, by: u32) -> Result<ValueId> {
+        self.secret_operand("shift", x)?;
+        let t = self.exact_operand("shift", x)?;
+        if !t.elem.is_int() || by >= t.elem.bits() {
+            return Err(type_error(format!(
+                "shift of {} by {by} is not valid",
+                t.elem
+            )));
+        }
+        Ok(self.push_typed(
+            Op::Shift { x, left, by },
+            Visibility::Secret,
+            Shape::Scalar,
+            t.elem,
+        ))
+    }
+
+    pub fn min(&mut self, a: ValueId, b: ValueId) -> Result<ValueId> {
+        self.min_max(Op::Min(a, b), a, b)
+    }
+
+    pub fn max(&mut self, a: ValueId, b: ValueId) -> Result<ValueId> {
+        self.min_max(Op::Max(a, b), a, b)
+    }
+
+    fn min_max(&mut self, op: Op, a: ValueId, b: ValueId) -> Result<ValueId> {
+        let elem = self.exact_pair(op.mnemonic(), a, b)?;
+        if !elem.is_int() {
+            return Err(type_error(format!("{} needs integers", op.mnemonic())));
+        }
+        Ok(self.push_typed(op, Visibility::Secret, Shape::Scalar, elem))
+    }
+
+    /// `cond ? a : b` without revealing `cond`.
+    pub fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> Result<ValueId> {
+        let tc = self.secret_operand("select condition", cond)?;
+        if tc.elem != Elem::Bool {
+            return Err(type_error(format!(
+                "select needs a bool condition, got {}",
+                tc.elem
+            )));
+        }
+        let (ta, tb) = (
+            self.exact_operand("select", a)?,
+            self.exact_operand("select", b)?,
+        );
+        if ta.elem != tb.elem {
+            return Err(type_error(format!(
+                "select branches differ: {} and {}",
+                ta.elem, tb.elem
+            )));
+        }
+        Ok(self.push_typed(
+            Op::Select(cond, a, b),
+            Visibility::Secret,
+            Shape::Scalar,
+            ta.elem,
+        ))
+    }
+
+    /// `table[x]`; every entry must be a valid value of `x`'s type.
+    pub fn lookup(&mut self, x: ValueId, table: Vec<f64>) -> Result<ValueId> {
+        self.secret_operand("lookup", x)?;
+        let t = self.exact_operand("lookup", x)?;
+        let (min, max) = t.elem.bounds();
+        if table.is_empty() || table.len() > 1 << 16 {
+            return Err(type_error("lookup table needs 1 to 65536 entries"));
+        }
+        if let Some(v) = table.iter().find(|v| {
+            !v.is_finite() || v.fract() != 0.0 || (**v as i128) < min || (**v as i128) > max
+        }) {
+            return Err(type_error(format!(
+                "lookup entry {v} is not a valid {}",
+                t.elem
+            )));
+        }
+        Ok(self.push_typed(
+            Op::Lookup { x, table },
+            Visibility::Secret,
+            Shape::Scalar,
+            t.elem,
+        ))
+    }
+
+    /// Convert to integer type `to`; the value must fit (checked by range analysis).
+    pub fn cast(&mut self, x: ValueId, to: Elem) -> Result<ValueId> {
+        self.secret_operand("cast", x)?;
+        self.exact_operand("cast", x)?;
+        if !to.is_int() {
+            return Err(type_error(format!(
+                "cast target must be an integer type, got {to}"
+            )));
+        }
+        Ok(self.push_typed(Op::Cast(x), Visibility::Secret, Shape::Scalar, to))
+    }
+
+    pub fn div(&mut self, a: ValueId, b: ValueId) -> Result<ValueId> {
+        self.div_rem(Op::Div(a, b), a, b)
+    }
+
+    pub fn rem(&mut self, a: ValueId, b: ValueId) -> Result<ValueId> {
+        self.div_rem(Op::Rem(a, b), a, b)
+    }
+
+    fn div_rem(&mut self, op: Op, a: ValueId, b: ValueId) -> Result<ValueId> {
+        let name = op.mnemonic();
+        let ta = self.secret_operand(name, a)?;
+        let tb = self.ty(b)?;
+        let divisor = match &self.program.node(b).op {
+            Op::Const { data } if tb.visibility == Visibility::Public => data[0],
+            _ => {
+                return Err(Error::new(
+                    Code::SecretDivision,
+                    format!("{name} needs a public constant divisor in 0.3"),
+                ))
+            }
+        };
+        if !ta.elem.is_int() || ta.elem != tb.elem {
+            return Err(type_error(format!("{name} needs two integers of one type")));
+        }
+        if divisor == 0.0 {
+            return Err(type_error(format!("{name} by zero")));
+        }
+        Ok(self.push_typed(op, Visibility::Secret, Shape::Scalar, ta.elem))
     }
 
     pub fn output(&mut self, name: &str, value: ValueId) -> Result<()> {
@@ -334,9 +630,19 @@ impl Builder {
     }
 
     /// Rebuild `op` through the checked constructors, used by the parser.
-    pub(crate) fn push_op(&mut self, op: Op, shape: Shape) -> Result<ValueId> {
+    pub(crate) fn push_op(&mut self, op: Op, ty: Type) -> Result<ValueId> {
+        let (shape, elem) = (ty.shape, ty.elem);
         match op {
+            Op::Input { name, range } if elem.is_exact() => {
+                self.input_exact(&name, elem, Some(range))
+            }
             Op::Input { name, range } => self.input(&name, shape, range),
+            Op::Const { data } if elem.is_exact() => {
+                if data.len() != 1 {
+                    return Err(type_error("exact constants are scalars"));
+                }
+                self.constant_exact(elem, data[0])
+            }
             Op::Const { data } => self.constant(shape, data),
             Op::Add(a, b) => self.add(a, b),
             Op::Sub(a, b) => self.sub(a, b),
@@ -347,21 +653,85 @@ impl Builder {
             Op::MatVec(m, v) => self.matvec(m, v),
             Op::Poly { x, coeffs } => self.poly(x, coeffs),
             Op::Sigmoid(x) => self.sigmoid(x),
+            Op::Cmp(c, a, b) => self.cmp(c, a, b),
+            Op::Logic(l, a, b) => self.logic(l, a, b),
+            Op::Not(a) => self.not(a),
+            Op::Shift { x, left, by } => self.shift(x, left, by),
+            Op::Min(a, b) => self.min(a, b),
+            Op::Max(a, b) => self.max(a, b),
+            Op::Select(c, a, b) => self.select(c, a, b),
+            Op::Lookup { x, table } => self.lookup(x, table),
+            Op::Cast(x) => self.cast(x, elem),
+            Op::Div(a, b) => self.div(a, b),
+            Op::Rem(a, b) => self.rem(a, b),
         }
     }
 
     fn push(&mut self, op: Op, visibility: Visibility, shape: Shape) -> ValueId {
+        self.push_typed(op, visibility, shape, Elem::F64)
+    }
+
+    fn push_typed(&mut self, op: Op, visibility: Visibility, shape: Shape, elem: Elem) -> ValueId {
         let id = ValueId(self.program.nodes.len() as u32);
         self.program.nodes.push(Node {
             op,
-            ty: Type { visibility, shape },
+            ty: Type {
+                visibility,
+                shape,
+                elem,
+            },
         });
         id
+    }
+
+    fn approx_only(&self, name: &str, ids: &[ValueId]) -> Result<()> {
+        for &id in ids {
+            if self.ty(id)?.elem.is_exact() {
+                return Err(type_error(format!(
+                    "{name} works on approximate (float) values, not {}",
+                    self.ty(id)?.elem
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn exact_operand(&self, name: &str, id: ValueId) -> Result<Type> {
+        let t = self.ty(id)?;
+        if !t.elem.is_exact() {
+            return Err(type_error(format!(
+                "{name} needs exact (integer or bool) operands; CKKS values have no exact \
+                 comparison or logic semantics"
+            )));
+        }
+        Ok(t)
+    }
+
+    /// Two exact operands of one element type, at least one secret.
+    fn exact_pair(&self, name: &str, a: ValueId, b: ValueId) -> Result<Elem> {
+        let (ta, tb) = (self.exact_operand(name, a)?, self.exact_operand(name, b)?);
+        self.any_secret(name, ta, tb)?;
+        if ta.elem != tb.elem {
+            return Err(type_error(format!(
+                "{name} needs operands of one type, got {} and {}; cast one explicitly",
+                ta.elem, tb.elem
+            )));
+        }
+        Ok(ta.elem)
     }
 
     fn elementwise(&mut self, op: Op, a: ValueId, b: ValueId) -> Result<ValueId> {
         let (ta, tb) = (self.ty(a)?, self.ty(b)?);
         let name = op.mnemonic();
+        if ta.elem.is_exact() || tb.elem.is_exact() {
+            let elem = self.exact_pair(name, a, b)?;
+            if elem == Elem::Bool {
+                return Err(type_error(format!(
+                    "{name} on bool; use and/or/xor for Boolean logic"
+                )));
+            }
+            return Ok(self.push_typed(op, Visibility::Secret, Shape::Scalar, elem));
+        }
         self.any_secret(name, ta, tb)?;
         self.unary_shape(name, ta.shape)?;
         self.unary_shape(name, tb.shape)?;

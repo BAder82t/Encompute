@@ -19,6 +19,6 @@ pub use error::{Code, Error, Result};
 /// `encompute <IR_VERSION>`).
 pub const IR_VERSION: &str = "0.1";
 pub use eval::{check_inputs, evaluate, horner, sigmoid, Inputs, Outputs};
-pub use program::{Builder, Node, Op, Output, Program, MAX_DIM};
+pub use program::{Builder, CmpOp, LogicOp, Node, Op, Output, Program, MAX_DIM};
 pub use text::parse;
-pub use types::{Range, Shape, Type, ValueId, Visibility};
+pub use types::{Elem, Range, Shape, Type, ValueId, Visibility};

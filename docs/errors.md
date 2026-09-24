@@ -16,5 +16,12 @@ Python raises `encompute.EncomputeError` with `.code` and `.message`.
 | ENC1202 | compiler | Precision unreachable: scale above 59 bits, first modulus above 60 bits, unbounded range, or a sigmoid needing degree > 127 | Relax `precision` or narrow input ranges |
 | ENC1301 | frontend, IR | Type error: shape mismatch, public-only computation, output not depending on a secret, bad constant | See message |
 | ENC1302 | IR parser | Malformed `.eir` text (message includes the line) | — |
+| ENC1303 | analysis | An exact integer operation may overflow its type for inputs in the declared ranges, a lookup index may leave its table, or an exact output may exceed ±2^53 | Use a wider type (`cast`) or narrower input ranges |
 | ENC1401 | runtime | Artifact missing, modified (hash mismatch), or compiled by a different Encompute version | Recompile the artifact |
 | ENC1501 | backend | Backend error (OpenFHE exception, missing rotation key, depth budget exhausted, build without OpenFHE) | See message |
+| ENC1601 | envelope | Malformed, truncated or corrupted envelope (checksum mismatch) | — |
+| ENC1602 | envelope | Wrong kind, format, scheme or backend version | Match client and evaluator versions |
+| ENC1603 | envelope | Made for a different parameter set | Recompile or regenerate keys |
+| ENC1604 | envelope | Made for a different program | — |
+| ENC1605 | envelope | Different or unregistered key | Upload `eval.keys` |
+| ENC1701 | remote | Network or protocol failure between client and evaluator | — |

@@ -17,8 +17,8 @@
 use std::fmt::{self, Write as _};
 
 use crate::error::{Code, Error, Result};
-use crate::program::{Builder, Op, Program};
-use crate::types::{Range, Shape, Type, ValueId, Visibility};
+use crate::program::{Builder, CmpOp, LogicOp, Op, Program};
+use crate::types::{Elem, Range, Shape, Type, ValueId, Visibility};
 
 const HEADER: &str = "encompute 0.1";
 const _: () = assert!(HEADER.len() == "encompute ".len() + crate::IR_VERSION.len());
@@ -40,6 +40,8 @@ impl fmt::Display for Program {
                 }
                 Op::Const { data } => write!(f, " {}", floats(data))?,
                 Op::Poly { x, coeffs } => write!(f, " {x} {}", floats(coeffs))?,
+                Op::Lookup { x, table } => write!(f, " {x} {}", floats(table))?,
+                Op::Shift { x, by, .. } => write!(f, " {x} {by}")?,
                 op => {
                     let ids: Vec<String> = op.operands().iter().map(ToString::to_string).collect();
                     write!(f, " {}", ids.join(", "))?;
@@ -128,9 +130,35 @@ pub fn parse(src: &str) -> Result<Program> {
                 }
             }
             "neg" => Op::Neg(c.value()?),
+            "not" => Op::Not(c.value()?),
+            "cast" => Op::Cast(c.value()?),
+            "shl" | "shr" => {
+                let x = c.value()?;
+                let by = c.usize()?;
+                Op::Shift {
+                    x,
+                    left: mnemonic == "shl",
+                    by: u32::try_from(by).map_err(|_| err(n, "shift amount too large"))?,
+                }
+            }
+            "lookup" => {
+                let x = c.value()?;
+                Op::Lookup {
+                    x,
+                    table: c.floats()?,
+                }
+            }
+            "select" => {
+                let cond = c.value()?;
+                c.punct(',')?;
+                let a = c.value()?;
+                c.punct(',')?;
+                Op::Select(cond, a, c.value()?)
+            }
             "sum" => Op::Sum(c.value()?),
             "sigmoid" => Op::Sigmoid(c.value()?),
-            "add" | "sub" | "mul" | "dot" | "matvec" => {
+            "add" | "sub" | "mul" | "dot" | "matvec" | "eq" | "ne" | "lt" | "le" | "gt" | "ge"
+            | "and" | "or" | "xor" | "min" | "max" | "div" | "rem" => {
                 let a = c.value()?;
                 c.punct(',')?;
                 let bv = c.value()?;
@@ -139,7 +167,20 @@ pub fn parse(src: &str) -> Result<Program> {
                     "sub" => Op::Sub(a, bv),
                     "mul" => Op::Mul(a, bv),
                     "dot" => Op::Dot(a, bv),
-                    _ => Op::MatVec(a, bv),
+                    "matvec" => Op::MatVec(a, bv),
+                    "eq" => Op::Cmp(CmpOp::Eq, a, bv),
+                    "ne" => Op::Cmp(CmpOp::Ne, a, bv),
+                    "lt" => Op::Cmp(CmpOp::Lt, a, bv),
+                    "le" => Op::Cmp(CmpOp::Le, a, bv),
+                    "gt" => Op::Cmp(CmpOp::Gt, a, bv),
+                    "ge" => Op::Cmp(CmpOp::Ge, a, bv),
+                    "and" => Op::Logic(LogicOp::And, a, bv),
+                    "or" => Op::Logic(LogicOp::Or, a, bv),
+                    "xor" => Op::Logic(LogicOp::Xor, a, bv),
+                    "min" => Op::Min(a, bv),
+                    "max" => Op::Max(a, bv),
+                    "div" => Op::Div(a, bv),
+                    _ => Op::Rem(a, bv),
                 }
             }
             other => return Err(err(n, format!("unknown op {other:?}"))),
@@ -147,7 +188,7 @@ pub fn parse(src: &str) -> Result<Program> {
         c.punct(':')?;
         let ty = c.ty()?;
         c.end()?;
-        let id = b.push_op(op, ty.shape).map_err(|e| at(n, e))?;
+        let id = b.push_op(op, ty).map_err(|e| at(n, e))?;
         let inferred = b.ty(id).map_err(|e| at(n, e))?;
         if inferred != ty {
             return Err(err(
@@ -304,9 +345,22 @@ impl<'a> Cursor<'a> {
                 self.punct('>')?;
                 Shape::Matrix(r, c)
             }
-            _ => return self.fail("a shape"),
+            other => match Elem::parse(other) {
+                Some(elem) if elem.is_exact() => {
+                    return Ok(Type {
+                        visibility,
+                        shape: Shape::Scalar,
+                        elem,
+                    })
+                }
+                _ => return self.fail("a shape or element type"),
+            },
         };
-        Ok(Type { visibility, shape })
+        Ok(Type {
+            visibility,
+            shape,
+            elem: Elem::F64,
+        })
     }
 
     fn end(&mut self) -> Result<()> {

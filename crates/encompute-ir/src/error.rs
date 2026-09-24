@@ -25,6 +25,8 @@ pub enum Code {
     Type,
     /// The `.eir` text is malformed.
     Parse,
+    /// An exact integer operation may overflow its type.
+    Overflow,
     /// Compiled artifact is missing, corrupt or from another version.
     Artifact,
     /// A backend (e.g. OpenFHE) reported an error.
@@ -57,6 +59,7 @@ impl Code {
             Code::PrecisionUnreachable => "ENC1202",
             Code::Type => "ENC1301",
             Code::Parse => "ENC1302",
+            Code::Overflow => "ENC1303",
             Code::Artifact => "ENC1401",
             Code::Backend => "ENC1501",
             Code::Envelope => "ENC1601",
@@ -71,7 +74,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 19] = [
+    pub const ALL: [Code; 20] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -83,6 +86,7 @@ impl Code {
         Code::PrecisionUnreachable,
         Code::Type,
         Code::Parse,
+        Code::Overflow,
         Code::Artifact,
         Code::Backend,
         Code::Envelope,

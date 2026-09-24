@@ -36,6 +36,13 @@ pub struct PrecisionEstimate {
 
 /// Lower `program` to a CKKS plan and choose its parameters.
 pub fn compile(program: &Program) -> Result<Compiled> {
+    if encompute_analysis::semantics(program)? == encompute_analysis::Semantics::Exact {
+        return Err(Error::new(
+            Code::Type,
+            "program requires exact integer/bool semantics (comparisons, logic, selection); CKKS \
+             does not provide exact semantics. Use scheme \"auto\" or \"tfhe\"",
+        ));
+    }
     let ranges = ranges(program)?;
     let slots = required_slots(program);
     let mut e = Emitter::new(program, &ranges, slots);
@@ -76,6 +83,7 @@ pub fn compile(program: &Program) -> Result<Compiled> {
             Op::MatVec(m, v) => e.matvec(*m, get(*v)),
             Op::Poly { x, coeffs } => e.poly(get(*x), coeffs),
             Op::Sigmoid(x) => e.sigmoid(id, *x, get(*x))?,
+            op => unreachable!("{} is exact; rejected above", op.mnemonic()),
         };
         // IR ranges bound the real elements; padding is covered only when clean.
         if let Val::Secret(reg, layout) = v {

@@ -135,6 +135,15 @@ pub fn ranges(program: &Program) -> Result<RangeMap> {
                 .iter()
                 .map(|x| Interval::new(sigmoid(x.lo), sigmoid(x.hi)))
                 .collect(),
+            op => {
+                return Err(Error::new(
+                    Code::Unsupported,
+                    format!(
+                        "{} is exact; use int_ranges for exact programs",
+                        op.mnemonic()
+                    ),
+                ))
+            }
         };
         if let Some(bad) = r.iter().find(|i| !(i.lo.is_finite() && i.hi.is_finite())) {
             return Err(Error::new(
