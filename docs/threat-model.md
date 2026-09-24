@@ -1,4 +1,4 @@
-# Encompute v0.1 threat model
+# Encompute threat model (v0.2)
 
 Also written into every artifact's `security.json`.
 
@@ -13,7 +13,7 @@ Also written into every artifact's `security.json`.
 
 The evaluator follows the protocol but may try to learn from what it sees.
 Malicious evaluators, malicious clients and colluding parties are out of
-scope for v0.1.
+scope for v0.2.
 
 ## Guarantees
 
@@ -45,7 +45,7 @@ checksums against corruption, but there is no client authentication in 0.2.
 
 1. **Decrypted results are never returned to the evaluator.** CKKS is not
    IND-CPA-D secure (Li–Micciancio, 2021). An evaluator that sees decryptions
-   of ciphertexts it computed can recover the secret key. v0.1 adds no noise
+   of ciphertexts it computed can recover the secret key. v0.2 adds no noise
    flooding; returning results to the evaluator is unsupported.
 2. **Inputs lie within their declared ranges.** The client checks this before
    encrypting (ENC1102). Out-of-range inputs would not leak data, but the
@@ -59,9 +59,9 @@ checksums against corruption, but there is no client authentication in 0.2.
 - Timing and ciphertext sizes (they depend only on the program, not on input values).
 
 Values are never revealed. Hiding the model itself (encrypted weights)
-is out of scope for v0.1.
+is out of scope for v0.2.
 
-## Not covered in v0.1
+## Not covered in v0.2
 
 Side channels on the client, malicious-evaluator integrity (results are not
 verifiable), key rotation, threshold decryption, and multi-party settings.

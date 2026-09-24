@@ -24,11 +24,13 @@ print(score.explain())           # depth, rotations, parameters, precision
 score.save("score.encompute")         # reproducible artifact, no keys
 ```
 
-Status: **v0.1**. See the [v0.1 plan](docs/v0.1-plan.md), the
+Status: **v0.2**: client/evaluator split across a network boundary, with a
+containerized evaluator demo. See the [changelog](CHANGELOG.md), the
+[0.2 plan](docs/v0.2-plan.md), [benchmarks](docs/benchmarks.md), the
 [decision records](docs/adr/), the [threat model](docs/threat-model.md) and
 the [error codes](docs/errors.md).
 
-## What v0.1 does
+## What 0.2 does
 
 - **Privacy types.** `secret[float, lo:hi]` and `secret[Tensor[n], lo:hi]`.
   Using a secret in `if`, `print`, a comparison or a division by a secret is a
@@ -42,13 +44,13 @@ the [error codes](docs/errors.md).
   (cross-checked against OpenFHE's own choice).
 - **Runtime.** `clear`, `mock` and `encrypted` modes; client and evaluator
   roles kept apart in the API (the evaluator role never receives the secret key).
-  In v0.1 both roles run in one process; 0.2 separates them across a network
-  boundary.
+  Locally both roles run in one process; `run --remote` puts a network
+  boundary between them.
 - **Differential testing.** `test()` / `encompute test` compares encrypted and
   plaintext outputs on range endpoints plus random samples.
 
-Out of scope for v0.1: comparisons and integers (TFHE, 0.3), bootstrapping
-and GPU (0.2), networking and KMS (0.2/0.4).
+Out of scope for 0.2: comparisons and integers (TFHE, 0.3), bootstrapping,
+GPU, TLS and client authentication, KMS.
 
 ## Build
 
@@ -113,7 +115,7 @@ contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-runtime` | Execution, differential testing, explain, bench, artifacts |
 | `crates/encompute-cli` | `encompute` command |
 | `crates/encompute-py`, `python/encompute` | Python SDK: extension module and tracing frontend |
-| `examples/` | The two v0.1 demos |
+| `examples/` | Demos: logistic scoring, semantic search, the two-machine search model |
 
 ## License
 

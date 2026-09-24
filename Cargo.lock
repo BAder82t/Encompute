@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-analysis"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "encompute-ir",
  "proptest",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-backend"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "encompute-ckks",
  "encompute-ir",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-ckks"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "encompute-analysis",
  "encompute-ir",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-cli"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "encompute-ir",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-evaluator"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "encompute-backend",
  "encompute-ckks",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-ir"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-openfhe"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-openfhe-client"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-protocol"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "encompute-ir",
  "proptest",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-py"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "encompute-backend",
  "encompute-ckks",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-runtime"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "encompute-analysis",
  "encompute-backend",
