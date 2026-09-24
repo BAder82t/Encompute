@@ -58,23 +58,35 @@ lbcrypto::Plaintext encode_like(const ContextImpl& c,
 }
 }  // namespace
 
+// Destructors release OpenFHE objects (crypto context, keys, ciphertext
+// polynomials) and must hold the lock like every other OpenFHE call, so
+// `impl` is reset inside the lock rather than after the body returns.
+// Wrapper objects are never destroyed while the lock is held (the mutex is
+// not recursive): shim functions only create them.
 Context::Context(std::unique_ptr<ContextImpl> impl) : impl(std::move(impl)) {}
 Context::~Context() {
+  std::lock_guard lock(g_openfhe);
   if (impl && !impl->key_tag.empty()) {
-    std::lock_guard lock(g_openfhe);
     lbcrypto::CryptoContextImpl<DCRTPoly>::ClearEvalMultKeys(impl->key_tag);
     lbcrypto::CryptoContextImpl<DCRTPoly>::ClearEvalAutomorphismKeys(
         impl->key_tag);
   }
+  impl.reset();
 }
 
 SecretKey::SecretKey(std::unique_ptr<SecretKeyImpl> impl)
     : impl(std::move(impl)) {}
-SecretKey::~SecretKey() = default;
+SecretKey::~SecretKey() {
+  std::lock_guard lock(g_openfhe);
+  impl.reset();
+}
 
 Ciphertext::Ciphertext(std::unique_ptr<CiphertextImpl> impl)
     : impl(std::move(impl)) {}
-Ciphertext::~Ciphertext() = default;
+Ciphertext::~Ciphertext() {
+  std::lock_guard lock(g_openfhe);
+  impl.reset();
+}
 
 std::unique_ptr<Context> new_context(uint32_t ring_dim, uint32_t mult_depth,
                                      uint32_t scale_bits,

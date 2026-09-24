@@ -47,10 +47,13 @@ exclusive (2 of 12 failed) or only the evaluation paths exclusive (4 of 12
 failed) was not enough either. The root cause is spread over several paths.
 
 Mitigation in `cpp/shim.cc`: every OpenFHE call holds one process-wide
-`std::mutex`. OpenFHE still uses all cores inside each call through
+`std::mutex`, including the wrapper destructors, which release OpenFHE
+objects inside the lock (added after review; a stress harness did not
+reproduce a failure either way, but unlocked destruction broke the
+invariant). OpenFHE still uses all cores inside each call through
 OpenMP; what is lost is parallelism between application threads.
-Regression test: `contexts_can_be_created_and_used_concurrently` (8
-threads) running alongside the other backend tests. Result: 20 of 20 runs
+Regression test: `contexts_can_be_created_used_and_dropped_concurrently`
+(16 threads, interleaved creation, evaluation and drops) running alongside the other backend tests. Result: 20 of 20 runs
 clean.
 
 Follow-up: report upstream with a minimal reproducer; revisit for the 0.4

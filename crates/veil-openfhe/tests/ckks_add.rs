@@ -128,17 +128,28 @@ fn veil_parameter_choice_matches_openfhe() {
 }
 
 #[test]
-fn contexts_can_be_created_and_used_concurrently() {
-    let handles: Vec<_> = (0..8)
+fn contexts_can_be_created_used_and_dropped_concurrently() {
+    // Creation, evaluation and destruction (ciphertexts, keys, contexts)
+    // interleaved across threads; every one must hold the shim's lock.
+    // Values reach 2 * 15 = 30, so parameters are sized for 40.
+    let handles: Vec<_> = (0..16)
         .map(|i| {
             std::thread::spawn(move || {
-                let params = select_params(2, 4.0, 1e-3, 4).unwrap();
-                let (be, sk) = OpenFheBackend::new(&params, &[1]).unwrap();
-                let x = [i as f64, 1.0, 2.0, 3.0];
-                let ct = be.encrypt(&x).unwrap();
-                let r = be.rotate(&be.add(&ct, &ct).unwrap(), 1).unwrap();
-                let out = be.decrypt(&sk, &r).unwrap();
-                assert!((out[3] - 2.0 * i as f64).abs() < 1e-5);
+                for round in 0..6 {
+                    let params = select_params(2, 40.0, 1e-3, 4).unwrap();
+                    let (be, sk) = OpenFheBackend::new(&params, &[1]).unwrap();
+                    let x = [i as f64, round as f64, 2.0, 3.0];
+                    let ct = be.encrypt(&x).unwrap();
+                    let doubled = be.add(&ct, &ct).unwrap();
+                    drop(ct);
+                    let r = be.rotate(&doubled, 1).unwrap();
+                    drop(doubled);
+                    let out = be.decrypt(&sk, &r).unwrap();
+                    assert!(
+                        (out[3] - 2.0 * i as f64).abs() < 1e-5,
+                        "thread {i} round {round}: {out:?}"
+                    );
+                }
             })
         })
         .collect();
