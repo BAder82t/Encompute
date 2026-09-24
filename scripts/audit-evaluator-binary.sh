@@ -3,7 +3,7 @@
 # (key generation, encryption, decryption, secret-key handling).
 # OpenFHE's own internal routines are statically linked and reported, not
 # failed: the guarantee is that the evaluator never receives a secret key
-# (docs/v0.2-plan.md, D2).
+# (docs/threat-model.md).
 set -euo pipefail
 BIN="${1:-target/release/encompute-evaluator}"
 [ -x "$BIN" ] || { echo "no evaluator binary at $BIN" >&2; exit 2; }

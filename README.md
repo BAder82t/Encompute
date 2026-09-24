@@ -26,7 +26,7 @@ score.save("score.encompute")         # reproducible artifact, no keys
 
 Status: **v0.2**: client/evaluator split across a network boundary, with a
 containerized evaluator demo. See the [changelog](CHANGELOG.md), the
-[0.2 plan](docs/v0.2-plan.md), [benchmarks](docs/benchmarks.md), the
+[benchmarks](docs/benchmarks.md), the
 [decision records](docs/adr/), the [threat model](docs/threat-model.md) and
 the [error codes](docs/errors.md).
 
