@@ -1,6 +1,6 @@
 [package]
 name = "veil-analysis"
-description = "Privacy, range, depth and precision analyses over Veil IR"
+description = "Privacy and range analyses over Veil IR"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,10 @@ license.workspace = true
 
 [dependencies]
 veil-ir.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true
