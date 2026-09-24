@@ -151,7 +151,7 @@ def test_public_parameters_bound_at_compile():
 
 def test_explain_bench_and_manifest():
     text = score.explain(measure=20)
-    assert "Chebyshev degree" in text and "PASS" in text
+    assert "degree" in text and "PASS" in text and "encrypted request" in text
     b = score.bench(reps=2)
     assert b["backend"] == "mock" and b["evaluate_ms"] >= 0
     assert score.security["evaluator_receives_secret_key"] is False

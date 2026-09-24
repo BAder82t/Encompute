@@ -3,6 +3,27 @@
 Machine: Apple Silicon (arm64), 14 cores, macOS; OpenFHE v1.5.1 static,
 OpenMP. Numbers are from one run; rerun with the commands shown.
 
+## Workloads (0.2 P5)
+
+`cargo run --release --features openfhe -p encompute-runtime --example suite`
+
+Encrypted on OpenFHE, client and evaluator in one fresh process per
+workload. Times are medians of 5 runs; error is over 20 sampled inputs
+(range endpoints first). Sizes are the envelopes that cross the network.
+Target error 1e-3 for all.
+
+| workload | N | depth | rot keys | compile ms | keygen ms | encrypt ms | eval ms | decrypt ms | eval keys MiB | request MiB | response MiB | peak RSS MiB | max abs err | max rel err |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| scalar_arith | 8192 | 2 | 0 | 0.2 | 162 | 13.2 | 12.4 | 4.9 | 1.50 | 0.75 | 0.25 | 37 | 2.8e-7 | 9.2e-7 |
+| dot_1024 | 8192 | 1 | 10 | 0.1 | 395 | 7.4 | 27.4 | 6.8 | 8.26 | 0.25 | 0.25 | 94 | 2.8e-7 | 1.8e-6 |
+| matvec_128x128 | 8192 | 1 | 22 | 1.0 | 543 | 7.3 | 93.7 | 7.2 | 17.26 | 0.25 | 0.25 | 177 | 4.3e-7 | 2.1e-4 |
+| logistic_32 | 16384 | 7 | 5 | 1.0 | 1523 | 54.3 | 302.2 | 23.6 | 45.02 | 2.00 | 0.50 | 432 | 4.8e-4 | 1.3e-3 |
+| similarity_384x64 | 8192 | 1 | 17 | 1.9 | 431 | 6.3 | 68.2 | 6.7 | 13.51 | 0.25 | 0.25 | 150 | 2.7e-7 | 1.0e-4 |
+
+Relative error is |error| / max(|expected|, precision). Logistic's error is
+dominated by the Chebyshev sigmoid approximation (degree chosen for half the
+budget); the others are CKKS noise only.
+
 ## Evaluator concurrency (0.2 P4)
 
 `cargo run --release --features openfhe -p encompute-runtime --example concurrency -- target/release/encompute-evaluator MODEL JOBS 8`

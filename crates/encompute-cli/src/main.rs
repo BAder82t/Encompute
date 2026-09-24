@@ -57,6 +57,16 @@ enum Cmd {
         #[arg(long, default_value = "openfhe")]
         backend: String,
     },
+    /// Check an artifact (and optionally keys and the evaluator binary) against the security model.
+    Audit {
+        model: PathBuf,
+        #[arg(long)]
+        keys: Option<PathBuf>,
+        #[arg(long)]
+        evaluator: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Compare encrypted (or mock) execution with plaintext on sampled inputs.
     Test {
         model: PathBuf,
@@ -191,6 +201,29 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("wrote {} (key {})", dir.display(), &client.key_id()[..16]);
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Audit {
+            model,
+            keys,
+            evaluator,
+            json,
+        } => {
+            use encompute_runtime::audit::{audit, Status};
+            let m = load(&model)?;
+            let checks = audit(&m, keys.as_deref(), evaluator.as_deref());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&checks).unwrap());
+            } else {
+                for c in &checks {
+                    let s = serde_json::to_value(c.status).unwrap();
+                    println!("{:<5} {:<28} {}", s.as_str().unwrap(), c.id, c.detail);
+                }
+            }
+            Ok(if checks.iter().any(|c| c.status == Status::Fail) {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            })
+        }
         Cmd::Serve {
             model,
             listen,
@@ -255,11 +288,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             mode,
         } => {
             let m = load(&model)?;
-            let rep = match measure {
-                Some(n) => Some(m.test(mode.parse()?, n, 42)?),
+            let measured = match measure {
+                Some(n) => Some(m.measure(mode.parse()?, n, 3)?),
                 None => None,
             };
-            print!("{}", m.explain(rep.as_ref()));
+            print!("{}", m.explain(measured.as_ref()));
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Bench {

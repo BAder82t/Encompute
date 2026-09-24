@@ -99,11 +99,11 @@ impl Model {
 
     #[pyo3(signature = (measure=None, mode_="mock"))]
     fn explain(&self, measure: Option<usize>, mode_: &str) -> PyResult<String> {
-        let rep = match measure {
-            Some(n) => Some(self.inner.test(mode(mode_)?, n, 42).map_err(err)?),
+        let measured = match measure {
+            Some(n) => Some(self.inner.measure(mode(mode_)?, n, 3).map_err(err)?),
             None => None,
         };
-        Ok(self.inner.explain(rep.as_ref()))
+        Ok(self.inner.explain(measured.as_ref()))
     }
 
     fn bench_json(&self, mode_: &str, reps: usize) -> PyResult<String> {

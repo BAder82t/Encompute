@@ -57,7 +57,7 @@ fn compile_run_test_explain_bench() {
 
     let (code, out, _) = encompute(&["explain", a, "--measure", "10"]);
     assert_eq!(code, 0);
-    assert!(out.contains("Chebyshev degree") && out.contains("measured"));
+    assert!(out.contains("degree") && out.contains("Accuracy (measured"));
 
     let (code, out, _) = encompute(&["bench", a, "--reps", "2", "--json"]);
     assert_eq!(code, 0);
@@ -66,4 +66,35 @@ fn compile_run_test_explain_bench() {
     let (code, _, err) = encompute(&["run", a, "--input", "x=5,0,0"]);
     assert_eq!(code, 2);
     assert!(err.contains("error[ENC1102]"), "{err}");
+}
+
+#[test]
+fn keys_and_audit() {
+    let dir = std::env::temp_dir().join(format!("encompute-audit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("score.eir");
+    std::fs::write(&src, MODEL).unwrap();
+    let art = dir.join("score.encompute");
+    let keys = dir.join("score.keys");
+    let (a, k) = (art.to_str().unwrap(), keys.to_str().unwrap());
+    assert_eq!(encompute(&["compile", src.to_str().unwrap(), "-o", a]).0, 0);
+    let (code, out, err) = encompute(&["keys", "generate", a, "-o", k, "--mode", "mock"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("wrote"));
+
+    let (code, out, _) = encompute(&["audit", a, "--keys", k]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("PASS  keys.secret_permissions"));
+    assert!(out.contains("WARN  ckks.decryption_oracle"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let secret = keys.join("secret.key");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (code, out, _) = encompute(&["audit", a, "--keys", k]);
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("FAIL  keys.secret_permissions"));
+    }
 }

@@ -92,6 +92,8 @@ pub struct BenchReport {
     pub evaluation_key_bytes: usize,
     pub request_bytes: usize,
     pub response_bytes: usize,
+    /// Peak resident memory of this process (client and evaluator both run here).
+    pub peak_rss_bytes: u64,
     /// True for the mock backend, whose byte format is not OpenFHE's.
     pub sizes_estimated: bool,
 }
@@ -222,6 +224,7 @@ impl Model {
             evaluation_key_bytes: s.client.evaluation_keys().map_or(0, <[u8]>::len),
             request_bytes: req,
             response_bytes: resp,
+            peak_rss_bytes: encompute_evaluator::engine::peak_rss_bytes(),
             sizes_estimated: mode == Mode::Mock,
         })
     }

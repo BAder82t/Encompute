@@ -29,8 +29,23 @@ pub struct OutputError {
     pub name: String,
     pub max_abs: f64,
     pub mean_abs: f64,
+    /// Max of |error| / max(|expected|, precision).
+    pub max_relative: f64,
     /// Case index with the largest error.
     pub worst_case: usize,
+    /// Vector outputs: fraction of cases whose argmax matches plaintext.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argmax_agreement: Option<f64>,
+    /// Vector outputs of length ≥ 5: mean overlap of the top-5 sets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top5_overlap: Option<f64>,
+}
+
+fn top_k(v: &[f64], k: usize) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..v.len()).collect();
+    idx.sort_by(|&a, &b| v[b].total_cmp(&v[a]));
+    idx.truncate(k);
+    idx
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -72,11 +87,16 @@ pub fn diff_test(
             name: o.name.clone(),
             max_abs: 0.0,
             mean_abs: 0.0,
+            max_relative: 0.0,
             worst_case: 0,
+            argmax_agreement: None,
+            top5_overlap: None,
         })
         .collect();
     let mut worst: Option<(f64, FailingCase)> = None;
     let mut elements = vec![0usize; errs.len()];
+    let mut argmax_hits = vec![0usize; errs.len()];
+    let mut top5 = vec![0f64; errs.len()];
 
     for case in 0..cases {
         let inputs = sample_inputs(program, case, seed);
@@ -85,8 +105,17 @@ pub fn diff_test(
         let got = client.decrypt(&response)?;
         let mut case_max: f64 = 0.0;
         for (i, e) in errs.iter_mut().enumerate() {
-            for (x, y) in expected[&e.name].iter().zip(&got[&e.name]) {
+            let (want, have) = (&expected[&e.name], &got[&e.name]);
+            if want.len() > 1 {
+                argmax_hits[i] += usize::from(top_k(want, 1) == top_k(have, 1));
+                if want.len() >= 5 {
+                    let (a, b) = (top_k(want, 5), top_k(have, 5));
+                    top5[i] += a.iter().filter(|j| b.contains(j)).count() as f64 / 5.0;
+                }
+            }
+            for (x, y) in want.iter().zip(have) {
                 let d = (x - y).abs();
+                e.max_relative = e.max_relative.max(d / x.abs().max(program.precision()));
                 e.mean_abs += d;
                 elements[i] += 1;
                 if d > e.max_abs {
@@ -108,8 +137,15 @@ pub fn diff_test(
             ));
         }
     }
-    for (e, n) in errs.iter_mut().zip(elements) {
+    for (i, (e, n)) in errs.iter_mut().zip(elements).enumerate() {
         e.mean_abs /= n.max(1) as f64;
+        let len = program.node(program.outputs()[i].value).ty.shape.len();
+        if len > 1 && cases > 0 {
+            e.argmax_agreement = Some(argmax_hits[i] as f64 / cases as f64);
+        }
+        if len >= 5 && cases > 0 {
+            e.top5_overlap = Some(top5[i] / cases as f64);
+        }
     }
     let max_error = errs.iter().map(|e| e.max_abs).fold(0.0, f64::max);
     let passed = max_error <= program.precision();

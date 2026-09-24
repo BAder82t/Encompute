@@ -83,14 +83,19 @@ fn modes_explain_and_bench() {
 
     let rep = m.test(Mode::Mock, 50, 1).unwrap();
     assert!(rep.passed);
-    let text = m.explain(Some(&rep));
+    let measured = m.measure(Mode::Mock, 20, 2).unwrap();
+    let text = m.explain(Some(&measured));
+    assert!(m.explain(None).contains("Accuracy (estimated)"));
     for needle in [
         "Privacy",
-        "encrypted by the client",
-        "rotation keys",
-        "Chebyshev degree",
+        "evaluator can decrypt",
+        "rotations",
+        "degree",
         "ring dimension",
-        "measured",
+        "encrypted request",
+        "evaluation keys",
+        "peak memory",
+        "Accuracy (measured",
         "PASS",
     ] {
         assert!(text.contains(needle), "missing {needle:?} in\n{text}");
