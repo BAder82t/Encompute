@@ -8,6 +8,7 @@ members = [
     "crates/veil-openfhe",
     "crates/veil-runtime",
     "crates/veil-cli",
+    "crates/veil-py",
 ]
 # veil-openfhe links a native OpenFHE install; build it explicitly with
 # `-p veil-openfhe` or `--workspace` once OPENFHE_ROOT is set.

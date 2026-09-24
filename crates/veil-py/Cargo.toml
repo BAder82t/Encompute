@@ -1,0 +1,31 @@
+[package]
+name = "veil-py"
+description = "Python bindings for Veil (distribution: veilcompute)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+veil-ir.workspace = true
+veil-ckks.workspace = true
+veil-backend.workspace = true
+veil-runtime.workspace = true
+serde_json.workspace = true
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+
+[build-dependencies]
+pyo3-build-config = "0.29"
+
+[features]
+openfhe = ["veil-runtime/openfhe"]
+extension-module = ["pyo3/extension-module"]
+default = ["extension-module"]
+
+[lints]
+workspace = true

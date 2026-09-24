@@ -21,21 +21,60 @@ fn arithmetic_matches_plaintext() {
     let (ca, cb) = (be.encrypt(&a).unwrap(), be.encrypt(&b).unwrap());
     let dec = |c: &veil_openfhe::OpenFheCiphertext| be.decrypt(&sk, c).unwrap();
 
-    close(&dec(&be.add(&ca, &cb).unwrap()), &a.iter().zip(&b).map(|(x, y)| x + y).collect::<Vec<_>>(), 1e-6);
-    close(&dec(&be.sub(&ca, &cb).unwrap()), &a.iter().zip(&b).map(|(x, y)| x - y).collect::<Vec<_>>(), 1e-6);
-    close(&dec(&be.neg(&ca).unwrap()), &a.iter().map(|x| -x).collect::<Vec<_>>(), 1e-6);
+    close(
+        &dec(&be.add(&ca, &cb).unwrap()),
+        &a.iter().zip(&b).map(|(x, y)| x + y).collect::<Vec<_>>(),
+        1e-6,
+    );
+    close(
+        &dec(&be.sub(&ca, &cb).unwrap()),
+        &a.iter().zip(&b).map(|(x, y)| x - y).collect::<Vec<_>>(),
+        1e-6,
+    );
+    close(
+        &dec(&be.neg(&ca).unwrap()),
+        &a.iter().map(|x| -x).collect::<Vec<_>>(),
+        1e-6,
+    );
     let prod = be.mul(&ca, &cb).unwrap();
-    close(&dec(&prod), &a.iter().zip(&b).map(|(x, y)| x * y).collect::<Vec<_>>(), 1e-6);
+    close(
+        &dec(&prod),
+        &a.iter().zip(&b).map(|(x, y)| x * y).collect::<Vec<_>>(),
+        1e-6,
+    );
     // Plaintext ops on a product that FLEXIBLEAUTO has not yet rescaled.
     let pp = be.mul_plain(&prod, &b).unwrap();
-    close(&dec(&pp), &a.iter().zip(&b).map(|(x, y)| x * y * y).collect::<Vec<_>>(), 1e-6);
+    close(
+        &dec(&pp),
+        &a.iter().zip(&b).map(|(x, y)| x * y * y).collect::<Vec<_>>(),
+        1e-6,
+    );
     let ap = be.add_plain(&prod, &a).unwrap();
-    close(&dec(&ap), &a.iter().zip(&b).map(|(x, y)| x * y + x).collect::<Vec<_>>(), 1e-6);
-    close(&dec(&be.add_const(&ca, 2.5).unwrap()), &a.iter().map(|x| x + 2.5).collect::<Vec<_>>(), 1e-6);
-    close(&dec(&be.mul_const(&ca, -3.0).unwrap()), &a.iter().map(|x| -3.0 * x).collect::<Vec<_>>(), 1e-6);
+    close(
+        &dec(&ap),
+        &a.iter().zip(&b).map(|(x, y)| x * y + x).collect::<Vec<_>>(),
+        1e-6,
+    );
+    close(
+        &dec(&be.add_const(&ca, 2.5).unwrap()),
+        &a.iter().map(|x| x + 2.5).collect::<Vec<_>>(),
+        1e-6,
+    );
+    close(
+        &dec(&be.mul_const(&ca, -3.0).unwrap()),
+        &a.iter().map(|x| -3.0 * x).collect::<Vec<_>>(),
+        1e-6,
+    );
     // Mixed levels.
     let mixed = be.add(&pp, &ca).unwrap();
-    close(&dec(&mixed), &a.iter().zip(&b).map(|(x, y)| x * y * y + x).collect::<Vec<_>>(), 1e-6);
+    close(
+        &dec(&mixed),
+        &a.iter()
+            .zip(&b)
+            .map(|(x, y)| x * y * y + x)
+            .collect::<Vec<_>>(),
+        1e-6,
+    );
     assert!(be.ciphertext_bytes(&ca).unwrap() > be.ciphertext_bytes(&pp).unwrap());
 }
 
@@ -64,7 +103,10 @@ fn secret_key_is_bound_to_its_context() {
     // A different key decrypts to noise, not to the plaintext.
     let wrong = a.decrypt(&sk_b, &ct);
     if let Ok(v) = wrong {
-        assert!((v[0] - 1.0).abs() > 1.0, "decrypted with the wrong key: {v:?}");
+        assert!(
+            (v[0] - 1.0).abs() > 1.0,
+            "decrypted with the wrong key: {v:?}"
+        );
     }
     assert!(a.encrypt(&[0.0; 3]).is_err(), "wrong slot count");
 }
@@ -76,7 +118,11 @@ fn veil_parameter_choice_matches_openfhe() {
             let p = select_params(depth, max_abs, precision, 8).unwrap();
             let (n, log_qp) = openfhe_choice(&p).unwrap();
             assert_eq!(n, p.ring_dim, "depth {depth}, {p:?}");
-            assert!(log_qp <= p.log_qp, "OpenFHE log QP {log_qp} > Veil estimate {}", p.log_qp);
+            assert!(
+                log_qp <= p.log_qp,
+                "OpenFHE log QP {log_qp} > Veil estimate {}",
+                p.log_qp
+            );
         }
     }
 }

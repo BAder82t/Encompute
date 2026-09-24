@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "veilcompute"
+version = "0.0.1"
+description = "Compiler and runtime for private computation (internal codename: Veil)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Security :: Cryptography",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "numpy"]
+
+[tool.maturin]
+manifest-path = "crates/veil-py/Cargo.toml"
+python-source = "python"
+module-name = "veil._native"
+# Encrypted mode: build with `--features openfhe` after scripts/install-openfhe.sh
+# (maturin develop --features openfhe, or MATURIN_PEP517_ARGS="--features openfhe").
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

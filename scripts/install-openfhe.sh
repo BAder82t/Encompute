@@ -4,7 +4,7 @@ set -euo pipefail
 
 OPENFHE_VERSION="v1.5.1"
 # Static libraries: binaries and the Python extension need no rpath setup.
-BUILD_ID="$OPENFHE_VERSION-static-2"
+BUILD_ID="$OPENFHE_VERSION-static-3"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PREFIX="${1:-$ROOT/.deps/openfhe}"
 SRC="$ROOT/.deps/src/openfhe-development"
@@ -27,6 +27,8 @@ CMAKE_ARGS=(
   -DBUILD_STATIC=ON
   -DBUILD_SHARED=OFF
   -DWITH_OPENMP=ON
+  # The Python extension is a shared object; static OpenFHE must be PIC on Linux.
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 )
 if [ "$(uname)" = "Darwin" ]; then
   OMP="$(brew --prefix libomp)"

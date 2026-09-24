@@ -11,7 +11,10 @@ name = "veil"
 path = "src/main.rs"
 
 [dependencies]
+veil-ir.workspace = true
 veil-runtime.workspace = true
+serde_json.workspace = true
+clap = { version = "~4.5", features = ["derive"] }
 
 [features]
 openfhe = ["veil-runtime/openfhe"]

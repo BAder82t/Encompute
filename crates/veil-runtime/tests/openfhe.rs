@@ -44,10 +44,21 @@ fn similarity_encrypted() {
 #[test]
 fn masking_and_broadcast_encrypted() {
     let mut b = veil_ir::Builder::new("mixed", 1e-3).unwrap();
-    let x = b.input("x", veil_ir::Shape::Vector(3), veil_ir::Range::new(-1.0, 1.0)).unwrap();
-    let s = b.input("s", veil_ir::Shape::Scalar, veil_ir::Range::new(-1.0, 1.0)).unwrap();
+    let x = b
+        .input(
+            "x",
+            veil_ir::Shape::Vector(3),
+            veil_ir::Range::new(-1.0, 1.0),
+        )
+        .unwrap();
+    let s = b
+        .input("s", veil_ir::Shape::Scalar, veil_ir::Range::new(-1.0, 1.0))
+        .unwrap();
     let m = b
-        .constant(veil_ir::Shape::Matrix(3, 3), vec![1.0, 2.0, 0.0, 0.0, 1.0, -1.0, 3.0, 0.5, 1.0])
+        .constant(
+            veil_ir::Shape::Matrix(3, 3),
+            vec![1.0, 2.0, 0.0, 0.0, 1.0, -1.0, 3.0, 0.5, 1.0],
+        )
         .unwrap();
     let v = b.add(x, s).unwrap();
     let t = b.sum(v).unwrap();

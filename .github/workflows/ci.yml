@@ -10,7 +10,7 @@ env:
 
 jobs:
   mock:
-    name: mock (no OpenFHE)
+    name: rust (no OpenFHE)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -43,4 +43,15 @@ jobs:
           key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
       - run: ./scripts/install-openfhe.sh
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --all-features --release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: python sdk
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin pytest numpy
+          maturin develop --release --features openfhe
+          pytest -q
+          python examples/semantic_search.py

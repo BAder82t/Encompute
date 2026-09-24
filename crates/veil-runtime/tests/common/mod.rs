@@ -1,4 +1,5 @@
 //! Demo workloads shared by the mock and OpenFHE tests.
+#![allow(dead_code)] // each test binary uses a subset
 
 use veil_backend::rng::Rng;
 use veil_ir::{Builder, Program, Range, Shape};
@@ -36,4 +37,3 @@ pub fn similarity(dim: usize, docs: usize, seed: u64) -> Program {
     b.output("scores", s).unwrap();
     b.finish().unwrap()
 }
-
