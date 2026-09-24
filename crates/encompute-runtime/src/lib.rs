@@ -6,9 +6,11 @@ mod client;
 mod diff;
 mod explain;
 mod model;
+mod remote;
 
 pub use artifact::FORMAT as ARTIFACT_FORMAT;
 pub use client::ClientSession;
 pub use diff::{diff_test, sample_inputs, DiffReport, FailingCase, OutputError};
 pub use encompute_evaluator::{BackendKind, EvaluatorSession, Ids};
 pub use model::{has_openfhe, BenchReport, Mode, Model};
+pub use remote::{Remote, RemoteStats};

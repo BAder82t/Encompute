@@ -69,6 +69,35 @@ impl Code {
     }
 }
 
+impl Code {
+    /// Every code, for parsing codes received over the network.
+    pub const ALL: [Code; 19] = [
+        Code::SecretControlFlow,
+        Code::SecretDivision,
+        Code::SecretComparison,
+        Code::SecretToPublic,
+        Code::Unsupported,
+        Code::MissingRange,
+        Code::BadInput,
+        Code::DepthExceeded,
+        Code::PrecisionUnreachable,
+        Code::Type,
+        Code::Parse,
+        Code::Artifact,
+        Code::Backend,
+        Code::Envelope,
+        Code::Incompatible,
+        Code::WrongParameters,
+        Code::WrongProgram,
+        Code::WrongKey,
+        Code::Remote,
+    ];
+
+    pub fn parse(s: &str) -> Option<Code> {
+        Code::ALL.into_iter().find(|c| c.as_str() == s)
+    }
+}
+
 impl fmt::Display for Code {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

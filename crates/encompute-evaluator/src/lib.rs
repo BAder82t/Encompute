@@ -7,6 +7,7 @@
 //! key, backend version), executes, and returns an output envelope.
 
 mod exec;
+pub mod server;
 mod session;
 
 pub use exec::evaluate_encrypted;

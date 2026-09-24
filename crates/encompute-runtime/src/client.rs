@@ -7,8 +7,33 @@ use encompute_evaluator::{BackendKind, Ids};
 use encompute_ir::{check_inputs, Code, Error, Inputs, Outputs, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
 
+/// The concrete client, so the secret key can be exported.
+enum Client {
+    Mock(MockClient),
+    #[cfg(feature = "openfhe")]
+    OpenFhe(encompute_openfhe_client::OpenFheClient),
+}
+
+impl Client {
+    fn get(&self) -> &dyn CkksClient {
+        match self {
+            Client::Mock(c) => c,
+            #[cfg(feature = "openfhe")]
+            Client::OpenFhe(c) => c,
+        }
+    }
+
+    fn secret_key(&self) -> Result<Vec<u8>> {
+        match self {
+            Client::Mock(c) => Ok(c.secret_key()),
+            #[cfg(feature = "openfhe")]
+            Client::OpenFhe(c) => c.secret_key(),
+        }
+    }
+}
+
 pub struct ClientSession {
-    client: Box<dyn CkksClient>,
+    client: Client,
     kind: BackendKind,
     ids: Ids,
     key_id: String,
@@ -33,13 +58,8 @@ impl ClientSession {
         }
     }
 
-    fn with_keys(
-        client: Box<dyn CkksClient>,
-        kind: BackendKind,
-        ids: Ids,
-        plan: CkksPlan,
-    ) -> Result<Self> {
-        let payload = client.evaluation_keys()?;
+    fn with_keys(client: Client, kind: BackendKind, ids: Ids, plan: CkksPlan) -> Result<Self> {
+        let payload = client.get().evaluation_keys()?;
         let key_id = sha256_hex(&payload);
         let mut s = Self {
             client,
@@ -65,46 +85,69 @@ impl ClientSession {
         seed: u64,
     ) -> Result<Self> {
         let client = MockClient::new(params, &plan.rotations, MockConfig { seed, noise: true });
-        Self::with_keys(Box::new(client), BackendKind::Mock, ids, plan.clone())
+        Self::with_keys(Client::Mock(client), BackendKind::Mock, ids, plan.clone())
     }
 
     /// Fresh OpenFHE keys.
     #[cfg(feature = "openfhe")]
     pub fn openfhe(ids: Ids, plan: &CkksPlan, params: &encompute_ckks::CkksParams) -> Result<Self> {
         let client = encompute_openfhe_client::OpenFheClient::generate(params, &plan.rotations)?;
-        Self::with_keys(Box::new(client), BackendKind::OpenFhe, ids, plan.clone())
+        Self::with_keys(
+            Client::OpenFhe(client),
+            BackendKind::OpenFhe,
+            ids,
+            plan.clone(),
+        )
     }
 
-    /// OpenFHE client restored from a secret-key envelope written by
-    /// [`ClientSession::secret_key_envelope`].
-    #[cfg(feature = "openfhe")]
-    pub fn openfhe_restore(
+    /// Restore a client from a secret-key envelope written by
+    /// [`ClientSession::secret_key_envelope`]; the backend is taken from it.
+    pub fn restore(
         ids: Ids,
         plan: &CkksPlan,
         params: &encompute_ckks::CkksParams,
         secret: &[u8],
     ) -> Result<Self> {
-        let (backend, backend_version) = BackendKind::OpenFhe.label();
-        let env = open(
-            secret,
-            &Expect {
-                kind: Kind::SecretKey,
-                backend,
-                backend_version,
-                parameter_set_id: &ids.parameter_set_id,
-                program_id: None,
-                key_id: None,
-            },
-        )?;
+        let env = Envelope::decode(secret)?;
+        let kind = match env.header.backend.as_str() {
+            "mock" => BackendKind::Mock,
+            _ => BackendKind::OpenFhe,
+        };
+        let (backend, backend_version) = kind.label();
+        env.check(&Expect {
+            kind: Kind::SecretKey,
+            backend,
+            backend_version,
+            parameter_set_id: &ids.parameter_set_id,
+            program_id: None,
+            key_id: None,
+        })?;
         let key_id = env
             .header
             .key_id
             .clone()
             .ok_or_else(|| Error::new(Code::WrongKey, "secret key carries no key ID"))?;
-        let client = encompute_openfhe_client::OpenFheClient::restore(params, &env.payload)?;
+        let client = match kind {
+            BackendKind::Mock => Client::Mock(MockClient::restore(
+                params,
+                &env.payload,
+                MockConfig::default(),
+            )?),
+            #[cfg(feature = "openfhe")]
+            BackendKind::OpenFhe => Client::OpenFhe(
+                encompute_openfhe_client::OpenFheClient::restore(params, &env.payload)?,
+            ),
+            #[cfg(not(feature = "openfhe"))]
+            BackendKind::OpenFhe => {
+                return Err(Error::new(
+                    Code::Backend,
+                    "this build has no OpenFHE backend",
+                ))
+            }
+        };
         Ok(Self {
-            client: Box::new(client),
-            kind: BackendKind::OpenFhe,
+            client,
+            kind,
             ids,
             key_id,
             plan: plan.clone(),
@@ -112,14 +155,14 @@ impl ClientSession {
         })
     }
 
-    /// Secret-key envelope for the client's disk (OpenFHE only).
-    #[cfg(feature = "openfhe")]
-    pub fn secret_key_envelope(
-        client: &encompute_openfhe_client::OpenFheClient,
-        s: &Self,
-    ) -> Result<Vec<u8>> {
-        let payload = client.secret_key()?;
-        Ok(Envelope::new(s.header(Kind::SecretKey), vec![("secret".into(), payload)]).encode())
+    /// Secret-key envelope for the client's disk. Never send it anywhere.
+    pub fn secret_key_envelope(&self) -> Result<Vec<u8>> {
+        let payload = self.client.secret_key()?;
+        Ok(Envelope::new(
+            self.header(Kind::SecretKey),
+            vec![("secret".into(), payload)],
+        )
+        .encode())
     }
 
     pub fn kind(&self) -> BackendKind {
@@ -151,6 +194,7 @@ impl ClientSession {
             .map(|(i, inp)| {
                 let ct = self
                     .client
+                    .get()
                     .encrypt(&self.plan.encode_input(i, &inputs[&inp.name]))?;
                 Ok((inp.name.clone(), ct))
             })
@@ -187,7 +231,7 @@ impl ClientSession {
                         format!("unexpected output {name:?}"),
                     ));
                 }
-                let mut v = self.client.decrypt(ct)?;
+                let mut v = self.client.get().decrypt(ct)?;
                 v.truncate(o.len);
                 Ok((o.name.clone(), v))
             })

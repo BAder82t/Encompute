@@ -44,6 +44,10 @@ jobs:
       - run: ./scripts/install-openfhe.sh
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features --release
+      - name: evaluator links no client crypto
+        run: |
+          cargo build --release -p encompute-evaluator --features openfhe
+          ./scripts/audit-evaluator-binary.sh
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

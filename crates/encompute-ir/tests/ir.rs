@@ -273,3 +273,12 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn every_code_round_trips_and_is_unique() {
+    let mut seen = std::collections::HashSet::new();
+    for c in Code::ALL {
+        assert_eq!(Code::parse(c.as_str()), Some(c));
+        assert!(seen.insert(c.as_str()), "duplicate {c}");
+    }
+}

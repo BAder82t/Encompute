@@ -14,9 +14,16 @@ encompute-ckks.workspace = true
 encompute-backend.workspace = true
 encompute-protocol.workspace = true
 encompute-openfhe = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+tiny_http = "0.12"
 
 [features]
 openfhe = ["dep:encompute-openfhe"]
+
+[[bin]]
+name = "encompute-evaluator"
+path = "src/main.rs"
 
 [lints]
 workspace = true

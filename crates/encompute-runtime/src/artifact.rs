@@ -159,14 +159,8 @@ impl Model {
         ])
     }
 
-    /// Write the artifact directory (created if missing).
-    pub fn save(&self, dir: &Path) -> Result<()> {
-        fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-        let files = self.artifact_files();
-        for (name, body) in &files {
-            let path = dir.join(name);
-            fs::write(&path, body).map_err(|e| io_err(&path, e))?;
-        }
+    /// Canonical `manifest.json` for these file contents.
+    fn manifest_json(&self, files: &BTreeMap<&'static str, String>) -> String {
         let manifest = Manifest {
             artifact_format: FORMAT,
             program: self.program().name(),
@@ -188,8 +182,20 @@ impl Model {
                 .map(|(n, b)| (*n, sha256(b.as_bytes())))
                 .collect(),
         };
+        json(&manifest)
+    }
+
+    /// Write the artifact directory (created if missing).
+    pub fn save(&self, dir: &Path) -> Result<()> {
+        fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
+        let files = self.artifact_files();
+        for (name, body) in &files {
+            let path = dir.join(name);
+            fs::write(&path, body).map_err(|e| io_err(&path, e))?;
+        }
+        let manifest = self.manifest_json(&files);
         let path = dir.join("manifest.json");
-        fs::write(&path, json(&manifest)).map_err(|e| io_err(&path, e))
+        fs::write(&path, manifest).map_err(|e| io_err(&path, e))
     }
 
     /// Load an artifact: verify every file hash, recompile `program.eir`,
@@ -259,6 +265,12 @@ impl Model {
             stored.insert(name, body);
         }
         let model = Model::from_eir(&stored["program.eir"])?;
+        if manifest["program"] != model.program().name() {
+            return Err(Error::new(
+                Code::Artifact,
+                "manifest names a different program than program.eir",
+            ));
+        }
         let fresh = model.artifact_files();
         for name in ["plan.json", "parameters.json", "security.json"] {
             if fresh[name] != stored[name] {
@@ -272,6 +284,13 @@ impl Model {
                     ),
                 ));
             }
+        }
+        // The manifest itself must be exactly what this version writes.
+        if model.manifest_json(&fresh) != read("manifest.json")? {
+            return Err(Error::new(
+                Code::Artifact,
+                "manifest.json differs from what this Encompute writes; recompile the artifact",
+            ));
         }
         Ok(model)
     }

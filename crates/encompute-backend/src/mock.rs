@@ -30,6 +30,7 @@ impl Default for MockConfig {
 
 const CT_MAGIC: &[u8; 8] = b"MOCKCT01";
 const EK_MAGIC: &[u8; 8] = b"MOCKEK01";
+const SK_MAGIC: &[u8; 8] = b"MOCKSK01";
 
 fn err(msg: impl Into<String>) -> Error {
     Error::new(Code::Backend, format!("mock: {}", msg.into()))
@@ -131,6 +132,32 @@ impl MockClient {
             sigma: sigma(params, &config),
             rng: RefCell::new(rng),
         }
+    }
+}
+
+impl MockClient {
+    /// Serialized "secret key" (the key ID and noise seed).
+    pub fn secret_key(&self) -> Vec<u8> {
+        let mut b = SK_MAGIC.to_vec();
+        b.extend_from_slice(&self.key_id.to_le_bytes());
+        b
+    }
+
+    /// Restore from [`MockClient::secret_key`] bytes. A restored client
+    /// cannot export evaluation keys.
+    pub fn restore(params: &CkksParams, secret: &[u8], config: MockConfig) -> Result<Self> {
+        let mut r = Reader(secret);
+        r.magic(SK_MAGIC)?;
+        let key_id = r.u64()?;
+        r.end()?;
+        Ok(Self {
+            slots: params.slots as usize,
+            mult_depth: params.mult_depth,
+            rotations: vec![],
+            key_id,
+            sigma: sigma(params, &config),
+            rng: RefCell::new(Rng::new(config.seed ^ key_id)),
+        })
     }
 }
 

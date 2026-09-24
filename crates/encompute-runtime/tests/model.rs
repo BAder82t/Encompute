@@ -184,10 +184,19 @@ proptest::proptest! {
             fs::write(&m, serde_json::to_string_pretty(&v).unwrap()).unwrap();
         }
         if let Ok(model) = Model::load(&dir) {
-            // Only a no-op edit (e.g. whitespace the recompile reproduces) may load,
-            // and then it must be the same program.
-            let original = Model::compile(logistic(4, 1)).unwrap();
-            proptest::prop_assert_eq!(model.program(), original.program());
+            // The manifest is unsigned, so a consistent edit (hash recomputed)
+            // can load; it must then be internally consistent: saving the
+            // loaded model reproduces every file.
+            let again = dir.with_extension("resaved");
+            model.save(&again).unwrap();
+            for name in names {
+                proptest::prop_assert_eq!(
+                    fs::read(dir.join(name)).unwrap(),
+                    fs::read(again.join(name)).unwrap(),
+                    "{} not reproduced", name
+                );
+            }
+            let _ = fs::remove_dir_all(&again);
         }
         let _ = fs::remove_dir_all(&dir);
     }

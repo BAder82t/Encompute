@@ -127,7 +127,13 @@ impl Model {
         let c = &self.compiled;
         match mode {
             Mode::Clear => Err(Error::new(Code::BadInput, "clear mode has no keys")),
-            Mode::Mock => ClientSession::mock(self.ids(), &c.plan, &c.params, 0),
+            Mode::Mock => {
+                // Distinct mock keys per client, like real key generation.
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as u64);
+                ClientSession::mock(self.ids(), &c.plan, &c.params, seed)
+            }
             #[cfg(feature = "openfhe")]
             Mode::Encrypted => ClientSession::openfhe(self.ids(), &c.plan, &c.params),
             #[cfg(not(feature = "openfhe"))]

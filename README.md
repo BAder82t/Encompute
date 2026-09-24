@@ -85,6 +85,19 @@ encompute explain score.encompute --measure 100 --mode encrypted
 encompute bench score.encompute --mode encrypted
 ```
 
+Remote evaluation (the evaluator never receives the secret key):
+
+```sh
+cargo build --release --features openfhe -p encompute-cli -p encompute-evaluator
+encompute keys generate score.encompute -o score.keys     # secret.key stays here
+encompute-evaluator serve score.encompute --listen 0.0.0.0:8750   # on the evaluator machine
+encompute run score.encompute --remote http://EVALUATOR:8750 --keys score.keys --input x=...
+```
+
+The evaluator speaks plain HTTP; put a TLS proxy in front of it for remote
+clients. `scripts/audit-evaluator-binary.sh` checks that the evaluator binary
+contains no Encompute key-generation, encryption or decryption code.
+
 ## Layout
 
 | Path | Role |

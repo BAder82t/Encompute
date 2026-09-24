@@ -5,7 +5,7 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 use encompute_ir::{Code, Error, Inputs, Result};
-use encompute_runtime::{Mode, Model};
+use encompute_runtime::{ClientSession, Mode, Model, Remote};
 
 #[derive(Parser)]
 #[command(
@@ -37,6 +37,25 @@ enum Cmd {
         inputs_file: Option<PathBuf>,
         #[arg(long, default_value = "clear")]
         mode: String,
+        /// Evaluator URL: encrypt here, compute there, decrypt here.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Key directory from `encompute keys generate` (with --remote).
+        #[arg(long)]
+        keys: Option<PathBuf>,
+    },
+    /// Manage client keys.
+    Keys {
+        #[command(subcommand)]
+        cmd: KeysCmd,
+    },
+    /// Start an evaluator for a model (runs `encompute-evaluator serve`).
+    Serve {
+        model: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8750")]
+        listen: String,
+        #[arg(long, default_value = "openfhe")]
+        backend: String,
     },
     /// Compare encrypted (or mock) execution with plaintext on sampled inputs.
     Test {
@@ -71,6 +90,20 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum KeysCmd {
+    /// Generate a key pair for a model: `secret.key` (stays here, mode 0600)
+    /// and `eval.keys` (sent to the evaluator).
+    Generate {
+        model: PathBuf,
+        /// Output directory (default: <name>.keys next to the model).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "encrypted")]
+        mode: String,
+    },
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
@@ -99,12 +132,88 @@ fn run(cli: Cli) -> Result<ExitCode> {
             inputs,
             inputs_file,
             mode,
+            remote,
+            keys,
         } => {
             let m = load(&model)?;
             let inputs = parse_inputs(&inputs, inputs_file.as_deref())?;
-            let out = m.run(mode.parse()?, &inputs)?;
+            let out = match remote {
+                None => m.run(mode.parse()?, &inputs)?,
+                Some(url) => {
+                    let dir = keys.ok_or_else(|| {
+                        Error::new(
+                            Code::WrongKey,
+                            "--remote needs --keys DIR (encompute keys generate)",
+                        )
+                    })?;
+                    let read = |f: &str| {
+                        std::fs::read(dir.join(f)).map_err(|e| {
+                            Error::new(Code::WrongKey, format!("{}: {e}", dir.join(f).display()))
+                        })
+                    };
+                    let c = m.compiled();
+                    let client =
+                        ClientSession::restore(m.ids(), &c.plan, &c.params, &read("secret.key")?)?;
+                    let eval_keys = read("eval.keys").ok();
+                    let (out, stats) = Remote::new(&url).run(
+                        &client,
+                        m.program(),
+                        eval_keys.as_deref(),
+                        &inputs,
+                    )?;
+                    eprintln!(
+                        "remote: request {} KiB, response {} KiB, keys uploaded {} KiB, evaluator {:.1} ms, round trip {:.1} ms",
+                        stats.request_bytes / 1024,
+                        stats.response_bytes / 1024,
+                        stats.evaluation_key_bytes_uploaded / 1024,
+                        stats.evaluator_ms,
+                        stats.round_trip_ms
+                    );
+                    out
+                }
+            };
             println!("{}", serde_json::to_string_pretty(&out).unwrap());
             Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Keys {
+            cmd:
+                KeysCmd::Generate {
+                    model,
+                    output,
+                    mode,
+                },
+        } => {
+            let m = load(&model)?;
+            let client = m.new_client(mode.parse()?)?;
+            let dir = output
+                .unwrap_or_else(|| model.with_file_name(format!("{}.keys", m.program().name())));
+            write_keys(&dir, &client)?;
+            println!("wrote {} (key {})", dir.display(), &client.key_id()[..16]);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Serve {
+            model,
+            listen,
+            backend,
+        } => {
+            let exe = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("encompute-evaluator")))
+                .filter(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("encompute-evaluator"));
+            let status = Command::new(&exe)
+                .arg("serve")
+                .arg(&model)
+                .args(["--listen", &listen, "--backend", &backend])
+                .status()
+                .map_err(|e| {
+                    Error::new(Code::Remote, format!("cannot start {}: {e}", exe.display()))
+                })?;
+            Ok(if status.success() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            })
         }
         Cmd::Test {
             model,
@@ -220,6 +329,29 @@ fn compile(source: &str, output: Option<PathBuf>) -> Result<ExitCode> {
     m.save(&out)?;
     println!("wrote {}", out.display());
     Ok(ExitCode::SUCCESS)
+}
+
+fn write_keys(dir: &Path, client: &ClientSession) -> Result<()> {
+    let io = |e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", dir.display()));
+    std::fs::create_dir_all(dir).map_err(io)?;
+    let secret = dir.join("secret.key");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    use std::io::Write;
+    let envelope = client.secret_key_envelope()?;
+    opts.open(&secret)
+        .and_then(|mut f| f.write_all(&envelope))
+        .map_err(io)?;
+    let keys = client
+        .evaluation_keys()
+        .expect("fresh client has evaluation keys");
+    std::fs::write(dir.join("eval.keys"), keys).map_err(io)?;
+    Ok(())
 }
 
 fn parse_inputs(args: &[String], file: Option<&Path>) -> Result<Inputs> {
