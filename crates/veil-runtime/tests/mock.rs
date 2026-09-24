@@ -1,5 +1,7 @@
+mod common;
+
+use common::{logistic, similarity};
 use proptest::prelude::*;
-use veil_backend::rng::Rng;
 use veil_backend::{CkksBackend, MockBackend, MockConfig};
 use veil_ckks::compile;
 use veil_ir::{evaluate, Builder, Code, Program, Range, Shape};
@@ -30,40 +32,6 @@ fn plan_error(p: &Program, cases: usize) -> f64 {
                 .fold(0.0, f64::max)
         })
         .fold(0.0, f64::max)
-}
-
-pub fn logistic(features: usize, seed: u64) -> Program {
-    let mut rng = Rng::new(seed);
-    let mut b = Builder::new("logistic", 1e-3).unwrap();
-    let x = b
-        .input("x", Shape::Vector(features), Range::new(-1.0, 1.0))
-        .unwrap();
-    let w: Vec<f64> = (0..features).map(|_| rng.uniform(-0.4, 0.4)).collect();
-    let w = b.constant(Shape::Vector(features), w).unwrap();
-    let bias = b.constant(Shape::Scalar, vec![0.25]).unwrap();
-    let z = b.dot(w, x).unwrap();
-    let z = b.add(z, bias).unwrap();
-    let y = b.sigmoid(z).unwrap();
-    b.output("score", y).unwrap();
-    b.finish().unwrap()
-}
-
-pub fn similarity(dim: usize, docs: usize, seed: u64) -> Program {
-    let mut rng = Rng::new(seed);
-    let mut m = Vec::with_capacity(dim * docs);
-    for _ in 0..docs {
-        let row: Vec<f64> = (0..dim).map(|_| rng.normal()).collect();
-        let norm = row.iter().map(|x| x * x).sum::<f64>().sqrt();
-        m.extend(row.iter().map(|x| x / norm));
-    }
-    let mut b = Builder::new("similarity", 1e-3).unwrap();
-    let q = b
-        .input("q", Shape::Vector(dim), Range::new(-1.0, 1.0))
-        .unwrap();
-    let m = b.constant(Shape::Matrix(docs, dim), m).unwrap();
-    let s = b.matvec(m, q).unwrap();
-    b.output("scores", s).unwrap();
-    b.finish().unwrap()
 }
 
 #[test]
@@ -177,7 +145,7 @@ fn diff_test_reports_failures() {
 }
 
 /// Random programs with bounded depth: plan semantics equal the reference.
-pub fn arb_program() -> impl Strategy<Value = Program> {
+fn arb_program() -> impl Strategy<Value = Program> {
     (
         1usize..9,
         prop::collection::vec((0u8..9, any::<u32>(), any::<u32>(), -1.0f64..1.0), 1..10),

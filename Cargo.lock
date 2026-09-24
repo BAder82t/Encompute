@@ -581,6 +581,9 @@ version = "0.0.1"
 dependencies = [
  "cxx",
  "cxx-build",
+ "veil-backend",
+ "veil-ckks",
+ "veil-ir",
 ]
 
 [[package]]

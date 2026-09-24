@@ -30,22 +30,32 @@ One failure means no adoption. Further observations:
   put OpenFHE-shaped types into Veil's upper layers anyway.
 - It has no guard against the concurrency bug below.
 
-## Finding: OpenFHE context creation is not thread-safe
+## Finding: OpenFHE is not thread-safe across contexts
 
-Two threads calling `GenCryptoContext` at the same time corrupt the heap
-(EXC_BAD_ACCESS in `ParameterGenerationCKKSRNS::ParamsGenCKKSRNSInternal`
-and in a `std::map` insert). Reproduced on OpenFHE v1.5.1, macOS arm64:
-4 of 5 parallel test runs crashed.
+Reproduced on OpenFHE v1.5.1, macOS arm64:
 
-Mitigation in `cpp/shim.cc`: a process-wide `std::shared_mutex`. Context
-creation takes it exclusively; every other call takes it shared, so no call
-reads the global precomputation tables while another thread writes them.
-Regression test: `contexts_can_be_created_and_used_concurrently` (8 threads).
-Result: 20 of 20 runs clean.
+1. Two threads calling `GenCryptoContext` at once corrupt the heap
+   (EXC_BAD_ACCESS in `ParameterGenerationCKKSRNS::ParamsGenCKKSRNSInternal`
+   and in a `std::map` insert): 4 of 5 parallel runs crashed.
+2. Concurrent *evaluation* on separate contexts, with context creation
+   already serialized, corrupts results: decryption fails with "approximation
+   error is too high" in 7 of 12 runs.
 
-Consequence: context creation is serialized process-wide. That is acceptable
-because contexts are long-lived. Revisit if a server needs to create many
-contexts under load.
+A reader/writer lock (exclusive for context creation and keygen, shared for
+evaluation) fixed (1) but not (2). Making only the encode/decode paths
+exclusive (2 of 12 failed) or only the evaluation paths exclusive (4 of 12
+failed) was not enough either. The root cause is spread over several paths.
+
+Mitigation in `cpp/shim.cc`: every OpenFHE call holds one process-wide
+`std::mutex`. OpenFHE still uses all cores inside each call through
+OpenMP; what is lost is parallelism between application threads.
+Regression test: `contexts_can_be_created_and_used_concurrently` (8
+threads) running alongside the other backend tests. Result: 20 of 20 runs
+clean.
+
+Follow-up: report upstream with a minimal reproducer; revisit for the 0.4
+server, where requests arrive concurrently (process-per-worker is the
+likely answer).
 
 ## Replaceability
 

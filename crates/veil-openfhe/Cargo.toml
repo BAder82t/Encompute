@@ -9,6 +9,9 @@ links = "OPENFHEpke"
 
 [dependencies]
 cxx.workspace = true
+veil-ir.workspace = true
+veil-ckks.workspace = true
+veil-backend.workspace = true
 
 [build-dependencies]
 cxx-build.workspace = true

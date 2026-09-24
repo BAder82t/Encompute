@@ -12,9 +12,9 @@ fn main() {
         .unwrap_or_else(|| manifest.join("../../.deps/openfhe"));
     let include = root.join("include/openfhe");
     let lib = root.join("lib");
-    if !include.join("pke/openfhe.h").exists() {
+    if !include.join("pke/openfhe.h").exists() || !lib.join("libOPENFHEpke_static.a").exists() {
         panic!(
-            "OpenFHE not found at {}. Run scripts/install-openfhe.sh or set OPENFHE_ROOT.",
+            "static OpenFHE v1.5.1 not found at {}. Run scripts/install-openfhe.sh or set OPENFHE_ROOT.",
             root.display()
         );
     }
@@ -48,11 +48,13 @@ fn main() {
     }
     build.compile("veil_openfhe_shim");
 
+    // Static: every dependent binary, test and the Python extension links
+    // OpenFHE in, with no rpath or DYLD/LD_LIBRARY_PATH setup.
     println!("cargo:rustc-link-search=native={}", lib.display());
-    println!("cargo:rustc-link-lib=dylib=OPENFHEpke");
-    println!("cargo:rustc-link-lib=dylib=OPENFHEcore");
-    // Tests and binaries find the dylibs without DYLD/LD_LIBRARY_PATH.
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
+    // pke references binfhe (scheme switching); order: dependents first.
+    println!("cargo:rustc-link-lib=static=OPENFHEpke_static");
+    println!("cargo:rustc-link-lib=static=OPENFHEbinfhe_static");
+    println!("cargo:rustc-link-lib=static=OPENFHEcore_static");
 
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cpp/shim.h");
