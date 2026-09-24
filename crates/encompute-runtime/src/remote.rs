@@ -20,6 +20,8 @@ pub struct RemoteStats {
     pub response_bytes: usize,
     pub evaluation_key_bytes_uploaded: usize,
     pub evaluator_ms: f64,
+    /// Peak resident memory of the evaluator process that ran the job.
+    pub evaluator_peak_rss_bytes: u64,
     pub round_trip_ms: f64,
 }
 
@@ -126,12 +128,11 @@ impl Remote {
     }
 
     /// Submit an inputs envelope and fetch the outputs envelope.
-    pub fn execute(&self, program_id: &str, request: &[u8]) -> Result<(Vec<u8>, f64)> {
+    pub fn execute(&self, program_id: &str, request: &[u8]) -> Result<(Vec<u8>, Value)> {
         let job = self.post(&format!("/v1/programs/{program_id}/jobs"), request)?;
         let id = job["job_id"]
             .as_str()
             .ok_or_else(|| Error::new(Code::Remote, "no job ID in response"))?;
-        let evaluator_ms = job["timings_ms"]["evaluate"].as_f64().unwrap_or(0.0);
         let resp = self
             .agent
             .get(&self.url(&format!("/v1/jobs/{id}/result")))
@@ -142,7 +143,7 @@ impl Remote {
             .take(1 << 30)
             .read_to_end(&mut out)
             .map_err(|e| Error::new(Code::Remote, format!("reading result: {e}")))?;
-        Ok((out, evaluator_ms))
+        Ok((out, job["timings_ms"].clone()))
     }
 
     /// Full remote run: program and keys ensured, encrypted request, decrypted result.
@@ -162,7 +163,7 @@ impl Remote {
             eval_keys.or(client.evaluation_keys()),
         )?;
         let request = client.encrypt(program, inputs)?;
-        let (response, evaluator_ms) = self.execute(&ids.program_id, &request)?;
+        let (response, timings) = self.execute(&ids.program_id, &request)?;
         let outputs = client.decrypt(&response)?;
         Ok((
             outputs,
@@ -170,7 +171,8 @@ impl Remote {
                 request_bytes: request.len(),
                 response_bytes: response.len(),
                 evaluation_key_bytes_uploaded: uploaded,
-                evaluator_ms,
+                evaluator_ms: timings["evaluate"].as_f64().unwrap_or(0.0),
+                evaluator_peak_rss_bytes: timings["peak_rss_bytes"].as_u64().unwrap_or(0),
                 round_trip_ms: t.elapsed().as_secs_f64() * 1e3,
             },
         ))

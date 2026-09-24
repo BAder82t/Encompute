@@ -50,6 +50,14 @@ mod ffi {
     }
 }
 
+// SAFETY: every shim function, including the wrappers' destructors, holds the
+// process-wide OpenFHE mutex (ADR-001), so these objects may be used from and
+// dropped on any thread.
+#[allow(unsafe_code)]
+unsafe impl Send for ffi::Context {}
+#[allow(unsafe_code)]
+unsafe impl Send for ffi::Ciphertext {}
+
 fn backend_err(e: cxx::Exception) -> Error {
     let msg = e.what();
     let code = if msg.contains("another parameter set") {

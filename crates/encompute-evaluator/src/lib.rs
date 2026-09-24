@@ -6,7 +6,9 @@
 //! keys and input envelopes, checks every binding (parameter set, program,
 //! key, backend version), executes, and returns an output envelope.
 
+pub mod engine;
 mod exec;
+pub mod pool;
 pub mod server;
 mod session;
 
