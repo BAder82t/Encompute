@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/veil-ir",
+    "crates/veil-analysis",
+    "crates/veil-ckks",
+    "crates/veil-backend",
+    "crates/veil-openfhe",
+    "crates/veil-runtime",
+    "crates/veil-cli",
+]
+# veil-openfhe links a native OpenFHE install; build it explicitly with
+# `-p veil-openfhe` or `--workspace` once OPENFHE_ROOT is set.
+default-members = [
+    "crates/veil-ir",
+    "crates/veil-analysis",
+    "crates/veil-ckks",
+    "crates/veil-backend",
+    "crates/veil-runtime",
+    "crates/veil-cli",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+veil-ir = { path = "crates/veil-ir" }
+veil-analysis = { path = "crates/veil-analysis" }
+veil-ckks = { path = "crates/veil-ckks" }
+veil-backend = { path = "crates/veil-backend" }
+veil-openfhe = { path = "crates/veil-openfhe" }
+veil-runtime = { path = "crates/veil-runtime" }
+cxx = "1.0"
+cxx-build = "1.0"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

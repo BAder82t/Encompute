@@ -1,0 +1,13 @@
+[package]
+name = "veil-analysis"
+description = "Privacy, range, depth and precision analyses over Veil IR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+veil-ir.workspace = true
+
+[lints]
+workspace = true

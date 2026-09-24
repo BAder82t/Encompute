@@ -1,0 +1,17 @@
+[package]
+name = "veil-openfhe"
+description = "OpenFHE CKKS backend for Veil"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+links = "OPENFHEpke"
+
+[dependencies]
+cxx.workspace = true
+
+[build-dependencies]
+cxx-build.workspace = true
+
+[lints]
+workspace = true

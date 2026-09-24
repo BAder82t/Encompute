@@ -1,0 +1,14 @@
+[package]
+name = "veil-ckks"
+description = "Lowering from Veil IR to CKKS plans, and CKKS parameter selection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+veil-ir.workspace = true
+veil-analysis.workspace = true
+
+[lints]
+workspace = true
