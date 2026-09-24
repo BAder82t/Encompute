@@ -8,6 +8,7 @@ members = [
     "crates/encompute-protocol",
     "crates/encompute-openfhe",
     "crates/encompute-openfhe-client",
+    "crates/encompute-tfhe",
     "crates/encompute-evaluator",
     "crates/encompute-runtime",
     "crates/encompute-cli",
@@ -29,7 +30,7 @@ default-members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.91"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
@@ -40,6 +41,7 @@ encompute-backend = { path = "crates/encompute-backend" }
 encompute-protocol = { path = "crates/encompute-protocol" }
 encompute-openfhe = { path = "crates/encompute-openfhe" }
 encompute-openfhe-client = { path = "crates/encompute-openfhe-client" }
+encompute-tfhe = { path = "crates/encompute-tfhe" }
 encompute-evaluator = { path = "crates/encompute-evaluator" }
 encompute-runtime = { path = "crates/encompute-runtime" }
 serde = { version = "1.0", features = ["derive"] }

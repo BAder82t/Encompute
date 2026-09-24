@@ -5,7 +5,7 @@
 #   docker build -f Dockerfile.evaluator -t encompute-evaluator .
 #   docker run --rm -p 8750:8750 encompute-evaluator
 
-FROM rust:1.89-bookworm AS build
+FROM rust:1.98-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake git g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY scripts/install-openfhe.sh scripts/

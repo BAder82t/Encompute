@@ -1,0 +1,20 @@
+[package]
+name = "encompute-tfhe"
+description = "Exact (TFHE-family) evaluation for Encompute"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+encompute-ir.workspace = true
+# Research use only: Zama licenses TFHE-rs under BSD-3-Clause-Clear for
+# development, research, prototyping and experimentation; commercial use
+# requires Zama's patent license (docs/threat-model.md, README).
+tfhe = { version = "=1.8.1", default-features = false, features = ["integer"], optional = true }
+
+[features]
+tfhe-rs = ["dep:tfhe"]
+
+[lints]
+workspace = true
