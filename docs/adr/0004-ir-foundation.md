@@ -1,15 +1,15 @@
-# ADR-004 — Veil IR: custom Rust IR or MLIR
+# ADR-004 — Encompute IR: custom Rust IR or MLIR
 
 Status: **Accepted** (2026-09-24): option A, custom Rust IR, MLIR-exportable.
 
 ## Options
 
-**A. Custom Rust IR, MLIR-exportable (recommended).** SSA graph in `veil-ir`,
-plain Rust types, serde, textual `.vlir`. An MLIR text exporter is added at
+**A. Custom Rust IR, MLIR-exportable (recommended).** SSA graph in `encompute-ir`,
+plain Rust types, serde, textual `.eir`. An MLIR text exporter is added at
 0.2 for the HEIR benchmark (ADR-002).
 
-**B. MLIR from day one.** Veil dialect defined in MLIR (TableGen/C++), driven
-from Rust through `melior` or the MLIR C API, or Veil written as an MLIR/HEIR
+**B. MLIR from day one.** Encompute dialect defined in MLIR (TableGen/C++), driven
+from Rust through `melior` or the MLIR C API, or Encompute written as an MLIR/HEIR
 project in C++.
 
 ## Assessment
@@ -28,7 +28,7 @@ project in C++.
 The decisive points:
 
 1. v0.1's IR is small and its analyses (privacy, range, depth, precision) are
-   Veil-specific. MLIR's free passes are the generic ones.
+   Encompute-specific. MLIR's free passes are the generic ones.
 2. The one thing MLIR would give — HEIR interop — is deferred to 0.2 by ADR-002
    and can go through textual MLIR, which is how HEIR's own frontends connect.
 
@@ -36,14 +36,14 @@ The decisive points:
 
 These keep option B, or a HEIR export, cheap later:
 
-- Every Veil op documents its lowering to upstream MLIR (`arith`, `tensor`,
+- Every Encompute op documents its lowering to upstream MLIR (`arith`, `tensor`,
   `linalg`) wrapped in HEIR's `secret.generic`.
 - SSA values, typed operands, no implicit state. Attributes (range, precision,
   visibility) are plain data that can be written as MLIR attributes.
 - No control flow in v0.1 IR (no regions), matching the tracing frontend.
-- Passes operate on `veil-ir` through a small visitor API, not by reaching into
+- Passes operate on `encompute-ir` through a small visitor API, not by reaching into
   internal representation.
-- The 0.2 HEIR benchmark includes a round trip: `veil export --mlir` → HEIR →
+- The 0.2 HEIR benchmark includes a round trip: `encompute export --mlir` → HEIR →
   OpenFHE, with differential tests against native lowering.
 
 ## Revisit triggers

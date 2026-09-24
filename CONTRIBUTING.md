@@ -1,9 +1,9 @@
 # Contributing
 
-Thanks for your interest in Veil.
+Thanks for your interest in Encompute.
 
 - **Issues** (bugs, questions, feature requests) are welcome.
-- **Pull requests** from outside contributors cannot be merged yet. Veil is
+- **Pull requests** from outside contributors cannot be merged yet. Encompute is
   dual-licensed (AGPL-3.0-only and commercial, see [LICENSING.md](LICENSING.md)),
   which needs a contributor license agreement. One will be published before
   external contributions open.

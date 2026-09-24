@@ -1,0 +1,20 @@
+[package]
+name = "encompute-openfhe"
+description = "OpenFHE CKKS backend for Encompute"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+links = "OPENFHEpke"
+
+[dependencies]
+cxx.workspace = true
+encompute-ir.workspace = true
+encompute-ckks.workspace = true
+encompute-backend.workspace = true
+
+[build-dependencies]
+cxx-build.workspace = true
+
+[lints]
+workspace = true

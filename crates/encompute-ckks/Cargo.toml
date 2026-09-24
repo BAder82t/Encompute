@@ -1,0 +1,18 @@
+[package]
+name = "encompute-ckks"
+description = "Lowering from Encompute IR to CKKS plans, and CKKS parameter selection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+encompute-ir.workspace = true
+encompute-analysis.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

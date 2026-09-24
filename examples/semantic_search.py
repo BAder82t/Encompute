@@ -11,15 +11,15 @@ import argparse
 
 import numpy as np
 
-import veil
-from veil import Tensor, secret
+import encompute
+from encompute import Tensor, secret
 
 DIM, DOCS = 384, 64
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", default="encrypted" if veil.has_openfhe() else "mock")
+    ap.add_argument("--mode", default="encrypted" if encompute.has_openfhe() else "mock")
     ap.add_argument("--cases", type=int, default=20)
     args = ap.parse_args()
 
@@ -27,7 +27,7 @@ def main():
     docs = rng.normal(size=(DOCS, DIM))
     docs /= np.linalg.norm(docs, axis=1, keepdims=True)
 
-    @veil.compile(precision=1e-3)
+    @encompute.compile(precision=1e-3)
     def similarity(q: secret[Tensor[DIM], -1.0:1.0]):
         return docs @ q
 

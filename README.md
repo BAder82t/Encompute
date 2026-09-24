@@ -1,29 +1,27 @@
-# Veil
+# Encompute
 
-*Internal codename, see [ADR-003](docs/adr/0003-project-name.md). Python distribution: `veilcompute`.*
-
-Veil compiles ordinary programs into encrypted computation. You declare which
-values are secret and their ranges; Veil builds a CKKS plan, picks 128-bit
+Encompute compiles ordinary programs into encrypted computation. You declare which
+values are secret and their ranges; Encompute builds a CKKS plan, picks 128-bit
 parameters, runs it on OpenFHE, and checks the encrypted result against
 plaintext.
 
 ```python
 import numpy as np
-import veil
-from veil import secret, Tensor
+import encompute
+from encompute import secret, Tensor
 
 w, b = np.random.default_rng(0).normal(0, 0.3, 32), 0.1
 
-@veil.compile(precision=1e-3)
+@encompute.compile(precision=1e-3)
 def score(x: secret[Tensor[32], -1.0:1.0]):
-    return veil.sigmoid(veil.dot(w, x) + b)
+    return encompute.sigmoid(encompute.dot(w, x) + b)
 
 x = np.random.default_rng(1).uniform(-1, 1, 32)
 score(x)                         # plaintext reference
 score(x, mode="encrypted")       # encrypted end to end on OpenFHE
 print(score.test(cases=1000, mode="encrypted"))   # measured error vs. plaintext
 print(score.explain())           # depth, rotations, parameters, precision
-score.save("score.veil")         # reproducible artifact, no keys
+score.save("score.encompute")         # reproducible artifact, no keys
 ```
 
 Status: **v0.1**. See the [v0.1 plan](docs/v0.1-plan.md), the
@@ -44,7 +42,7 @@ the [error codes](docs/errors.md).
   (cross-checked against OpenFHE's own choice).
 - **Runtime.** `clear`, `mock` and `encrypted` modes; client and evaluator
   roles kept apart (the evaluator never holds the secret key).
-- **Differential testing.** `test()` / `veil test` compares encrypted and
+- **Differential testing.** `test()` / `encompute test` compares encrypted and
   plaintext outputs on range endpoints plus random samples.
 
 Out of scope for v0.1: comparisons and integers (TFHE, 0.3), bootstrapping
@@ -77,31 +75,31 @@ python examples/semantic_search.py
 ### CLI
 
 ```sh
-cargo build --release --features openfhe -p veil-cli
-veil compile model.py:score -o score.veil     # or a .vlir file
-veil run score.veil --input x=0.1,0.2,... --mode encrypted
-veil test score.veil --cases 1000 --mode encrypted
-veil explain score.veil --measure 100 --mode encrypted
-veil bench score.veil --mode encrypted
+cargo build --release --features openfhe -p encompute-cli
+encompute compile model.py:score -o score.encompute     # or a .eir file
+encompute run score.encompute --input x=0.1,0.2,... --mode encrypted
+encompute test score.encompute --cases 1000 --mode encrypted
+encompute explain score.encompute --measure 100 --mode encrypted
+encompute bench score.encompute --mode encrypted
 ```
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `crates/veil-ir` | Scheme-independent SSA IR, `.vlir` text form, reference semantics |
-| `crates/veil-analysis` | Range and privacy analyses |
-| `crates/veil-ckks` | Lowering to CKKS plans; Chebyshev approximation; parameter selection |
-| `crates/veil-backend` | Backend trait; mock backend |
-| `crates/veil-openfhe` | OpenFHE CKKS through a `cxx` shim |
-| `crates/veil-runtime` | Execution, differential testing, explain, bench, artifacts |
-| `crates/veil-cli` | `veil` command |
-| `crates/veil-py`, `python/veil` | Python SDK: extension module and tracing frontend |
+| `crates/encompute-ir` | Scheme-independent SSA IR, `.eir` text form, reference semantics |
+| `crates/encompute-analysis` | Range and privacy analyses |
+| `crates/encompute-ckks` | Lowering to CKKS plans; Chebyshev approximation; parameter selection |
+| `crates/encompute-backend` | Backend trait; mock backend |
+| `crates/encompute-openfhe` | OpenFHE CKKS through a `cxx` shim |
+| `crates/encompute-runtime` | Execution, differential testing, explain, bench, artifacts |
+| `crates/encompute-cli` | `encompute` command |
+| `crates/encompute-py`, `python/encompute` | Python SDK: extension module and tracing frontend |
 | `examples/` | The two v0.1 demos |
 
 ## License
 
 AGPL-3.0-only, with commercial licenses available: see [LICENSING.md](LICENSING.md).
-Veil statically links OpenFHE (BSD 2-Clause); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Encompute statically links OpenFHE (BSD 2-Clause); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 Security reports: [SECURITY.md](SECURITY.md).
 

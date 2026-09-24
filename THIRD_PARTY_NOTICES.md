@@ -1,6 +1,6 @@
 # Third-party notices
 
-Veil links OpenFHE statically. Its license:
+Encompute links OpenFHE statically. Its license:
 
 ## OpenFHE v1.5.1 (https://github.com/openfheorg/openfhe-development)
 

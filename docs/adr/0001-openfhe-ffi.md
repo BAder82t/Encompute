@@ -4,11 +4,11 @@ Status: **Accepted** (M0, 2026-09-24)
 
 ## Decision
 
-Veil owns a minimal `cxx` shim over OpenFHE, in `crates/veil-openfhe`.
-It exposes only the CKKS surface Veil needs. Upper layers (`veil-ir`,
-`veil-analysis`, `veil-ckks`, `veil-runtime`, the SDKs) MUST NOT depend on
+Encompute owns a minimal `cxx` shim over OpenFHE, in `crates/encompute-openfhe`.
+It exposes only the CKKS surface Encompute needs. Upper layers (`encompute-ir`,
+`encompute-analysis`, `encompute-ckks`, `encompute-runtime`, the SDKs) MUST NOT depend on
 OpenFHE types. They reach OpenFHE only through the backend trait in
-`veil-backend` (M4).
+`encompute-backend` (M4).
 
 OpenFHE is pinned to **v1.5.1** by `scripts/install-openfhe.sh`.
 
@@ -27,7 +27,7 @@ Checked `fairmath/openfhe-rs` at commit `a60b38a101e9cccbada7629245c6a79a4c65741
 One failure means no adoption. Further observations:
 
 - The API mirrors OpenFHE's C++ classes one to one, so using it directly would
-  put OpenFHE-shaped types into Veil's upper layers anyway.
+  put OpenFHE-shaped types into Encompute's upper layers anyway.
 - It has no guard against the concurrency bug below.
 
 ## Finding: OpenFHE is not thread-safe across contexts

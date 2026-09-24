@@ -10,7 +10,7 @@ PREFIX="${1:-$ROOT/.deps/openfhe}"
 SRC="$ROOT/.deps/src/openfhe-development"
 JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
-if [ -f "$PREFIX/.veil-openfhe-version" ] && [ "$(cat "$PREFIX/.veil-openfhe-version")" = "$BUILD_ID" ]; then
+if [ -f "$PREFIX/.encompute-openfhe-version" ] && [ "$(cat "$PREFIX/.encompute-openfhe-version")" = "$BUILD_ID" ]; then
   echo "OpenFHE $OPENFHE_VERSION already installed at $PREFIX"
   exit 0
 fi
@@ -43,5 +43,5 @@ fi
 cmake -S "$SRC" -B "$SRC/build" "${CMAKE_ARGS[@]}"
 cmake --build "$SRC/build" -j "$JOBS"
 cmake --install "$SRC/build"
-echo "$BUILD_ID" > "$PREFIX/.veil-openfhe-version"
+echo "$BUILD_ID" > "$PREFIX/.encompute-openfhe-version"
 echo "OpenFHE $OPENFHE_VERSION installed at $PREFIX"

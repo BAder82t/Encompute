@@ -3,9 +3,9 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "veilcompute"
+name = "encompute"
 version = "0.0.1"
-description = "Compiler and runtime for private computation (internal codename: Veil)"
+description = "Compiler and runtime for private computation (internal codename: Encompute)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "AGPL-3.0-only" }
@@ -19,9 +19,9 @@ classifiers = [
 test = ["pytest>=7", "numpy"]
 
 [tool.maturin]
-manifest-path = "crates/veil-py/Cargo.toml"
+manifest-path = "crates/encompute-py/Cargo.toml"
 python-source = "python"
-module-name = "veil._native"
+module-name = "encompute._native"
 # Encrypted mode: build with `--features openfhe` after scripts/install-openfhe.sh
 # (maturin develop --features openfhe, or MATURIN_PEP517_ARGS="--features openfhe").
 

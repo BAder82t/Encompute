@@ -11,8 +11,8 @@ import time
 
 import numpy as np
 
-import veil
-from veil import Tensor, secret
+import encompute
+from encompute import Tensor, secret
 
 FEATURES = 32
 
@@ -34,14 +34,14 @@ def train(seed: int = 0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", type=int, default=200)
-    ap.add_argument("--mode", default="encrypted" if veil.has_openfhe() else "mock")
+    ap.add_argument("--mode", default="encrypted" if encompute.has_openfhe() else "mock")
     args = ap.parse_args()
 
     w, b = train()
 
-    @veil.compile(precision=1e-3)
+    @encompute.compile(precision=1e-3)
     def score(x: secret[Tensor[FEATURES], -1.0:1.0]):
-        return veil.sigmoid(veil.dot(w, x) + b)
+        return encompute.sigmoid(encompute.dot(w, x) + b)
 
     print(score.explain())
 
@@ -55,8 +55,8 @@ def main():
     rep = score.test(cases=args.cases, mode=args.mode)
     print(rep)
     print(score.bench(reps=5, mode=args.mode))
-    score.save("logistic.veil")
-    print("wrote logistic.veil")
+    score.save("logistic.encompute")
+    print("wrote logistic.encompute")
     raise SystemExit(0 if rep.passed else 1)
 
 

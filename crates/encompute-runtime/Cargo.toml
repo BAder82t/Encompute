@@ -1,0 +1,26 @@
+[package]
+name = "encompute-runtime"
+description = "Encompute executor, differential testing and compiled artifacts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+encompute-ir.workspace = true
+encompute-ckks.workspace = true
+encompute-backend.workspace = true
+encompute-openfhe = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+proptest.workspace = true
+encompute-analysis.workspace = true
+
+[features]
+openfhe = ["dep:encompute-openfhe"]
+
+[lints]
+workspace = true

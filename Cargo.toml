@@ -1,24 +1,24 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/veil-ir",
-    "crates/veil-analysis",
-    "crates/veil-ckks",
-    "crates/veil-backend",
-    "crates/veil-openfhe",
-    "crates/veil-runtime",
-    "crates/veil-cli",
-    "crates/veil-py",
+    "crates/encompute-ir",
+    "crates/encompute-analysis",
+    "crates/encompute-ckks",
+    "crates/encompute-backend",
+    "crates/encompute-openfhe",
+    "crates/encompute-runtime",
+    "crates/encompute-cli",
+    "crates/encompute-py",
 ]
-# veil-openfhe links a native OpenFHE install; build it explicitly with
-# `-p veil-openfhe` or `--workspace` once OPENFHE_ROOT is set.
+# encompute-openfhe links a native OpenFHE install; build it explicitly with
+# `-p encompute-openfhe` or `--workspace` once OPENFHE_ROOT is set.
 default-members = [
-    "crates/veil-ir",
-    "crates/veil-analysis",
-    "crates/veil-ckks",
-    "crates/veil-backend",
-    "crates/veil-runtime",
-    "crates/veil-cli",
+    "crates/encompute-ir",
+    "crates/encompute-analysis",
+    "crates/encompute-ckks",
+    "crates/encompute-backend",
+    "crates/encompute-runtime",
+    "crates/encompute-cli",
 ]
 
 [workspace.package]
@@ -28,12 +28,12 @@ rust-version = "1.89"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
-veil-ir = { path = "crates/veil-ir" }
-veil-analysis = { path = "crates/veil-analysis" }
-veil-ckks = { path = "crates/veil-ckks" }
-veil-backend = { path = "crates/veil-backend" }
-veil-openfhe = { path = "crates/veil-openfhe" }
-veil-runtime = { path = "crates/veil-runtime" }
+encompute-ir = { path = "crates/encompute-ir" }
+encompute-analysis = { path = "crates/encompute-analysis" }
+encompute-ckks = { path = "crates/encompute-ckks" }
+encompute-backend = { path = "crates/encompute-backend" }
+encompute-openfhe = { path = "crates/encompute-openfhe" }
+encompute-runtime = { path = "crates/encompute-runtime" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 proptest = "1.5"

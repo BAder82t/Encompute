@@ -1,4 +1,4 @@
-# Veil v0.1 threat model
+# Encompute v0.1 threat model
 
 Also written into every artifact's `security.json`.
 
@@ -20,7 +20,7 @@ scope for v0.1.
 - The evaluator never holds the secret key and cannot decrypt inputs,
   intermediate values or outputs. Security: CKKS (RNS, OpenFHE v1.5.1) at
   128-bit classical security, parameters checked against the HE Standard
-  ternary-secret table (`veil-ckks/src/params.rs`), and re-checked by OpenFHE
+  ternary-secret table (`encompute-ckks/src/params.rs`), and re-checked by OpenFHE
   when the context is created.
 - Artifacts never contain key material.
 
@@ -31,7 +31,7 @@ scope for v0.1.
    of ciphertexts it computed can recover the secret key. v0.1 adds no noise
    flooding; returning results to the evaluator is unsupported.
 2. **Inputs lie within their declared ranges.** The client checks this before
-   encrypting (VEIL1102). Out-of-range inputs would not leak data, but the
+   encrypting (ENC1102). Out-of-range inputs would not leak data, but the
    results would be wrong (approximations are fitted to the range).
 
 ## What the evaluator learns

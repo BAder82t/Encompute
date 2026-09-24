@@ -1,6 +1,6 @@
 # Security policy
 
-Veil is pre-release research software (v0.1). Do not use it to protect
+Encompute is pre-release research software (v0.1). Do not use it to protect
 production data yet.
 
 ## Reporting a vulnerability

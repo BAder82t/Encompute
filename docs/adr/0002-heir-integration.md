@@ -4,8 +4,8 @@ Status: **Deferred to 0.2**
 
 ## Decision
 
-v0.1 lowers Veil IR directly to the OpenFHE backend (`veil-ckks` →
-`veil-openfhe`). HEIR is not in the v0.1 build or critical path.
+v0.1 lowers Encompute IR directly to the OpenFHE backend (`encompute-ckks` →
+`encompute-openfhe`). HEIR is not in the v0.1 build or critical path.
 
 v0.1 packing is intentionally modest:
 
@@ -17,10 +17,10 @@ v0.1 packing is intentionally modest:
 ## Why
 
 HEIR already has CKKS → OpenFHE lowering, parameter and noise analysis, and a
-layout system (`layout-propagation`, `layout-optimization`), so Veil should not
+layout system (`layout-propagation`, `layout-optimization`), so Encompute should not
 compete with it on packing. But HEIR is still changing quickly, including open
 2026 work on OpenFHE sparse packing and layout mismatches in large CKKS
-workloads. Depending on it in M0 would tie Veil's schedule to HEIR's.
+workloads. Depending on it in M0 would tie Encompute's schedule to HEIR's.
 
 ## 0.2 review
 
@@ -32,13 +32,13 @@ maintenance burden.
 If HEIR wins, the pipeline becomes:
 
 ```text
-Veil IR → Veil privacy/range passes → MLIR export → HEIR → OpenFHE
+Encompute IR → Encompute privacy/range passes → MLIR export → HEIR → OpenFHE
 ```
 
-Veil keeps what sits above HEIR: privacy types, range inference, the developer
+Encompute keeps what sits above HEIR: privacy types, range inference, the developer
 API, cost objectives, deployment, KMS, observability and backend planning.
 
 ## Constraint on v0.1
 
-Veil IR must stay backend-neutral enough to be exported to HEIR's input
+Encompute IR must stay backend-neutral enough to be exported to HEIR's input
 dialects without changing the Python API. See ADR-004.
