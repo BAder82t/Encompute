@@ -1,33 +1,48 @@
-//! The CKKS backend trait, and a mock backend that runs plans in plaintext.
+//! CKKS backend traits and a mock backend.
 //!
-//! Key roles (plan D6): a backend value is the *evaluator*. It holds the
-//! public and evaluation keys and can compute on ciphertexts. Decryption
-//! needs the separate secret key, which only the client holds. v0.1 runs
-//! both in one process; 0.2 puts a network between them.
+//! The two roles are separate traits (0.2 plan, D2):
 //!
-//! In v0.1 the trait is CKKS-shaped on purpose; it becomes scheme-generic
-//! when a second scheme exists (plan, "Crates").
+//! - [`CkksClient`] holds the secret key: it encrypts, decrypts and exports
+//!   evaluation keys.
+//! - [`CkksEvaluator`] holds only evaluation keys: it computes on ciphertexts.
+//!   It has no decryption method, and the evaluator binary does not link any
+//!   client implementation.
+//!
+//! The roles exchange ciphertexts and evaluation keys as bytes, in-process
+//! as well as over the network, so local execution takes the same path as
+//! remote execution.
+//!
+//! The traits are CKKS-shaped on purpose; they become scheme-generic when a
+//! second scheme exists.
 
 mod mock;
 pub mod rng;
 
 use encompute_ir::Result;
-pub use mock::{MockBackend, MockCiphertext, MockConfig, MockSecretKey};
+pub use mock::{MockClient, MockConfig, MockEvaluator};
 
-/// Operations a CKKS evaluator provides. Every slot vector has exactly
-/// `slots()` elements.
-pub trait CkksBackend {
+/// Client side: key owner.
+pub trait CkksClient {
+    /// Backend name, e.g. `"openfhe"`.
+    fn name(&self) -> &'static str;
+    fn slots(&self) -> usize;
+    /// Public-key encryption of a full slot vector; returns a serialized ciphertext.
+    fn encrypt(&self, values: &[f64]) -> Result<Vec<u8>>;
+    /// Decrypt a serialized ciphertext into all slots.
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<f64>>;
+    /// Serialized evaluation keys (relinearization and rotations) for the evaluator.
+    fn evaluation_keys(&self) -> Result<Vec<u8>>;
+}
+
+/// Evaluator side: computes on ciphertexts; cannot decrypt.
+pub trait CkksEvaluator {
     type Ciphertext;
-    type SecretKey;
 
-    /// Human-readable backend name, e.g. `"openfhe"`.
     fn name(&self) -> &'static str;
     fn slots(&self) -> usize;
 
-    /// Public-key encryption of a full slot vector.
-    fn encrypt(&self, values: &[f64]) -> Result<Self::Ciphertext>;
-    /// Decrypt all slots. Requires the client's secret key.
-    fn decrypt(&self, sk: &Self::SecretKey, ct: &Self::Ciphertext) -> Result<Vec<f64>>;
+    fn load_ciphertext(&self, bytes: &[u8]) -> Result<Self::Ciphertext>;
+    fn store_ciphertext(&self, ct: &Self::Ciphertext) -> Result<Vec<u8>>;
 
     fn add(&self, a: &Self::Ciphertext, b: &Self::Ciphertext) -> Result<Self::Ciphertext>;
     fn sub(&self, a: &Self::Ciphertext, b: &Self::Ciphertext) -> Result<Self::Ciphertext>;
@@ -41,7 +56,4 @@ pub trait CkksBackend {
     /// Cyclic left rotation over the slots: `out[i] = in[(i + k) mod slots]`.
     /// Needs a rotation key for `k`.
     fn rotate(&self, a: &Self::Ciphertext, k: u32) -> Result<Self::Ciphertext>;
-
-    /// Serialized size of a ciphertext in bytes.
-    fn ciphertext_bytes(&self, ct: &Self::Ciphertext) -> Result<usize>;
 }

@@ -10,7 +10,9 @@ license.workspace = true
 encompute-ir.workspace = true
 encompute-ckks.workspace = true
 encompute-backend.workspace = true
-encompute-openfhe = { workspace = true, optional = true }
+encompute-protocol.workspace = true
+encompute-evaluator.workspace = true
+encompute-openfhe-client = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
@@ -20,7 +22,7 @@ proptest.workspace = true
 encompute-analysis.workspace = true
 
 [features]
-openfhe = ["dep:encompute-openfhe"]
+openfhe = ["encompute-evaluator/openfhe", "dep:encompute-openfhe-client"]
 
 [lints]
 workspace = true

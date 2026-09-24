@@ -2,12 +2,13 @@
 //! tests, explains plans, and reads and writes compiled artifacts.
 
 mod artifact;
+mod client;
 mod diff;
-mod exec;
 mod explain;
 mod model;
 
 pub use artifact::FORMAT as ARTIFACT_FORMAT;
+pub use client::ClientSession;
 pub use diff::{diff_test, sample_inputs, DiffReport, FailingCase, OutputError};
-pub use exec::{decrypt_outputs, encrypt_inputs, evaluate_encrypted, run};
+pub use encompute_evaluator::{BackendKind, EvaluatorSession, Ids};
 pub use model::{has_openfhe, BenchReport, Mode, Model};

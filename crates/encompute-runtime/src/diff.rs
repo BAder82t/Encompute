@@ -1,10 +1,9 @@
 use encompute_backend::rng::Rng;
-use encompute_backend::CkksBackend;
-use encompute_ckks::CkksPlan;
+use encompute_evaluator::EvaluatorSession;
 use encompute_ir::{evaluate, Inputs, Outputs, Program, Result};
 use serde::Serialize;
 
-use crate::exec::run;
+use crate::client::ClientSession;
 
 /// Inputs for test case `case`: case 0 puts every element at its range's
 /// low end, case 1 at the high end, later cases are uniform samples.
@@ -57,11 +56,11 @@ pub struct DiffReport {
 }
 
 /// Run `cases` sampled inputs through the reference semantics and through
-/// `backend`, and compare every output element against the program's precision.
-pub fn diff_test<B: CkksBackend>(
-    backend: &B,
-    sk: &B::SecretKey,
-    plan: &CkksPlan,
+/// client → evaluator → client (envelopes included), and compare every
+/// output element against the program's precision.
+pub fn diff_test(
+    client: &ClientSession,
+    evaluator: &EvaluatorSession,
     program: &Program,
     cases: usize,
     seed: u64,
@@ -82,7 +81,8 @@ pub fn diff_test<B: CkksBackend>(
     for case in 0..cases {
         let inputs = sample_inputs(program, case, seed);
         let expected = evaluate(program, &inputs)?;
-        let got = run(backend, sk, plan, program, &inputs)?;
+        let (response, _) = evaluator.execute(&client.encrypt(program, &inputs)?)?;
+        let got = client.decrypt(&response)?;
         let mut case_max: f64 = 0.0;
         for (i, e) in errs.iter_mut().enumerate() {
             for (x, y) in expected[&e.name].iter().zip(&got[&e.name]) {
@@ -114,7 +114,7 @@ pub fn diff_test<B: CkksBackend>(
     let max_error = errs.iter().map(|e| e.max_abs).fold(0.0, f64::max);
     let passed = max_error <= program.precision();
     Ok(DiffReport {
-        backend: backend.name().to_owned(),
+        backend: client.kind().label().0.to_owned(),
         cases,
         seed,
         precision: program.precision(),

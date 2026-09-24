@@ -53,6 +53,16 @@ pub struct CkksParams {
     pub table_source: String,
 }
 
+impl CkksParams {
+    /// Canonical JSON (pretty, trailing newline): the artifact's
+    /// `parameters.json`, whose SHA-256 is the parameter-set ID.
+    pub fn canonical_json(&self) -> String {
+        let mut s = serde_json::to_string_pretty(self).expect("serializable");
+        s.push('\n');
+        s
+    }
+}
+
 /// Choose parameters for a plan of multiplicative `depth` whose values are
 /// bounded by `max_abs`, meeting absolute `precision`, on `slots` slots.
 pub fn select_params(depth: u32, max_abs: f64, precision: f64, slots: usize) -> Result<CkksParams> {

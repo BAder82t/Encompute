@@ -37,3 +37,71 @@ pub fn similarity(dim: usize, docs: usize, seed: u64) -> Program {
     b.output("scores", s).unwrap();
     b.finish().unwrap()
 }
+
+use encompute_backend::{CkksClient, CkksEvaluator, MockClient, MockConfig, MockEvaluator};
+use encompute_ckks::{CkksParams, CkksPlan};
+use encompute_evaluator::{evaluate_encrypted, BackendKind, EvaluatorSession};
+use encompute_ir::{Inputs, Outputs, Result};
+use encompute_runtime::ClientSession;
+
+/// Run a plan on the mock at the plan level (no envelopes), with explicit
+/// parameters, rotation keys and noise.
+pub fn mock_run(
+    plan: &CkksPlan,
+    params: &CkksParams,
+    rotations: &[u32],
+    noise: bool,
+    p: &Program,
+    inputs: &Inputs,
+) -> Result<Outputs> {
+    let cfg = MockConfig { seed: 1, noise };
+    let client = MockClient::new(params, rotations, cfg.clone());
+    let ev = MockEvaluator::new(params, &client.evaluation_keys()?, cfg)?;
+    let cts = plan
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, inp)| {
+            ev.load_ciphertext(&client.encrypt(&plan.encode_input(i, &inputs[&inp.name]))?)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let outs = evaluate_encrypted(&ev, plan, p, cts)?;
+    plan.outputs
+        .iter()
+        .zip(&outs)
+        .map(|(o, ct)| {
+            let mut v = client.decrypt(&ev.store_ciphertext(ct)?)?;
+            v.truncate(o.len);
+            Ok((o.name.clone(), v))
+        })
+        .collect()
+}
+
+/// Client and evaluator sessions for `p` (mock), keys registered.
+pub fn mock_sessions(
+    p: &Program,
+    client_params: Option<&CkksParams>,
+    seed: u64,
+) -> (ClientSession, EvaluatorSession) {
+    let mut ev = EvaluatorSession::new(p.clone(), BackendKind::Mock).unwrap();
+    let c = ev.compiled().clone();
+    let client = ClientSession::mock(
+        ev.ids().clone(),
+        &c.plan,
+        client_params.unwrap_or(&c.params),
+        seed,
+    )
+    .unwrap();
+    ev.register_keys(client.evaluation_keys().unwrap()).unwrap();
+    (client, ev)
+}
+
+/// Client and evaluator sessions for `p` on OpenFHE, keys registered.
+#[cfg(feature = "openfhe")]
+pub fn openfhe_sessions(p: &Program) -> (ClientSession, EvaluatorSession) {
+    let mut ev = EvaluatorSession::new(p.clone(), BackendKind::OpenFhe).unwrap();
+    let c = ev.compiled().clone();
+    let client = ClientSession::openfhe(ev.ids().clone(), &c.plan, &c.params).unwrap();
+    ev.register_keys(client.evaluation_keys().unwrap()).unwrap();
+    (client, ev)
+}

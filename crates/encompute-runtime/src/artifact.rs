@@ -154,7 +154,7 @@ impl Model {
         BTreeMap::from([
             ("program.eir", p.to_string()),
             ("plan.json", json(&c.plan)),
-            ("parameters.json", json(&c.params)),
+            ("parameters.json", c.params.canonical_json()),
             ("security.json", json(&security)),
         ])
     }

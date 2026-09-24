@@ -1,11 +1,13 @@
-//! OpenFHE CKKS backend for Encompute (ADR-001: Encompute-owned `cxx` shim over
-//! OpenFHE v1.5.1). Nothing outside this crate sees OpenFHE types.
+//! OpenFHE CKKS evaluator for Encompute (ADR-001: Encompute-owned `cxx` shim
+//! over OpenFHE v1.5.1). Nothing outside this crate sees OpenFHE types.
 //!
-//! [`OpenFheBackend`] is the evaluator: it holds the crypto context, public
-//! key and evaluation keys. [`OpenFheSecretKey`] is the client's decryption
-//! key, returned separately by [`OpenFheBackend::new`].
+//! This crate is the evaluator side only: it builds a crypto context from
+//! parameters, loads evaluation keys exported by a client, and computes on
+//! serialized ciphertexts. It has no key generation, encryption or
+//! decryption; those live in `encompute-openfhe-client`, which the evaluator
+//! binary does not link (0.2 plan, D2).
 
-use encompute_backend::CkksBackend;
+use encompute_backend::CkksEvaluator;
 use encompute_ckks::CkksParams;
 use encompute_ir::{Code, Error, Result};
 
@@ -19,7 +21,6 @@ mod ffi {
         include!("shim.h");
 
         type Context;
-        type SecretKey;
         type Ciphertext;
 
         fn new_context(
@@ -30,12 +31,12 @@ mod ffi {
             num_large_digits: u32,
             slots: u32,
         ) -> Result<UniquePtr<Context>>;
-        fn keygen(ctx: Pin<&mut Context>, rotations: &[i32]) -> Result<UniquePtr<SecretKey>>;
         fn ring_dimension(ctx: &Context) -> Result<u32>;
         fn log_qp(ctx: &Context) -> Result<u32>;
+        fn load_evaluation_keys(ctx: Pin<&mut Context>, bytes: &[u8]) -> Result<String>;
+        fn load_ciphertext(ctx: &Context, bytes: &[u8]) -> Result<UniquePtr<Ciphertext>>;
+        fn store_ciphertext(ct: &Ciphertext) -> Result<Vec<u8>>;
 
-        fn encrypt(ctx: &Context, values: &[f64]) -> Result<UniquePtr<Ciphertext>>;
-        fn decrypt(ctx: &Context, sk: &SecretKey, ct: &Ciphertext) -> Result<Vec<f64>>;
         fn add(ctx: &Context, a: &Ciphertext, b: &Ciphertext) -> Result<UniquePtr<Ciphertext>>;
         fn sub(ctx: &Context, a: &Ciphertext, b: &Ciphertext) -> Result<UniquePtr<Ciphertext>>;
         fn neg(ctx: &Context, a: &Ciphertext) -> Result<UniquePtr<Ciphertext>>;
@@ -45,13 +46,20 @@ mod ffi {
         fn add_const(ctx: &Context, a: &Ciphertext, c: f64) -> Result<UniquePtr<Ciphertext>>;
         fn mul_const(ctx: &Context, a: &Ciphertext, c: f64) -> Result<UniquePtr<Ciphertext>>;
         fn rotate(ctx: &Context, a: &Ciphertext, k: i32) -> Result<UniquePtr<Ciphertext>>;
-        fn serialized_size(ct: &Ciphertext) -> Result<usize>;
         fn level(ct: &Ciphertext) -> u32;
     }
 }
 
 fn backend_err(e: cxx::Exception) -> Error {
-    Error::new(Code::Backend, format!("OpenFHE: {}", e.what()))
+    let msg = e.what();
+    let code = if msg.contains("another parameter set") {
+        Code::WrongParameters
+    } else if msg.contains("evaluation keys are not loaded") {
+        Code::WrongKey
+    } else {
+        Code::Backend
+    };
+    Error::new(code, format!("OpenFHE: {msg}"))
 }
 
 /// Smallest ring dimension OpenFHE considers 128-bit secure for these
@@ -76,6 +84,11 @@ pub fn openfhe_choice(p: &CkksParams) -> Result<(u32, u32)> {
 /// Create (without keys) the exact context Encompute would use, letting
 /// OpenFHE apply its own security and batch-size checks. Returns log2(Q·P).
 pub fn openfhe_validate(p: &CkksParams) -> Result<u32> {
+    let ctx = new_checked_context(p)?;
+    ffi::log_qp(&ctx).map_err(backend_err)
+}
+
+fn new_checked_context(p: &CkksParams) -> Result<cxx::UniquePtr<ffi::Context>> {
     let ctx = ffi::new_context(
         p.ring_dim,
         p.mult_depth,
@@ -86,25 +99,26 @@ pub fn openfhe_validate(p: &CkksParams) -> Result<u32> {
     )
     .map_err(backend_err)?;
     let n = ffi::ring_dimension(&ctx).map_err(backend_err)?;
-    if n != p.ring_dim {
+    let log_qp = ffi::log_qp(&ctx).map_err(backend_err)?;
+    if n != p.ring_dim || log_qp > p.max_log_qp {
         return Err(Error::new(
             Code::Backend,
-            format!("OpenFHE used ring {n}, expected {}", p.ring_dim),
+            format!(
+                "OpenFHE parameters disagree with Encompute's: ring {n} (expected {}), \
+                 log2 QP {log_qp} (limit {})",
+                p.ring_dim, p.max_log_qp
+            ),
         ));
     }
-    ffi::log_qp(&ctx).map_err(backend_err)
+    Ok(ctx)
 }
 
-/// Evaluator over an OpenFHE CKKS context.
-pub struct OpenFheBackend {
+/// Evaluator over an OpenFHE CKKS context. Holds evaluation keys only.
+pub struct OpenFheEvaluator {
     ctx: cxx::UniquePtr<ffi::Context>,
     slots: usize,
-    ring_dim: u32,
-    log_qp: u32,
+    key_tags: Vec<String>,
 }
-
-/// The client's decryption key.
-pub struct OpenFheSecretKey(cxx::UniquePtr<ffi::SecretKey>);
 
 pub struct OpenFheCiphertext(cxx::UniquePtr<ffi::Ciphertext>);
 
@@ -115,52 +129,21 @@ impl OpenFheCiphertext {
     }
 }
 
-impl OpenFheBackend {
-    /// Create the context for `params` and generate keys, including one
-    /// rotation key per entry of `rotations`. Fails if OpenFHE's modulus
-    /// exceeds the security table's limit for the ring dimension (plan D3).
-    pub fn new(params: &CkksParams, rotations: &[u32]) -> Result<(Self, OpenFheSecretKey)> {
-        let mut ctx = ffi::new_context(
-            params.ring_dim,
-            params.mult_depth,
-            params.scale_bits,
-            params.first_mod_bits,
-            params.num_large_digits,
-            params.slots,
-        )
-        .map_err(backend_err)?;
-        let ring_dim = ffi::ring_dimension(&ctx).map_err(backend_err)?;
-        let log_qp = ffi::log_qp(&ctx).map_err(backend_err)?;
-        if ring_dim != params.ring_dim || log_qp > params.max_log_qp {
-            return Err(Error::new(
-                Code::Backend,
-                format!(
-                    "OpenFHE parameters disagree with Encompute's: ring {ring_dim} (expected {}), \
-                     log2 QP {log_qp} (limit {})",
-                    params.ring_dim, params.max_log_qp
-                ),
-            ));
-        }
-        let rot: Vec<i32> = rotations.iter().map(|&k| k as i32).collect();
-        let sk = ffi::keygen(ctx.pin_mut(), &rot).map_err(backend_err)?;
-        Ok((
-            Self {
-                ctx,
-                slots: params.slots as usize,
-                ring_dim,
-                log_qp,
-            },
-            OpenFheSecretKey(sk),
-        ))
+impl OpenFheEvaluator {
+    /// Context for `params`, checked against the security table (plan D3).
+    pub fn new(params: &CkksParams) -> Result<Self> {
+        Ok(Self {
+            ctx: new_checked_context(params)?,
+            slots: params.slots as usize,
+            key_tags: vec![],
+        })
     }
 
-    pub fn ring_dim(&self) -> u32 {
-        self.ring_dim
-    }
-
-    /// log2(Q·P) of the generated context, as OpenFHE reports it.
-    pub fn log_qp(&self) -> u32 {
-        self.log_qp
+    /// Load evaluation keys exported by `CkksClient::evaluation_keys`.
+    pub fn load_keys(&mut self, bytes: &[u8]) -> Result<()> {
+        let tag = ffi::load_evaluation_keys(self.ctx.pin_mut(), bytes).map_err(backend_err)?;
+        self.key_tags.push(tag);
+        Ok(())
     }
 
     fn check_len(&self, v: &[f64]) -> Result<()> {
@@ -180,9 +163,8 @@ fn wrap(r: std::result::Result<cxx::UniquePtr<ffi::Ciphertext>, cxx::Exception>)
     r.map(OpenFheCiphertext).map_err(backend_err)
 }
 
-impl CkksBackend for OpenFheBackend {
+impl CkksEvaluator for OpenFheEvaluator {
     type Ciphertext = OpenFheCiphertext;
-    type SecretKey = OpenFheSecretKey;
 
     fn name(&self) -> &'static str {
         "openfhe"
@@ -192,13 +174,15 @@ impl CkksBackend for OpenFheBackend {
         self.slots
     }
 
-    fn encrypt(&self, values: &[f64]) -> Result<Ct> {
-        self.check_len(values)?;
-        wrap(ffi::encrypt(&self.ctx, values))
+    fn load_ciphertext(&self, bytes: &[u8]) -> Result<Ct> {
+        if self.key_tags.is_empty() {
+            return Err(Error::new(Code::WrongKey, "no evaluation keys are loaded"));
+        }
+        wrap(ffi::load_ciphertext(&self.ctx, bytes))
     }
 
-    fn decrypt(&self, sk: &OpenFheSecretKey, ct: &Ct) -> Result<Vec<f64>> {
-        ffi::decrypt(&self.ctx, &sk.0, &ct.0).map_err(backend_err)
+    fn store_ciphertext(&self, ct: &Ct) -> Result<Vec<u8>> {
+        ffi::store_ciphertext(&ct.0).map_err(backend_err)
     }
 
     fn add(&self, a: &Ct, b: &Ct) -> Result<Ct> {
@@ -237,9 +221,5 @@ impl CkksBackend for OpenFheBackend {
 
     fn rotate(&self, a: &Ct, k: u32) -> Result<Ct> {
         wrap(ffi::rotate(&self.ctx, &a.0, k as i32))
-    }
-
-    fn ciphertext_bytes(&self, ct: &Ct) -> Result<usize> {
-        ffi::serialized_size(&ct.0).map_err(backend_err)
     }
 }

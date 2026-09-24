@@ -29,6 +29,18 @@ pub enum Code {
     Artifact,
     /// A backend (e.g. OpenFHE) reported an error.
     Backend,
+    /// An envelope is malformed, truncated or fails its checksum.
+    Envelope,
+    /// An envelope is of the wrong kind, format, scheme or backend version.
+    Incompatible,
+    /// An object was made for a different parameter set.
+    WrongParameters,
+    /// An object was made for a different program.
+    WrongProgram,
+    /// An object was made under a different or unregistered key.
+    WrongKey,
+    /// A network or protocol failure between client and evaluator.
+    Remote,
 }
 
 impl Code {
@@ -47,6 +59,12 @@ impl Code {
             Code::Parse => "ENC1302",
             Code::Artifact => "ENC1401",
             Code::Backend => "ENC1501",
+            Code::Envelope => "ENC1601",
+            Code::Incompatible => "ENC1602",
+            Code::WrongParameters => "ENC1603",
+            Code::WrongProgram => "ENC1604",
+            Code::WrongKey => "ENC1605",
+            Code::Remote => "ENC1701",
         }
     }
 }

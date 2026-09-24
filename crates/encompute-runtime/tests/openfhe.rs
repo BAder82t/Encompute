@@ -6,16 +6,15 @@ mod common;
 use std::time::Instant;
 
 use encompute_ckks::compile;
-use encompute_openfhe::OpenFheBackend;
 use encompute_runtime::diff_test;
 
 fn check(p: &encompute_ir::Program, cases: usize) {
     let c = compile(p).unwrap();
     let t = Instant::now();
-    let (be, sk) = OpenFheBackend::new(&c.params, &c.plan.rotations).unwrap();
+    let (client, ev) = common::openfhe_sessions(p);
     let keygen = t.elapsed();
     let t = Instant::now();
-    let rep = diff_test(&be, &sk, &c.plan, p, cases, 42).unwrap();
+    let rep = diff_test(&client, &ev, p, cases, 42).unwrap();
     eprintln!(
         "{}: N={} depth={} scale={} keygen={:.2?} per-case={:.2?} max_error={:.3e} (estimate {:.3e}, target {:e})",
         p.name(),

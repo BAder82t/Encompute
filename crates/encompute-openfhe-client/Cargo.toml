@@ -1,0 +1,20 @@
+[package]
+name = "encompute-openfhe-client"
+description = "OpenFHE CKKS client for Encompute: key generation, encryption, decryption"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cxx.workspace = true
+encompute-ir.workspace = true
+encompute-ckks.workspace = true
+encompute-backend.workspace = true
+encompute-openfhe.workspace = true
+
+[build-dependencies]
+cxx-build.workspace = true
+
+[lints]
+workspace = true

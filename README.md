@@ -92,8 +92,11 @@ encompute bench score.encompute --mode encrypted
 | `crates/encompute-ir` | Scheme-independent SSA IR, `.eir` text form, reference semantics |
 | `crates/encompute-analysis` | Range and privacy analyses |
 | `crates/encompute-ckks` | Lowering to CKKS plans; Chebyshev approximation; parameter selection |
-| `crates/encompute-backend` | Backend trait; mock backend |
-| `crates/encompute-openfhe` | OpenFHE CKKS through a `cxx` shim |
+| `crates/encompute-backend` | Client and evaluator traits; mock backend |
+| `crates/encompute-protocol` | Versioned, checksummed envelopes bound to parameters, program and key |
+| `crates/encompute-openfhe` | OpenFHE evaluator side (no keygen, encryption or decryption) |
+| `crates/encompute-openfhe-client` | OpenFHE client side: keys, encryption, decryption |
+| `crates/encompute-evaluator` | Evaluator sessions; never links client crypto |
 | `crates/encompute-runtime` | Execution, differential testing, explain, bench, artifacts |
 | `crates/encompute-cli` | `encompute` command |
 | `crates/encompute-py`, `python/encompute` | Python SDK: extension module and tracing frontend |

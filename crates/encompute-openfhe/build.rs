@@ -56,7 +56,12 @@ fn main() {
     println!("cargo:rustc-link-lib=static=OPENFHEbinfhe_static");
     println!("cargo:rustc-link-lib=static=OPENFHEcore_static");
 
+    // For encompute-openfhe-client's build script (DEP_OPENFHEPKE_*).
+    println!("cargo:include={}", manifest.join("cpp").display());
+    println!("cargo:root={}", root.display());
+
     println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=cpp/common.h");
     println!("cargo:rerun-if-changed=cpp/shim.h");
     println!("cargo:rerun-if-changed=cpp/shim.cc");
     println!("cargo:rerun-if-env-changed=OPENFHE_ROOT");

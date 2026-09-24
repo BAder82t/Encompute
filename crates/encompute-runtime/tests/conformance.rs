@@ -5,10 +5,11 @@
 //! `ENCOMPUTE_CONFORMANCE=full` runs 200 programs (scheduled CI); default 6.
 #![cfg(feature = "openfhe")]
 
+mod common;
+
 use encompute_backend::rng::Rng;
 use encompute_ckks::compile;
 use encompute_ir::{Builder, Code, Program, Range, Shape, ValueId};
-use encompute_openfhe::OpenFheBackend;
 use encompute_runtime::diff_test;
 
 fn program(seed: u64) -> Program {
@@ -80,9 +81,8 @@ fn accepted_programs_meet_their_precision_encrypted() {
                 continue;
             }
         };
-        let (be, sk) = OpenFheBackend::new(&c.params, &c.plan.rotations)
-            .unwrap_or_else(|e| panic!("seed {seed}: {e}\n{p}"));
-        let rep = diff_test(&be, &sk, &c.plan, &p, 3, seed).unwrap();
+        let (client, ev) = common::openfhe_sessions(&p);
+        let rep = diff_test(&client, &ev, &p, 3, seed).unwrap();
         assert!(
             rep.passed,
             "seed {seed}: max error {:.3e} > {:e} with {:?}\n{p}",

@@ -1,32 +1,20 @@
 mod common;
 
-use common::{logistic, similarity};
-use encompute_backend::{CkksBackend, MockBackend, MockConfig};
+use common::{logistic, mock_run, mock_sessions, similarity};
+use encompute_backend::{CkksClient, MockClient, MockConfig};
 use encompute_ckks::compile;
 use encompute_ir::{evaluate, Builder, Code, Program, Range, Shape};
-use encompute_runtime::{diff_test, run, sample_inputs};
+use encompute_runtime::{diff_test, sample_inputs};
 use proptest::prelude::*;
-
-fn exact_mock(c: &encompute_ckks::Compiled) -> (MockBackend, encompute_backend::MockSecretKey) {
-    MockBackend::new(
-        &c.params,
-        &c.plan.rotations,
-        MockConfig {
-            seed: 1,
-            noise: false,
-        },
-    )
-}
 
 /// Max |reference − plan| over sampled cases, noise off.
 fn plan_error(p: &Program, cases: usize) -> f64 {
     let c = compile(p).unwrap();
-    let (b, sk) = exact_mock(&c);
     (0..cases)
         .map(|case| {
             let inputs = sample_inputs(p, case, 7);
             let want = evaluate(p, &inputs).unwrap();
-            let got = run(&b, &sk, &c.plan, p, &inputs).unwrap();
+            let got = mock_run(&c.plan, &c.params, &c.plan.rotations, false, p, &inputs).unwrap();
             want.iter()
                 .flat_map(|(k, v)| v.iter().zip(&got[k]).map(|(x, y)| (x - y).abs()))
                 .fold(0.0, f64::max)
@@ -45,8 +33,8 @@ fn logistic_demo_on_mock() {
     assert!(c.plan.depth <= 10, "depth {}", c.plan.depth);
     assert!(plan_error(&p, 20) <= cheb.max_error + 1e-9);
 
-    let (b, sk) = MockBackend::new(&c.params, &c.plan.rotations, MockConfig::default());
-    let rep = diff_test(&b, &sk, &c.plan, &p, 200, 42).unwrap();
+    let (client, ev) = mock_sessions(&p, None, 1);
+    let rep = diff_test(&client, &ev, &p, 200, 42).unwrap();
     assert!(rep.passed, "{rep:#?}");
 }
 
@@ -67,8 +55,8 @@ fn similarity_demo_on_mock() {
     assert!(c.plan.rotations.len() <= 20, "{:?}", c.plan.rotations);
     assert!(plan_error(&p, 5) < 1e-12);
 
-    let (b, sk) = MockBackend::new(&c.params, &c.plan.rotations, MockConfig::default());
-    let rep = diff_test(&b, &sk, &c.plan, &p, 20, 42).unwrap();
+    let (client, ev) = mock_sessions(&p, None, 2);
+    let rep = diff_test(&client, &ev, &p, 20, 42).unwrap();
     assert!(rep.passed, "{rep:#?}");
 }
 
@@ -104,22 +92,28 @@ fn mock_enforces_rotation_keys_and_depth() {
     let c = compile(&p).unwrap();
     let inputs = sample_inputs(&p, 2, 0);
 
-    let (b, sk) = MockBackend::new(&c.params, &[1], MockConfig::default());
-    let e = run(&b, &sk, &c.plan, &p, &inputs).unwrap_err();
+    let e = mock_run(&c.plan, &c.params, &[1], true, &p, &inputs).unwrap_err();
     assert_eq!(e.code, Code::Backend);
     assert!(e.message.contains("no rotation key for 2"), "{}", e.message);
 
     let mut shallow = c.params.clone();
     shallow.mult_depth = c.plan.depth - 1;
-    let (b, sk) = MockBackend::new(&shallow, &c.plan.rotations, MockConfig::default());
-    let e = run(&b, &sk, &c.plan, &p, &inputs).unwrap_err();
+    let e = mock_run(&c.plan, &shallow, &c.plan.rotations, true, &p, &inputs).unwrap_err();
     assert!(
         e.message.contains("depth budget exhausted"),
         "{}",
         e.message
     );
 
-    let (_, other_sk) = MockBackend::new(
+    let a = MockClient::new(
+        &c.params,
+        &c.plan.rotations,
+        MockConfig {
+            seed: 1,
+            noise: true,
+        },
+    );
+    let b = MockClient::new(
         &c.params,
         &c.plan.rotations,
         MockConfig {
@@ -127,9 +121,8 @@ fn mock_enforces_rotation_keys_and_depth() {
             noise: true,
         },
     );
-    let (b, _) = MockBackend::new(&c.params, &c.plan.rotations, MockConfig::default());
-    let ct = b.encrypt(&vec![0.0; b.slots()]).unwrap();
-    assert!(b.decrypt(&other_sk, &ct).is_err(), "wrong secret key");
+    let ct = a.encrypt(&vec![0.0; a.slots()]).unwrap();
+    assert!(b.decrypt(&ct).is_err(), "wrong secret key");
 }
 
 #[test]
@@ -138,8 +131,8 @@ fn diff_test_reports_failures() {
     let c = compile(&p).unwrap();
     let mut params = c.params.clone();
     params.scale_bits = 20; // noise σ = 2^-3, far above 1e-3
-    let (b, sk) = MockBackend::new(&params, &c.plan.rotations, MockConfig::default());
-    let rep = diff_test(&b, &sk, &c.plan, &p, 10, 1).unwrap();
+    let (client, ev) = mock_sessions(&p, Some(&params), 3);
+    let rep = diff_test(&client, &ev, &p, 10, 1).unwrap();
     assert!(!rep.passed);
     assert!(rep.failing.is_some());
 }

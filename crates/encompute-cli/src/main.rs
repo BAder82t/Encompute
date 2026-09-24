@@ -178,9 +178,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 println!("  evaluate   {:>10.2} ms", b.evaluate_ms);
                 println!("  decrypt    {:>10.2} ms", b.decrypt_ms);
                 println!(
-                    "  ciphertexts in {} KiB, out {} KiB{est}",
-                    b.input_ciphertext_bytes / 1024,
-                    b.output_ciphertext_bytes / 1024
+                    "  bytes      eval keys {} KiB, request {} KiB, response {} KiB{est}",
+                    b.evaluation_key_bytes / 1024,
+                    b.request_bytes / 1024,
+                    b.response_bytes / 1024
                 );
             }
             Ok(ExitCode::SUCCESS)

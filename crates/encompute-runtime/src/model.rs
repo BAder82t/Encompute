@@ -4,13 +4,13 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use encompute_backend::{CkksBackend, MockBackend, MockConfig, MockSecretKey};
 use encompute_ckks::{compile, Compiled};
+use encompute_evaluator::{EvaluatorSession, Ids};
 use encompute_ir::{evaluate, parse, Code, Error, Inputs, Outputs, Program, Result};
 use serde::Serialize;
 
+use crate::client::ClientSession;
 use crate::diff::{diff_test, sample_inputs, DiffReport};
-use crate::exec::{decrypt_outputs, encrypt_inputs, evaluate_encrypted};
 
 /// How to execute a model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,24 +53,19 @@ pub fn has_openfhe() -> bool {
     cfg!(feature = "openfhe")
 }
 
-/// Keys and backend for one mode. Both roles live in one process in v0.1.
-enum Session {
-    Mock(MockBackend, MockSecretKey),
-    #[cfg(feature = "openfhe")]
-    OpenFhe(
-        encompute_openfhe::OpenFheBackend,
-        encompute_openfhe::OpenFheSecretKey,
-    ),
+/// Client and evaluator for one mode, sharing a process but talking only
+/// through envelopes: the same path a remote evaluator takes.
+struct Session {
+    client: ClientSession,
+    evaluator: EvaluatorSession,
 }
 
-macro_rules! with_backend {
-    ($s:expr, |$b:ident, $sk:ident| $body:expr) => {
-        match $s {
-            Session::Mock($b, $sk) => $body,
-            #[cfg(feature = "openfhe")]
-            Session::OpenFhe($b, $sk) => $body,
-        }
-    };
+impl Session {
+    fn run(&self, program: &Program, inputs: &Inputs) -> Result<Outputs> {
+        let request = self.client.encrypt(program, inputs)?;
+        let (response, _) = self.evaluator.execute(&request)?;
+        self.client.decrypt(&response)
+    }
 }
 
 /// A compiled program plus lazily generated keys per mode.
@@ -80,7 +75,8 @@ pub struct Model {
     sessions: RefCell<HashMap<Mode, Session>>,
 }
 
-/// Timings are medians over `reps` runs, in milliseconds.
+/// Timings are medians over `reps` runs, in milliseconds; sizes are the
+/// envelopes that would cross the network.
 #[derive(Clone, Debug, Serialize)]
 pub struct BenchReport {
     pub backend: String,
@@ -93,9 +89,10 @@ pub struct BenchReport {
     pub encrypt_ms: f64,
     pub evaluate_ms: f64,
     pub decrypt_ms: f64,
-    pub input_ciphertext_bytes: usize,
-    pub output_ciphertext_bytes: usize,
-    /// True when sizes are computed, not serialized (mock backend).
+    pub evaluation_key_bytes: usize,
+    pub request_bytes: usize,
+    pub response_bytes: usize,
+    /// True for the mock backend, whose byte format is not OpenFHE's.
     pub sizes_estimated: bool,
 }
 
@@ -121,19 +118,18 @@ impl Model {
         &self.compiled
     }
 
-    fn new_session(&self, mode: Mode) -> Result<Session> {
+    pub fn ids(&self) -> Ids {
+        Ids::of(&self.program, &self.compiled)
+    }
+
+    /// Fresh client keys for `mode`.
+    pub fn new_client(&self, mode: Mode) -> Result<ClientSession> {
         let c = &self.compiled;
         match mode {
-            Mode::Clear => unreachable!("clear mode has no keys"),
-            Mode::Mock => {
-                let (b, sk) = MockBackend::new(&c.params, &c.plan.rotations, MockConfig::default());
-                Ok(Session::Mock(b, sk))
-            }
+            Mode::Clear => Err(Error::new(Code::BadInput, "clear mode has no keys")),
+            Mode::Mock => ClientSession::mock(self.ids(), &c.plan, &c.params, 0),
             #[cfg(feature = "openfhe")]
-            Mode::Encrypted => {
-                let (b, sk) = encompute_openfhe::OpenFheBackend::new(&c.params, &c.plan.rotations)?;
-                Ok(Session::OpenFhe(b, sk))
-            }
+            Mode::Encrypted => ClientSession::openfhe(self.ids(), &c.plan, &c.params),
             #[cfg(not(feature = "openfhe"))]
             Mode::Encrypted => Err(Error::new(
                 Code::Backend,
@@ -141,6 +137,13 @@ impl Model {
                  (see README) or use mode \"mock\"",
             )),
         }
+    }
+
+    fn new_session(&self, mode: Mode) -> Result<Session> {
+        let client = self.new_client(mode)?;
+        let mut evaluator = EvaluatorSession::new(self.program.clone(), client.kind())?;
+        evaluator.register_keys(client.evaluation_keys().expect("fresh client"))?;
+        Ok(Session { client, evaluator })
     }
 
     fn with_session<T>(&self, mode: Mode, f: impl FnOnce(&Session) -> Result<T>) -> Result<T> {
@@ -155,10 +158,7 @@ impl Model {
         if mode == Mode::Clear {
             return evaluate(&self.program, inputs);
         }
-        let (p, plan) = (&self.program, &self.compiled.plan);
-        self.with_session(mode, |s| {
-            with_backend!(s, |b, sk| crate::exec::run(b, sk, plan, p, inputs))
-        })
+        self.with_session(mode, |s| s.run(&self.program, inputs))
     }
 
     /// Differential test of `mode` against the reference semantics.
@@ -169,9 +169,8 @@ impl Model {
                 "clear mode is the reference; test mock or encrypted",
             ));
         }
-        let (p, plan) = (&self.program, &self.compiled.plan);
         self.with_session(mode, |s| {
-            with_backend!(s, |b, sk| diff_test(b, sk, plan, p, cases, seed))
+            diff_test(&s.client, &s.evaluator, &self.program, cases, seed)
         })
     }
 
@@ -185,50 +184,39 @@ impl Model {
         }
         let reps = reps.max(1);
         let t = Instant::now();
-        let session = self.new_session(mode)?;
+        let s = self.new_session(mode)?;
         let keygen = t.elapsed();
-        let (p, c) = (&self.program, &self.compiled);
-        with_backend!(&session, |b, sk| {
-            let mut times = [vec![], vec![], vec![]];
-            let mut sizes = (0, 0);
-            let mut dec = vec![];
-            for rep in 0..reps {
-                let inputs = sample_inputs(p, rep + 2, 0);
-                let t = Instant::now();
-                let cts = encrypt_inputs(b, &c.plan, p, &inputs)?;
-                times[0].push(t.elapsed());
-                sizes.0 = cts
-                    .iter()
-                    .map(|ct| b.ciphertext_bytes(ct))
-                    .sum::<Result<usize>>()?;
-                let t = Instant::now();
-                let outs = evaluate_encrypted(b, &c.plan, p, cts)?;
-                times[1].push(t.elapsed());
-                sizes.1 = outs
-                    .iter()
-                    .map(|ct| b.ciphertext_bytes(ct))
-                    .sum::<Result<usize>>()?;
-                let t = Instant::now();
-                decrypt_outputs(b, sk, &c.plan, &outs)?;
-                dec.push(t.elapsed());
-            }
-            times[2] = dec;
-            let [enc, eval, dec] = times.map(median_ms);
-            Ok(BenchReport {
-                backend: b.name().to_owned(),
-                reps,
-                ring_dim: c.params.ring_dim,
-                slots: c.params.slots,
-                depth: c.plan.depth,
-                rotation_keys: c.plan.rotations.len(),
-                keygen_ms: ms(keygen),
-                encrypt_ms: enc,
-                evaluate_ms: eval,
-                decrypt_ms: dec,
-                input_ciphertext_bytes: sizes.0,
-                output_ciphertext_bytes: sizes.1,
-                sizes_estimated: b.name() == "mock",
-            })
+        let (mut enc, mut eval, mut dec) = (vec![], vec![], vec![]);
+        let (mut req, mut resp) = (0, 0);
+        for rep in 0..reps {
+            let inputs = sample_inputs(&self.program, rep + 2, 0);
+            let t = Instant::now();
+            let request = s.client.encrypt(&self.program, &inputs)?;
+            enc.push(t.elapsed());
+            let t = Instant::now();
+            let (response, _) = s.evaluator.execute(&request)?;
+            eval.push(t.elapsed());
+            let t = Instant::now();
+            s.client.decrypt(&response)?;
+            dec.push(t.elapsed());
+            (req, resp) = (request.len(), response.len());
+        }
+        let c = &self.compiled;
+        Ok(BenchReport {
+            backend: s.client.kind().label().0.to_owned(),
+            reps,
+            ring_dim: c.params.ring_dim,
+            slots: c.params.slots,
+            depth: c.plan.depth,
+            rotation_keys: c.plan.rotations.len(),
+            keygen_ms: ms(keygen),
+            encrypt_ms: median_ms(enc),
+            evaluate_ms: median_ms(eval),
+            decrypt_ms: median_ms(dec),
+            evaluation_key_bytes: s.client.evaluation_keys().map_or(0, <[u8]>::len),
+            request_bytes: req,
+            response_bytes: resp,
+            sizes_estimated: mode == Mode::Mock,
         })
     }
 }

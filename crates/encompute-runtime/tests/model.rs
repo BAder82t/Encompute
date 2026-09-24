@@ -96,7 +96,12 @@ fn modes_explain_and_bench() {
         assert!(text.contains(needle), "missing {needle:?} in\n{text}");
     }
     let b = m.bench(Mode::Mock, 3).unwrap();
-    assert!(b.sizes_estimated && b.input_ciphertext_bytes > b.output_ciphertext_bytes);
+    assert!(
+        b.sizes_estimated
+            && b.request_bytes > 0
+            && b.response_bytes > 0
+            && b.evaluation_key_bytes > 0
+    );
 
     assert_eq!("gpu".parse::<Mode>().unwrap_err().code, Code::BadInput);
     assert!(m.test(Mode::Clear, 1, 0).is_err());

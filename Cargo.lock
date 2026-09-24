@@ -290,6 +290,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "encompute-evaluator"
+version = "0.0.1"
+dependencies = [
+ "encompute-backend",
+ "encompute-ckks",
+ "encompute-ir",
+ "encompute-openfhe",
+ "encompute-protocol",
+]
+
+[[package]]
 name = "encompute-ir"
 version = "0.0.1"
 dependencies = [
@@ -306,6 +317,29 @@ dependencies = [
  "encompute-backend",
  "encompute-ckks",
  "encompute-ir",
+]
+
+[[package]]
+name = "encompute-openfhe-client"
+version = "0.0.1"
+dependencies = [
+ "cxx",
+ "cxx-build",
+ "encompute-backend",
+ "encompute-ckks",
+ "encompute-ir",
+ "encompute-openfhe",
+]
+
+[[package]]
+name = "encompute-protocol"
+version = "0.0.1"
+dependencies = [
+ "encompute-ir",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -328,8 +362,10 @@ dependencies = [
  "encompute-analysis",
  "encompute-backend",
  "encompute-ckks",
+ "encompute-evaluator",
  "encompute-ir",
- "encompute-openfhe",
+ "encompute-openfhe-client",
+ "encompute-protocol",
  "proptest",
  "serde",
  "serde_json",

@@ -1,0 +1,22 @@
+[package]
+name = "encompute-evaluator"
+description = "Encompute evaluator: runs compiled plans on encrypted inputs; holds no secret key"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Must never depend (directly or transitively) on encompute-openfhe-client or
+# encompute-runtime: the evaluator binary may not link client crypto.
+[dependencies]
+encompute-ir.workspace = true
+encompute-ckks.workspace = true
+encompute-backend.workspace = true
+encompute-protocol.workspace = true
+encompute-openfhe = { workspace = true, optional = true }
+
+[features]
+openfhe = ["dep:encompute-openfhe"]
+
+[lints]
+workspace = true

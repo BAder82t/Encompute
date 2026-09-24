@@ -1,6 +1,6 @@
 [package]
-name = "encompute-ckks"
-description = "Lowering from Encompute IR to CKKS plans, and CKKS parameter selection"
+name = "encompute-protocol"
+description = "Encompute envelopes: versioned, bound, checksummed wire and file objects"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,12 @@ license.workspace = true
 
 [dependencies]
 encompute-ir.workspace = true
-encompute-analysis.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 
 [dev-dependencies]
-serde_json.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true
