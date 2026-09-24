@@ -14,7 +14,11 @@ mod text;
 mod types;
 
 pub use error::{Code, Error, Result};
+
+/// Version of the IR and its `.eir` text form (the header line is
+/// `encompute <IR_VERSION>`).
+pub const IR_VERSION: &str = "0.1";
 pub use eval::{check_inputs, evaluate, horner, sigmoid, Inputs, Outputs};
-pub use program::{Builder, Node, Op, Output, Program};
+pub use program::{Builder, Node, Op, Output, Program, MAX_DIM};
 pub use text::parse;
 pub use types::{Range, Shape, Type, ValueId, Visibility};

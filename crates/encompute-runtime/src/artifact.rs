@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::model::Model;
 
-pub const FORMAT: &str = "encompute-artifact/0.1";
+/// Artifact format version; 1 was the unversioned 0.1 layout.
+pub const FORMAT: u32 = 2;
 const FILES: [&str; 4] = [
     "program.eir",
     "plan.json",
@@ -22,12 +23,29 @@ const FILES: [&str; 4] = [
 
 #[derive(Serialize)]
 struct Manifest<'a> {
-    format: &'a str,
-    encompute_version: &'a str,
+    artifact_format: u32,
     program: &'a str,
-    /// OpenFHE release the parameters were checked against.
-    backend: &'a str,
+    compiler: Compiler<'a>,
+    crypto: Crypto<'a>,
+    /// SHA-256 of each file.
     files: BTreeMap<&'a str, String>,
+}
+
+#[derive(Serialize)]
+struct Compiler<'a> {
+    version: &'a str,
+    ir_version: &'a str,
+    plan_version: u32,
+}
+
+#[derive(Serialize)]
+struct Crypto<'a> {
+    scheme: &'a str,
+    backend: &'a str,
+    backend_version: &'a str,
+    parameter_profile: &'a str,
+    parameter_selector_version: u32,
+    security_table: &'a str,
 }
 
 #[derive(Serialize)]
@@ -35,7 +53,7 @@ struct Security<'a> {
     security_level: &'a str,
     scheme: &'a str,
     security_table: &'a str,
-    server_can_decrypt: bool,
+    evaluator_receives_secret_key: bool,
     plaintext_logging: bool,
     threat_model: BTreeMap<&'a str, &'a str>,
     conditions: Vec<&'a str>,
@@ -94,7 +112,7 @@ impl Model {
             security_level: &c.params.security,
             scheme: "CKKS",
             security_table: &c.params.table_source,
-            server_can_decrypt: false,
+            evaluator_receives_secret_key: false,
             plaintext_logging: false,
             threat_model: BTreeMap::from([
                 ("client", "trusted: holds the secret key, encrypts inputs, decrypts outputs"),
@@ -150,10 +168,21 @@ impl Model {
             fs::write(&path, body).map_err(|e| io_err(&path, e))?;
         }
         let manifest = Manifest {
-            format: FORMAT,
-            encompute_version: env!("CARGO_PKG_VERSION"),
+            artifact_format: FORMAT,
             program: self.program().name(),
-            backend: "openfhe 1.5.1",
+            compiler: Compiler {
+                version: env!("CARGO_PKG_VERSION"),
+                ir_version: encompute_ir::IR_VERSION,
+                plan_version: encompute_ckks::PLAN_VERSION,
+            },
+            crypto: Crypto {
+                scheme: "CKKS",
+                backend: encompute_ckks::BACKEND,
+                backend_version: encompute_ckks::BACKEND_VERSION,
+                parameter_profile: encompute_ckks::PARAMETER_PROFILE,
+                parameter_selector_version: encompute_ckks::PARAMETER_SELECTOR_VERSION,
+                security_table: &self.compiled().params.table_source,
+            },
             files: files
                 .iter()
                 .map(|(n, b)| (*n, sha256(b.as_bytes())))
@@ -173,11 +202,49 @@ impl Model {
         };
         let manifest: serde_json::Value = serde_json::from_str(&read("manifest.json")?)
             .map_err(|e| Error::new(Code::Artifact, format!("manifest.json: {e}")))?;
-        if manifest["format"] != FORMAT {
+        if manifest["artifact_format"] != FORMAT {
             return Err(Error::new(
                 Code::Artifact,
-                format!("unsupported artifact format {}", manifest["format"]),
+                format!(
+                    "unsupported artifact format {} (this Encompute reads format {FORMAT}); recompile",
+                    manifest["artifact_format"]
+                ),
             ));
+        }
+        let expect = [
+            (
+                "/compiler/ir_version",
+                serde_json::json!(encompute_ir::IR_VERSION),
+            ),
+            (
+                "/compiler/plan_version",
+                serde_json::json!(encompute_ckks::PLAN_VERSION),
+            ),
+            (
+                "/crypto/backend",
+                serde_json::json!(encompute_ckks::BACKEND),
+            ),
+            (
+                "/crypto/backend_version",
+                serde_json::json!(encompute_ckks::BACKEND_VERSION),
+            ),
+            (
+                "/crypto/parameter_profile",
+                serde_json::json!(encompute_ckks::PARAMETER_PROFILE),
+            ),
+            (
+                "/crypto/parameter_selector_version",
+                serde_json::json!(encompute_ckks::PARAMETER_SELECTOR_VERSION),
+            ),
+        ];
+        for (ptr, want) in expect {
+            let got = manifest.pointer(ptr).cloned().unwrap_or_default();
+            if got != want {
+                return Err(Error::new(
+                    Code::Artifact,
+                    format!("artifact {ptr} is {got}, this Encompute uses {want}; recompile the artifact"),
+                ));
+            }
         }
         let mut stored = BTreeMap::new();
         for name in FILES {
@@ -201,7 +268,7 @@ impl Model {
                         "{name} differs from what this Encompute version ({}) compiles; recompile the \
                          artifact (built with {})",
                         env!("CARGO_PKG_VERSION"),
-                        manifest["encompute_version"]
+                        manifest["compiler"]["version"]
                     ),
                 ));
             }

@@ -36,16 +36,21 @@ fn artifact_round_trips_and_is_reproducible() {
     assert_eq!(loaded.compiled().plan, m.compiled().plan);
 
     let security = fs::read_to_string(a.join("security.json")).unwrap();
-    assert!(security.contains("\"server_can_decrypt\": false"));
+    assert!(security.contains("\"evaluator_receives_secret_key\": false"));
     assert!(security.contains("IND-CPA-D"));
     for f in fs::read_dir(&a).unwrap() {
-        let body = fs::read_to_string(f.unwrap().path())
-            .unwrap()
-            .to_lowercase();
-        assert!(
-            !body.contains("secret_key") && !body.contains("private"),
-            "no key material"
-        );
+        let body = fs::read_to_string(f.unwrap().path()).unwrap();
+        // No key fields and no OpenFHE key serialization (cereal JSON or binary).
+        for needle in [
+            "\"secret_key\":",
+            "\"private_key\":",
+            "\"sk\":",
+            "PrivateKey",
+            "EvalKey",
+            "cereal",
+        ] {
+            assert!(!body.contains(needle), "key material marker {needle:?}");
+        }
     }
 }
 
@@ -101,4 +106,91 @@ fn modes_explain_and_bench() {
             Code::Backend
         );
     }
+}
+
+#[test]
+fn manifest_records_versioned_provenance() {
+    let dir = tmp("prov.encompute");
+    Model::compile(logistic(8, 1)).unwrap().save(&dir).unwrap();
+    let path = dir.join("manifest.json");
+    let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(m["artifact_format"], 2);
+    assert_eq!(m["compiler"]["ir_version"], encompute_ir::IR_VERSION);
+    assert_eq!(
+        m["crypto"]["parameter_selector_version"],
+        encompute_ckks::PARAMETER_SELECTOR_VERSION
+    );
+    assert_eq!(m["crypto"]["backend_version"], "1.5.1");
+
+    // A different parameter selector version is rejected even though every
+    // file hash still matches.
+    let bumped = fs::read_to_string(&path).unwrap().replace(
+        "\"parameter_selector_version\": 1",
+        "\"parameter_selector_version\": 0",
+    );
+    fs::write(&path, bumped).unwrap();
+    let e = Model::load(&dir).err().unwrap();
+    assert_eq!(e.code, Code::Artifact);
+    assert!(
+        e.message.contains("parameter_selector_version"),
+        "{}",
+        e.message
+    );
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(300))]
+
+    /// Corrupted artifacts are rejected with an error, never a panic, including
+    /// when the corruption comes with a matching manifest hash.
+    #[test]
+    fn corrupted_artifacts_never_panic(
+        file in 0usize..5,
+        edits in proptest::collection::vec((proptest::prelude::any::<usize>(), proptest::prelude::any::<u8>(), 0u8..3), 1..6),
+        fix_hash in proptest::prelude::any::<bool>(),
+    ) {
+        let names = ["program.eir", "plan.json", "parameters.json", "security.json", "manifest.json"];
+        let dir = tmp(&format!("fuzz-{}.encompute", rand_suffix(&edits)));
+        Model::compile(logistic(4, 1)).unwrap().save(&dir).unwrap();
+        let path = dir.join(names[file]);
+        let mut bytes = fs::read(&path).unwrap();
+        for (pos, byte, kind) in edits {
+            let i = pos % (bytes.len() + 1);
+            match kind {
+                0 if i < bytes.len() => bytes[i] = byte,
+                1 => bytes.insert(i, byte),
+                _ if i < bytes.len() => { bytes.truncate(i); }
+                _ => {}
+            }
+        }
+        fs::write(&path, &bytes).unwrap();
+        if fix_hash && file < 4 {
+            let m = dir.join("manifest.json");
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&m).unwrap()).unwrap();
+            v["files"][names[file]] = serde_json::Value::String(sha256_hex(&bytes));
+            fs::write(&m, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        }
+        if let Ok(model) = Model::load(&dir) {
+            // Only a no-op edit (e.g. whitespace the recompile reproduces) may load,
+            // and then it must be the same program.
+            let original = Model::compile(logistic(4, 1)).unwrap();
+            proptest::prop_assert_eq!(model.program(), original.program());
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+fn rand_suffix(edits: &[(usize, u8, u8)]) -> u64 {
+    edits.iter().fold(0u64, |h, (a, b, c)| {
+        h.wrapping_mul(31)
+            .wrapping_add(*a as u64 ^ ((*b as u64) << 8) ^ ((*c as u64) << 16))
+    })
 }

@@ -154,7 +154,7 @@ def test_explain_bench_and_manifest():
     assert "Chebyshev degree" in text and "PASS" in text
     b = score.bench(reps=2)
     assert b["backend"] == "mock" and b["evaluate_ms"] >= 0
-    assert score.security["server_can_decrypt"] is False
+    assert score.security["evaluator_receives_secret_key"] is False
     assert score.parameters["security"] == "128-bit classical"
 
 

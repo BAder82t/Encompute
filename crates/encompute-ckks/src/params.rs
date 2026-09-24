@@ -35,7 +35,7 @@ const MIN_SCALE_BITS: u32 = 30;
 const NOISE_MARGIN_BITS: u32 = 22;
 
 /// CKKS parameters. Scaling is OpenFHE `FLEXIBLEAUTO`, key switching `HYBRID`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CkksParams {
     pub ring_dim: u32,
     /// Batch size: slots used per ciphertext (power of two, ≤ ring_dim / 2).

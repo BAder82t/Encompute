@@ -51,7 +51,8 @@ impl Model {
         }
         let _ = writeln!(
             s,
-            "  evaluator holds public and evaluation keys only; it cannot decrypt"
+            "  evaluator role holds public and evaluation keys only, never the secret key\n  \
+           (v0.1 runs client and evaluator in one process; see docs/threat-model.md)"
         );
         let _ = writeln!(
             s,

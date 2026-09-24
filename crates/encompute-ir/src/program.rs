@@ -181,6 +181,7 @@ impl Builder {
 
     pub fn input(&mut self, name: &str, shape: Shape, range: Range) -> Result<ValueId> {
         check_ident("input name", name)?;
+        check_dims(shape)?;
         if !self.input_names.insert(name.to_owned()) {
             return Err(type_error(format!("duplicate input {name:?}")));
         }
@@ -210,6 +211,7 @@ impl Builder {
     }
 
     pub fn constant(&mut self, shape: Shape, data: Vec<f64>) -> Result<ValueId> {
+        check_dims(shape)?;
         if shape.is_empty() {
             return Err(type_error(format!("constant of empty shape {shape}")));
         }
@@ -397,6 +399,25 @@ impl Builder {
             s => Err(type_error(format!("{name} does not accept {s}"))),
         }
     }
+}
+
+/// Largest vector length or matrix dimension: the slot count of the largest
+/// 128-bit ring (N = 2^16) supported without bootstrapping.
+pub const MAX_DIM: usize = 32768;
+
+fn check_dims(shape: Shape) -> Result<()> {
+    let (a, b) = match shape {
+        Shape::Scalar => (1, 1),
+        Shape::Vector(n) => (n, 1),
+        Shape::Matrix(r, c) => (r, c),
+    };
+    if a > MAX_DIM || b > MAX_DIM {
+        return Err(Error::new(
+            Code::Unsupported,
+            format!("{shape} exceeds the maximum dimension {MAX_DIM}"),
+        ));
+    }
+    Ok(())
 }
 
 fn public_only(name: &str) -> Error {

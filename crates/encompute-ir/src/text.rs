@@ -21,6 +21,7 @@ use crate::program::{Builder, Op, Program};
 use crate::types::{Range, Shape, Type, ValueId, Visibility};
 
 const HEADER: &str = "encompute 0.1";
+const _: () = assert!(HEADER.len() == "encompute ".len() + crate::IR_VERSION.len());
 
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

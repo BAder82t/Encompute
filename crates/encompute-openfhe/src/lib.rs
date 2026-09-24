@@ -54,9 +54,9 @@ fn backend_err(e: cxx::Exception) -> Error {
     Error::new(Code::Backend, format!("OpenFHE: {}", e.what()))
 }
 
-/// Ring dimension and log2(Q·P) OpenFHE itself picks for the parameters, with
-/// `ring_dim = 0` ("choose for 128-bit security"). Used to check Encompute's own
-/// selection against OpenFHE's.
+/// Smallest ring dimension OpenFHE considers 128-bit secure for these
+/// moduli (`ring_dim = 0`, full packing), and the resulting log2(Q·P).
+/// Slot count is ignored: it can only force a larger ring.
 pub fn openfhe_choice(p: &CkksParams) -> Result<(u32, u32)> {
     let ctx = ffi::new_context(
         0,
@@ -64,13 +64,35 @@ pub fn openfhe_choice(p: &CkksParams) -> Result<(u32, u32)> {
         p.scale_bits,
         p.first_mod_bits,
         p.num_large_digits,
-        p.slots,
+        0,
     )
     .map_err(backend_err)?;
     Ok((
         ffi::ring_dimension(&ctx).map_err(backend_err)?,
         ffi::log_qp(&ctx).map_err(backend_err)?,
     ))
+}
+
+/// Create (without keys) the exact context Encompute would use, letting
+/// OpenFHE apply its own security and batch-size checks. Returns log2(Q·P).
+pub fn openfhe_validate(p: &CkksParams) -> Result<u32> {
+    let ctx = ffi::new_context(
+        p.ring_dim,
+        p.mult_depth,
+        p.scale_bits,
+        p.first_mod_bits,
+        p.num_large_digits,
+        p.slots,
+    )
+    .map_err(backend_err)?;
+    let n = ffi::ring_dimension(&ctx).map_err(backend_err)?;
+    if n != p.ring_dim {
+        return Err(Error::new(
+            Code::Backend,
+            format!("OpenFHE used ring {n}, expected {}", p.ring_dim),
+        ));
+    }
+    ffi::log_qp(&ctx).map_err(backend_err)
 }
 
 /// Evaluator over an OpenFHE CKKS context.

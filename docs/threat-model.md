@@ -17,12 +17,21 @@ scope for v0.1.
 
 ## Guarantees
 
-- The evaluator never holds the secret key and cannot decrypt inputs,
+- The evaluator role never receives the secret key, so it cannot decrypt inputs,
   intermediate values or outputs. Security: CKKS (RNS, OpenFHE v1.5.1) at
   128-bit classical security, parameters checked against the HE Standard
   ternary-secret table (`encompute-ckks/src/params.rs`), and re-checked by OpenFHE
   when the context is created.
 - Artifacts never contain key material.
+
+## Deployment in v0.1
+
+Client and evaluator are separate roles in the API, but v0.1 runs both in
+one process on one machine. The cryptographic separation holds (evaluation
+code never uses the secret key), but anyone who compromises that process sees
+both roles' data. The guarantees above assume the evaluator runs on
+infrastructure the data owner does not control, which needs the network
+separation of 0.2 (see `docs/v0.2-plan.md`).
 
 ## Conditions
 

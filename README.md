@@ -41,7 +41,9 @@ the [error codes](docs/errors.md).
   precision, and parameter selection against the HE Standard 128-bit table
   (cross-checked against OpenFHE's own choice).
 - **Runtime.** `clear`, `mock` and `encrypted` modes; client and evaluator
-  roles kept apart (the evaluator never holds the secret key).
+  roles kept apart in the API (the evaluator role never receives the secret key).
+  In v0.1 both roles run in one process; 0.2 separates them across a network
+  boundary.
 - **Differential testing.** `test()` / `encompute test` compares encrypted and
   plaintext outputs on range endpoints plus random samples.
 

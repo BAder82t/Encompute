@@ -212,3 +212,64 @@ proptest! {
         prop_assert_eq!(back.to_string(), text);
     }
 }
+
+#[test]
+fn oversized_shapes_are_rejected_before_allocation() {
+    let mut b = Builder::new("p", 1e-3).unwrap();
+    let e = b
+        .input("x", Shape::Vector(1 << 40), Range::new(0.0, 1.0))
+        .unwrap_err();
+    assert_eq!(e.code, Code::Unsupported);
+    let text = "encompute 0.1\nprogram p precision 0.1\n%0 = const [1.0] : public matrix<4294967297x4294967297>\n";
+    assert!(parse(text).is_err());
+    let text = "encompute 0.1\nprogram p precision 0.1\n%0 = input \"x\" [0.0, 1.0] : secret vector<99999999999>\n";
+    assert_eq!(parse(text).unwrap_err().code, Code::Unsupported);
+}
+
+fn valid_text() -> String {
+    let mut b = Builder::new("fuzz", 1e-3).unwrap();
+    let x = b
+        .input("x", Shape::Vector(3), Range::new(-1.0, 1.0))
+        .unwrap();
+    let m = b
+        .constant(Shape::Matrix(2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        .unwrap();
+    let y = b.matvec(m, x).unwrap();
+    let z = b.poly(y, vec![0.5, 1.0, -0.25]).unwrap();
+    let s = b.sum(z).unwrap();
+    let t = b.sigmoid(s).unwrap();
+    b.output("t", t).unwrap();
+    b.finish().unwrap().to_string()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// The parser returns an error, never panics, on arbitrary input.
+    #[test]
+    fn parse_never_panics_on_arbitrary_text(s in ".{0,400}") {
+        let _ = parse(&s);
+    }
+
+    /// Nor on valid programs with random edits.
+    #[test]
+    fn parse_never_panics_on_mutations(
+        edits in prop::collection::vec((any::<usize>(), 0u8..3, any::<char>()), 1..8)
+    ) {
+        let mut chars: Vec<char> = valid_text().chars().collect();
+        for (pos, kind, c) in edits {
+            let i = pos % (chars.len() + 1);
+            match kind {
+                0 if i < chars.len() => { chars[i] = c; }
+                1 => chars.insert(i, c),
+                _ if i < chars.len() => { chars.remove(i); }
+                _ => {}
+            }
+        }
+        let text: String = chars.into_iter().collect();
+        if let Ok(p) = parse(&text) {
+            // Whatever parses must print and re-parse identically.
+            prop_assert_eq!(parse(&p.to_string()).unwrap(), p);
+        }
+    }
+}

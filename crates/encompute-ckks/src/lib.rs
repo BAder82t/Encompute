@@ -7,6 +7,18 @@
 //! sums and matrix products need no masking; the lowering tracks this and
 //! masks only when an op would otherwise read dirty padding.
 
+/// Version of the `CkksPlan` format and lowering rules.
+pub const PLAN_VERSION: u32 = 1;
+/// Version of the parameter-selection algorithm. Bump on any change to
+/// `select_params` or its constants: it can change security or performance
+/// without any change to the program.
+pub const PARAMETER_SELECTOR_VERSION: u32 = 1;
+/// The scheme configuration parameters are selected for.
+pub const PARAMETER_PROFILE: &str = "ckks-rns/flexibleauto/hybrid/ternary/128-classic";
+/// Backend release the selector mirrors and is tested against.
+pub const BACKEND: &str = "openfhe";
+pub const BACKEND_VERSION: &str = "1.5.1";
+
 mod approx;
 mod lower;
 mod params;

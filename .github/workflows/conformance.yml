@@ -1,0 +1,35 @@
+name: conformance
+
+# Full parameter-conformance grids: 10 080 parameter points checked against
+# OpenFHE, and 200 random programs executed encrypted. Nightly, and on demand.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/encompute-ckks/src/params.rs"
+      - "crates/encompute-ckks/src/lower.rs"
+
+env:
+  CARGO_TERM_COLOR: always
+  ENCOMPUTE_CONFORMANCE: full
+
+jobs:
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .deps/openfhe
+          key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
+      - run: ./scripts/install-openfhe.sh
+      - name: check tier (parameters vs OpenFHE)
+        run: cargo test -p encompute-openfhe --release --test conformance -- --nocapture
+      - name: run tier (encrypted execution)
+        run: cargo test -p encompute-runtime --release --features openfhe --test conformance -- --nocapture
