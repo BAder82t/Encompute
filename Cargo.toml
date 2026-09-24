@@ -33,6 +33,9 @@ veil-ckks = { path = "crates/veil-ckks" }
 veil-backend = { path = "crates/veil-backend" }
 veil-openfhe = { path = "crates/veil-openfhe" }
 veil-runtime = { path = "crates/veil-runtime" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+proptest = "1.5"
 cxx = "1.0"
 cxx-build = "1.0"
 
