@@ -172,6 +172,17 @@ fn evaluator_symbols(bin: &Path) -> Check {
         }
         Ok(o) => {
             let syms = String::from_utf8_lossy(&o.stdout);
+            if !syms.contains("encompute") {
+                // Stripped, or a format this nm cannot read: a pass would be vacuous.
+                return check(
+                    id,
+                    Status::Skip,
+                    format!(
+                        "{} has no readable Encompute symbols; cannot audit",
+                        bin.display()
+                    ),
+                );
+            }
             let client = syms
                 .lines()
                 .filter(|l| l.contains("encompute_openfhe_client"))

@@ -1,0 +1,24 @@
+# Encompute evaluator image: the "machine B" of the 0.2 demo.
+# Contains only encompute-evaluator (no client crypto, no keys, no models);
+# clients upload programs and evaluation keys over HTTP.
+#
+#   docker build -f Dockerfile.evaluator -t encompute-evaluator .
+#   docker run --rm -p 8750:8750 encompute-evaluator
+
+FROM rust:1.89-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends cmake git g++ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY scripts/install-openfhe.sh scripts/
+RUN ./scripts/install-openfhe.sh /opt/openfhe
+COPY . .
+RUN OPENFHE_ROOT=/opt/openfhe cargo build --release --locked -p encompute-evaluator --features openfhe \
+ && ./scripts/audit-evaluator-binary.sh target/release/encompute-evaluator
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 evaluator
+COPY --from=build /src/target/release/encompute-evaluator /usr/local/bin/encompute-evaluator
+USER evaluator
+EXPOSE 8750
+ENTRYPOINT ["encompute-evaluator", "serve", "--listen", "0.0.0.0:8750", "--backend", "openfhe"]
+CMD ["--workers", "2"]

@@ -59,3 +59,28 @@ jobs:
           maturin develop --release --features openfhe
           pytest -q
           python examples/semantic_search.py
+
+  two-machine-demo:
+    name: two-machine demo (client ↔ evaluator container)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .deps/openfhe
+          key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
+      - run: ./scripts/install-openfhe.sh
+      - run: cargo build --release --features openfhe -p encompute-cli
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: client SDK
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin numpy
+          maturin develop --release --features openfhe
+      - name: demo
+        run: PYTHON=.venv/bin/python ./scripts/two-machine-demo.sh

@@ -24,14 +24,22 @@ scope for v0.1.
   when the context is created.
 - Artifacts never contain key material.
 
-## Deployment in v0.1
+## Deployment
 
-Client and evaluator are separate roles in the API, but v0.1 runs both in
-one process on one machine. The cryptographic separation holds (evaluation
-code never uses the secret key), but anyone who compromises that process sees
-both roles' data. The guarantees above assume the evaluator runs on
-infrastructure the data owner does not control, which needs the network
-separation of 0.2 (see `docs/v0.2-plan.md`).
+Since 0.2 the evaluator runs as its own binary (`encompute-evaluator`),
+usually on another machine. It receives programs, evaluation keys and
+encrypted inputs, and returns encrypted outputs. It never receives the
+secret key, and its binary contains no Encompute key-generation, encryption
+or decryption code (`encompute audit --evaluator`). OpenFHE's own internal
+routines are linked into it, but without the secret key they cannot
+decrypt.
+
+In local modes (`run --mode encrypted` without `--remote`), client and
+evaluator still share one process: anyone who compromises it sees both
+roles' data.
+
+The evaluator speaks plain HTTP: run it behind a TLS proxy. Envelopes carry
+checksums against corruption, but there is no client authentication in 0.2.
 
 ## Conditions
 
