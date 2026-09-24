@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+veil-ir.workspace = true
 veil-ckks.workspace = true
 
 [lints]

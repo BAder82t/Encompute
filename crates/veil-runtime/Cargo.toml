@@ -11,6 +11,12 @@ veil-ir.workspace = true
 veil-ckks.workspace = true
 veil-backend.workspace = true
 veil-openfhe = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+veil-analysis.workspace = true
 
 [features]
 openfhe = ["dep:veil-openfhe"]
