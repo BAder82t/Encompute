@@ -3,16 +3,36 @@ use encompute_ir::{Code, Error, Result};
 
 use crate::plan::{ExactInstr, ExactPlan, Reg};
 
-/// Watches an exact execution step by step: the hook for a future
-/// execution transcript or proof witness (0.4 V2). It sees only the plan's
-/// structure (instruction index, the instruction with its public constants,
-/// register numbers), never ciphertexts or plaintext values.
+/// Context of one execution, given to observers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExecutionContext {
+    /// Hex `ExecutionSpecId` of what is being executed.
+    pub spec_id: String,
+}
+
+/// One executed instruction, as observers see it: the plan's structure
+/// only (index, the instruction with its public constants, the result
+/// register), never ciphertexts or plaintext values.
+#[derive(Clone, Copy, Debug)]
+pub struct InstructionEvent<'a> {
+    pub index: usize,
+    pub instr: &'a ExactInstr,
+    pub result: Reg,
+}
+
+/// Watches an exact execution step by step: the hook for transcripts,
+/// proof witnesses and profiling. An error aborts the execution.
 pub trait ExecutionObserver {
-    fn begin(&mut self, _plan: &ExactPlan) {}
-    /// Instruction `index` has run, writing register `result`.
-    fn instruction(&mut self, _index: usize, _instr: &ExactInstr, _result: Reg) {}
+    fn begin(&mut self, _plan: &ExactPlan, _ctx: &ExecutionContext) -> Result<()> {
+        Ok(())
+    }
+    fn instruction(&mut self, _event: &InstructionEvent<'_>) -> Result<()> {
+        Ok(())
+    }
     /// Execution finished; `outputs` are the output registers in order.
-    fn finish(&mut self, _outputs: &[Reg]) {}
+    fn finish(&mut self, _outputs: &[Reg]) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Observes nothing; execution is unchanged.
@@ -30,7 +50,13 @@ pub fn evaluate_exact<E: ExactEvaluator>(
 where
     E::Ciphertext: Clone,
 {
-    evaluate_exact_observed(ev, plan, inputs, &mut NoopObserver)
+    evaluate_exact_observed(
+        ev,
+        plan,
+        inputs,
+        &ExecutionContext::default(),
+        &mut NoopObserver,
+    )
 }
 
 /// [`evaluate_exact`] reporting each step to `observer`.
@@ -38,6 +64,7 @@ pub fn evaluate_exact_observed<E: ExactEvaluator>(
     ev: &E,
     plan: &ExactPlan,
     inputs: Vec<E::Ciphertext>,
+    ctx: &ExecutionContext,
     observer: &mut dyn ExecutionObserver,
 ) -> Result<Vec<E::Ciphertext>>
 where
@@ -69,7 +96,7 @@ where
             ),
         ));
     }
-    observer.begin(plan);
+    observer.begin(plan, ctx)?;
     let n = plan.instrs.len();
     let mut last_use = vec![0usize; n];
     for (i, instr) in plan.instrs.iter().enumerate() {
@@ -115,14 +142,18 @@ where
             Cast(a) => ev.cast(r(*a), elem)?,
         };
         regs.push(Some(ct));
-        observer.instruction(i, instr, i as Reg);
+        observer.instruction(&InstructionEvent {
+            index: i,
+            instr,
+            result: i as Reg,
+        })?;
         for op in instr.operands() {
             if last_use[op as usize] == i {
                 regs[op as usize] = None;
             }
         }
     }
-    observer.finish(&plan.outputs.iter().map(|o| o.reg).collect::<Vec<_>>());
+    observer.finish(&plan.outputs.iter().map(|o| o.reg).collect::<Vec<_>>())?;
     // Outputs may share a register; copy all but the last use.
     let mut out = Vec::with_capacity(plan.outputs.len());
     for (i, o) in plan.outputs.iter().enumerate() {

@@ -192,6 +192,25 @@ fn exact_checks(out: &mut Vec<Check>, model: &Model, e: &encompute_evaluator::Ex
             format!("unrecognized parameter profile {}", e.profile.profile),
         )
     });
+    // The stored transcript hash equals the one regenerated from the plan.
+    let stored: serde_json::Value =
+        serde_json::from_str(&model.artifact_files()["verification.json"]).unwrap_or_default();
+    out.push(match model.transcript_for_target() {
+        Some(t) if stored["transcript_hash"] == t.id().hex() => check(
+            "exact.transcript",
+            Status::Pass,
+            format!(
+                "{} regenerated from plan.json ({} instructions) matches verification.json",
+                t.id(),
+                t.entries.len()
+            ),
+        ),
+        _ => check(
+            "exact.transcript",
+            Status::Fail,
+            "ENC1702 transcript commitment mismatch: the exact plan does not match the verification metadata",
+        ),
+    });
     out.push(check(
         "exact.bindings",
         Status::Pass,

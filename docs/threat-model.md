@@ -34,7 +34,9 @@ scope.
   identity, binding the execution spec, key, and exact request and response
   bytes; clients verify it before decrypting. A receipt makes the
   evaluator's claim attributable. It does not prove correct execution
-  (ADR-007).
+  (ADR-007). For exact programs the receipt also binds the semantic
+  transcript a future proof must follow (ADR-008); that is public program
+  structure, not a proof.
 - Artifacts never contain key material.
 
 ## Deployment

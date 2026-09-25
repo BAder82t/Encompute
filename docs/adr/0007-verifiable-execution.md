@@ -12,7 +12,7 @@ the proof backend arrives.
 
 ## Decision
 
-1. **Receipts precede proofs.** 0.4 V1 adds `ExecutionReceiptV1`: what the
+1. **Receipts precede proofs.** 0.4 V1 adds the execution receipt (`ExecutionReceipt`, version 2 since 0.4 V2 added `transcript_hash`): what the
    evaluator claims it executed, bound to the execution spec, the key, the
    exact request and response bytes, and the evaluator's identity, signed
    by the evaluator. Its `evidence` is `VerificationEvidence::None`. A later

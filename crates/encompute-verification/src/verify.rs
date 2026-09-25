@@ -2,7 +2,7 @@ use encompute_ir::{Code, Error, Result};
 
 use crate::identity::EvaluatorIdentity;
 use crate::receipt::{
-    ExecutionReceiptV1, SignedExecutionReceipt, VerificationEvidence, RECEIPT_VERSION,
+    ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence, RECEIPT_VERSION,
 };
 use crate::spec::ExecutionSpec;
 
@@ -13,6 +13,9 @@ pub struct ExpectedExecution<'a> {
     pub key_id: &'a str,
     pub request_commitment: &'a str,
     pub output_commitment: &'a str,
+    /// The transcript hash of the verifier's own plan (exact plans), or
+    /// `None` (CKKS).
+    pub transcript_hash: Option<&'a str>,
     pub trusted_evaluator: &'a EvaluatorIdentity,
 }
 
@@ -21,11 +24,11 @@ pub struct ExpectedExecution<'a> {
 /// claims*; it is not an execution proof (`evidence` is `None` in V1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedReceipt {
-    receipt: ExecutionReceiptV1,
+    receipt: ExecutionReceipt,
 }
 
 impl VerifiedReceipt {
-    pub fn receipt(&self) -> &ExecutionReceiptV1 {
+    pub fn receipt(&self) -> &ExecutionReceipt {
         &self.receipt
     }
 
@@ -113,6 +116,12 @@ pub fn verify_receipt(
         if got != want {
             return Err(mismatch(what));
         }
+    }
+    if r.transcript_hash.as_deref() != expected.transcript_hash {
+        return Err(Error::new(
+            Code::Transcript,
+            "transcript commitment mismatch: the receipt binds another transcript",
+        ));
     }
     Ok(VerifiedReceipt { receipt: r.clone() })
 }

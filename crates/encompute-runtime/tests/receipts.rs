@@ -138,8 +138,9 @@ fn tampering_fails_closed() {
     assert_eq!(check(&a.request, &resp, &a.receipt), Some(Code::Receipt));
     // A receipt signed by another evaluator, however consistent.
     let other = EvaluatorSigner::generate().unwrap();
-    let forged = encompute_runtime::verification::ExecutionReceiptV1::new(
+    let forged = encompute_runtime::verification::ExecutionReceipt::new(
         &client.spec(),
+        client.transcript().map(|t| t.id().hex()).as_deref(),
         client.key_id(),
         &a.request,
         &a.response,
@@ -174,6 +175,7 @@ fn tampering_fails_closed() {
             key_id: client.key_id(),
             request_commitment: &rc,
             output_commitment: &oc,
+            transcript_hash: None,
             trusted_evaluator: &trusted,
         }
     )
@@ -203,4 +205,59 @@ fn local_runs_verify_receipts() {
             assert!((got[&k][0] - v[0]).abs() < 1e-2, "{k}");
         }
     }
+}
+
+/// Exact receipts bind the transcript of the client's own plan; the
+/// statement a proof must satisfy follows from receipt + transcript.
+#[test]
+fn receipts_bind_the_transcript_and_form_a_statement() {
+    use encompute_runtime::verification::ExecutionStatement;
+    let (remote, trusted) = serve();
+    let m = Model::compile(adult()).unwrap();
+    let client = m.new_client(Mode::Mock).unwrap();
+    let run = remote
+        .run(&client, m.program(), None, &inputs_for(&m), &trusted)
+        .unwrap();
+    let t = client.transcript().unwrap();
+    assert_eq!(run.receipt.receipt.transcript_hash, Some(t.id().hex()));
+    let st = ExecutionStatement::new(&run.verified, &t).unwrap();
+    assert_eq!(st.spec_id, client.spec().id().hex());
+    assert_eq!(st.request_commitment, request_commitment(&run.request));
+    assert_eq!(st.output_commitment, output_commitment(&run.response));
+    assert_eq!(st.instruction_count, t.entries.len() as u64);
+    assert!(st.public_inputs.is_empty());
+    // Another program's transcript does not fit this receipt.
+    let other = Model::compile(adult_at(21.0))
+        .unwrap()
+        .new_client(Mode::Mock)
+        .unwrap();
+    let e = ExecutionStatement::new(&run.verified, &other.transcript().unwrap()).unwrap_err();
+    assert_eq!(e.code, Code::Transcript);
+    // verification.json stores the target transcript's hash.
+    let v: serde_json::Value =
+        serde_json::from_str(&m.artifact_files()["verification.json"]).unwrap();
+    assert_eq!(
+        v["transcript_hash"],
+        m.transcript_for_target().unwrap().id().hex()
+    );
+    // CKKS programs have no transcript yet.
+    let c = Model::compile(logistic(8, 1)).unwrap();
+    assert!(c.transcript_for_target().is_none());
+    let run = remote
+        .run(
+            &c.new_client(Mode::Mock).unwrap(),
+            c.program(),
+            None,
+            &inputs_for(&c),
+            &trusted,
+        )
+        .unwrap();
+    assert_eq!(run.receipt.receipt.transcript_hash, None);
+}
+
+fn adult_at(threshold: f64) -> Program {
+    let text = adult()
+        .to_string()
+        .replace("[18.0]", &format!("[{threshold:?}]"));
+    encompute_ir::parse(&text).unwrap()
 }

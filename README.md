@@ -40,8 +40,11 @@ approve(35, 100_000, 20_000, 400, mode="mock")    # True, exactly
 print(approve.test(cases=1000))                   # 1000 matches, 0 mismatches
 ```
 
-Status: **v0.2**, with 0.3 (exact computation) in progress: exact programs
-run end to end on the mock backend and, in the research build, on TFHE-rs. See the [changelog](CHANGELOG.md), the
+Status: **0.3 / 0.4 in progress** (last release: v0.2.0). Approximate (CKKS)
+and exact (integer/Boolean) programs run end to end over the client/evaluator
+boundary; every evaluation returns a signed execution receipt, and exact
+programs have a semantic transcript fixing what a future execution proof
+must show. No execution proof exists yet. See the [changelog](CHANGELOG.md), the
 [benchmarks](docs/benchmarks.md), the
 [decision records](docs/adr/), the [threat model](docs/threat-model.md) and
 the [error codes](docs/errors.md).
@@ -166,6 +169,12 @@ It does **not** prove that the evaluator executed every operation honestly,
 that the output ciphertext is mathematically correct, or that the result was
 not fabricated. That needs an execution proof, which is future work (0.4 V3);
 receipts say `EXECUTION PROOF NOT PRESENT`. See ADR-007.
+
+For exact programs, receipts also bind a *semantic transcript*: the
+canonical list of operations a proof will have to cover
+(`encompute transcript model.encompute`). It is public program structure,
+not a proof: `TRANSCRIPT AVAILABLE`, `EXECUTION PROOF NOT PRESENT`
+(ADR-008).
 
 The evaluator speaks plain HTTP; put a TLS proxy in front of it for remote
 clients. `scripts/audit-evaluator-binary.sh` checks that the evaluator binary

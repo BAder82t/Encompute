@@ -8,6 +8,7 @@ pub(crate) const REQUEST: &str = "encompute.execution-request.v1";
 pub(crate) const OUTPUT: &str = "encompute.execution-output.v1";
 pub(crate) const RECEIPT: &str = "encompute.execution-receipt.v1";
 pub(crate) const EVALUATOR: &str = "encompute.evaluator.v1";
+pub(crate) const TRANSCRIPT: &str = "encompute.execution-transcript.v1";
 
 /// A 32-byte SHA-256 digest.
 pub type Digest32 = [u8; 32];

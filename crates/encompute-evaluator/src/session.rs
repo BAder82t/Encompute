@@ -4,11 +4,15 @@ use std::time::{Duration, Instant};
 use encompute_backend::{
     CkksEvaluator, ExactEvaluator, MockConfig, MockEvaluator, PlainExactEvaluator,
 };
-use encompute_exact::{evaluate_exact_observed, ExactPlan, ExecutionObserver, NoopObserver};
+use encompute_exact::{
+    evaluate_exact_observed, semantic_transcript, ExactPlan, ExecutionContext, ExecutionObserver,
+    NoopObserver,
+};
 use encompute_ir::{Code, Error, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
 use encompute_verification::{
-    EvaluatorSigner, ExecutionReceiptV1, ExecutionSpec, SignedExecutionReceipt, SPEC_VERSION,
+    EvaluatorSigner, ExecutionReceipt, ExecutionSpec, SemanticTranscript, SignedExecutionReceipt,
+    SPEC_VERSION,
 };
 
 use crate::compiled::{compile_program, CompiledProgram, Semantics};
@@ -59,10 +63,22 @@ pub fn execution_spec(ids: &Ids, compiled: &CompiledProgram, kind: BackendKind) 
     }
 }
 
-/// Sign a receipt binding `spec`, the request's key ID, and the exact
-/// request and response envelope bytes.
+/// The semantic transcript of an exact program under `spec` (0.4 V2);
+/// `None` for CKKS programs, which are not transcribed yet.
+pub fn transcript_for(
+    compiled: &CompiledProgram,
+    spec: &ExecutionSpec,
+) -> Option<SemanticTranscript> {
+    compiled
+        .exact()
+        .map(|e| semantic_transcript(&e.plan, &spec.id().hex()))
+}
+
+/// Sign a receipt binding `spec`, the transcript hash (exact programs), the
+/// request's key ID, and the exact request and response envelope bytes.
 pub fn issue_receipt(
     spec: &ExecutionSpec,
+    transcript_hash: Option<&str>,
     request: &[u8],
     response: &[u8],
     signer: &EvaluatorSigner,
@@ -71,7 +87,15 @@ pub fn issue_receipt(
         .header
         .key_id
         .ok_or_else(|| Error::new(Code::WrongKey, "inputs carry no key ID"))?;
-    ExecutionReceiptV1::new(spec, &key_id, request, response, &signer.identity())?.sign(signer)
+    ExecutionReceipt::new(
+        spec,
+        transcript_hash,
+        &key_id,
+        request,
+        response,
+        &signer.identity(),
+    )?
+    .sign(signer)
 }
 
 /// Which implementation runs a program. The mock serves both semantics;
@@ -280,6 +304,8 @@ pub struct EvaluatorSession {
     compiled: CompiledProgram,
     ids: Ids,
     spec: ExecutionSpec,
+    /// Exact programs: hash of the semantic transcript receipts bind.
+    transcript_hash: Option<String>,
     kind: BackendKind,
     keys: HashMap<String, Keyed>,
 }
@@ -300,11 +326,13 @@ impl EvaluatorSession {
         kind.check(compiled.semantics())?;
         let ids = Ids::of(&program, &compiled);
         let spec = execution_spec(&ids, &compiled, kind);
+        let transcript_hash = transcript_for(&compiled, &spec).map(|t| t.id().hex());
         Ok(Self {
             program,
             compiled,
             ids,
             spec,
+            transcript_hash,
             kind,
             keys: HashMap::new(),
         })
@@ -329,6 +357,11 @@ impl EvaluatorSession {
     /// What this session executes, as receipts state it.
     pub fn spec(&self) -> &ExecutionSpec {
         &self.spec
+    }
+
+    /// The transcript hash receipts bind (exact programs).
+    pub fn transcript_hash(&self) -> Option<&str> {
+        self.transcript_hash.as_deref()
     }
 
     pub fn has_key(&self, key_id: &str) -> bool {
@@ -428,11 +461,11 @@ impl EvaluatorSession {
             #[cfg(feature = "openfhe")]
             (Keyed::OpenFhe(ev), CompiledProgram::Approx(c)) => self.run(ev, c, &items)?,
             (Keyed::ExactMock(ev), CompiledProgram::Exact(e)) => {
-                run_exact(ev, &e.plan, &items, observer)?
+                run_exact(ev, &e.plan, &items, &self.context(), observer)?
             }
             #[cfg(feature = "tfhe-rs")]
             (Keyed::TfheRs(ev), CompiledProgram::Exact(e)) => {
-                run_exact(ev, &e.plan, &items, observer)?
+                run_exact(ev, &e.plan, &items, &self.context(), observer)?
             }
             _ => unreachable!("keys are registered for this session's program"),
         };
@@ -448,6 +481,12 @@ impl EvaluatorSession {
             items: vec![],
         };
         Ok((Envelope::new(header, outputs).encode(), times))
+    }
+
+    fn context(&self) -> ExecutionContext {
+        ExecutionContext {
+            spec_id: self.spec.id().hex(),
+        }
     }
 
     fn run<E: CkksEvaluator>(
@@ -483,6 +522,7 @@ fn run_exact<E: ExactEvaluator>(
     ev: &E,
     plan: &ExactPlan,
     items: &[(&str, &[u8])],
+    ctx: &ExecutionContext,
     observer: &mut dyn ExecutionObserver,
 ) -> Result<(Named, ExecTimes)>
 where
@@ -498,7 +538,7 @@ where
         .collect::<Result<Vec<_>>>()?;
     times.load = t.elapsed();
     let t = Instant::now();
-    let outs = evaluate_exact_observed(ev, plan, cts, observer)?;
+    let outs = evaluate_exact_observed(ev, plan, cts, ctx, observer)?;
     times.evaluate = t.elapsed();
     let t = Instant::now();
     let stored = plan

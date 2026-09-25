@@ -187,6 +187,33 @@ fn remote_receipts_and_verify() {
         "{out}"
     );
     assert!(!out.contains("EXECUTION VERIFIED"));
+    assert!(out.contains("TRANSCRIPT AVAILABLE"), "{out}");
+
+    // The transcript command prints the semantic program, never values.
+    let (code, out, err) = encompute(&["transcript", &p("adult.encompute"), "--backend", "mock"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("GE_CONST   r0 18") && out.contains("enctrace1:"),
+        "{out}"
+    );
+    assert!(
+        out.contains("TRANSCRIPT AVAILABLE\nEXECUTION PROOF NOT PRESENT"),
+        "{out}"
+    );
+    let listing = out
+        .split("Instructions")
+        .nth(1)
+        .unwrap()
+        .split("Outputs")
+        .next()
+        .unwrap();
+    assert!(!listing.contains("30"), "no runtime input value: {listing}");
+    let (code, out, _) = encompute(&["explain", &p("adult.encompute")]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Verification") && out.contains("proof coverage"),
+        "{out}"
+    );
 
     let (code, out, _) = verify(&[]);
     assert_eq!(code, 3, "incomplete verification is not success: {out}");

@@ -20,6 +20,8 @@ pub struct ProgramInfo {
     pub backend: String,
     /// What this evaluator executes for the program; receipts state it.
     pub spec: encompute_verification::ExecutionSpec,
+    /// Exact programs: the semantic transcript hash receipts bind.
+    pub transcript_hash: Option<String>,
 }
 
 /// Timings of one job, in milliseconds.
@@ -99,6 +101,7 @@ fn info(s: &EvaluatorSession) -> ProgramInfo {
         scheme: s.compiled().scheme().to_owned(),
         backend: s.kind().name().to_owned(),
         spec: s.spec().clone(),
+        transcript_hash: s.transcript_hash().map(str::to_owned),
     }
 }
 

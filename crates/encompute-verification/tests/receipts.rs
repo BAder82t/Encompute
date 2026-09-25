@@ -3,7 +3,7 @@
 use encompute_ir::Code;
 use encompute_verification::canonical::canonical_json;
 use encompute_verification::{
-    output_commitment, request_commitment, verify_receipt, EvaluatorSigner, ExecutionReceiptV1,
+    output_commitment, request_commitment, verify_receipt, EvaluatorSigner, ExecutionReceipt,
     ExecutionSpec, ExpectedExecution, NoProofBackend, SignedExecutionReceipt, VerificationBackend,
 };
 
@@ -23,11 +23,12 @@ fn spec() -> ExecutionSpec {
 }
 
 const KEY: &str = "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f";
+const TRANSCRIPT: &str = "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c";
 const REQ: &[u8] = b"ENCM request envelope bytes";
 const OUT: &[u8] = b"ENCM output envelope bytes";
 
 fn signed(signer: &EvaluatorSigner) -> SignedExecutionReceipt {
-    ExecutionReceiptV1::new(&spec(), KEY, REQ, OUT, &signer.identity())
+    ExecutionReceipt::new(&spec(), Some(TRANSCRIPT), KEY, REQ, OUT, &signer.identity())
         .unwrap()
         .sign(signer)
         .unwrap()
@@ -43,6 +44,7 @@ fn check(r: &SignedExecutionReceipt, signer: &EvaluatorSigner) -> encompute_ir::
             key_id: KEY,
             request_commitment: &rc,
             output_commitment: &oc,
+            transcript_hash: Some(TRANSCRIPT),
             trusted_evaluator: &id,
         },
     )
@@ -93,6 +95,7 @@ fn valid_receipt_verifies_and_is_not_a_proof() {
             key_id: KEY,
             request_commitment: &rc,
             output_commitment: &oc,
+            transcript_hash: Some(TRANSCRIPT),
             trusted_evaluator: &id,
         },
     )
@@ -158,10 +161,17 @@ fn every_tampering_fails_closed() {
 fn receipts_do_not_transfer_between_executions() {
     let signer = EvaluatorSigner::generate().unwrap();
     let id = signer.identity();
-    let a = ExecutionReceiptV1::new(&spec(), KEY, b"request A", b"output A", &id)
-        .unwrap()
-        .sign(&signer)
-        .unwrap();
+    let a = ExecutionReceipt::new(
+        &spec(),
+        Some(TRANSCRIPT),
+        KEY,
+        b"request A",
+        b"output A",
+        &id,
+    )
+    .unwrap()
+    .sign(&signer)
+    .unwrap();
     let s = spec();
     let expect = |req: &[u8], out: &[u8], spec: &ExecutionSpec| {
         let (rc, oc) = (request_commitment(req), output_commitment(out));
@@ -172,6 +182,7 @@ fn receipts_do_not_transfer_between_executions() {
                 key_id: KEY,
                 request_commitment: &rc,
                 output_commitment: &oc,
+                transcript_hash: Some(TRANSCRIPT),
                 trusted_evaluator: &id,
             },
         )
@@ -201,7 +212,7 @@ fn malformed_receipts_are_refused() {
         ("empty", vec![]),
         (
             "unknown version",
-            text.replace("\"version\":1", "\"version\":2").into_bytes(),
+            text.replace("\"version\":2", "\"version\":3").into_bytes(),
         ),
         (
             "unknown field",
@@ -236,11 +247,40 @@ fn malformed_receipts_are_refused() {
 
 #[test]
 fn no_proof_backend_never_produces_evidence() {
-    let signer = EvaluatorSigner::generate().unwrap();
-    let statement = encompute_verification::ExecutionStatement {
-        receipt: signed(&signer).receipt,
+    use encompute_verification::StatementShape;
+    let t = encompute_verification::SemanticTranscript {
+        format: encompute_verification::transcript::TRANSCRIPT_FORMAT.into(),
+        transcript_version: 1,
+        spec_id: spec().id().hex(),
+        plan_kind: "exact".into(),
+        plan_version: 1,
+        inputs: vec![],
+        outputs: vec![],
+        entries: vec![],
     };
-    assert!(NoProofBackend
-        .prove(&statement, &Default::default())
-        .is_err());
+    assert!(NoProofBackend.setup(&StatementShape::of(&t)).is_err());
+    assert_eq!(NoProofBackend.capabilities().coverage(&t), (0, 0));
+}
+
+#[test]
+fn transcript_hash_is_bound() {
+    let signer = EvaluatorSigner::generate().unwrap();
+    let r = signed(&signer);
+    let (s, id) = (spec(), signer.identity());
+    let (rc, oc) = (request_commitment(REQ), output_commitment(OUT));
+    for want in [None, Some("4d".repeat(32))] {
+        let e = verify_receipt(
+            &r,
+            &ExpectedExecution {
+                spec: &s,
+                key_id: KEY,
+                request_commitment: &rc,
+                output_commitment: &oc,
+                transcript_hash: want.as_deref(),
+                trusted_evaluator: &id,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Transcript, "{e}");
+    }
 }

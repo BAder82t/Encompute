@@ -218,14 +218,19 @@ impl Evaluator {
     /// Execute, then sign a receipt over the exact request and response.
     fn job(&self, pid: &str, body: &[u8]) -> Result<Reply> {
         let (out, times) = self.engine.execute(pid, body)?;
-        let spec = self
+        let info = self
             .engine
             .programs()
             .into_iter()
             .find(|p| p.program_id == pid)
-            .ok_or_else(crate::engine::unknown_program)?
-            .spec;
-        let receipt = issue_receipt(&spec, body, &out, &self.signer)?;
+            .ok_or_else(crate::engine::unknown_program)?;
+        let receipt = issue_receipt(
+            &info.spec,
+            info.transcript_hash.as_deref(),
+            body,
+            &out,
+            &self.signer,
+        )?;
         let receipt_json: serde_json::Value =
             serde_json::from_slice(&receipt.to_bytes()?).expect("canonical JSON");
         let n = self.jobs.fetch_add(1, Ordering::Relaxed);

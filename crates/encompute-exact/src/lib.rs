@@ -6,7 +6,15 @@
 mod exec;
 mod lower;
 mod plan;
+mod transcript;
 
-pub use exec::{evaluate_exact, evaluate_exact_observed, ExecutionObserver, NoopObserver};
+pub use exec::{
+    evaluate_exact, evaluate_exact_observed, ExecutionContext, ExecutionObserver, InstructionEvent,
+    NoopObserver,
+};
+pub use transcript::{semantic_transcript, transcript_entry, TranscriptObserver};
+
+/// Version of the exact plan format (`plan.json`), independent of CKKS.
+pub const EXACT_PLAN_VERSION: u32 = 1;
 pub use lower::{compile, CompiledExact};
 pub use plan::{ExactInput, ExactInstr, ExactOutput, ExactPlan, ExactProfile, Reg, MAX_TABLE};

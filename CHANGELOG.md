@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased — 0.4 V1: execution identity and receipts
+## Unreleased — 0.4 V2: semantic transcripts
+
+- **Semantic transcripts.** Every exact plan maps deterministically to a
+  `SemanticTranscript` (stable numeric opcodes, typed canonical constants,
+  plan-local registers, inputs without values) with a stable hash
+  (`enctrace1:…`), bound to the execution spec (ADR-008).
+- **Receipts v2** bind the transcript hash; clients compute it from their
+  own plan and refuse a mismatch (ENC1702). `verification.json` stores the
+  transcript version and hash; `encompute audit` checks it.
+- **Proof boundary.** `ExecutionStatement` (spec, commitments, transcript
+  hash), `StatementShape`, `VerificationCapabilities`, and a
+  `VerificationBackend` with proving/verification keys, witness and
+  evidence types; `NoProofBackend` still proves nothing.
+- **Observers** receive `InstructionEvent`s and can fail an execution;
+  `TranscriptObserver` records the plan-derived transcript.
+- `ReferenceTranscriptEvaluator` (plaintext replay, for tests only): 12 132
+  generated plans replay exactly; nightly runs 25 000 programs.
+- CLI: `encompute transcript`; `explain` reports verification readiness;
+  `verify` checks the transcript hash against the artifact.
+- Fix: evaluator worker processes kept the gateway's backends (a mock for
+  one semantics replaced OpenFHE for the other).
+
+## 0.4 V1: execution identity and receipts
 
 - **Execution specs.** `ExecutionSpec` binds program, plan, parameters,
   plan kind and version, semantics, scheme and backend; its domain-separated

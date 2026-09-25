@@ -29,3 +29,11 @@ pub use remote::{Remote, RemoteRun, RemoteStats};
 pub fn verification_spec(model: &Model, kind: BackendKind) -> verification::ExecutionSpec {
     encompute_evaluator::execution_spec(&model.ids(), model.compiled(), kind)
 }
+
+/// The semantic transcript of `model` on backend `kind` (exact programs).
+pub fn verification_transcript(
+    model: &Model,
+    kind: BackendKind,
+) -> Option<verification::SemanticTranscript> {
+    encompute_evaluator::transcript_for(model.compiled(), &verification_spec(model, kind))
+}

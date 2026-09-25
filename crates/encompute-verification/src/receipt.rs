@@ -6,7 +6,8 @@ use crate::hash::{hex, tagged, unhex, RECEIPT};
 use crate::identity::{EvaluatorIdentity, EvaluatorSigner};
 use crate::spec::ExecutionSpec;
 
-pub const RECEIPT_VERSION: u32 = 1;
+/// 2 adds `transcript_hash` (0.4 V2).
+pub const RECEIPT_VERSION: u32 = 2;
 
 /// Largest receipt accepted on parse (receipts are ~1 KiB).
 pub const MAX_RECEIPT_BYTES: usize = 16 << 10;
@@ -25,7 +26,7 @@ pub enum VerificationEvidence {
 /// metadata: no plaintext, no key, no ciphertext.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionReceiptV1 {
+pub struct ExecutionReceipt {
     pub version: u32,
     /// Opaque and unique (random UUIDv4); not a security commitment.
     pub execution_id: String,
@@ -39,6 +40,11 @@ pub struct ExecutionReceiptV1 {
     pub scheme: String,
     pub backend: String,
     pub backend_version: String,
+    /// Hash of the semantic transcript the execution follows (exact plans;
+    /// absent for CKKS). Fixes the statement a future proof must satisfy;
+    /// proves nothing by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_hash: Option<String>,
     pub evaluator_id: String,
     pub evidence: VerificationEvidence,
 }
@@ -49,7 +55,7 @@ pub struct ExecutionReceiptV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedExecutionReceipt {
-    pub receipt: ExecutionReceiptV1,
+    pub receipt: ExecutionReceipt,
     /// Lowercase hex, 32 bytes.
     pub evaluator_public_key: String,
     /// Lowercase hex, 64 bytes.
@@ -73,11 +79,12 @@ fn random_uuid_v4() -> Result<String> {
     ))
 }
 
-impl ExecutionReceiptV1 {
+impl ExecutionReceipt {
     /// The receipt for one execution of `spec` under `key_id`, binding the
     /// exact request and response envelope bytes.
     pub fn new(
         spec: &ExecutionSpec,
+        transcript_hash: Option<&str>,
         key_id: &str,
         request: &[u8],
         response: &[u8],
@@ -96,6 +103,7 @@ impl ExecutionReceiptV1 {
             scheme: spec.scheme.clone(),
             backend: spec.backend.clone(),
             backend_version: spec.backend_version.clone(),
+            transcript_hash: transcript_hash.map(str::to_owned),
             evaluator_id: evaluator.evaluator_id(),
             evidence: VerificationEvidence::None,
         })
@@ -159,6 +167,9 @@ impl SignedExecutionReceipt {
             ("evaluator ID", &r.evaluator_id),
         ] {
             hex_of(what, v, 32)?;
+        }
+        if let Some(t) = &r.transcript_hash {
+            hex_of("transcript hash", t, 32)?;
         }
         hex_of("public key", &self.evaluator_public_key, 32)?;
         hex_of("signature", &self.signature, 64)?;

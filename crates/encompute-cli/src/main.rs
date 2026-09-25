@@ -58,6 +58,18 @@ enum Cmd {
         #[arg(long)]
         save_envelopes: Option<PathBuf>,
     },
+    /// Print the semantic transcript of an exact program: the operations a
+    /// future execution proof must follow. Never contains runtime values.
+    Transcript {
+        model: PathBuf,
+        /// Backend of the execution spec (default: the artifact's target,
+        /// tfhe-rs; mock runs use `--backend mock`).
+        #[arg(long)]
+        backend: Option<String>,
+        /// Canonical JSON instead of the listing.
+        #[arg(long)]
+        json: bool,
+    },
     /// Check a saved execution receipt: signature, evaluator, and (when
     /// given) the artifact, request and response it binds. A receipt is a
     /// signed claim, not a proof of correct execution.
@@ -245,6 +257,54 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 "{}",
                 serde_json::to_string_pretty(&m.outputs_json(&out)).unwrap()
             );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Transcript {
+            model,
+            backend,
+            json,
+        } => {
+            let m = load(&model)?;
+            let kind = match backend.as_deref() {
+                None => BackendKind::TfheRs,
+                Some(b) => BackendKind::parse(b)
+                    .ok_or_else(|| Error::new(Code::BadInput, format!("unknown backend {b:?}")))?,
+            };
+            let t = encompute_runtime::verification_transcript(&m, kind).ok_or_else(|| {
+                Error::new(
+                    Code::Unsupported,
+                    "no transcript: CKKS programs are not transcribed yet (exact programs only)",
+                )
+            })?;
+            if json {
+                println!(
+                    "{}",
+                    String::from_utf8(t.canonical_bytes()?).expect("UTF-8")
+                );
+            } else {
+                let section = |t: &str| println!("\n{t}\n{}", "─".repeat(40));
+                println!("Transcript v{}", t.transcript_version);
+                section("Spec");
+                println!(
+                    "encspec1:{} ({} {})",
+                    t.spec_id,
+                    kind.label().0,
+                    kind.label().1
+                );
+                section("Inputs");
+                for i in &t.inputs {
+                    println!("#{} {:<16} {} {}", i.position, i.name, i.visibility, i.ty);
+                }
+                section("Instructions");
+                print!("{}", t.listing());
+                section("Outputs");
+                for o in &t.outputs {
+                    println!("{:<16} r{} : {}", o.name, o.register, o.ty);
+                }
+                section("Transcript");
+                println!("{}", t.id());
+                println!("\nTRANSCRIPT AVAILABLE\nEXECUTION PROOF NOT PRESENT");
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Verify {
@@ -538,11 +598,15 @@ fn verify(
             Some(s.parameter_set_id.clone()),
         );
         bind("scheme", &r.scheme, Some(s.scheme.clone()));
+        bind("backend", &r.backend, Some(s.backend.clone()));
         bind(
             "backend version",
             &r.backend_version,
             Some(s.backend_version.clone()),
         );
+    }
+    if let (None, Some(b)) = (&spec, &expected_backend) {
+        bind("backend", &r.backend, Some(b.clone()));
     }
     bind("request commitment", &r.request_commitment, rc.clone());
     if request_bytes.is_some() {
@@ -553,6 +617,21 @@ fn verify(
         );
     }
     bind("output commitment", &r.output_commitment, oc.clone());
+    // The transcript the artifact's plan implies on that backend.
+    let transcript = match (&model, kind) {
+        (Some(m), Some(k)) => {
+            Some(encompute_runtime::verification_transcript(m, k).map(|t| t.id().hex()))
+        }
+        _ => None,
+    };
+    if let (Ok(()), Some(want)) = (&result, &transcript) {
+        if r.transcript_hash != *want {
+            result = Err(Error::new(
+                Code::Transcript,
+                "transcript commitment mismatch: the receipt binds another transcript",
+            ));
+        }
+    }
     section("Evaluator");
     println!("  {:<16}enc-eval:{}", "ID", short(&r.evaluator_id));
     println!(
@@ -575,7 +654,11 @@ fn verify(
     println!("  {:<16}{}", "Backend", checked(expected_backend.is_some()));
     println!("  {:<16}{}", "Request", checked(rc.is_some()));
     println!("  {:<16}{}", "Response", checked(oc.is_some()));
+    println!("  {:<16}{}", "Transcript", checked(transcript.is_some()));
     section("Execution proof");
+    if let Some(t) = &r.transcript_hash {
+        println!("  {:<16}enctrace1:{}", "Transcript", short(t));
+    }
     println!("  {:<16}NOT PRESENT", "Status");
     section("Receipt");
     match result {
@@ -584,6 +667,9 @@ fn verify(
             // binding of verify_receipt was checked (the key ID is inside
             // the request envelope the commitment covers).
             let complete = trusted.is_some() && spec.is_some() && rc.is_some() && oc.is_some();
+            if r.transcript_hash.is_some() {
+                println!("TRANSCRIPT AVAILABLE");
+            }
             if complete {
                 println!("RECEIPT VERIFIED");
             } else {

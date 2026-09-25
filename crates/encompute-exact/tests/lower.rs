@@ -255,7 +255,10 @@ fn malformed_plans_are_rejected_not_executed() {
 /// are the same as without it.
 #[test]
 fn observer_sees_structure_only_and_changes_nothing() {
-    use encompute_exact::{evaluate_exact_observed, ExactPlan, ExecutionObserver, Reg};
+    use encompute_exact::{
+        evaluate_exact_observed, ExactPlan, ExecutionContext, ExecutionObserver, InstructionEvent,
+        Reg,
+    };
     #[derive(Default)]
     struct Record {
         began: usize,
@@ -263,14 +266,17 @@ fn observer_sees_structure_only_and_changes_nothing() {
         outputs: Vec<Reg>,
     }
     impl ExecutionObserver for Record {
-        fn begin(&mut self, plan: &ExactPlan) {
+        fn begin(&mut self, plan: &ExactPlan, _: &ExecutionContext) -> encompute_ir::Result<()> {
             self.began = plan.instrs.len();
+            Ok(())
         }
-        fn instruction(&mut self, index: usize, _: &ExactInstr, result: Reg) {
-            self.steps.push((index, result));
+        fn instruction(&mut self, e: &InstructionEvent<'_>) -> encompute_ir::Result<()> {
+            self.steps.push((e.index, e.result));
+            Ok(())
         }
-        fn finish(&mut self, outputs: &[Reg]) {
+        fn finish(&mut self, outputs: &[Reg]) -> encompute_ir::Result<()> {
             self.outputs = outputs.to_vec();
+            Ok(())
         }
     }
     let p = approve();
@@ -287,7 +293,8 @@ fn observer_sees_structure_only_and_changes_nothing() {
             .collect::<Vec<_>>()
     };
     let mut rec = Record::default();
-    let a = evaluate_exact_observed(&ev, &plan, load(30), &mut rec).unwrap();
+    let a = evaluate_exact_observed(&ev, &plan, load(30), &ExecutionContext::default(), &mut rec)
+        .unwrap();
     let b = evaluate_exact(&ev, &plan, load(30)).unwrap();
     let dec = |v: &[_]| {
         v.iter()

@@ -568,6 +568,7 @@ dependencies = [
  "encompute-analysis",
  "encompute-backend",
  "encompute-ir",
+ "encompute-verification",
  "proptest",
  "serde",
  "serde_json",

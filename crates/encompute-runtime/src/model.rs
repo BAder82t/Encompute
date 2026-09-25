@@ -76,7 +76,13 @@ impl Session {
     fn run(&self, program: &Program, inputs: &Inputs) -> Result<Outputs> {
         let request = self.client.encrypt(program, inputs)?;
         let (response, _) = self.evaluator.execute(&request)?;
-        let receipt = issue_receipt(self.evaluator.spec(), &request, &response, &self.signer)?;
+        let receipt = issue_receipt(
+            self.evaluator.spec(),
+            self.evaluator.transcript_hash(),
+            &request,
+            &response,
+            &self.signer,
+        )?;
         let (outputs, _) =
             self.client
                 .decrypt_verified(&request, &response, &receipt, &self.signer.identity())?;

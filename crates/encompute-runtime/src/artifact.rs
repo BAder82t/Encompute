@@ -33,6 +33,12 @@ struct Verification<'a> {
     spec_id: String,
     #[serde(flatten)]
     spec: &'a encompute_verification::ExecutionSpec,
+    /// Exact programs: the semantic transcript is regenerated from
+    /// `plan.json`; only its version and hash are stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -245,6 +251,7 @@ impl Model {
             },
         };
         let spec = self.target_spec();
+        let transcript = encompute_evaluator::transcript_for(c, &spec);
         BTreeMap::from([
             ("program.eir", p.to_string()),
             ("plan.json", c.plan_json()),
@@ -255,6 +262,8 @@ impl Model {
                 json(&Verification {
                     spec_id: spec.id().hex(),
                     spec: &spec,
+                    transcript_version: transcript.as_ref().map(|t| t.transcript_version),
+                    transcript_hash: transcript.as_ref().map(|t| t.id().hex()),
                 }),
             ),
         ])
@@ -267,6 +276,11 @@ impl Model {
             CompiledProgram::Exact(_) => encompute_evaluator::BackendKind::TfheRs,
         };
         encompute_evaluator::execution_spec(&self.ids(), self.compiled(), kind)
+    }
+
+    /// The semantic transcript on the target backend (exact programs).
+    pub fn transcript_for_target(&self) -> Option<encompute_verification::SemanticTranscript> {
+        encompute_evaluator::transcript_for(self.compiled(), &self.target_spec())
     }
 
     /// Canonical `manifest.json` for these file contents.

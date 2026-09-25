@@ -3,12 +3,12 @@
 //! One session type serves both semantics (CKKS and exact).
 
 use encompute_backend::{CkksClient, ExactClient, MockClient, MockConfig, PlainExactClient};
-use encompute_evaluator::{execution_spec, BackendKind, CompiledProgram, Ids};
+use encompute_evaluator::{execution_spec, transcript_for, BackendKind, CompiledProgram, Ids};
 use encompute_ir::{check_inputs, Code, Error, Inputs, Outputs, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
 use encompute_verification::{
     output_commitment, request_commitment, verify_receipt, EvaluatorIdentity, ExecutionSpec,
-    ExpectedExecution, SignedExecutionReceipt, VerifiedReceipt,
+    ExpectedExecution, SemanticTranscript, SignedExecutionReceipt, VerifiedReceipt,
 };
 
 /// The concrete client, so the secret key can be exported.
@@ -274,6 +274,12 @@ impl ClientSession {
         execution_spec(&self.ids, &self.compiled, self.kind)
     }
 
+    /// The semantic transcript of this client's own plan (exact programs):
+    /// what receipts must bind and a future proof must follow.
+    pub fn transcript(&self) -> Option<SemanticTranscript> {
+        transcript_for(&self.compiled, &self.spec())
+    }
+
     /// Verify `receipt` against this client's own spec and key, the exact
     /// `request` it sent and `response` it received, and the evaluator it
     /// trusts; only then decrypt. The receipt is a signed claim by that
@@ -287,6 +293,7 @@ impl ClientSession {
     ) -> Result<(Outputs, VerifiedReceipt)> {
         let spec = self.spec();
         let (rc, oc) = (request_commitment(request), output_commitment(response));
+        let transcript_hash = self.transcript().map(|t| t.id().hex());
         let verified = verify_receipt(
             receipt,
             &ExpectedExecution {
@@ -294,6 +301,7 @@ impl ClientSession {
                 key_id: &self.key_id,
                 request_commitment: &rc,
                 output_commitment: &oc,
+                transcript_hash: transcript_hash.as_deref(),
                 trusted_evaluator: trusted,
             },
         )?;

@@ -46,6 +46,9 @@ pub enum Code {
     Receipt,
     /// A network or protocol failure between client and evaluator.
     Remote,
+    /// A semantic transcript is malformed, of an unknown version, or does
+    /// not match the plan or the verification metadata.
+    Transcript,
 }
 
 impl Code {
@@ -72,13 +75,14 @@ impl Code {
             Code::WrongKey => "ENC1605",
             Code::Receipt => "ENC1606",
             Code::Remote => "ENC1701",
+            Code::Transcript => "ENC1702",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 21] = [
+    pub const ALL: [Code; 22] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -100,6 +104,7 @@ impl Code {
         Code::WrongKey,
         Code::Receipt,
         Code::Remote,
+        Code::Transcript,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

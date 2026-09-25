@@ -82,3 +82,6 @@ the square of the width: choose the narrowest type range analysis allows.
 Eligibility example end to end (`scripts/exact-demo.sh`, separate evaluator
 process, u8/u16/u32 inputs, 11 plan instructions): request 709 KiB,
 response 16 KiB, evaluation 2.1 s.
+
+Semantic transcript of the eligibility plan (8 instructions): built and
+hashed in ~70 µs (release), against ~2 s of TFHE-rs evaluation: far below 1 %.

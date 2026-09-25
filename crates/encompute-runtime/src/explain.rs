@@ -6,12 +6,53 @@ use serde::Serialize;
 
 use crate::diff::TestReport;
 use crate::model::{has_tfhe, BenchReport, Mode, Model};
+use encompute_verification::VerificationBackend;
 
 /// Measured behaviour of a model: accuracy and cost from real runs.
 #[derive(Clone, Debug, Serialize)]
 pub struct Measurement {
     pub accuracy: TestReport,
     pub cost: BenchReport,
+}
+
+/// Verification readiness (0.4): receipts, transcript, proof coverage.
+fn verification(s: &mut String, model: &Model) {
+    section(s, "Verification");
+    let _ = writeln!(s, "  {:<24}supported (signed by the evaluator)", "receipt");
+    match model.transcript_for_target() {
+        Some(t) => {
+            let cov = encompute_verification::NoProofBackend
+                .capabilities()
+                .coverage(&t);
+            let _ = writeln!(s, "  {:<24}v{}", "transcript", t.transcript_version);
+            let _ = writeln!(
+                s,
+                "  {:<24}{}",
+                "transcript hash",
+                &t.id().to_string()[..26]
+            );
+            let _ = writeln!(s, "  {:<24}none", "proof backend");
+            let _ = writeln!(
+                s,
+                "  {:<24}{}%",
+                "proof coverage",
+                100 * cov.0 / cov.1.max(1)
+            );
+        }
+        None => {
+            let _ = writeln!(
+                s,
+                "  {:<24}not available (CKKS plans are not transcribed yet)",
+                "transcript"
+            );
+            let _ = writeln!(s, "  {:<24}none", "proof backend");
+        }
+    }
+    let _ = writeln!(
+        s,
+        "  {:<24}NOT PRESENT (a receipt is a signed claim, not a proof)",
+        "execution proof"
+    );
 }
 
 fn section(s: &mut String, title: &str) {
@@ -199,6 +240,7 @@ impl Model {
             "failure probability", pr.failure_probability
         );
         let _ = writeln!(s, "  {:<24}no", "evaluator can decrypt");
+        verification(&mut s, self);
 
         if let Some(m) = measured {
             cost(&mut s, &m.cost);
@@ -332,6 +374,8 @@ impl Model {
             plan.rotations.len()
         );
         let _ = writeln!(s, "  {:<24}0", "bootstraps");
+        let mut v = String::new();
+        verification(&mut v, self);
         let _ = writeln!(s, "  {:<24}{}", "total instructions", plan.instrs.len());
         for a in &plan.approximations {
             let ch = &a.chebyshev;
@@ -347,6 +391,7 @@ impl Model {
             );
         }
 
+        s.push_str(&v);
         match measured.map(|m| (&m.cost, &m.accuracy)) {
             Some((b, TestReport::Approximate(r))) => {
                 cost(&mut s, b);

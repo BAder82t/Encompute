@@ -24,7 +24,7 @@ pub enum CompiledProgram {
 }
 
 /// Plan-format versions, independent per scheme.
-pub const EXACT_PLAN_VERSION: u32 = 1;
+pub use encompute_exact::EXACT_PLAN_VERSION;
 
 /// Compile by semantics: approximate → CKKS, exact → exact plan. Programs
 /// mixing both are rejected (0.3).
