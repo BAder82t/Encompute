@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fail if the evaluator binary contains Encompute's client crypto
-# (key generation, encryption, decryption, secret-key handling).
+# (key generation, encryption, decryption, secret-key handling), for both
+# CKKS (OpenFHE) and exact (TFHE-rs) programs.
 # OpenFHE's own internal routines are statically linked and reported, not
 # failed: the guarantee is that the evaluator never receives a secret key
 # (docs/threat-model.md).
@@ -16,12 +17,14 @@ if [ "${total}" = "0" ] || [ "${ours}" = "0" ]; then
   echo "CANNOT AUDIT: ${BIN} has no readable symbols (stripped, or wrong nm for its format)" >&2
   exit 2
 fi
-client_syms="$(nm "$BIN" | grep -c 'encompute_openfhe_client' || true)"
-mock_client="$(nm "$BIN" | grep -E 'MockClient' | grep -c . || true)"
+client_syms="$(nm "$BIN" | grep -cE 'encompute_(openfhe|tfhe)_client' || true)"
+mock_client="$(nm "$BIN" | grep -E 'MockClient|PlainExactClient' | grep -c . || true)"
+tfhe_client="$(nm "$BIN" | grep -c 'ClientKey' || true)"
 echo "encompute client-crypto symbols: ${client_syms}"
 echo "mock client symbols:             ${mock_client}"
+echo "TFHE-rs ClientKey symbols:       ${tfhe_client}"
 echo "OpenFHE-internal Decrypt symbols (library code, no key present): $(nm "$BIN" | c++filt | grep -c 'Decrypt(' || true)"
-if [ "${client_syms}" != "0" ] || [ "${mock_client}" != "0" ]; then
+if [ "${client_syms}" != "0" ] || [ "${mock_client}" != "0" ] || [ "${tfhe_client}" != "0" ]; then
   echo "FAIL: evaluator binary links client crypto" >&2
   exit 1
 fi

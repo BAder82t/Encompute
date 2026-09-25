@@ -1,9 +1,10 @@
 # Encompute
 
 Encompute compiles ordinary programs into encrypted computation. You declare which
-values are secret and their ranges; Encompute builds a CKKS plan, picks 128-bit
-parameters, runs it on OpenFHE, and checks the encrypted result against
-plaintext.
+values are secret and their ranges; Encompute picks the scheme from the
+types (CKKS for approximate numbers, TFHE for exact integers and Booleans),
+builds a plan, picks 128-bit parameters, and checks the encrypted result
+against plaintext.
 
 ```python
 import numpy as np
@@ -24,8 +25,23 @@ print(score.explain())           # depth, rotations, parameters, precision
 score.save("score.encompute")         # reproducible artifact, no keys
 ```
 
-Status: **v0.2**: client/evaluator split across a network boundary, with a
-containerized evaluator demo. See the [changelog](CHANGELOG.md), the
+Exact programs use integer and Boolean types, with comparisons and
+encrypted selection:
+
+```python
+from encompute import secret, u8, u16, u32
+
+@encompute.compile()
+def approve(age: secret[u8, 0:120], income: secret[u32, 0:1_000_000],
+            debt: secret[u32, 0:500_000], risk: secret[u16, 0:1000]):
+    return (age >= 18) & (debt * 100 < income * 40) & (risk <= 650)
+
+approve(35, 100_000, 20_000, 400, mode="mock")    # True, exactly
+print(approve.test(cases=1000))                   # 1000 matches, 0 mismatches
+```
+
+Status: **v0.2**, with 0.3 (exact computation) in progress: exact programs
+run end to end on the mock backend and, in the research build, on TFHE-rs. See the [changelog](CHANGELOG.md), the
 [benchmarks](docs/benchmarks.md), the
 [decision records](docs/adr/), the [threat model](docs/threat-model.md) and
 the [error codes](docs/errors.md).
@@ -49,8 +65,25 @@ the [error codes](docs/errors.md).
 - **Differential testing.** `test()` / `encompute test` compares encrypted and
   plaintext outputs on range endpoints plus random samples.
 
-Out of scope for 0.2: comparisons and integers (TFHE, 0.3), bootstrapping,
-GPU, TLS and client authentication, KMS.
+## Exact programs (0.3, in progress)
+
+- **Types.** `secret[u8, lo:hi]` … `secret[u64, lo:hi]`, `secret[i8, lo:hi]` …
+  `secret[i64, lo:hi]` and `secret[bool_]`. Exact values at the API are
+  integers within ±2^53 (ADR-006).
+- **Operations.** `+ - *`, comparisons, `& | ^ ~`, shifts, `//` and `%` by
+  constants, `encompute.select`, `minimum`/`maximum`, `lookup`, `cast`.
+  `if` on an encrypted Boolean is still a compile error (ENC1001).
+- **Checked arithmetic.** Integer range analysis proves that no operation
+  overflows for inputs in range; a possible overflow is a compile error
+  (ENC1303).
+- **Backends.** A plaintext mock by default. TFHE-rs behind the
+  off-by-default `tfhe-rs` feature, for research use only: Zama requires a
+  patent license for commercial use of its technology.
+- **Same workflow.** `compile`, `run` (local or `--remote`), `test` (exact
+  matches, no tolerance), `explain`, `bench`, `audit`, `keys generate`.
+
+Out of scope for 0.3: programs mixing approximate and exact values (0.4),
+bootstrapping for CKKS, GPU, TLS and client authentication, KMS.
 
 ## Build
 
@@ -60,10 +93,21 @@ on macOS, `brew install libomp`.
 ```sh
 cargo test                               # everything except OpenFHE
 ./scripts/install-openfhe.sh             # builds OpenFHE v1.5.1 (static) into .deps/openfhe
-cargo test --workspace --all-features    # adds the OpenFHE backend
+cargo test --workspace --features encompute-runtime/openfhe,encompute-evaluator/openfhe,encompute-cli/openfhe
+                                         # adds the OpenFHE backend
 ```
 
 Set `OPENFHE_ROOT` to use another static OpenFHE v1.5.1 install.
+
+The TFHE-rs backend for exact programs is a research feature (Zama requires
+a patent license for commercial use):
+
+```sh
+cargo test --release -p encompute-runtime --features tfhe-rs --test exact
+cargo build --release -p encompute-cli -p encompute-evaluator \
+  --features encompute-cli/tfhe-rs,encompute-evaluator/tfhe-rs
+scripts/exact-demo.sh      # encrypted eligibility decision via a separate evaluator
+```
 
 ### Python
 
@@ -107,19 +151,24 @@ contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-ir` | Scheme-independent SSA IR, `.eir` text form, reference semantics |
 | `crates/encompute-analysis` | Range and privacy analyses |
 | `crates/encompute-ckks` | Lowering to CKKS plans; Chebyshev approximation; parameter selection |
+| `crates/encompute-exact` | Lowering to backend-independent exact plans; plan validation and execution |
 | `crates/encompute-backend` | Client and evaluator traits; mock backend |
 | `crates/encompute-protocol` | Versioned, checksummed envelopes bound to parameters, program and key |
 | `crates/encompute-openfhe` | OpenFHE evaluator side (no keygen, encryption or decryption) |
 | `crates/encompute-openfhe-client` | OpenFHE client side: keys, encryption, decryption |
+| `crates/encompute-tfhe` | TFHE-rs evaluator side (research feature) |
+| `crates/encompute-tfhe-client` | TFHE-rs client side: keys, encryption, decryption (research feature) |
 | `crates/encompute-evaluator` | Evaluator sessions; never links client crypto |
 | `crates/encompute-runtime` | Execution, differential testing, explain, bench, artifacts |
 | `crates/encompute-cli` | `encompute` command |
 | `crates/encompute-py`, `python/encompute` | Python SDK: extension module and tracing frontend |
-| `examples/` | Demos: logistic scoring, semantic search, the two-machine search model |
+| `examples/` | Demos: logistic scoring, semantic search, the two-machine search model, exact eligibility |
 
 ## License
 
 AGPL-3.0-only, with commercial licenses available: see [LICENSING.md](LICENSING.md).
-Encompute statically links OpenFHE (BSD 2-Clause); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Encompute statically links OpenFHE (BSD 2-Clause); research builds with the
+`tfhe-rs` feature also link TFHE-rs (BSD-3-Clause-Clear, plus Zama's patent
+terms); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 Security reports: [SECURITY.md](SECURITY.md).
 

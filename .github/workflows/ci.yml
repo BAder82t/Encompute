@@ -94,5 +94,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p encompute-tfhe -p encompute-tfhe-client --all-targets --features encompute-tfhe-client/tfhe-rs -- -D warnings
+      - run: cargo clippy -p encompute-tfhe -p encompute-tfhe-client -p encompute-runtime -p encompute-evaluator -p encompute-cli --all-targets --features encompute-tfhe-client/tfhe-rs,encompute-runtime/tfhe-rs,encompute-evaluator/tfhe-rs,encompute-cli/tfhe-rs -- -D warnings
       - run: cargo test --release -p encompute-tfhe -p encompute-tfhe-client --features encompute-tfhe-client/tfhe-rs
+      - run: cargo test --release -p encompute-runtime --features tfhe-rs --test exact
+      - name: exact demo through a separate evaluator process
+        run: |
+          cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/tfhe-rs,encompute-evaluator/tfhe-rs
+          ./scripts/audit-evaluator-binary.sh target/release/encompute-evaluator

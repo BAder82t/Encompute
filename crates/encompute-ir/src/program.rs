@@ -411,10 +411,11 @@ impl Builder {
         let (min, max) = elem.bounds();
         let range = match (elem, range) {
             (Elem::Bool, _) => Range::new(0.0, 1.0),
-            // Values cross the API as f64: default ranges stop at ±2^53.
-            (_, None) => Range::new(min.max(-(1 << 53)) as f64, max.min(1 << 53) as f64),
+            // Values cross the API as f64: ranges stop at ±2^53 (ADR-006).
+            (_, None) => Range::new(min.max(-MAX_EXACT_IO) as f64, max.min(MAX_EXACT_IO) as f64),
             (_, Some(r)) => r,
         };
+        let (min, max) = (min.max(-MAX_EXACT_IO), max.min(MAX_EXACT_IO));
         let integral = |x: f64| x.is_finite() && x.fract() == 0.0;
         if !(integral(range.lo) && integral(range.hi) && range.lo <= range.hi)
             || (range.lo as i128) < min
@@ -423,7 +424,8 @@ impl Builder {
             return Err(Error::new(
                 Code::MissingRange,
                 format!(
-                    "input {name:?}: range [{}, {}] must be integers within {elem} [{min}, {max}]",
+                    "input {name:?}: range [{}, {}] must be integers within [{min}, {max}] \
+                     ({elem}, and at most 2^53 in magnitude)",
                     range.lo, range.hi
                 ),
             ));
@@ -441,6 +443,7 @@ impl Builder {
     /// Public exact scalar constant.
     pub fn constant_exact(&mut self, elem: Elem, value: f64) -> Result<ValueId> {
         let (min, max) = elem.bounds();
+        let (min, max) = (min.max(-MAX_EXACT_IO), max.min(MAX_EXACT_IO));
         if !elem.is_exact()
             || !value.is_finite()
             || value.fract() != 0.0
@@ -551,6 +554,7 @@ impl Builder {
         self.secret_operand("lookup", x)?;
         let t = self.exact_operand("lookup", x)?;
         let (min, max) = t.elem.bounds();
+        let (min, max) = (min.max(-MAX_EXACT_IO), max.min(MAX_EXACT_IO));
         if table.is_empty() || table.len() > 1 << 16 {
             return Err(type_error("lookup table needs 1 to 65536 entries"));
         }
@@ -781,6 +785,10 @@ impl Builder {
 
 /// Largest vector length or matrix dimension: the slot count of the largest
 /// 128-bit ring (N = 2^16) supported without bootstrapping.
+/// Largest magnitude of an exact value crossing the API (inputs, constants,
+/// table entries, outputs): values travel as f64, exact up to 2^53 (ADR-006).
+pub const MAX_EXACT_IO: i128 = 1 << 53;
+
 pub const MAX_DIM: usize = 32768;
 
 fn check_dims(shape: Shape) -> Result<()> {

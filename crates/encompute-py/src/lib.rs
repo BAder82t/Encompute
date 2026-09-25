@@ -55,33 +55,47 @@ impl Model {
         self.inner.program().to_string()
     }
 
-    /// `[(name, length, is_scalar, lo, hi)]` in definition order.
-    fn inputs(&self) -> Vec<(String, usize, bool, f64, f64)> {
-        self.inner
-            .program()
-            .inputs()
-            .map(|(_, n, s, r)| {
+    /// `[(name, length, is_scalar, lo, hi, elem)]` in definition order;
+    /// `elem` is "f64" or an exact type such as "u8" or "bool".
+    fn inputs(&self) -> Vec<(String, usize, bool, f64, f64, String)> {
+        let p = self.inner.program();
+        p.inputs()
+            .map(|(id, n, s, r)| {
                 (
                     n.to_owned(),
                     s.len(),
                     s == encompute_ir::Shape::Scalar,
                     r.lo,
                     r.hi,
+                    p.node(id).ty.elem.to_string(),
                 )
             })
             .collect()
     }
 
-    /// `[(name, length, is_scalar)]`.
-    fn outputs(&self) -> Vec<(String, usize, bool)> {
+    /// `[(name, length, is_scalar, elem)]`.
+    fn outputs(&self) -> Vec<(String, usize, bool, String)> {
         let p = self.inner.program();
         p.outputs()
             .iter()
             .map(|o| {
-                let s = p.node(o.value).ty.shape;
-                (o.name.clone(), s.len(), s == encompute_ir::Shape::Scalar)
+                let t = p.node(o.value).ty;
+                (
+                    o.name.clone(),
+                    t.shape.len(),
+                    t.shape == encompute_ir::Shape::Scalar,
+                    t.elem.to_string(),
+                )
             })
             .collect()
+    }
+
+    /// "approximate" or "exact".
+    fn semantics(&self) -> &'static str {
+        match self.inner.semantics() {
+            encompute_runtime::Semantics::Approximate => "approximate",
+            encompute_runtime::Semantics::Exact => "exact",
+        }
     }
 
     fn run(
@@ -127,10 +141,17 @@ fn has_openfhe() -> bool {
     encompute_runtime::has_openfhe()
 }
 
+/// Whether this build includes the TFHE-rs backend (research use only).
+#[pyfunction]
+fn has_tfhe() -> bool {
+    encompute_runtime::has_tfhe()
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Model>()?;
     m.add_function(wrap_pyfunction!(has_openfhe, m)?)?;
+    m.add_function(wrap_pyfunction!(has_tfhe, m)?)?;
     m.add("NativeError", m.py().get_type::<NativeError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

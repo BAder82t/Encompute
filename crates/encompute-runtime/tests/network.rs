@@ -8,12 +8,12 @@ use std::net::TcpListener;
 use common::logistic;
 use encompute_evaluator::server::{Evaluator, Limits};
 use encompute_ir::{evaluate, Code};
-use encompute_runtime::{sample_inputs, BackendKind, Mode, Model, Remote};
+use encompute_runtime::{sample_inputs, Backends, Mode, Model, Remote};
 
 fn spawn(limits: Limits) -> String {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let url = format!("http://{}", server.server_addr().to_ip().unwrap());
-    std::thread::spawn(move || Evaluator::new(BackendKind::Mock, limits).serve(server));
+    std::thread::spawn(move || Evaluator::new(Backends::MOCK, limits).serve(server));
     url
 }
 
@@ -47,8 +47,7 @@ fn remote_round_trip_uploads_program_and_keys_once() {
     // A restored client (no evaluation keys in hand) works once keys are registered…
     let restored = encompute_runtime::ClientSession::restore(
         m.ids(),
-        &m.compiled().plan,
-        &m.compiled().params,
+        m.compiled(),
         &client.secret_key_envelope().unwrap(),
     )
     .unwrap();
@@ -56,8 +55,7 @@ fn remote_round_trip_uploads_program_and_keys_once() {
     // …and a new client whose keys were never uploaded is refused.
     let stranger = encompute_runtime::ClientSession::restore(
         m.ids(),
-        &m.compiled().plan,
-        &m.compiled().params,
+        m.compiled(),
         &m.new_client(Mode::Mock)
             .unwrap()
             .secret_key_envelope()

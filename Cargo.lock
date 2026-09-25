@@ -470,11 +470,14 @@ dependencies = [
 name = "encompute-evaluator"
 version = "0.2.0"
 dependencies = [
+ "encompute-analysis",
  "encompute-backend",
  "encompute-ckks",
+ "encompute-exact",
  "encompute-ir",
  "encompute-openfhe",
  "encompute-protocol",
+ "encompute-tfhe",
  "libc",
  "serde",
  "serde_json",
@@ -556,9 +559,12 @@ dependencies = [
  "encompute-backend",
  "encompute-ckks",
  "encompute-evaluator",
+ "encompute-exact",
  "encompute-ir",
  "encompute-openfhe-client",
  "encompute-protocol",
+ "encompute-tfhe",
+ "encompute-tfhe-client",
  "proptest",
  "serde",
  "serde_json",

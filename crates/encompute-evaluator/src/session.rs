@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use encompute_backend::{CkksEvaluator, MockConfig, MockEvaluator};
-use encompute_ckks::{compile, Compiled};
+use encompute_backend::{
+    CkksEvaluator, ExactEvaluator, MockConfig, MockEvaluator, PlainExactEvaluator,
+};
+use encompute_exact::{evaluate_exact, ExactPlan};
 use encompute_ir::{Code, Error, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
 
+use crate::compiled::{compile_program, CompiledProgram, Semantics};
 use crate::exec::evaluate_encrypted;
 
 /// SHA-256 of the canonical `.eir` text.
@@ -21,28 +24,151 @@ pub struct Ids {
 }
 
 impl Ids {
-    pub fn of(program: &Program, compiled: &Compiled) -> Self {
+    pub fn of(program: &Program, compiled: &CompiledProgram) -> Self {
         Self {
-            parameter_set_id: sha256_hex(compiled.params.canonical_json().as_bytes()),
+            parameter_set_id: sha256_hex(compiled.parameters_json().as_bytes()),
             program_id: program_id(program),
         }
     }
 }
 
-/// Which evaluator implementation a session uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which implementation runs a program. The mock serves both semantics;
+/// OpenFHE runs approximate (CKKS) programs, TFHE-rs exact ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackendKind {
     Mock,
     OpenFhe,
+    TfheRs,
 }
 
 impl BackendKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "mock" => Some(BackendKind::Mock),
+            "openfhe" => Some(BackendKind::OpenFhe),
+            "tfhe-rs" => Some(BackendKind::TfheRs),
+            _ => None,
+        }
+    }
+
+    /// Command-line name.
+    pub fn name(self) -> &'static str {
+        match self {
+            BackendKind::Mock => "mock",
+            BackendKind::OpenFhe => "openfhe",
+            BackendKind::TfheRs => "tfhe-rs",
+        }
+    }
+
     /// `(backend, backend_version)` written into and required of envelopes.
     pub fn label(self) -> (&'static str, &'static str) {
         match self {
             BackendKind::Mock => ("mock", "0"),
             BackendKind::OpenFhe => (encompute_ckks::BACKEND, encompute_ckks::BACKEND_VERSION),
+            BackendKind::TfheRs => (encompute_tfhe::BACKEND, encompute_tfhe::BACKEND_VERSION),
         }
+    }
+
+    pub fn supports(self, s: Semantics) -> bool {
+        match self {
+            BackendKind::Mock => true,
+            BackendKind::OpenFhe => s == Semantics::Approximate,
+            BackendKind::TfheRs => s == Semantics::Exact,
+        }
+    }
+
+    /// Whether this build includes the backend.
+    pub fn built(self) -> bool {
+        match self {
+            BackendKind::Mock => true,
+            BackendKind::OpenFhe => cfg!(feature = "openfhe"),
+            BackendKind::TfheRs => cfg!(feature = "tfhe-rs"),
+        }
+    }
+
+    fn check(self, s: Semantics) -> Result<()> {
+        if !self.supports(s) {
+            return Err(Error::new(
+                Code::Backend,
+                format!(
+                    "{} cannot run {} programs",
+                    self.name(),
+                    match s {
+                        Semantics::Approximate => "approximate (CKKS)",
+                        Semantics::Exact => "exact (integer/Boolean)",
+                    }
+                ),
+            ));
+        }
+        if !self.built() {
+            return Err(Error::new(
+                Code::Backend,
+                match self {
+                    BackendKind::TfheRs => {
+                        "this build has no TFHE-rs backend (research use only): rebuild with \
+                         the `tfhe-rs` feature, or use the mock"
+                    }
+                    _ => "this build has no OpenFHE backend: rebuild with the `openfhe` feature",
+                },
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The backend an evaluator uses for each semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Backends {
+    pub approx: BackendKind,
+    pub exact: BackendKind,
+}
+
+impl Backends {
+    pub const MOCK: Self = Self {
+        approx: BackendKind::Mock,
+        exact: BackendKind::Mock,
+    };
+
+    /// Real cryptography where this build has it, the mock otherwise.
+    pub fn for_build() -> Self {
+        Self {
+            approx: if BackendKind::OpenFhe.built() {
+                BackendKind::OpenFhe
+            } else {
+                BackendKind::Mock
+            },
+            exact: if BackendKind::TfheRs.built() {
+                BackendKind::TfheRs
+            } else {
+                BackendKind::Mock
+            },
+        }
+    }
+
+    /// Use `k` for every semantics it supports.
+    pub fn with(self, k: BackendKind) -> Self {
+        match k {
+            BackendKind::Mock => Self::MOCK,
+            BackendKind::OpenFhe => Self { approx: k, ..self },
+            BackendKind::TfheRs => Self { exact: k, ..self },
+        }
+    }
+
+    pub fn for_semantics(self, s: Semantics) -> BackendKind {
+        match s {
+            Semantics::Approximate => self.approx,
+            Semantics::Exact => self.exact,
+        }
+    }
+
+    /// Command-line arguments reproducing this choice.
+    pub fn args(self) -> Vec<&'static str> {
+        vec![
+            "--backend",
+            self.approx.name(),
+            "--backend",
+            self.exact.name(),
+        ]
     }
 }
 
@@ -53,13 +179,16 @@ enum Keyed {
     Mock(MockEvaluator),
     #[cfg(feature = "openfhe")]
     OpenFhe(encompute_openfhe::OpenFheEvaluator),
+    ExactMock(PlainExactEvaluator),
+    #[cfg(feature = "tfhe-rs")]
+    TfheRs(encompute_tfhe::tfhe_rs::TfheRsEvaluator),
 }
 
 /// One compiled program, the evaluation keys registered for it, and nothing
 /// else: no secret key, no plaintext inputs or outputs.
 pub struct EvaluatorSession {
     program: Program,
-    compiled: Compiled,
+    compiled: CompiledProgram,
     ids: Ids,
     kind: BackendKind,
     keys: HashMap<String, Keyed>,
@@ -77,13 +206,8 @@ impl EvaluatorSession {
     /// Compile `program` independently of the client (the evaluator trusts
     /// its own compilation, not the client's plan).
     pub fn new(program: Program, kind: BackendKind) -> Result<Self> {
-        if kind == BackendKind::OpenFhe && !cfg!(feature = "openfhe") {
-            return Err(Error::new(
-                Code::Backend,
-                "this evaluator was built without OpenFHE",
-            ));
-        }
-        let compiled = compile(&program)?;
+        let compiled = compile_program(&program)?;
+        kind.check(compiled.semantics())?;
         let ids = Ids::of(&program, &compiled);
         Ok(Self {
             program,
@@ -102,7 +226,7 @@ impl EvaluatorSession {
         &self.program
     }
 
-    pub fn compiled(&self) -> &Compiled {
+    pub fn compiled(&self) -> &CompiledProgram {
         &self.compiled
     }
 
@@ -114,15 +238,16 @@ impl EvaluatorSession {
         self.keys.contains_key(key_id)
     }
 
-    fn expect(&self, kind: Kind, key_id: Option<&'static str>) -> Expect<'_> {
+    fn expect(&self, kind: Kind, program_id: Option<&'static str>) -> Expect<'_> {
         let (backend, backend_version) = self.kind.label();
         Expect {
             kind,
+            scheme: self.compiled.scheme(),
             backend,
             backend_version,
             parameter_set_id: &self.ids.parameter_set_id,
-            program_id: None,
-            key_id,
+            program_id,
+            key_id: None,
         }
     }
 
@@ -140,21 +265,26 @@ impl EvaluatorSession {
         if self.keys.contains_key(&key_id) {
             return Ok(key_id);
         }
-        let params = &self.compiled.params;
-        let keyed = match self.kind {
-            BackendKind::Mock => Keyed::Mock(MockEvaluator::new(
-                params,
+        let keyed = match (&self.compiled, self.kind) {
+            (CompiledProgram::Approx(c), BackendKind::Mock) => Keyed::Mock(MockEvaluator::new(
+                &c.params,
                 &env.payload,
                 MockConfig::default(),
             )?),
             #[cfg(feature = "openfhe")]
-            BackendKind::OpenFhe => {
-                let mut ev = encompute_openfhe::OpenFheEvaluator::new(params)?;
+            (CompiledProgram::Approx(c), BackendKind::OpenFhe) => {
+                let mut ev = encompute_openfhe::OpenFheEvaluator::new(&c.params)?;
                 ev.load_keys(&env.payload)?;
                 Keyed::OpenFhe(ev)
             }
-            #[cfg(not(feature = "openfhe"))]
-            BackendKind::OpenFhe => unreachable!("rejected in new()"),
+            (CompiledProgram::Exact(_), BackendKind::Mock) => {
+                Keyed::ExactMock(PlainExactEvaluator::new(&env.payload)?)
+            }
+            #[cfg(feature = "tfhe-rs")]
+            (CompiledProgram::Exact(_), BackendKind::TfheRs) => {
+                Keyed::TfheRs(encompute_tfhe::tfhe_rs::TfheRsEvaluator::new(&env.payload)?)
+            }
+            _ => unreachable!("backend checked in new()"),
         };
         self.keys.insert(key_id.clone(), keyed);
         Ok(key_id)
@@ -179,28 +309,26 @@ impl EvaluatorSession {
         })?;
         let items = env.items();
         let names: Vec<&str> = items.iter().map(|(n, _)| *n).collect();
-        let want: Vec<&str> = self
-            .compiled
-            .plan
-            .inputs
-            .iter()
-            .map(|i| i.name.as_str())
-            .collect();
+        let want = self.compiled.input_names();
         if names != want {
             return Err(Error::new(
                 Code::BadInput,
                 format!("expected encrypted inputs {want:?}, got {names:?}"),
             ));
         }
-        let (outputs, times) = match keyed {
-            Keyed::Mock(ev) => self.run(ev, &items)?,
+        let (outputs, times) = match (keyed, &self.compiled) {
+            (Keyed::Mock(ev), CompiledProgram::Approx(c)) => self.run(ev, c, &items)?,
             #[cfg(feature = "openfhe")]
-            Keyed::OpenFhe(ev) => self.run(ev, &items)?,
+            (Keyed::OpenFhe(ev), CompiledProgram::Approx(c)) => self.run(ev, c, &items)?,
+            (Keyed::ExactMock(ev), CompiledProgram::Exact(e)) => run_exact(ev, &e.plan, &items)?,
+            #[cfg(feature = "tfhe-rs")]
+            (Keyed::TfheRs(ev), CompiledProgram::Exact(e)) => run_exact(ev, &e.plan, &items)?,
+            _ => unreachable!("keys are registered for this session's program"),
         };
         let (backend, backend_version) = self.kind.label();
         let header = Header {
             kind: Kind::Outputs,
-            scheme: "CKKS".into(),
+            scheme: self.compiled.scheme().into(),
             backend: backend.into(),
             backend_version: backend_version.into(),
             parameter_set_id: self.ids.parameter_set_id.clone(),
@@ -211,7 +339,12 @@ impl EvaluatorSession {
         Ok((Envelope::new(header, outputs).encode(), times))
     }
 
-    fn run<E: CkksEvaluator>(&self, ev: &E, items: &[(&str, &[u8])]) -> Result<(Named, ExecTimes)> {
+    fn run<E: CkksEvaluator>(
+        &self,
+        ev: &E,
+        c: &encompute_ckks::Compiled,
+        items: &[(&str, &[u8])],
+    ) -> Result<(Named, ExecTimes)> {
         let mut times = ExecTimes::default();
         let t = Instant::now();
         let cts = items
@@ -220,11 +353,10 @@ impl EvaluatorSession {
             .collect::<Result<Vec<_>>>()?;
         times.load = t.elapsed();
         let t = Instant::now();
-        let outs = evaluate_encrypted(ev, &self.compiled.plan, &self.program, cts)?;
+        let outs = evaluate_encrypted(ev, &c.plan, &self.program, cts)?;
         times.evaluate = t.elapsed();
         let t = Instant::now();
-        let stored = self
-            .compiled
+        let stored = c
             .plan
             .outputs
             .iter()
@@ -234,4 +366,35 @@ impl EvaluatorSession {
         times.store = t.elapsed();
         Ok((stored, times))
     }
+}
+
+fn run_exact<E: ExactEvaluator>(
+    ev: &E,
+    plan: &ExactPlan,
+    items: &[(&str, &[u8])],
+) -> Result<(Named, ExecTimes)>
+where
+    E::Ciphertext: Clone,
+{
+    let mut times = ExecTimes::default();
+    let t = Instant::now();
+    let cts = plan
+        .inputs
+        .iter()
+        .zip(items)
+        .map(|(i, (_, b))| ev.load(i.elem, b))
+        .collect::<Result<Vec<_>>>()?;
+    times.load = t.elapsed();
+    let t = Instant::now();
+    let outs = evaluate_exact(ev, plan, cts)?;
+    times.evaluate = t.elapsed();
+    let t = Instant::now();
+    let stored = plan
+        .outputs
+        .iter()
+        .zip(&outs)
+        .map(|(o, ct)| Ok((o.name.clone(), ev.store(ct)?)))
+        .collect::<Result<Vec<_>>>()?;
+    times.store = t.elapsed();
+    Ok((stored, times))
 }

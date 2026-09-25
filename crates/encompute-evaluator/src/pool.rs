@@ -16,7 +16,7 @@ use std::sync::{Condvar, Mutex};
 use encompute_ir::{Code, Error, Result};
 
 use crate::engine::{unknown_program, Engine, JobTimes, Local, ProgramInfo};
-use crate::session::BackendKind;
+use crate::session::Backends;
 
 const ADD_PROGRAM: u8 = 1;
 const REGISTER_KEYS: u8 = 3;
@@ -65,8 +65,8 @@ fn split_pid(payload: &[u8]) -> Result<(&str, &[u8])> {
 }
 
 /// Worker main loop: serve frames from stdin until the gateway closes it.
-pub fn run_worker(kind: BackendKind) -> std::io::Result<()> {
-    let engine = Local::new(kind);
+pub fn run_worker(backends: Backends) -> std::io::Result<()> {
+    let engine = Local::new(backends);
     let (stdin, stdout) = (std::io::stdin(), std::io::stdout());
     let (mut input, mut output) = (stdin.lock(), stdout.lock());
     while let Some((op, payload)) = read_frame(&mut input)? {
@@ -136,7 +136,7 @@ impl Drop for Worker {
 
 /// A pool of worker processes behind one [`Engine`].
 pub struct Pool {
-    kind: BackendKind,
+    backends: Backends,
     exe: PathBuf,
     threads_per_worker: usize,
     workers: Vec<Mutex<Option<Worker>>>,
@@ -150,10 +150,10 @@ pub struct Pool {
 impl Pool {
     /// Start `n` workers running `exe worker --backend …`. Each gets
     /// `OMP_NUM_THREADS = cores / n` unless the variable is already set.
-    pub fn start(kind: BackendKind, exe: PathBuf, n: usize) -> Result<Self> {
+    pub fn start(backends: Backends, exe: PathBuf, n: usize) -> Result<Self> {
         let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
         let pool = Self {
-            kind,
+            backends,
             exe,
             threads_per_worker: (cores / n.max(1)).max(1),
             workers: (0..n.max(1)).map(|_| Mutex::new(None)).collect(),
@@ -181,12 +181,9 @@ impl Pool {
     }
 
     fn spawn(&self) -> Result<Worker> {
-        let backend = match self.kind {
-            BackendKind::Mock => "mock",
-            BackendKind::OpenFhe => "openfhe",
-        };
         let mut cmd = Command::new(&self.exe);
-        cmd.args(["worker", "--backend", backend])
+        cmd.arg("worker")
+            .args(self.backends.args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -258,8 +255,8 @@ impl Pool {
 }
 
 impl Engine for Pool {
-    fn backend(&self) -> BackendKind {
-        self.kind
+    fn backend(&self) -> Backends {
+        self.backends
     }
 
     fn add_program(&self, eir: &str) -> Result<ProgramInfo> {

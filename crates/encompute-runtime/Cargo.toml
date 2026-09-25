@@ -13,6 +13,10 @@ encompute-backend.workspace = true
 encompute-protocol.workspace = true
 encompute-evaluator.workspace = true
 encompute-openfhe-client = { workspace = true, optional = true }
+encompute-analysis.workspace = true
+encompute-exact.workspace = true
+encompute-tfhe.workspace = true
+encompute-tfhe-client = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
@@ -21,11 +25,12 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "json"] 
 [dev-dependencies]
 tiny_http = "0.12"
 proptest.workspace = true
-encompute-analysis.workspace = true
 ureq = { version = "2.12", default-features = false }
 
 [features]
 openfhe = ["encompute-evaluator/openfhe", "dep:encompute-openfhe-client"]
+# Research use only: TFHE-rs requires a patent license from Zama for commercial use.
+tfhe-rs = ["encompute-evaluator/tfhe-rs", "encompute-tfhe-client/tfhe-rs"]
 
 [lints]
 workspace = true

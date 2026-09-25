@@ -2,19 +2,32 @@
 
 ## Unreleased — 0.3 (in progress)
 
-Exact private computation (research preview).
+Exact private computation: integers and Booleans, computed exactly.
 
 - **Exact types.** Integer (`u8`–`u64`, `i8`–`i64`) and `bool` values with
-  comparisons, logic, shifts, min/max, select, lookup tables, casts and
+  `+ - *`, comparisons, logic, shifts, min/max, select, lookup tables, casts and
   division by public constants. Integer range analysis proves no operation
-  overflows; a possible overflow is a compile error (ENC1303).
-- **Exact plans.** `encompute-exact` lowers exact programs to a
-  backend-independent `ExactPlan`, validated before it runs, for any
-  `ExactEvaluator`. A plaintext mock backend ships for tests.
+  overflows; a possible overflow is a compile error (ENC1303). Exact values
+  at the API are integers within ±2^53 (ADR-006).
+- **Python.** `secret[u8, 0:120]` … `secret[i64, lo:hi]`, `secret[bool_]`;
+  `+ - *`, `< <= > >= == !=`, `& | ^ ~`, `<< >>`, `//` and `%` by constants,
+  `encompute.select`, `minimum`, `maximum`, `lookup`, `cast`. Results come
+  back as `int` and `bool`.
+- **One compiler, two schemes (ADR-006).** The program's types choose the
+  lowering: approximate programs → CKKS, exact programs → a
+  backend-independent `ExactPlan` (validated before it runs). Mixed programs
+  are refused until 0.4.
+- **Scheme-neutral runtime.** `Model`, client and evaluator sessions,
+  artifacts (format 3: `semantics`, `scheme`, per-plan-kind versions),
+  envelopes (explicit scheme check), the evaluator service (one backend per
+  semantics), worker processes, and `run`/`test`/`explain`/`bench`/`audit`/
+  `keys` handle exact programs. Exact tests report matches and mismatches,
+  never error metrics.
 - **TFHE-rs backend** (`encompute-tfhe`, `encompute-tfhe-client`) behind the
   off-by-default `tfhe-rs` feature: research use only; Zama requires a patent
   license for commercial use. Encrypted results equal the clear reference on
-  1000 random inputs of the eligibility example.
+  1000 random inputs of the eligibility example. `scripts/exact-demo.sh`
+  runs it through a separate evaluator process.
 - Rust toolchain 1.98.1.
 
 ## 0.2.0 — 2026-09-25

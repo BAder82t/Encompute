@@ -14,7 +14,11 @@ fn check(p: &encompute_ir::Program, cases: usize) {
     let (client, ev) = common::openfhe_sessions(p);
     let keygen = t.elapsed();
     let t = Instant::now();
-    let rep = diff_test(&client, &ev, p, cases, 42).unwrap();
+    let rep = diff_test(&client, &ev, p, cases, 42)
+        .unwrap()
+        .approx()
+        .unwrap()
+        .clone();
     eprintln!(
         "{}: N={} depth={} scale={} keygen={:.2?} per-case={:.2?} max_error={:.3e} (estimate {:.3e}, target {:e})",
         p.name(),

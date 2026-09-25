@@ -4,22 +4,25 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use encompute_ckks::{compile, Compiled};
-use encompute_evaluator::{EvaluatorSession, Ids};
+use encompute_evaluator::{
+    compile_program, BackendKind, CompiledProgram, EvaluatorSession, Ids, Semantics,
+};
 use encompute_ir::{evaluate, parse, Code, Error, Inputs, Outputs, Program, Result};
 use serde::Serialize;
 
 use crate::client::ClientSession;
-use crate::diff::{diff_test, sample_inputs, DiffReport};
+use crate::diff::{diff_test, sample_inputs, TestReport};
 
 /// How to execute a model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mode {
     /// Plaintext reference semantics; no cryptography.
     Clear,
-    /// The CKKS plan on the mock backend (plaintext slots, simulated noise).
+    /// The plan on the mock backend: plaintext stand-ins (with simulated
+    /// noise for CKKS). No cryptography.
     Mock,
-    /// The CKKS plan on OpenFHE.
+    /// Real encryption: OpenFHE for approximate programs, TFHE-rs (research
+    /// feature) for exact ones.
     Encrypted,
 }
 
@@ -53,6 +56,11 @@ pub fn has_openfhe() -> bool {
     cfg!(feature = "openfhe")
 }
 
+/// Whether this build includes the TFHE-rs backend (research use only).
+pub fn has_tfhe() -> bool {
+    cfg!(feature = "tfhe-rs")
+}
+
 /// Client and evaluator for one mode, sharing a process but talking only
 /// through envelopes: the same path a remote evaluator takes.
 struct Session {
@@ -71,7 +79,7 @@ impl Session {
 /// A compiled program plus lazily generated keys per mode.
 pub struct Model {
     program: Program,
-    compiled: Compiled,
+    compiled: CompiledProgram,
     sessions: RefCell<HashMap<Mode, Session>>,
 }
 
@@ -81,10 +89,6 @@ pub struct Model {
 pub struct BenchReport {
     pub backend: String,
     pub reps: usize,
-    pub ring_dim: u32,
-    pub slots: u32,
-    pub depth: u32,
-    pub rotation_keys: usize,
     pub keygen_ms: f64,
     pub encrypt_ms: f64,
     pub evaluate_ms: f64,
@@ -94,13 +98,34 @@ pub struct BenchReport {
     pub response_bytes: usize,
     /// Peak resident memory of this process (client and evaluator both run here).
     pub peak_rss_bytes: u64,
-    /// True for the mock backend, whose byte format is not OpenFHE's.
+    /// True for the mock backend, whose byte format is not the real one.
     pub sizes_estimated: bool,
+    #[serde(flatten)]
+    pub detail: BenchDetail,
+}
+
+/// Scheme-specific cost figures.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "semantics", rename_all = "lowercase")]
+pub enum BenchDetail {
+    Approximate {
+        ring_dim: u32,
+        slots: u32,
+        depth: u32,
+        rotation_keys: usize,
+    },
+    Exact {
+        parameter_profile: String,
+        /// Plan operations by class (comparison, logic, select, lookup, ...).
+        operations: std::collections::BTreeMap<String, usize>,
+    },
 }
 
 impl Model {
+    /// Compile by the program's semantics: CKKS for approximate programs,
+    /// an exact plan for integer/Boolean ones.
     pub fn compile(program: Program) -> Result<Self> {
-        let compiled = compile(&program)?;
+        let compiled = compile_program(&program)?;
         Ok(Self {
             program,
             compiled,
@@ -116,8 +141,32 @@ impl Model {
         &self.program
     }
 
-    pub fn compiled(&self) -> &Compiled {
+    pub fn compiled(&self) -> &CompiledProgram {
         &self.compiled
+    }
+
+    pub fn semantics(&self) -> Semantics {
+        self.compiled.semantics()
+    }
+
+    /// The backend `mode` uses for this program.
+    pub fn backend_for(&self, mode: Mode) -> Result<BackendKind> {
+        match (mode, self.semantics()) {
+            (Mode::Clear, _) => Err(Error::new(Code::BadInput, "clear mode has no keys")),
+            (Mode::Mock, _) => Ok(BackendKind::Mock),
+            (Mode::Encrypted, Semantics::Approximate) if has_openfhe() => Ok(BackendKind::OpenFhe),
+            (Mode::Encrypted, Semantics::Approximate) => Err(Error::new(
+                Code::Backend,
+                "this build has no OpenFHE backend; rebuild with the `openfhe` feature \
+                 (see README) or use mode \"mock\"",
+            )),
+            (Mode::Encrypted, Semantics::Exact) if has_tfhe() => Ok(BackendKind::TfheRs),
+            (Mode::Encrypted, Semantics::Exact) => Err(Error::new(
+                Code::Backend,
+                "no exact cryptographic backend in this build: TFHE-rs is research-only and \
+                 behind the `tfhe-rs` feature (see README); use mode \"mock\"",
+            )),
+        }
     }
 
     pub fn ids(&self) -> Ids {
@@ -126,25 +175,12 @@ impl Model {
 
     /// Fresh client keys for `mode`.
     pub fn new_client(&self, mode: Mode) -> Result<ClientSession> {
-        let c = &self.compiled;
-        match mode {
-            Mode::Clear => Err(Error::new(Code::BadInput, "clear mode has no keys")),
-            Mode::Mock => {
-                // Distinct mock keys per client, like real key generation.
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos() as u64);
-                ClientSession::mock(self.ids(), &c.plan, &c.params, seed)
-            }
-            #[cfg(feature = "openfhe")]
-            Mode::Encrypted => ClientSession::openfhe(self.ids(), &c.plan, &c.params),
-            #[cfg(not(feature = "openfhe"))]
-            Mode::Encrypted => Err(Error::new(
-                Code::Backend,
-                "this build has no OpenFHE backend; rebuild with the `openfhe` feature \
-                 (see README) or use mode \"mock\"",
-            )),
-        }
+        let kind = self.backend_for(mode)?;
+        // Distinct mock keys per client, like real key generation.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        ClientSession::generate(self.ids(), &self.compiled, kind, seed)
     }
 
     fn new_session(&self, mode: Mode) -> Result<Session> {
@@ -162,6 +198,27 @@ impl Model {
         f(&self.sessions.borrow()[&mode])
     }
 
+    /// Outputs as JSON with their types: exact integers as integers, bools
+    /// as `true`/`false`, approximate values as lists of numbers.
+    pub fn outputs_json(&self, outputs: &Outputs) -> serde_json::Value {
+        let p = &self.program;
+        let map = p
+            .outputs()
+            .iter()
+            .filter_map(|o| {
+                let v = outputs.get(&o.name)?;
+                let elem = p.node(o.value).ty.elem;
+                let j = match elem {
+                    encompute_ir::Elem::Bool => serde_json::json!(v[0] != 0.0),
+                    e if e.is_exact() => serde_json::json!(v[0] as i64),
+                    _ => serde_json::json!(v),
+                };
+                Some((o.name.clone(), j))
+            })
+            .collect();
+        serde_json::Value::Object(map)
+    }
+
     pub fn run(&self, mode: Mode, inputs: &Inputs) -> Result<Outputs> {
         if mode == Mode::Clear {
             return evaluate(&self.program, inputs);
@@ -170,7 +227,7 @@ impl Model {
     }
 
     /// Differential test of `mode` against the reference semantics.
-    pub fn test(&self, mode: Mode, cases: usize, seed: u64) -> Result<DiffReport> {
+    pub fn test(&self, mode: Mode, cases: usize, seed: u64) -> Result<TestReport> {
         if mode == Mode::Clear {
             return Err(Error::new(
                 Code::BadInput,
@@ -209,14 +266,27 @@ impl Model {
             dec.push(t.elapsed());
             (req, resp) = (request.len(), response.len());
         }
-        let c = &self.compiled;
+        let detail = match &self.compiled {
+            CompiledProgram::Approx(c) => BenchDetail::Approximate {
+                ring_dim: c.params.ring_dim,
+                slots: c.params.slots,
+                depth: c.plan.depth,
+                rotation_keys: c.plan.rotations.len(),
+            },
+            CompiledProgram::Exact(e) => BenchDetail::Exact {
+                parameter_profile: e.profile.profile.clone(),
+                operations: e
+                    .plan
+                    .op_counts()
+                    .into_iter()
+                    .map(|(k, n)| (k.to_owned(), n))
+                    .collect(),
+            },
+        };
         Ok(BenchReport {
             backend: s.client.kind().label().0.to_owned(),
             reps,
-            ring_dim: c.params.ring_dim,
-            slots: c.params.slots,
-            depth: c.plan.depth,
-            rotation_keys: c.plan.rotations.len(),
+            detail,
             keygen_ms: ms(keygen),
             encrypt_ms: median_ms(enc),
             evaluate_ms: median_ms(eval),

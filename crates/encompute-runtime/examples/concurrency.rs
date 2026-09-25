@@ -29,8 +29,7 @@ fn main() {
     let secret = Arc::new(client.secret_key_envelope().expect("secret"));
     // Each client thread restores its own client from the secret key.
     let restore = |m: &Model, secret: &[u8]| {
-        let c = m.compiled();
-        ClientSession::restore(m.ids(), &c.plan, &c.params, secret).expect("restore")
+        ClientSession::restore(m.ids(), m.compiled(), secret).expect("restore")
     };
     let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
     println!(

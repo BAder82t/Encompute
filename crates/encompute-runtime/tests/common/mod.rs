@@ -40,7 +40,7 @@ pub fn similarity(dim: usize, docs: usize, seed: u64) -> Program {
 
 use encompute_backend::{CkksClient, CkksEvaluator, MockClient, MockConfig, MockEvaluator};
 use encompute_ckks::{CkksParams, CkksPlan};
-use encompute_evaluator::{evaluate_encrypted, BackendKind, EvaluatorSession};
+use encompute_evaluator::{evaluate_encrypted, BackendKind, CompiledProgram, EvaluatorSession};
 use encompute_ir::{Inputs, Outputs, Result};
 use encompute_runtime::ClientSession;
 
@@ -84,14 +84,11 @@ pub fn mock_sessions(
     seed: u64,
 ) -> (ClientSession, EvaluatorSession) {
     let mut ev = EvaluatorSession::new(p.clone(), BackendKind::Mock).unwrap();
-    let c = ev.compiled().clone();
-    let client = ClientSession::mock(
-        ev.ids().clone(),
-        &c.plan,
-        client_params.unwrap_or(&c.params),
-        seed,
-    )
-    .unwrap();
+    let mut c = ev.compiled().clone();
+    if let (Some(params), CompiledProgram::Approx(a)) = (client_params, &mut c) {
+        a.params = params.clone();
+    }
+    let client = ClientSession::generate(ev.ids().clone(), &c, BackendKind::Mock, seed).unwrap();
     ev.register_keys(client.evaluation_keys().unwrap()).unwrap();
     (client, ev)
 }
@@ -100,8 +97,8 @@ pub fn mock_sessions(
 #[cfg(feature = "openfhe")]
 pub fn openfhe_sessions(p: &Program) -> (ClientSession, EvaluatorSession) {
     let mut ev = EvaluatorSession::new(p.clone(), BackendKind::OpenFhe).unwrap();
-    let c = ev.compiled().clone();
-    let client = ClientSession::openfhe(ev.ids().clone(), &c.plan, &c.params).unwrap();
+    let client =
+        ClientSession::generate(ev.ids().clone(), ev.compiled(), BackendKind::OpenFhe, 0).unwrap();
     ev.register_keys(client.evaluation_keys().unwrap()).unwrap();
     (client, ev)
 }

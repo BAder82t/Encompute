@@ -4,16 +4,20 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use encompute_analysis::semantics;
 use encompute_ir::{parse, Code, Error, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::session::{BackendKind, EvaluatorSession, ExecTimes};
+use crate::session::{Backends, EvaluatorSession, ExecTimes};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProgramInfo {
     pub name: String,
     pub program_id: String,
     pub parameter_set_id: String,
+    /// "CKKS" or "TFHE".
+    pub scheme: String,
+    pub backend: String,
 }
 
 /// Timings of one job, in milliseconds.
@@ -57,7 +61,7 @@ impl From<ExecTimes> for JobTimes {
 }
 
 pub trait Engine: Send + Sync {
-    fn backend(&self) -> BackendKind;
+    fn backend(&self) -> Backends;
     fn add_program(&self, eir: &str) -> Result<ProgramInfo>;
     fn programs(&self) -> Vec<ProgramInfo>;
     fn has_key(&self, program_id: &str, key_id: &str) -> Result<bool>;
@@ -72,14 +76,14 @@ pub fn unknown_program() -> Error {
 /// Sessions in this process. Jobs run one at a time (OpenFHE is serialized
 /// per process anyway).
 pub struct Local {
-    kind: BackendKind,
+    backends: Backends,
     sessions: Mutex<HashMap<String, EvaluatorSession>>,
 }
 
 impl Local {
-    pub fn new(kind: BackendKind) -> Self {
+    pub fn new(backends: Backends) -> Self {
         Self {
-            kind,
+            backends,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -90,16 +94,20 @@ fn info(s: &EvaluatorSession) -> ProgramInfo {
         name: s.program().name().to_owned(),
         program_id: s.ids().program_id.clone(),
         parameter_set_id: s.ids().parameter_set_id.clone(),
+        scheme: s.compiled().scheme().to_owned(),
+        backend: s.kind().name().to_owned(),
     }
 }
 
 impl Engine for Local {
-    fn backend(&self) -> BackendKind {
-        self.kind
+    fn backend(&self) -> Backends {
+        self.backends
     }
 
     fn add_program(&self, eir: &str) -> Result<ProgramInfo> {
-        let session = EvaluatorSession::new(parse(eir)?, self.kind)?;
+        let program = parse(eir)?;
+        let kind = self.backends.for_semantics(semantics(&program)?);
+        let session = EvaluatorSession::new(program, kind)?;
         let i = info(&session);
         self.sessions
             .lock()

@@ -70,6 +70,8 @@ pub struct Header {
 #[derive(Clone, Debug)]
 pub struct Expect<'a> {
     pub kind: Kind,
+    /// "CKKS" or "TFHE"; never inferred from the backend.
+    pub scheme: &'a str,
     pub backend: &'a str,
     pub backend_version: &'a str,
     pub parameter_set_id: &'a str,
@@ -178,12 +180,13 @@ impl Envelope {
                 format!("expected {:?}, got {:?}", e.kind, h.kind),
             ));
         }
-        if h.scheme != "CKKS" || h.backend != e.backend || h.backend_version != e.backend_version {
+        if h.scheme != e.scheme || h.backend != e.backend || h.backend_version != e.backend_version
+        {
             return Err(Error::new(
                 Code::Incompatible,
                 format!(
-                    "made for {} on {} {}, this side runs CKKS on {} {}",
-                    h.scheme, h.backend, h.backend_version, e.backend, e.backend_version
+                    "made for {} on {} {}, this side runs {} on {} {}",
+                    h.scheme, h.backend, h.backend_version, e.scheme, e.backend, e.backend_version
                 ),
             ));
         }

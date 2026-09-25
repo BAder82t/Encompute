@@ -5,7 +5,7 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 use encompute_ir::{Code, Error, Inputs, Result};
-use encompute_runtime::{ClientSession, Mode, Model, Remote};
+use encompute_runtime::{BenchDetail, ClientSession, Mode, Model, Remote, TestReport};
 
 #[derive(Parser)]
 #[command(
@@ -27,7 +27,7 @@ enum Cmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Run a model on inputs, e.g. `--input x=0.5,-1,0.25`.
+    /// Run a model on inputs, e.g. `--input x=0.5,-1,0.25` or `--input ok=true`.
     Run {
         model: PathBuf,
         #[arg(short, long = "input", value_name = "NAME=V1,V2,...")]
@@ -54,8 +54,9 @@ enum Cmd {
         model: PathBuf,
         #[arg(long, default_value = "127.0.0.1:8750")]
         listen: String,
-        #[arg(long, default_value = "openfhe")]
-        backend: String,
+        /// mock, openfhe or tfhe-rs (default: real cryptography where built).
+        #[arg(long)]
+        backend: Vec<String>,
     },
     /// Check an artifact (and optionally keys and the evaluator binary) against the security model.
     Audit {
@@ -161,9 +162,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             Error::new(Code::WrongKey, format!("{}: {e}", dir.join(f).display()))
                         })
                     };
-                    let c = m.compiled();
                     let client =
-                        ClientSession::restore(m.ids(), &c.plan, &c.params, &read("secret.key")?)?;
+                        ClientSession::restore(m.ids(), m.compiled(), &read("secret.key")?)?;
                     let eval_keys = read("eval.keys").ok();
                     let (out, stats) = Remote::new(&url).run(
                         &client,
@@ -182,7 +182,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     out
                 }
             };
-            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.outputs_json(&out)).unwrap()
+            );
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Keys {
@@ -237,7 +240,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let status = Command::new(&exe)
                 .arg("serve")
                 .arg(&model)
-                .args(["--listen", &listen, "--backend", &backend])
+                .args(["--listen", &listen])
+                .args(backend.iter().flat_map(|b| ["--backend", b.as_str()]))
                 .status()
                 .map_err(|e| {
                     Error::new(Code::Remote, format!("cannot start {}: {e}", exe.display()))
@@ -260,23 +264,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&rep).unwrap());
             } else {
-                println!(
-                    "{} cases on {} (seed {}), precision {:e}",
-                    rep.cases, rep.backend, rep.seed, rep.precision
-                );
-                for o in &rep.outputs {
-                    println!(
-                        "  {:<12} max error {:.3e}  mean {:.3e}  worst case #{}",
-                        o.name, o.max_abs, o.mean_abs, o.worst_case
-                    );
-                }
-                println!("{}", if rep.passed { "PASS" } else { "FAIL" });
-                if let Some(f) = &rep.failing {
-                    println!("failing case #{}: inputs {:?}", f.case, f.inputs);
-                    println!("  expected {:?}\n  got      {:?}", f.expected, f.got);
-                }
+                print_test(&rep);
             }
-            Ok(if rep.passed {
+            Ok(if rep.passed() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -311,10 +301,29 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 } else {
                     ""
                 };
-                println!(
-                    "{} backend, N = {}, {} slots, depth {}, {} rotation keys, median of {}",
-                    b.backend, b.ring_dim, b.slots, b.depth, b.rotation_keys, b.reps
-                );
+                match &b.detail {
+                    BenchDetail::Approximate {
+                        ring_dim,
+                        slots,
+                        depth,
+                        rotation_keys,
+                    } => println!(
+                        "{} backend, N = {ring_dim}, {slots} slots, depth {depth}, {rotation_keys} rotation keys, median of {}",
+                        b.backend, b.reps
+                    ),
+                    BenchDetail::Exact {
+                        parameter_profile,
+                        operations,
+                    } => {
+                        println!(
+                            "{} backend (exact), profile {parameter_profile}, median of {}",
+                            b.backend, b.reps
+                        );
+                        let ops: Vec<String> =
+                            operations.iter().map(|(k, n)| format!("{n} {k}")).collect();
+                        println!("  operations {}", ops.join(", "));
+                    }
+                }
                 println!("  keygen     {:>10.2} ms", b.keygen_ms);
                 println!("  encrypt    {:>10.2} ms", b.encrypt_ms);
                 println!("  evaluate   {:>10.2} ms", b.evaluate_ms);
@@ -328,6 +337,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+fn print_test(rep: &TestReport) {
+    match rep {
+        TestReport::Approximate(rep) => {
+            println!(
+                "{} cases on {} (seed {}), precision {:e}",
+                rep.cases, rep.backend, rep.seed, rep.precision
+            );
+            for o in &rep.outputs {
+                println!(
+                    "  {:<12} max error {:.3e}  mean {:.3e}  worst case #{}",
+                    o.name, o.max_abs, o.mean_abs, o.worst_case
+                );
+            }
+        }
+        TestReport::Exact(rep) => {
+            println!(
+                "{} exact cases on {} (seed {})",
+                rep.cases, rep.backend, rep.seed
+            );
+            println!("  matches     {:>8}", rep.matches);
+            println!("  mismatches  {:>8}", rep.mismatches);
+        }
+    }
+    println!("{}", if rep.passed() { "PASS" } else { "FAIL" });
+    if let Some(f) = rep.failing() {
+        println!("failing case #{}: inputs {:?}", f.case, f.inputs);
+        println!("  expected {:?}\n  got      {:?}", f.expected, f.got);
     }
 }
 
@@ -397,6 +436,7 @@ fn parse_inputs(args: &[String], file: Option<&Path>) -> Result<Inputs> {
         for (k, v) in v {
             let vals = match v {
                 serde_json::Value::Number(n) => vec![n.as_f64().unwrap()],
+                serde_json::Value::Bool(b) => vec![f64::from(u8::from(b))],
                 serde_json::Value::Array(a) => a
                     .iter()
                     .map(|x| {
@@ -419,10 +459,12 @@ fn parse_inputs(args: &[String], file: Option<&Path>) -> Result<Inputs> {
             .ok_or_else(|| bad(format!("expected NAME=V1,V2,..., got {a:?}")))?;
         let vals = v
             .split(',')
-            .map(|x| {
-                x.trim()
+            .map(|x| match x.trim() {
+                "true" => Ok(1.0),
+                "false" => Ok(0.0),
+                x => x
                     .parse::<f64>()
-                    .map_err(|_| bad(format!("input {k}: bad number {x:?}")))
+                    .map_err(|_| bad(format!("input {k}: bad number {x:?}"))),
             })
             .collect::<Result<_>>()?;
         inputs.insert(k.to_owned(), vals);

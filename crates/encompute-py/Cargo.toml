@@ -24,6 +24,8 @@ pyo3-build-config = "0.29"
 
 [features]
 openfhe = ["encompute-runtime/openfhe"]
+# Research use only: TFHE-rs requires a patent license from Zama for commercial use.
+tfhe-rs = ["encompute-runtime/tfhe-rs"]
 extension-module = ["pyo3/extension-module"]
 default = ["extension-module"]
 

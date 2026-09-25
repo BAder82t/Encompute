@@ -33,7 +33,7 @@ fn artifact_round_trips_and_is_reproducible() {
     }
     let loaded = Model::load(&a).unwrap();
     assert_eq!(loaded.program(), m.program());
-    assert_eq!(loaded.compiled().plan, m.compiled().plan);
+    assert_eq!(loaded.compiled(), m.compiled());
 
     let security = fs::read_to_string(a.join("security.json")).unwrap();
     assert!(security.contains("\"evaluator_receives_secret_key\": false"));
@@ -82,7 +82,7 @@ fn modes_explain_and_bench() {
     assert!((again["score"][0] - mock["score"][0]).abs() < 1e-3);
 
     let rep = m.test(Mode::Mock, 50, 1).unwrap();
-    assert!(rep.passed);
+    assert!(rep.passed());
     let measured = m.measure(Mode::Mock, 20, 2).unwrap();
     let text = m.explain(Some(&measured));
     assert!(m.explain(None).contains("Accuracy (estimated)"));
@@ -124,19 +124,26 @@ fn manifest_records_versioned_provenance() {
     Model::compile(logistic(8, 1)).unwrap().save(&dir).unwrap();
     let path = dir.join("manifest.json");
     let m: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(m["artifact_format"], 2);
+    assert_eq!(m["artifact_format"], encompute_runtime::ARTIFACT_FORMAT);
     assert_eq!(m["compiler"]["ir_version"], encompute_ir::IR_VERSION);
+    assert_eq!(m["compiler"]["plan"]["kind"], "ckks");
+    assert_eq!(
+        m["compiler"]["plan"]["version"],
+        encompute_ckks::PLAN_VERSION
+    );
+    assert_eq!(m["crypto"]["semantics"], "approximate");
+    assert_eq!(m["crypto"]["scheme"], "CKKS");
     assert_eq!(
         m["crypto"]["parameter_selector_version"],
-        encompute_ckks::PARAMETER_SELECTOR_VERSION
+        encompute_ckks::PARAMETER_SELECTOR_VERSION.to_string()
     );
     assert_eq!(m["crypto"]["backend_version"], "1.5.1");
 
     // A different parameter selector version is rejected even though every
     // file hash still matches.
     let bumped = fs::read_to_string(&path).unwrap().replace(
-        "\"parameter_selector_version\": 1",
-        "\"parameter_selector_version\": 0",
+        "\"parameter_selector_version\": \"1\"",
+        "\"parameter_selector_version\": \"0\"",
     );
     fs::write(&path, bumped).unwrap();
     let e = Model::load(&dir).err().unwrap();

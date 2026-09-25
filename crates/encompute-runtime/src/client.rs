@@ -1,9 +1,9 @@
 //! The client role: owns the secret key; encrypts inputs into envelopes and
 //! decrypts output envelopes. Talks to an evaluator only through envelopes.
+//! One session type serves both semantics (CKKS and exact).
 
-use encompute_backend::{CkksClient, MockClient, MockConfig};
-use encompute_ckks::CkksPlan;
-use encompute_evaluator::{BackendKind, Ids};
+use encompute_backend::{CkksClient, ExactClient, MockClient, MockConfig, PlainExactClient};
+use encompute_evaluator::{BackendKind, CompiledProgram, Ids};
 use encompute_ir::{check_inputs, Code, Error, Inputs, Outputs, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
 
@@ -12,14 +12,36 @@ enum Client {
     Mock(MockClient),
     #[cfg(feature = "openfhe")]
     OpenFhe(encompute_openfhe_client::OpenFheClient),
+    ExactMock(PlainExactClient),
+    #[cfg(feature = "tfhe-rs")]
+    TfheRs(Box<encompute_tfhe_client::TfheRsClient>),
 }
 
 impl Client {
-    fn get(&self) -> &dyn CkksClient {
+    fn ckks(&self) -> &dyn CkksClient {
         match self {
             Client::Mock(c) => c,
             #[cfg(feature = "openfhe")]
             Client::OpenFhe(c) => c,
+            _ => unreachable!("exact client used for a CKKS program"),
+        }
+    }
+
+    fn exact(&self) -> &dyn ExactClient {
+        match self {
+            Client::ExactMock(c) => c,
+            #[cfg(feature = "tfhe-rs")]
+            Client::TfheRs(c) => c.as_ref(),
+            _ => unreachable!("CKKS client used for an exact program"),
+        }
+    }
+
+    fn evaluation_keys(&self) -> Result<Vec<u8>> {
+        match self {
+            Client::ExactMock(_) => self.exact().evaluation_keys(),
+            #[cfg(feature = "tfhe-rs")]
+            Client::TfheRs(_) => self.exact().evaluation_keys(),
+            _ => self.ckks().evaluation_keys(),
         }
     }
 
@@ -28,8 +50,18 @@ impl Client {
             Client::Mock(c) => Ok(c.secret_key()),
             #[cfg(feature = "openfhe")]
             Client::OpenFhe(c) => c.secret_key(),
+            Client::ExactMock(c) => Ok(c.secret_key()),
+            #[cfg(feature = "tfhe-rs")]
+            Client::TfheRs(c) => c.secret_key(),
         }
     }
+}
+
+fn not_built(kind: BackendKind) -> Error {
+    Error::new(
+        Code::Backend,
+        format!("this build has no {} backend", kind.name()),
+    )
 }
 
 pub struct ClientSession {
@@ -37,7 +69,7 @@ pub struct ClientSession {
     kind: BackendKind,
     ids: Ids,
     key_id: String,
-    plan: CkksPlan,
+    compiled: CompiledProgram,
     /// Evaluation-keys envelope, to send to the evaluator once.
     evaluation_keys: Option<Vec<u8>>,
 }
@@ -47,7 +79,7 @@ impl ClientSession {
         let (backend, backend_version) = self.kind.label();
         Header {
             kind,
-            scheme: "CKKS".into(),
+            scheme: self.compiled.scheme().into(),
             backend: backend.into(),
             backend_version: backend_version.into(),
             parameter_set_id: self.ids.parameter_set_id.clone(),
@@ -58,15 +90,58 @@ impl ClientSession {
         }
     }
 
-    fn with_keys(client: Client, kind: BackendKind, ids: Ids, plan: CkksPlan) -> Result<Self> {
-        let payload = client.get().evaluation_keys()?;
-        let key_id = sha256_hex(&payload);
+    fn expect(&self, kind: Kind) -> Expect<'_> {
+        let (backend, backend_version) = self.kind.label();
+        Expect {
+            kind,
+            scheme: self.compiled.scheme(),
+            backend,
+            backend_version,
+            parameter_set_id: &self.ids.parameter_set_id,
+            program_id: Some(&self.ids.program_id),
+            key_id: Some(&self.key_id),
+        }
+    }
+
+    /// Fresh keys for `compiled` on backend `kind`. `seed` seeds mock keys.
+    pub fn generate(
+        ids: Ids,
+        compiled: &CompiledProgram,
+        kind: BackendKind,
+        seed: u64,
+    ) -> Result<Self> {
+        let client = match (compiled, kind) {
+            (CompiledProgram::Approx(c), BackendKind::Mock) => Client::Mock(MockClient::new(
+                &c.params,
+                &c.plan.rotations,
+                MockConfig { seed, noise: true },
+            )),
+            #[cfg(feature = "openfhe")]
+            (CompiledProgram::Approx(c), BackendKind::OpenFhe) => Client::OpenFhe(
+                encompute_openfhe_client::OpenFheClient::generate(&c.params, &c.plan.rotations)?,
+            ),
+            (CompiledProgram::Exact(_), BackendKind::Mock) => {
+                Client::ExactMock(PlainExactClient::new(seed))
+            }
+            #[cfg(feature = "tfhe-rs")]
+            (CompiledProgram::Exact(_), BackendKind::TfheRs) => {
+                Client::TfheRs(Box::new(encompute_tfhe_client::TfheRsClient::generate()?))
+            }
+            (c, k) if !k.supports(c.semantics()) => {
+                return Err(Error::new(
+                    Code::Backend,
+                    format!("{} cannot run {} programs", k.name(), c.scheme()),
+                ))
+            }
+            (_, k) => return Err(not_built(k)),
+        };
+        let payload = client.evaluation_keys()?;
         let mut s = Self {
             client,
             kind,
             ids,
-            key_id,
-            plan,
+            key_id: sha256_hex(&payload),
+            compiled: compiled.clone(),
             evaluation_keys: None,
         };
         let env = Envelope::new(
@@ -77,45 +152,20 @@ impl ClientSession {
         Ok(s)
     }
 
-    /// Fresh mock keys.
-    pub fn mock(
-        ids: Ids,
-        plan: &CkksPlan,
-        params: &encompute_ckks::CkksParams,
-        seed: u64,
-    ) -> Result<Self> {
-        let client = MockClient::new(params, &plan.rotations, MockConfig { seed, noise: true });
-        Self::with_keys(Client::Mock(client), BackendKind::Mock, ids, plan.clone())
-    }
-
-    /// Fresh OpenFHE keys.
-    #[cfg(feature = "openfhe")]
-    pub fn openfhe(ids: Ids, plan: &CkksPlan, params: &encompute_ckks::CkksParams) -> Result<Self> {
-        let client = encompute_openfhe_client::OpenFheClient::generate(params, &plan.rotations)?;
-        Self::with_keys(
-            Client::OpenFhe(client),
-            BackendKind::OpenFhe,
-            ids,
-            plan.clone(),
-        )
-    }
-
     /// Restore a client from a secret-key envelope written by
     /// [`ClientSession::secret_key_envelope`]; the backend is taken from it.
-    pub fn restore(
-        ids: Ids,
-        plan: &CkksPlan,
-        params: &encompute_ckks::CkksParams,
-        secret: &[u8],
-    ) -> Result<Self> {
+    pub fn restore(ids: Ids, compiled: &CompiledProgram, secret: &[u8]) -> Result<Self> {
         let env = Envelope::decode(secret)?;
-        let kind = match env.header.backend.as_str() {
-            "mock" => BackendKind::Mock,
-            _ => BackendKind::OpenFhe,
-        };
+        let kind = BackendKind::parse(&env.header.backend).ok_or_else(|| {
+            Error::new(
+                Code::Incompatible,
+                format!("unknown backend {:?}", env.header.backend),
+            )
+        })?;
         let (backend, backend_version) = kind.label();
         env.check(&Expect {
             kind: Kind::SecretKey,
+            scheme: compiled.scheme(),
             backend,
             backend_version,
             parameter_set_id: &ids.parameter_set_id,
@@ -127,30 +177,30 @@ impl ClientSession {
             .key_id
             .clone()
             .ok_or_else(|| Error::new(Code::WrongKey, "secret key carries no key ID"))?;
-        let client = match kind {
-            BackendKind::Mock => Client::Mock(MockClient::restore(
-                params,
-                &env.payload,
-                MockConfig::default(),
-            )?),
-            #[cfg(feature = "openfhe")]
-            BackendKind::OpenFhe => Client::OpenFhe(
-                encompute_openfhe_client::OpenFheClient::restore(params, &env.payload)?,
-            ),
-            #[cfg(not(feature = "openfhe"))]
-            BackendKind::OpenFhe => {
-                return Err(Error::new(
-                    Code::Backend,
-                    "this build has no OpenFHE backend",
-                ))
-            }
-        };
+        let client =
+            match (compiled, kind) {
+                (CompiledProgram::Approx(c), BackendKind::Mock) => Client::Mock(
+                    MockClient::restore(&c.params, &env.payload, MockConfig::default())?,
+                ),
+                #[cfg(feature = "openfhe")]
+                (CompiledProgram::Approx(c), BackendKind::OpenFhe) => Client::OpenFhe(
+                    encompute_openfhe_client::OpenFheClient::restore(&c.params, &env.payload)?,
+                ),
+                (CompiledProgram::Exact(_), BackendKind::Mock) => {
+                    Client::ExactMock(PlainExactClient::restore(&env.payload)?)
+                }
+                #[cfg(feature = "tfhe-rs")]
+                (CompiledProgram::Exact(_), BackendKind::TfheRs) => Client::TfheRs(Box::new(
+                    encompute_tfhe_client::TfheRsClient::restore(&env.payload)?,
+                )),
+                (_, k) => return Err(not_built(k)),
+            };
         Ok(Self {
             client,
             kind,
             ids,
             key_id,
-            plan: plan.clone(),
+            compiled: compiled.clone(),
             evaluation_keys: None,
         })
     }
@@ -186,55 +236,71 @@ impl ClientSession {
     /// Encode and encrypt inputs into an inputs envelope.
     pub fn encrypt(&self, program: &Program, inputs: &Inputs) -> Result<Vec<u8>> {
         check_inputs(program, inputs)?;
-        let items = self
-            .plan
-            .inputs
-            .iter()
-            .enumerate()
-            .map(|(i, inp)| {
-                let ct = self
-                    .client
-                    .get()
-                    .encrypt(&self.plan.encode_input(i, &inputs[&inp.name]))?;
-                Ok((inp.name.clone(), ct))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let items = match &self.compiled {
+            CompiledProgram::Approx(c) => c
+                .plan
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(i, inp)| {
+                    let ct = self
+                        .client
+                        .ckks()
+                        .encrypt(&c.plan.encode_input(i, &inputs[&inp.name]))?;
+                    Ok((inp.name.clone(), ct))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            // check_inputs proved each value an integer within its range.
+            CompiledProgram::Exact(e) => e
+                .plan
+                .inputs
+                .iter()
+                .map(|inp| {
+                    let v = inputs[&inp.name][0] as i128;
+                    Ok((inp.name.clone(), self.client.exact().encrypt(inp.elem, v)?))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        };
         Ok(Envelope::new(self.header(Kind::Inputs), items).encode())
     }
 
     /// Check and decrypt an outputs envelope.
     pub fn decrypt(&self, bytes: &[u8]) -> Result<Outputs> {
-        let (backend, backend_version) = self.kind.label();
-        let env = open(
-            bytes,
-            &Expect {
-                kind: Kind::Outputs,
-                backend,
-                backend_version,
-                parameter_set_id: &self.ids.parameter_set_id,
-                program_id: Some(&self.ids.program_id),
-                key_id: Some(&self.key_id),
-            },
-        )?;
+        let env = open(bytes, &self.expect(Kind::Outputs))?;
         let items = env.items();
-        if items.len() != self.plan.outputs.len() {
-            return Err(Error::new(Code::Envelope, "wrong number of outputs"));
+        let want: Vec<&str> = match &self.compiled {
+            CompiledProgram::Approx(c) => c.plan.outputs.iter().map(|o| o.name.as_str()).collect(),
+            CompiledProgram::Exact(e) => e.plan.outputs.iter().map(|o| o.name.as_str()).collect(),
+        };
+        let got: Vec<&str> = items.iter().map(|(n, _)| *n).collect();
+        if got != want {
+            return Err(Error::new(
+                Code::Envelope,
+                format!("expected outputs {want:?}, got {got:?}"),
+            ));
         }
-        self.plan
-            .outputs
-            .iter()
-            .zip(items)
-            .map(|(o, (name, ct))| {
-                if name != o.name {
-                    return Err(Error::new(
-                        Code::Envelope,
-                        format!("unexpected output {name:?}"),
-                    ));
-                }
-                let mut v = self.client.get().decrypt(ct)?;
-                v.truncate(o.len);
-                Ok((o.name.clone(), v))
-            })
-            .collect()
+        match &self.compiled {
+            CompiledProgram::Approx(c) => c
+                .plan
+                .outputs
+                .iter()
+                .zip(items)
+                .map(|(o, (_, ct))| {
+                    let mut v = self.client.ckks().decrypt(ct)?;
+                    v.truncate(o.len);
+                    Ok((o.name.clone(), v))
+                })
+                .collect(),
+            CompiledProgram::Exact(e) => e
+                .plan
+                .outputs
+                .iter()
+                .zip(items)
+                .map(|(o, (_, ct))| {
+                    let v = self.client.exact().decrypt(o.elem, ct)?;
+                    Ok((o.name.clone(), vec![v as f64]))
+                })
+                .collect(),
+        }
     }
 }

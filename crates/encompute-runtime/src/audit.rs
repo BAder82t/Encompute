@@ -1,14 +1,16 @@
 //! `encompute audit`: checks of a compiled artifact and, optionally, its
 //! client keys and evaluator binary against the security model
 //! (docs/threat-model.md). Statuses follow fhe-attack-replay:
-//! PASS, WARN (a condition the deployment must uphold), FAIL, SKIP.
+//! PASS, WARN (a condition the deployment must uphold), FAIL, SKIP, plus
+//! INFO for facts about this build.
 
 use std::path::Path;
 use std::process::Command;
 
+use encompute_evaluator::CompiledProgram;
 use serde::Serialize;
 
-use crate::model::Model;
+use crate::model::{has_tfhe, Model};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -17,6 +19,7 @@ pub enum Status {
     Warn,
     Fail,
     Skip,
+    Info,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -37,8 +40,6 @@ fn check(id: &'static str, status: Status, detail: impl Into<String>) -> Check {
 /// Audit a loaded artifact. `keys` is a directory from `keys generate`;
 /// `evaluator` is the `encompute-evaluator` binary to inspect.
 pub fn audit(model: &Model, keys: Option<&Path>, evaluator: Option<&Path>) -> Vec<Check> {
-    let c = model.compiled();
-    let p = &c.params;
     let mut out = vec![check(
         "artifact.integrity",
         Status::Pass,
@@ -47,9 +48,15 @@ pub fn audit(model: &Model, keys: Option<&Path>, evaluator: Option<&Path>) -> Ve
 
     let files = model.artifact_files();
     let leaked = files.values().any(|b| {
-        ["\"secret_key\":", "PrivateKey", "EvalKey", "cereal"]
-            .iter()
-            .any(|m| b.contains(m))
+        [
+            "\"secret_key\":",
+            "PrivateKey",
+            "EvalKey",
+            "cereal",
+            "ClientKey",
+        ]
+        .iter()
+        .any(|m| b.contains(m))
     });
     out.push(if leaked {
         check(
@@ -65,6 +72,33 @@ pub fn audit(model: &Model, keys: Option<&Path>, evaluator: Option<&Path>) -> Ve
         )
     });
 
+    match model.compiled() {
+        CompiledProgram::Approx(c) => ckks_checks(&mut out, c),
+        CompiledProgram::Exact(e) => exact_checks(&mut out, model, e),
+    }
+
+    out.push(match keys {
+        None => check(
+            "keys.secret_permissions",
+            Status::Skip,
+            "no --keys directory given",
+        ),
+        Some(dir) => secret_permissions(&dir.join("secret.key")),
+    });
+
+    out.push(match evaluator {
+        None => check(
+            "evaluator.no_client_crypto",
+            Status::Skip,
+            "no --evaluator binary given",
+        ),
+        Some(bin) => evaluator_symbols(bin),
+    });
+    out
+}
+
+fn ckks_checks(out: &mut Vec<Check>, c: &encompute_ckks::Compiled) {
+    let p = &c.params;
     out.push(
         if p.log_qp <= p.max_log_qp && p.security == "128-bit classical" {
             check(
@@ -115,25 +149,70 @@ pub fn audit(model: &Model, keys: Option<&Path>, evaluator: Option<&Path>) -> Ve
     } else {
         check("accuracy.approximations", Status::Pass, "no function approximations")
     });
+}
 
-    out.push(match keys {
-        None => check(
-            "keys.secret_permissions",
-            Status::Skip,
-            "no --keys directory given",
+fn exact_checks(out: &mut Vec<Check>, model: &Model, e: &encompute_evaluator::ExactProgram) {
+    out.push(match e.plan.validate() {
+        Ok(()) => check(
+            "exact.plan_validated",
+            Status::Pass,
+            format!(
+                "{} instructions, every register typed and defined before use",
+                e.plan.instrs.len()
+            ),
         ),
-        Some(dir) => secret_permissions(&dir.join("secret.key")),
+        Err(err) => check("exact.plan_validated", Status::Fail, err.message),
     });
-
-    out.push(match evaluator {
-        None => check(
-            "evaluator.no_client_crypto",
-            Status::Skip,
-            "no --evaluator binary given",
+    out.push(match encompute_analysis::int_ranges(model.program()) {
+        Ok(_) => check(
+            "exact.ranges_proven",
+            Status::Pass,
+            "no operation can overflow its type for inputs within their declared ranges",
         ),
-        Some(bin) => evaluator_symbols(bin),
+        Err(err) => check("exact.ranges_proven", Status::Fail, err.message),
     });
-    out
+    let known = encompute_tfhe::default_profile();
+    out.push(if e.profile == known {
+        check(
+            "params.profile",
+            Status::Pass,
+            format!(
+                "{} {} {}: {} security, failure probability {}",
+                known.backend,
+                known.backend_version,
+                known.profile,
+                known.security,
+                known.failure_probability
+            ),
+        )
+    } else {
+        check(
+            "params.profile",
+            Status::Fail,
+            format!("unrecognized parameter profile {}", e.profile.profile),
+        )
+    });
+    out.push(check(
+        "exact.bindings",
+        Status::Pass,
+        "envelopes bind scheme TFHE, backend, parameter set, program and key; the evaluator \
+         checks ciphertexts against the parameter profile (TFHE-rs conformance) before use",
+    ));
+    out.push(if has_tfhe() {
+        check(
+            "exact.backend",
+            Status::Warn,
+            "TFHE-rs backend is research-only in this Encompute configuration; commercial use \
+             needs a patent license from Zama",
+        )
+    } else {
+        check(
+            "exact.backend",
+            Status::Info,
+            "no production exact cryptographic backend in this build: exact execution uses the \
+             mock evaluator (TFHE-rs is behind the research `tfhe-rs` feature)",
+        )
+    });
 }
 
 fn secret_permissions(path: &Path) -> Check {
@@ -185,7 +264,9 @@ fn evaluator_symbols(bin: &Path) -> Check {
             }
             let client = syms
                 .lines()
-                .filter(|l| l.contains("encompute_openfhe_client"))
+                .filter(|l| {
+                    l.contains("encompute_openfhe_client") || l.contains("encompute_tfhe_client")
+                })
                 .count();
             if client == 0 {
                 check(

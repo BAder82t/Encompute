@@ -1,17 +1,23 @@
 """Encompute: compile ordinary Python functions into encrypted computation.
 
     import encompute
-    from encompute import secret, Tensor
+    from encompute import secret, Tensor, u8, u32
 
     @encompute.compile(precision=1e-3)
-    def score(x: secret[Tensor[32], -1.0:1.0]):
+    def score(x: secret[Tensor[32], -1.0:1.0]):          # approximate: CKKS
         return encompute.sigmoid(encompute.dot(W, x) + b)
+
+    @encompute.compile()
+    def eligible(age: secret[u8, 0:120], income: secret[u32, 0:1_000_000]):
+        return (age >= 18) & (income > 30_000)             # exact: integers/bools
 
     score(x_values)                      # plaintext reference
     score(x_values, mode="encrypted")    # CKKS on OpenFHE
+    eligible(35, 100_000, mode="mock")   # True
     print(score.test(cases=1000, mode="encrypted"))
     print(score.explain())
 
+The program's types choose the scheme; no backend needs naming.
 """
 
 from __future__ import annotations
@@ -21,11 +27,25 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from . import _native
 from ._frontend import (
+    ExactType,
     Secret,
     SecretSpec,
     Tensor,
     EncomputeError,
+    bool_,
+    cast,
     dot,
+    i8,
+    i16,
+    i32,
+    i64,
+    lookup,
+    maximum,
+    minimum,
+    u8,
+    u16,
+    u32,
+    u64,
     matvec,
     poly,
     public,
@@ -38,16 +58,27 @@ from ._frontend import (
 )
 
 __all__ = [
+    "ExactType",
     "Model",
     "Secret",
     "Tensor",
     "TestReport",
     "EncomputeError",
+    "bool_",
+    "cast",
     "compile",
     "dot",
     "has_openfhe",
+    "has_tfhe",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
     "load",
+    "lookup",
     "matvec",
+    "maximum",
+    "minimum",
     "poly",
     "public",
     "secret",
@@ -55,6 +86,10 @@ __all__ = [
     "sigmoid",
     "square",
     "sum",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
 ]
 __version__ = _native.__version__
 
@@ -68,38 +103,70 @@ def _call(f: Callable[..., Any], *args: Any) -> Any:
 
 
 def has_openfhe() -> bool:
-    """Whether mode="encrypted" is available in this build."""
+    """Whether mode="encrypted" is available for approximate programs."""
     return _native.has_openfhe()
 
 
+def has_tfhe() -> bool:
+    """Whether mode="encrypted" is available for exact programs (TFHE-rs,
+    research use only)."""
+    return _native.has_tfhe()
+
+
 class TestReport:
-    """Result of ``Model.test``: plaintext reference vs. mock or encrypted."""
+    """Result of ``Model.test``: plaintext reference vs. mock or encrypted.
+
+    Approximate programs report errors against the declared precision;
+    exact programs report matches and mismatches (no tolerance)."""
 
     __test__ = False  # not a pytest class
 
     def __init__(self, data: Dict[str, Any]):
         self.data = data
+        self.semantics: str = data["semantics"]
         self.passed: bool = data["passed"]
-        self.max_error: float = data["max_error"]
-        self.precision: float = data["precision"]
         self.cases: int = data["cases"]
         self.backend: str = data["backend"]
         self.outputs: List[Dict[str, Any]] = data["outputs"]
         self.failing: Optional[Dict[str, Any]] = data.get("failing")
+        # Approximate programs only.
+        self.max_error: Optional[float] = data.get("max_error")
+        self.precision: Optional[float] = data.get("precision")
+        # Exact programs only.
+        self.matches: Optional[int] = data.get("matches")
+        self.mismatches: Optional[int] = data.get("mismatches")
 
     def __str__(self) -> str:
-        lines = [f"{self.cases} cases on {self.backend}, precision {self.precision:g}"]
-        for o in self.outputs:
-            lines.append(
-                f"  {o['name']:<12} max error {o['max_abs']:.3e}  mean {o['mean_abs']:.3e}"
-            )
+        if self.semantics == "exact":
+            lines = [
+                f"{self.cases} exact cases on {self.backend}",
+                f"  matches     {self.matches:>8}",
+                f"  mismatches  {self.mismatches:>8}",
+            ]
+        else:
+            lines = [f"{self.cases} cases on {self.backend}, precision {self.precision:g}"]
+            for o in self.outputs:
+                lines.append(
+                    f"  {o['name']:<12} max error {o['max_abs']:.3e}  mean {o['mean_abs']:.3e}"
+                )
         lines.append("PASS" if self.passed else "FAIL")
         if self.failing:
             lines.append(f"failing case #{self.failing['case']}: {self.failing['inputs']}")
         return "\n".join(lines)
 
     def __repr__(self) -> str:
-        return f"<TestReport {'PASS' if self.passed else 'FAIL'} max_error={self.max_error:.3e}>"
+        verdict = "PASS" if self.passed else "FAIL"
+        if self.semantics == "exact":
+            return f"<TestReport {verdict} exact {self.matches}/{self.cases} match>"
+        return f"<TestReport {verdict} max_error={self.max_error:.3e}>"
+
+
+def _typed(v: List[float], is_scalar: bool, elem: str) -> Any:
+    if elem == "bool":
+        return v[0] != 0.0
+    if elem != "f64":
+        return int(v[0])
+    return v[0] if is_scalar else v
 
 
 class Model:
@@ -107,8 +174,8 @@ class Model:
 
     def __init__(self, native: Any, style: str = "single"):
         self._native = native
-        self._inputs = native.inputs()  # (name, len, is_scalar, lo, hi)
-        self._outputs = native.outputs()  # (name, len, is_scalar)
+        self._inputs = native.inputs()  # (name, len, is_scalar, lo, hi, elem)
+        self._outputs = native.outputs()  # (name, len, is_scalar, elem)
         self._style = style if len(self._outputs) == 1 or style != "single" else "dict"
 
     @property
@@ -125,8 +192,14 @@ class Model:
         return [i[0] for i in self._inputs]
 
     @property
+    def semantics(self) -> str:
+        """"approximate" (CKKS) or "exact" (integers and Booleans)."""
+        return self._native.semantics()
+
+    @property
     def parameters(self) -> Dict[str, Any]:
-        """CKKS parameters (ring dimension, scale, depth, security table...)."""
+        """CKKS parameters (ring dimension, scale, depth, security table...)
+        or, for exact programs, the TFHE parameter profile."""
         return json.loads(self._native.artifact_files()["parameters.json"])
 
     @property
@@ -143,24 +216,28 @@ class Model:
                 raise TypeError(f"{self.name}() got input {k!r} twice")
             values[k] = v
         out = {}
-        for name, length, is_scalar, _, _ in self._inputs:
+        for name, length, is_scalar, _, _, elem in self._inputs:
             if name not in values:
                 raise TypeError(f"{self.name}() missing input {name!r}")
             v = values.pop(name)
             if hasattr(v, "tolist"):
                 v = v.tolist()
+            if elem != "f64":
+                if not isinstance(v, int) or (elem != "bool" and isinstance(v, bool)):
+                    want = "True or False" if elem == "bool" else f"an integer ({elem})"
+                    raise TypeError(f"{self.name}() input {name!r} must be {want}, got {v!r}")
+                if abs(v) > 2**53:
+                    raise EncomputeError("ENC1102", f"input {name!r} = {v} exceeds ±2^53")
             out[name] = [float(v)] if is_scalar else [float(x) for x in v]
         if values:
             raise TypeError(f"{self.name}() got unknown inputs {sorted(values)}")
         return out
 
     def run(self, *args: Any, mode: str = "clear", **kwargs: Any) -> Any:
-        """Run on inputs. mode: "clear" (plaintext), "mock", or "encrypted"."""
+        """Run on inputs. mode: "clear" (plaintext), "mock", or "encrypted"
+        (OpenFHE for approximate programs, TFHE-rs for exact ones)."""
         raw = _call(self._native.run, self._encode(args, kwargs), mode)
-        vals = {
-            name: (raw[name][0] if is_scalar else raw[name])
-            for name, _, is_scalar in self._outputs
-        }
+        vals = {name: _typed(raw[name], is_scalar, elem) for name, _, is_scalar, elem in self._outputs}
         if self._style == "single":
             return next(iter(vals.values()))
         if self._style == "tuple":
@@ -171,7 +248,8 @@ class Model:
 
     def test(self, cases: int = 100, seed: int = 42, mode: str = "mock") -> TestReport:
         """Differential test against the plaintext reference on sampled inputs
-        (range endpoints first, then uniform samples)."""
+        (range endpoints first, then uniform samples; exact programs also
+        sample boundary values and must match exactly)."""
         return TestReport(json.loads(_call(self._native.test_json, mode, cases, seed)))
 
     def explain(self, measure: Optional[int] = None, mode: str = "mock") -> str:
@@ -199,11 +277,14 @@ def compile(
     **publics: Any,
 ) -> Any:
     """Compile a function whose secret parameters are annotated with
-    ``secret[shape, lo:hi]``. Other parameters are public and bound here:
+    ``secret[shape, lo:hi]`` (approximate) or ``secret[u8, lo:hi]`` /
+    ``secret[bool_]`` (exact). Other parameters are public and bound here:
     ``encompute.compile(f, weights=W)``, or taken from their defaults.
 
-    ``precision`` is the maximum absolute error allowed on every output.
-    Usable as ``@encompute.compile``, ``@encompute.compile(precision=...)`` or a call.
+    The types choose the scheme: approximate programs compile to CKKS,
+    exact ones to an exact plan. ``precision`` is the maximum absolute error
+    allowed on every approximate output. Usable as ``@encompute.compile``,
+    ``@encompute.compile(precision=...)`` or a call.
     """
 
     def build(f: Callable[..., Any]) -> Model:

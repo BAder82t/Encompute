@@ -1,4 +1,4 @@
-# Encompute threat model (v0.2)
+# Encompute threat model (v0.3)
 
 Also written into every artifact's `security.json`.
 
@@ -7,13 +7,13 @@ Also written into every artifact's `security.json`.
 | Party | Trust | Holds |
 |---|---|---|
 | Client | trusted | secret key; encrypts inputs, decrypts outputs |
-| Evaluator | honest-but-curious | public key, relinearization key, rotation keys for the plan's rotations |
+| Evaluator | honest-but-curious | CKKS: public key, relinearization key, rotation keys for the plan's rotations. Exact (TFHE): the compressed server key |
 | Network | untrusted | ciphertexts in transit |
 | Storage | untrusted | ciphertexts and artifacts at rest |
 
 The evaluator follows the protocol but may try to learn from what it sees.
 Malicious evaluators, malicious clients and colluding parties are out of
-scope for v0.2.
+scope.
 
 ## Guarantees
 
@@ -22,6 +22,14 @@ scope for v0.2.
   128-bit classical security, parameters checked against the HE Standard
   ternary-secret table (`encompute-ckks/src/params.rs`), and re-checked by OpenFHE
   when the context is created.
+- Exact programs (TFHE-rs 1.8.1, research feature): the vetted profile
+  `PARAM_MESSAGE_2_CARRY_2_KS_PBS_TUNIFORM_2M128`, 128-bit security, failure
+  probability 2^-128 per bootstrap. The evaluator checks every incoming key
+  and ciphertext against the profile (TFHE-rs conformance) before use.
+  Results are exact: range analysis proves no operation overflows.
+- Envelopes name their scheme (CKKS or TFHE), backend, parameter set,
+  program and key; a mismatch is refused, so data for one scheme never
+  enters a program of the other.
 - Artifacts never contain key material.
 
 ## Deployment
@@ -45,11 +53,14 @@ checksums against corruption, but there is no client authentication in 0.2.
 
 1. **Decrypted results are never returned to the evaluator.** CKKS is not
    IND-CPA-D secure (Li–Micciancio, 2021). An evaluator that sees decryptions
-   of ciphertexts it computed can recover the secret key. v0.2 adds no noise
-   flooding; returning results to the evaluator is unsupported.
+   of ciphertexts it computed can recover the secret key. Encompute adds no
+   noise flooding; returning results to the evaluator is unsupported. The
+   same rule applies to exact programs, where decryption failures are
+   negligible (2^-128) but not zero.
 2. **Inputs lie within their declared ranges.** The client checks this before
    encrypting (ENC1102). Out-of-range inputs would not leak data, but the
-   results would be wrong (approximations are fitted to the range).
+   results would be wrong (approximations are fitted to the range; exact
+   overflow proofs assume the range).
 
 ## What the evaluator learns
 
@@ -58,10 +69,11 @@ checksums against corruption, but there is no client authentication in 0.2.
 - Input and output shapes and declared input ranges.
 - Timing and ciphertext sizes (they depend only on the program, not on input values).
 
-Values are never revealed. Hiding the model itself (encrypted weights)
-is out of scope for v0.2.
+Values are never revealed, including the outcome of comparisons and
+selections: both branches of a `select` are computed. Hiding the model
+itself (encrypted weights) is out of scope.
 
-## Not covered in v0.2
+## Not covered in v0.3
 
 Side channels on the client, malicious-evaluator integrity (results are not
 verifiable), key rotation, threshold decryption, and multi-party settings.

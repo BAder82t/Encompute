@@ -82,7 +82,11 @@ fn accepted_programs_meet_their_precision_encrypted() {
             }
         };
         let (client, ev) = common::openfhe_sessions(&p);
-        let rep = diff_test(&client, &ev, &p, 3, seed).unwrap();
+        let rep = diff_test(&client, &ev, &p, 3, seed)
+            .unwrap()
+            .approx()
+            .unwrap()
+            .clone();
         assert!(
             rep.passed,
             "seed {seed}: max error {:.3e} > {:e} with {:?}\n{p}",

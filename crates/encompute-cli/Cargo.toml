@@ -18,6 +18,8 @@ clap = { version = "~4.5", features = ["derive"] }
 
 [features]
 openfhe = ["encompute-runtime/openfhe"]
+# Research use only: TFHE-rs requires a patent license from Zama for commercial use.
+tfhe-rs = ["encompute-runtime/tfhe-rs"]
 
 [lints]
 workspace = true

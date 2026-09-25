@@ -5,7 +5,7 @@
 use encompute_ir::{Code, Elem, Error, LogicOp, Op, Program, Result, ValueId};
 
 /// Largest magnitude that crosses the API boundary exactly (f64).
-pub const MAX_IO: i128 = 1 << 53;
+pub const MAX_IO: i128 = encompute_ir::MAX_EXACT_IO;
 
 /// Inclusive interval over 128-bit integers.
 pub type IntRange = (i128, i128);
@@ -174,8 +174,9 @@ pub fn semantics(program: &Program) -> Result<Semantics> {
     match (exact, approx) {
         (true, true) => Err(Error::new(
             Code::Unsupported,
-            "program mixes approximate (float) and exact (integer/bool) values; mixed-scheme \
-             programs arrive in 0.4",
+            "this program mixes approximate (float) and exact (integer/bool) encrypted values; \
+             Encompute 0.3 runs one encrypted scheme per program: split the computation, or \
+             wait for hybrid execution (0.4)",
         )),
         (true, false) => Ok(Semantics::Exact),
         _ => Ok(Semantics::Approximate),

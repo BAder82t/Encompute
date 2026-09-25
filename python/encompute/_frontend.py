@@ -1,8 +1,16 @@
 """Tracing frontend: turns a typed Python function into Encompute IR (.eir text).
 
 Secret parameters become ``Secret`` proxies. Arithmetic on them records IR;
-anything that would reveal a secret to Python (``if``, ``print``, ``float``,
-comparisons) raises a ``EncomputeError`` with a stable code instead.
+anything that would reveal a secret to Python (``if``, ``print``, ``float``)
+raises an ``EncomputeError`` with a stable code instead.
+
+Two kinds of secret values exist (one kind per program in 0.3):
+
+* approximate: ``secret[float, lo:hi]`` and ``secret[Tensor[n], lo:hi]``,
+  computed with CKKS within a declared precision;
+* exact: ``secret[u8, lo:hi]`` ... ``secret[i64, lo:hi]`` and
+  ``secret[bool_]``, fixed-width integers and Booleans with comparisons,
+  logic and ``encompute.select``, computed exactly.
 """
 
 from __future__ import annotations
@@ -44,22 +52,84 @@ class Tensor:
         return _VectorShape(n)
 
 
+# Exact values cross the API as f64, exact up to 2^53 (ADR-006).
+MAX_EXACT = 2**53
+
+
+class ExactType:
+    """A fixed-width exact element type: ``u8`` ... ``i64`` or ``bool_``."""
+
+    def __init__(self, name: str, lo: int, hi: int):
+        self.name = name
+        self.min = lo
+        self.max = hi
+
+    @property
+    def is_bool(self) -> bool:
+        return self.name == "bool"
+
+    def fits(self, v: int) -> bool:
+        return self.min <= v <= self.max and abs(v) <= MAX_EXACT
+
+    def __repr__(self) -> str:
+        return "encompute.bool_" if self.is_bool else f"encompute.{self.name}"
+
+
+bool_ = ExactType("bool", 0, 1)
+u8 = ExactType("u8", 0, 2**8 - 1)
+u16 = ExactType("u16", 0, 2**16 - 1)
+u32 = ExactType("u32", 0, 2**32 - 1)
+u64 = ExactType("u64", 0, 2**64 - 1)
+i8 = ExactType("i8", -(2**7), 2**7 - 1)
+i16 = ExactType("i16", -(2**15), 2**15 - 1)
+i32 = ExactType("i32", -(2**31), 2**31 - 1)
+i64 = ExactType("i64", -(2**63), 2**63 - 1)
+_EXACT: Dict[str, ExactType] = {t.name: t for t in (bool_, u8, u16, u32, u64, i8, i16, i32, i64)}
+
+
 @dataclass(frozen=True)
 class SecretSpec:
-    """Result of ``secret[shape, lo:hi]``. ``length`` is None for a scalar."""
+    """Result of ``secret[shape, lo:hi]``. ``length`` is None for a scalar;
+    ``elem`` is ``"f64"`` for approximate values or an exact type name."""
 
     length: Optional[int]
     lo: Optional[float]
     hi: Optional[float]
+    elem: str = "f64"
 
     def __repr__(self) -> str:
+        if self.elem != "f64":
+            rng = "" if self.elem == "bool" else f", {int(self.lo)}:{int(self.hi)}"
+            return f"secret[{_EXACT[self.elem]!r}{rng}]"
         shape = "float" if self.length is None else f"Tensor[{self.length}]"
         rng = "" if self.lo is None else f", {self.lo}:{self.hi}"
         return f"secret[{shape}{rng}]"
 
 
+def _exact_spec(t: ExactType, item: Tuple[Any, ...]) -> SecretSpec:
+    if t.is_bool:
+        if len(item) == 2:
+            raise TypeError("secret[bool_] takes no range")
+        return SecretSpec(None, 0.0, 1.0, "bool")
+    lo, hi = max(t.min, -MAX_EXACT), min(t.max, MAX_EXACT)
+    if len(item) == 2:
+        r = item[1]
+        if not isinstance(r, slice) or r.step is not None:
+            raise TypeError(f"the range is written lo:hi, e.g. secret[{t.name}, 0:100]")
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (r.start, r.stop)):
+            raise _err("ENC1101", f"secret[{t.name}, lo:hi] needs integer bounds, got {r.start!r}:{r.stop!r}")
+        lo, hi = r.start, r.stop
+        if not (t.fits(lo) and t.fits(hi) and lo <= hi):
+            raise _err(
+                "ENC1101",
+                f"range {lo}:{hi} does not fit {t.name} (and exact values stay within ±2^53)",
+            )
+    return SecretSpec(None, float(lo), float(hi), t.name)
+
+
 class _Secret:
-    """``secret[float, lo:hi]`` or ``secret[Tensor[n], lo:hi]``."""
+    """``secret[float, lo:hi]``, ``secret[Tensor[n], lo:hi]``,
+    ``secret[u8, lo:hi]`` (any exact integer type) or ``secret[bool_]``."""
 
     def __getitem__(self, item: Any) -> SecretSpec:
         if not isinstance(item, tuple):
@@ -67,12 +137,18 @@ class _Secret:
         if len(item) not in (1, 2):
             raise TypeError("use secret[shape] or secret[shape, lo:hi]")
         shape = item[0]
+        if isinstance(shape, ExactType):
+            return _exact_spec(shape, item)
+        if shape is bool:
+            return _exact_spec(bool_, item)
         if shape in (float, int):
             length = None
         elif isinstance(shape, _VectorShape):
             length = shape.n
         else:
-            raise TypeError(f"secret shape must be float or Tensor[n], got {shape!r}")
+            raise TypeError(
+                f"secret type must be float, Tensor[n], an exact type (u8, i32, ...) or bool_, got {shape!r}"
+            )
         lo = hi = None
         if len(item) == 2:
             r = item[1]
@@ -123,6 +199,25 @@ def _to_list(value: Any) -> Any:
     return value
 
 
+def _exact_int(value: Any, t: ExactType) -> int:
+    """A public Python value as an exact constant of type ``t``."""
+    value = _to_list(value)
+    if isinstance(value, bool) and not t.is_bool:
+        raise _err("ENC1301", f"booleans are not {t.name} numbers; use 0 or 1, or a bool_ value")
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int):
+        raise _err(
+            "ENC1301",
+            f"exact {t.name} values combine with integer constants only, got {type(value).__name__} "
+            "(approximate and exact values cannot be mixed in 0.3)",
+        )
+    v = int(value)
+    if not t.fits(v):
+        raise _err("ENC1301", f"constant {v} does not fit {t.name} (and exact values stay within ±2^53)")
+    return v
+
+
 class _Graph:
     def __init__(self) -> None:
         self.lines: List[str] = []
@@ -131,6 +226,11 @@ class _Graph:
         i = len(self.lines)
         self.lines.append(f"%{i} = {op} : {ty}")
         return i
+
+    def const_exact(self, value: Any, t: ExactType) -> int:
+        """Emit a typed public constant (no detour through floating point
+        beyond 2^53, which is refused)."""
+        return self.emit(f"const [{float(_exact_int(value, t))!r}]", f"public {t.name}")
 
     def constant(self, value: Any) -> Tuple[int, str, Any]:
         """Emit a public constant; returns (id, kind, dims)."""
@@ -162,28 +262,50 @@ class _Graph:
 class Secret:
     """A secret value inside a ``@encompute.compile`` function.
 
-    Its contents are never available to Python: only arithmetic with other
-    secrets and public constants is allowed.
+    Its contents are never available to Python: only operations with other
+    secrets and public constants are allowed. Approximate (float) secrets
+    support arithmetic; exact (integer/bool) secrets also support
+    comparisons, logic, shifts, ``//`` and ``%`` by constants, and
+    ``encompute.select``.
     """
 
-    __slots__ = ("_g", "_id", "_n")
+    __slots__ = ("_g", "_id", "_n", "_e")
     __array_ufunc__ = None  # make numpy defer to our reflected operators
     __array_priority__ = 1000
 
-    def __init__(self, graph: _Graph, id_: int, length: Optional[int]):
+    def __init__(self, graph: _Graph, id_: int, length: Optional[int], elem: str = "f64"):
         self._g = graph
         self._id = id_
         self._n = length
+        self._e = elem
+
+    @property
+    def _exact(self) -> bool:
+        return self._e != "f64"
 
     # -- helpers
     def _new(self, op: str, length: Optional[int]) -> "Secret":
         return Secret(self._g, self._g.emit(op, f"secret {_shape_text(length)}"), length)
 
+    def _new_exact(self, op: str, elem: str) -> "Secret":
+        return Secret(self._g, self._g.emit(op, f"secret {elem}"), None, elem)
+
+    def _same_graph(self, other: "Secret") -> None:
+        if other._g is not self._g:
+            raise _err("ENC1301", "secret values from different compilations cannot be mixed")
+
     def _operand(self, other: Any) -> Tuple[int, Optional[int], bool]:
         """(id, length, is_secret) for an operand of an elementwise op."""
         if isinstance(other, Secret):
-            if other._g is not self._g:
-                raise _err("ENC1301", "secret values from different compilations cannot be mixed")
+            self._same_graph(other)
+            if self._exact and other._exact:
+                raise _err("ENC1301", f"this operation works on approximate (float) values, not {other._e}")
+            if other._exact or self._exact:
+                raise _err(
+                    "ENC1301",
+                    "this program mixes approximate (float) and exact (integer/bool) values; "
+                    "Encompute 0.3 runs one encrypted scheme per program",
+                )
             return other._id, other._n, True
         i, kind, dims = self._g.constant(other)
         if kind == "matrix":
@@ -191,12 +313,55 @@ class Secret:
         return i, (None if kind == "scalar" else dims), False
 
     def _elementwise(self, op: str, other: Any, reflected: bool = False) -> "Secret":
+        if self._exact:
+            return self._exact_binary(op, other, reflected)
         oid, on, _ = self._operand(other)
         a, b = (oid, self._id) if reflected else (self._id, oid)
         n = self._n
         if n is not None and on is not None and n != on:
             raise _err("ENC1301", f"{op} needs equal lengths, got {n} and {on}")
         return self._new(f"{op} %{a}, %{b}", n if n is not None else on)
+
+    # -- exact helpers
+    def _exact_id(self, other: Any) -> int:
+        """Operand id for an exact op: a secret of this type or a constant."""
+        if isinstance(other, Secret):
+            self._same_graph(other)
+            if other._e != self._e:
+                if not other._exact:
+                    raise _err(
+                        "ENC1301",
+                        "this program mixes approximate (float) and exact (integer/bool) values; "
+                        "Encompute 0.3 runs one encrypted scheme per program",
+                    )
+                raise _err(
+                    "ENC1301",
+                    f"operands have different types ({self._e} and {other._e}); convert one "
+                    f"with encompute.cast(x, {self._e})",
+                )
+            return other._id
+        return self._g.const_exact(other, _EXACT[self._e])
+
+    def _exact_binary(self, op: str, other: Any, reflected: bool = False, result: Optional[str] = None) -> "Secret":
+        oid = self._exact_id(other)
+        a, b = (oid, self._id) if reflected else (self._id, oid)
+        return self._new_exact(f"{op} %{a}, %{b}", result or self._e)
+
+    def _need_exact(self, what: str) -> None:
+        if not self._exact:
+            raise _err(
+                "ENC1003",
+                f"{what} needs exact values: declare inputs as e.g. secret[u32, 0:1000] or "
+                "secret[bool_] (approximate float values cannot be compared or branched on)",
+            )
+
+    def _public_int(self, what: str, v: Any) -> int:
+        if isinstance(v, Secret):
+            raise _err("ENC1002", f"{what} by a secret value is not supported; use a public constant")
+        v = _to_list(v)
+        if not isinstance(v, int) or isinstance(v, bool):
+            raise _err("ENC1301", f"{what} needs a public integer, got {v!r}")
+        return v
 
     # -- arithmetic
     def __add__(self, o: Any) -> "Secret":
@@ -218,12 +383,16 @@ class Secret:
         return self._elementwise("mul", o, reflected=True)
 
     def __neg__(self) -> "Secret":
+        if self._exact:
+            return self._new_exact(f"neg %{self._id}", self._e)
         return self._new(f"neg %{self._id}", self._n)
 
     def __pos__(self) -> "Secret":
         return self
 
     def __truediv__(self, o: Any) -> "Secret":
+        if self._exact:
+            raise _err("ENC1301", "exact values divide with // (and % for the remainder)")
         if isinstance(o, Secret):
             raise _err(
                 "ENC1002",
@@ -243,15 +412,39 @@ class Secret:
     def __rtruediv__(self, o: Any) -> "Secret":
         raise _err(
             "ENC1002",
-            "division by a secret value is not supported in v0.1; divide by public values only",
+            "division by a secret value is not supported; divide by public values only",
         )
+
+    def _divrem(self, op: str, o: Any) -> "Secret":
+        if not self._exact:
+            raise _err("ENC1301", "// and % need exact integer values; use / for approximate values")
+        d = self._public_int("division", o)
+        if d == 0:
+            raise ZeroDivisionError("division by zero")
+        return self._exact_binary(op, d)
+
+    def __floordiv__(self, o: Any) -> "Secret":
+        """Integer division by a public constant, rounding toward zero."""
+        return self._divrem("div", o)
+
+    def __mod__(self, o: Any) -> "Secret":
+        """Remainder of division by a public constant (sign of the dividend)."""
+        return self._divrem("rem", o)
+
+    def __rfloordiv__(self, o: Any) -> "Secret":
+        raise _err("ENC1002", "division by a secret value is not supported; divide by public values only")
+
+    __rmod__ = __rfloordiv__
 
     def __pow__(self, k: Any) -> "Secret":
         if isinstance(k, int) and not isinstance(k, bool) and k >= 1:
             if k == 1:
                 return self
-            if k == 2:
-                return self * self
+            if k == 2 or self._exact:
+                out = self
+                for _ in range(k - 1):
+                    out = out * self
+                return out
             return poly(self, [0.0] * k + [1.0])
         raise _err("ENC1005", f"secret ** {k!r}: only positive integer powers are supported")
 
@@ -270,22 +463,81 @@ class Secret:
             return matvec(o, self)
         return dot(o, self)
 
+    # -- comparisons: encrypted booleans (exact values only)
+    def _compare(self, op: str, other: Any) -> "Secret":
+        self._need_exact("comparison of secret values (<, <=, >, >=, ==, !=)")
+        return self._exact_binary(op, other, result="bool")
+
+    def __lt__(self, o: Any) -> "Secret":  # type: ignore[override]
+        return self._compare("lt", o)
+
+    def __le__(self, o: Any) -> "Secret":  # type: ignore[override]
+        return self._compare("le", o)
+
+    def __gt__(self, o: Any) -> "Secret":  # type: ignore[override]
+        return self._compare("gt", o)
+
+    def __ge__(self, o: Any) -> "Secret":  # type: ignore[override]
+        return self._compare("ge", o)
+
+    def __eq__(self, o: Any) -> "Secret":  # type: ignore[override]
+        return self._compare("eq", o)
+
+    def __ne__(self, o: Any) -> "Secret":  # type: ignore[override]
+        return self._compare("ne", o)
+
+    __hash__ = object.__hash__
+
+    # -- logic: Boolean for bool_, bitwise for integers
+    def _logic(self, op: str, other: Any) -> "Secret":
+        self._need_exact(f"{op} (& | ^)")
+        return self._exact_binary(op, other)
+
+    def __and__(self, o: Any) -> "Secret":
+        return self._logic("and", o)
+
+    __rand__ = __and__
+
+    def __or__(self, o: Any) -> "Secret":
+        return self._logic("or", o)
+
+    __ror__ = __or__
+
+    def __xor__(self, o: Any) -> "Secret":
+        return self._logic("xor", o)
+
+    __rxor__ = __xor__
+
+    def __invert__(self) -> "Secret":
+        self._need_exact("~ (not)")
+        return self._new_exact(f"not %{self._id}", self._e)
+
+    def _shift(self, op: str, by: Any) -> "Secret":
+        self._need_exact("shift")
+        n = self._public_int("shift", by)
+        if n < 0:
+            raise _err("ENC1301", "negative shift amount")
+        return self._new_exact(f"{op} %{self._id} {n}", self._e)
+
+    def __lshift__(self, by: Any) -> "Secret":
+        return self._shift("shl", by)
+
+    def __rshift__(self, by: Any) -> "Secret":
+        return self._shift("shr", by)
+
+    def __rlshift__(self, _: Any) -> "Secret":
+        raise _err("ENC1301", "a shift amount must be a public integer, not a secret value")
+
+    __rrshift__ = __rlshift__
+
     # -- things that would reveal the secret
     def __bool__(self) -> bool:
         raise _err(
             "ENC1001",
-            "Python control flow on a secret value (if, while, and/or/not, bool()); "
-            "the value is encrypted at run time. Use arithmetic instead; encompute.select arrives in 0.3",
+            "Python control flow on a secret value (if, while, and/or/not, bool(), min/max); "
+            "the value is encrypted at run time. Use encompute.select(condition, a, b), "
+            "& | ~ for Boolean logic, or encompute.minimum/maximum",
         )
-
-    def _compare(self, other: Any) -> Any:
-        raise _err(
-            "ENC1003",
-            "comparison of secret values (<, <=, >, >=, ==, !=) needs TFHE, which arrives in 0.3",
-        )
-
-    __lt__ = __le__ = __gt__ = __ge__ = __eq__ = __ne__ = _compare  # type: ignore[assignment]
-    __hash__ = object.__hash__
 
     def _reveal(self, *_: Any) -> Any:
         raise _err(
@@ -296,6 +548,8 @@ class Secret:
     __str__ = __format__ = __float__ = __int__ = __index__ = __complex__ = _reveal  # type: ignore[assignment]
 
     def __repr__(self) -> str:
+        if self._exact:
+            return f"<secret {self._e}>"
         return f"<secret {_shape_text(self._n)}>"
 
     def __len__(self) -> int:
@@ -379,8 +633,73 @@ def square(x: Any) -> Any:
     return x * x
 
 
-def select(*_: Any) -> Any:
-    raise _err("ENC1005", "encompute.select (encrypted branching) needs TFHE comparisons, which arrive in 0.3")
+def _narrowest(values: Sequence[int]) -> ExactType:
+    for t in (u8, u16, u32, u64) if min(values) >= 0 else (i8, i16, i32, i64):
+        if all(t.fits(v) for v in values):
+            return t
+    raise _err("ENC1301", f"{values} do not fit an exact type within ±2^53")
+
+
+def select(cond: Any, a: Any, b: Any, type: Optional[ExactType] = None) -> Secret:  # noqa: A002
+    """``a if cond else b`` with an encrypted bool condition; both branches
+    are computed. With two public branches the result type is ``type`` or
+    the narrowest integer type holding both."""
+    if not isinstance(cond, Secret) or cond._e != "bool":
+        raise _err(
+            "ENC1005",
+            "encompute.select needs an encrypted bool condition, e.g. select(age >= 18, a, b)",
+        )
+    secrets = [x for x in (a, b) if isinstance(x, Secret)]
+    if secrets:
+        elem = secrets[0]._e
+    elif type is not None:
+        elem = type.name
+    else:
+        elem = _narrowest([_exact_int(a, i64), _exact_int(b, i64)]).name
+    if type is not None and type.name != elem:
+        raise _err("ENC1301", f"select branches are {elem}, not {type.name}")
+    typed = Secret(cond._g, cond._id, None, elem)  # to type the constants
+    ia, ib = typed._exact_id(a), typed._exact_id(b)
+    return cond._new_exact(f"select %{cond._id}, %{ia}, %{ib}", elem)
+
+
+def cast(x: Secret, to: ExactType) -> Secret:
+    """Convert an exact value to integer type ``to``; the value must fit
+    (range analysis proves it at compile time)."""
+    if not isinstance(x, Secret) or not x._exact:
+        raise _err("ENC1301", "encompute.cast needs an exact secret value")
+    if not isinstance(to, ExactType):
+        raise TypeError(f"cast target must be an exact type such as encompute.u16, got {to!r}")
+    return x._new_exact(f"cast %{x._id}", to.name)
+
+
+def lookup(x: Secret, table: Sequence[int]) -> Secret:
+    """``table[x]`` for an encrypted index; entries have ``x``'s type."""
+    if not isinstance(x, Secret) or not x._exact:
+        raise _err("ENC1301", "encompute.lookup needs an exact secret index")
+    t = _EXACT[x._e]
+    entries = [_exact_int(v, t) for v in _to_list(table)]
+    if not entries:
+        raise _err("ENC1301", "lookup table is empty")
+    return x._new_exact(f"lookup %{x._id} {_nums(entries)}", x._e)
+
+
+def minimum(a: Any, b: Any) -> Any:
+    """Elementwise minimum of exact values."""
+    if isinstance(a, Secret):
+        return a._exact_binary("min", b) if a._exact else a._need_exact("minimum")
+    if isinstance(b, Secret):
+        return minimum(b, a)
+    return builtins.min(a, b)
+
+
+def maximum(a: Any, b: Any) -> Any:
+    """Elementwise maximum of exact values."""
+    if isinstance(a, Secret):
+        return a._exact_binary("max", b) if a._exact else a._need_exact("maximum")
+    if isinstance(b, Secret):
+        return maximum(b, a)
+    return builtins.max(a, b)
 
 
 # --- tracing -----------------------------------------------------------------
@@ -406,6 +725,10 @@ def trace(fn: Any, precision: float, name: Optional[str], publics: Dict[str, Any
         if isinstance(ann, SecretSpec):
             if pname in publics:
                 raise TypeError(f"parameter {pname!r} is secret; it cannot be bound at compile time")
+            if ann.elem != "f64":
+                i = g.emit(f'input "{pname}" [{_num(ann.lo)}, {_num(ann.hi)}]', f"secret {ann.elem}")
+                args[pname] = Secret(g, i, None, ann.elem)
+                continue
             if ann.lo is None:
                 raise _err(
                     "ENC1101",

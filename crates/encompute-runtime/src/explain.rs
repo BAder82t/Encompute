@@ -1,16 +1,60 @@
 use std::fmt::Write as _;
 
+use encompute_evaluator::{CompiledProgram, ExactProgram};
 use encompute_ir::Shape;
 use serde::Serialize;
 
-use crate::diff::DiffReport;
-use crate::model::{BenchReport, Mode, Model};
+use crate::diff::TestReport;
+use crate::model::{has_tfhe, BenchReport, Mode, Model};
 
 /// Measured behaviour of a model: accuracy and cost from real runs.
 #[derive(Clone, Debug, Serialize)]
 pub struct Measurement {
-    pub accuracy: DiffReport,
+    pub accuracy: TestReport,
     pub cost: BenchReport,
+}
+
+fn section(s: &mut String, title: &str) {
+    let _ = write!(s, "\n{title}\n{}\n", "─".repeat(48));
+}
+
+/// Data and timing sections of a measurement (any semantics).
+fn cost(s: &mut String, b: &BenchReport) {
+    let est = if b.sizes_estimated {
+        " (mock format)"
+    } else {
+        ""
+    };
+    section(s, &format!("Data (measured, {})", b.backend));
+    let _ = writeln!(
+        s,
+        "  {:<24}{}{est}",
+        "encrypted request",
+        kib(b.request_bytes)
+    );
+    let _ = writeln!(
+        s,
+        "  {:<24}{}{est}",
+        "evaluation keys",
+        kib(b.evaluation_key_bytes)
+    );
+    let _ = writeln!(
+        s,
+        "  {:<24}{}{est}",
+        "encrypted response",
+        kib(b.response_bytes)
+    );
+    section(s, &format!("Execution (measured, median of {})", b.reps));
+    let _ = writeln!(s, "  {:<24}{:.1} ms", "key generation", b.keygen_ms);
+    let _ = writeln!(s, "  {:<24}{:.1} ms", "encryption (client)", b.encrypt_ms);
+    let _ = writeln!(s, "  {:<24}{:.1} ms", "evaluation", b.evaluate_ms);
+    let _ = writeln!(s, "  {:<24}{:.1} ms", "decryption (client)", b.decrypt_ms);
+    let _ = writeln!(
+        s,
+        "  {:<24}{}",
+        "peak memory (process)",
+        kib(b.peak_rss_bytes as usize)
+    );
 }
 
 fn kib(b: usize) -> String {
@@ -42,12 +86,153 @@ impl Model {
     /// Human-readable execution plan; with a measurement, the data, cost
     /// and accuracy sections show measured values.
     pub fn explain(&self, measured: Option<&Measurement>) -> String {
-        let (p, c) = (self.program(), self.compiled());
+        match self.compiled() {
+            CompiledProgram::Approx(c) => self.explain_approx(c, measured),
+            CompiledProgram::Exact(e) => self.explain_exact(e, measured),
+        }
+    }
+
+    fn explain_exact(&self, e: &ExactProgram, measured: Option<&Measurement>) -> String {
+        let p = self.program();
+        let mut s = String::new();
+        let _ = writeln!(s, "Encompute execution plan");
+        section(&mut s, "Program");
+        let _ = writeln!(s, "  {:<24}{}", "name", p.name());
+        let _ = writeln!(s, "  {:<24}{}", "program id", &self.ids().program_id[..16]);
+        let _ = writeln!(s, "  {:<24}exact integers / Booleans", "semantics");
+
+        section(&mut s, "Privacy");
+        for (id, name, _, r) in p.inputs() {
+            let _ = writeln!(
+                s,
+                "  {:<24}secret<{}> in [{}, {}]",
+                name,
+                p.node(id).ty.elem,
+                r.lo,
+                r.hi
+            );
+        }
+        for o in &e.privacy.outputs {
+            let elem = e
+                .plan
+                .outputs
+                .iter()
+                .find(|x| x.name == o.name)
+                .map(|x| x.elem);
+            let _ = writeln!(
+                s,
+                "  {:<24}secret<{}> (depends on {})",
+                o.name,
+                elem.map_or("?".into(), |e| e.to_string()),
+                o.depends_on.join(", ")
+            );
+        }
+        let _ = writeln!(
+            s,
+            "  {:<24}no: it never receives the secret key",
+            "evaluator can decrypt"
+        );
+        for u in &e.privacy.unused_inputs {
+            let _ = writeln!(s, "  note: input {u} is not used by any output");
+        }
+
+        section(&mut s, "Plan");
+        let counts = e.plan.op_counts();
+        let count = |ks: &[&str]| {
+            counts
+                .iter()
+                .filter(|(n, _)| ks.contains(n))
+                .map(|x| x.1)
+                .sum::<usize>()
+        };
+        let _ = writeln!(
+            s,
+            "  {:<24}{}",
+            "integer operations",
+            count(&[
+                "add/sub",
+                "multiply",
+                "multiply by constant",
+                "divide by constant",
+                "shift",
+                "min/max",
+                "cast"
+            ])
+        );
+        let _ = writeln!(s, "  {:<24}{}", "comparisons", count(&["comparison"]));
+        let _ = writeln!(s, "  {:<24}{}", "Boolean/bitwise ops", count(&["logic"]));
+        let _ = writeln!(s, "  {:<24}{}", "selects", count(&["select"]));
+        let _ = writeln!(s, "  {:<24}{}", "lookups", count(&["lookup"]));
+        let _ = writeln!(s, "  {:<24}{}", "total instructions", e.plan.instrs.len());
+        let _ = writeln!(
+            s,
+            "  {:<24}proven: no operation overflows for inputs in range",
+            "integer overflow"
+        );
+
+        section(&mut s, "Execution");
+        let pr = &e.profile;
+        let _ = writeln!(s, "  {:<24}TFHE", "scheme");
+        let _ = writeln!(
+            s,
+            "  {:<24}{} {}{}",
+            "backend",
+            pr.backend,
+            pr.backend_version,
+            if has_tfhe() {
+                " (research use only)"
+            } else {
+                " (not in this build: mock only)"
+            }
+        );
+        let _ = writeln!(s, "  {:<24}{}", "parameter profile", pr.profile);
+        let _ = writeln!(
+            s,
+            "  {:<24}exact (no approximation error)",
+            "result semantics"
+        );
+        section(&mut s, "Security");
+        let _ = writeln!(s, "  {:<24}{}", "target", pr.security);
+        let _ = writeln!(
+            s,
+            "  {:<24}{}",
+            "failure probability", pr.failure_probability
+        );
+        let _ = writeln!(s, "  {:<24}no", "evaluator can decrypt");
+
+        if let Some(m) = measured {
+            cost(&mut s, &m.cost);
+            if let TestReport::Exact(r) = &m.accuracy {
+                section(
+                    &mut s,
+                    &format!("Correctness (measured, {} cases)", r.cases),
+                );
+                let _ = writeln!(s, "  {:<24}{}", "matches", r.matches);
+                let _ = writeln!(s, "  {:<24}{}", "mismatches", r.mismatches);
+                let _ = writeln!(
+                    s,
+                    "  {:<24}{}",
+                    "result",
+                    if r.passed { "PASS" } else { "FAIL" }
+                );
+            }
+        } else {
+            let _ = writeln!(
+                s,
+                "\n  run with --measure N for measured bytes, time and correctness"
+            );
+        }
+        s
+    }
+
+    fn explain_approx(
+        &self,
+        c: &encompute_ckks::Compiled,
+        measured: Option<&Measurement>,
+    ) -> String {
+        let p = self.program();
         let (plan, params) = (&c.plan, &c.params);
         let mut s = String::new();
-        let section = |s: &mut String, title: &str| {
-            let _ = write!(s, "\n{title}\n{}\n", "─".repeat(48));
-        };
         let _ = writeln!(s, "Encompute execution plan");
         section(&mut s, "Program");
         let _ = writeln!(s, "  {:<24}{}", "name", p.name());
@@ -162,47 +347,9 @@ impl Model {
             );
         }
 
-        match measured {
-            Some(m) => {
-                let (b, r) = (&m.cost, &m.accuracy);
-                let est = if b.sizes_estimated {
-                    " (mock format)"
-                } else {
-                    ""
-                };
-                section(&mut s, &format!("Data (measured, {})", b.backend));
-                let _ = writeln!(
-                    s,
-                    "  {:<24}{}{est}",
-                    "encrypted request",
-                    kib(b.request_bytes)
-                );
-                let _ = writeln!(
-                    s,
-                    "  {:<24}{}{est}",
-                    "evaluation keys",
-                    kib(b.evaluation_key_bytes)
-                );
-                let _ = writeln!(
-                    s,
-                    "  {:<24}{}{est}",
-                    "encrypted response",
-                    kib(b.response_bytes)
-                );
-                section(
-                    &mut s,
-                    &format!("Execution (measured, median of {})", b.reps),
-                );
-                let _ = writeln!(s, "  {:<24}{:.1} ms", "key generation", b.keygen_ms);
-                let _ = writeln!(s, "  {:<24}{:.1} ms", "encryption (client)", b.encrypt_ms);
-                let _ = writeln!(s, "  {:<24}{:.1} ms", "evaluation", b.evaluate_ms);
-                let _ = writeln!(s, "  {:<24}{:.1} ms", "decryption (client)", b.decrypt_ms);
-                let _ = writeln!(
-                    s,
-                    "  {:<24}{}",
-                    "peak memory (process)",
-                    kib(b.peak_rss_bytes as usize)
-                );
+        match measured.map(|m| (&m.cost, &m.accuracy)) {
+            Some((b, TestReport::Approximate(r))) => {
+                cost(&mut s, b);
                 section(&mut s, &format!("Accuracy (measured, {} cases)", r.cases));
                 let _ = writeln!(s, "  {:<24}{:.1e}", "target error", r.precision);
                 for o in &r.outputs {
@@ -231,7 +378,7 @@ impl Model {
                     if r.passed { "PASS" } else { "FAIL" }
                 );
             }
-            None => {
+            _ => {
                 section(&mut s, "Accuracy (estimated)");
                 let e = &c.estimate;
                 let _ = writeln!(s, "  {:<24}{:.1e}", "target error", e.target);

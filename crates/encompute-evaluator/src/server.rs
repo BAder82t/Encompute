@@ -24,7 +24,7 @@ use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::engine::{Engine, Local};
-use crate::session::BackendKind;
+use crate::session::{BackendKind, Backends};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -108,8 +108,8 @@ fn not_found(what: &str) -> Reply {
 
 impl Evaluator {
     /// In-process evaluator.
-    pub fn new(kind: BackendKind, limits: Limits) -> Self {
-        Self::with_engine(Arc::new(Local::new(kind)), limits, 0)
+    pub fn new(backends: Backends, limits: Limits) -> Self {
+        Self::with_engine(Arc::new(Local::new(backends)), limits, 0)
     }
 
     /// Evaluator over any engine; `workers` is reported in `/v1/info`
@@ -131,15 +131,20 @@ impl Evaluator {
     }
 
     fn info(&self) -> serde_json::Value {
-        let (backend, backend_version) = self.engine.backend().label();
+        let b = self.engine.backend();
+        let label = |k: BackendKind, scheme: &str| {
+            let (backend, version) = k.label();
+            json!({"scheme": scheme, "backend": backend, "backend_version": version})
+        };
         json!({
             "protocol": PROTOCOL_VERSION,
             "encompute_version": env!("CARGO_PKG_VERSION"),
             "role": "evaluator",
             "holds_secret_keys": false,
-            "scheme": "CKKS",
-            "backend": backend,
-            "backend_version": backend_version,
+            "backends": {
+                "approximate": label(b.approx, "CKKS"),
+                "exact": label(b.exact, "TFHE"),
+            },
             "worker_processes": self.workers,
             "programs": self.engine.programs(),
         })

@@ -104,9 +104,9 @@ fn one(name: &str) {
     let t = Instant::now();
     let m = Model::compile(workload(name)).unwrap();
     let compile_ms = t.elapsed().as_secs_f64() * 1e3;
-    let c = m.compiled();
+    let c = m.compiled().ckks().unwrap();
     let measured = m.measure(Mode::Encrypted, 20, 5).unwrap();
-    let (b, r) = (&measured.cost, &measured.accuracy);
+    let (b, r) = (&measured.cost, measured.accuracy.approx().unwrap());
     let rel = r.outputs.iter().map(|o| o.max_relative).fold(0.0, f64::max);
     println!(
         "| {name} | {} | {} | {} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.2} | {:.2} | {:.2} | {} | {:.1e} | {:.1e} |",

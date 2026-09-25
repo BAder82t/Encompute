@@ -5,11 +5,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use encompute_backend::{CkksClient, MockClient, MockConfig};
+use encompute_backend::{CkksClient, ExactClient, MockClient, MockConfig, PlainExactClient};
 use encompute_evaluator::engine::Engine;
 use encompute_evaluator::pool::Pool;
-use encompute_evaluator::{BackendKind, EvaluatorSession};
-use encompute_ir::{Builder, Program, Range, Shape};
+use encompute_evaluator::{BackendKind, Backends, EvaluatorSession};
+use encompute_ir::{Builder, CmpOp, Elem, Program, Range, Shape};
 use encompute_protocol::{sha256_hex, Envelope, Header, Kind};
 
 fn program() -> Program {
@@ -26,9 +26,13 @@ fn program() -> Program {
 }
 
 fn header(kind: Kind, ids: &encompute_evaluator::Ids, key_id: &str) -> Header {
+    scheme_header("CKKS", kind, ids, key_id)
+}
+
+fn scheme_header(scheme: &str, kind: Kind, ids: &encompute_evaluator::Ids, key_id: &str) -> Header {
     Header {
         kind,
-        scheme: "CKKS".into(),
+        scheme: scheme.into(),
         backend: "mock".into(),
         backend_version: "0".into(),
         parameter_set_id: ids.parameter_set_id.clone(),
@@ -46,11 +50,8 @@ fn exe() -> PathBuf {
 fn concurrent_jobs_crash_isolation_and_replay() {
     let p = program();
     let local = EvaluatorSession::new(p.clone(), BackendKind::Mock).unwrap();
-    let (ids, plan, params) = (
-        local.ids().clone(),
-        local.compiled().plan.clone(),
-        local.compiled().params.clone(),
-    );
+    let c = local.compiled().ckks().unwrap();
+    let (ids, plan, params) = (local.ids().clone(), c.plan.clone(), c.params.clone());
     let client = MockClient::new(
         &params,
         &plan.rotations,
@@ -67,7 +68,7 @@ fn concurrent_jobs_crash_isolation_and_replay() {
     )
     .encode();
 
-    let pool = Arc::new(Pool::start(BackendKind::Mock, exe(), 3).unwrap());
+    let pool = Arc::new(Pool::start(Backends::MOCK, exe(), 3).unwrap());
     assert_eq!(
         pool.add_program(&p.to_string()).unwrap().program_id,
         ids.program_id
@@ -130,5 +131,60 @@ fn concurrent_jobs_crash_isolation_and_replay() {
     assert!(
         new_pids.iter().flatten().count() == 3,
         "all workers restarted: {new_pids:?}"
+    );
+}
+
+/// Exact programs run in worker processes too, bound to scheme TFHE.
+#[test]
+fn exact_program_in_workers() {
+    let mut b = Builder::new("adult", 1e-3).unwrap();
+    let age = b
+        .input_exact("age", Elem::U8, Some(Range::new(0.0, 120.0)))
+        .unwrap();
+    let k = b.constant_exact(Elem::U8, 18.0).unwrap();
+    let ok = b.cmp(CmpOp::Ge, age, k).unwrap();
+    b.output("adult", ok).unwrap();
+    let p = b.finish().unwrap();
+
+    let ids = EvaluatorSession::new(p.clone(), BackendKind::Mock)
+        .unwrap()
+        .ids()
+        .clone();
+    let client = PlainExactClient::new(11);
+    let payload = client.evaluation_keys().unwrap();
+    let key_id = sha256_hex(&payload);
+    let keys = Envelope::new(
+        scheme_header("TFHE", Kind::EvaluationKeys, &ids, &key_id),
+        vec![("keys".into(), payload)],
+    )
+    .encode();
+    let pool = Pool::start(Backends::MOCK, exe(), 2).unwrap();
+    let info = pool.add_program(&p.to_string()).unwrap();
+    assert_eq!(
+        (info.scheme.as_str(), info.backend.as_str()),
+        ("TFHE", "mock")
+    );
+    pool.register_keys(&ids.program_id, &keys).unwrap();
+    for (age, want) in [(17, 0), (18, 1), (120, 1), (0, 0)] {
+        let ct = client.encrypt(Elem::U8, age).unwrap();
+        let req = Envelope::new(
+            scheme_header("TFHE", Kind::Inputs, &ids, &key_id),
+            vec![("age".into(), ct)],
+        )
+        .encode();
+        let out = Envelope::decode(&pool.execute(&ids.program_id, &req).unwrap().0).unwrap();
+        assert_eq!(out.header.scheme, "TFHE");
+        assert_eq!(client.decrypt(Elem::Bool, out.items()[0].1).unwrap(), want);
+    }
+    // A CKKS-labelled envelope is refused by the exact program.
+    let ct = client.encrypt(Elem::U8, 30).unwrap();
+    let wrong = Envelope::new(
+        header(Kind::Inputs, &ids, &key_id),
+        vec![("age".into(), ct)],
+    )
+    .encode();
+    assert_eq!(
+        pool.execute(&ids.program_id, &wrong).unwrap_err().code,
+        encompute_ir::Code::Incompatible
     );
 }

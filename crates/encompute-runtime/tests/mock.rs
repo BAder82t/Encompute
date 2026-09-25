@@ -34,7 +34,11 @@ fn logistic_demo_on_mock() {
     assert!(plan_error(&p, 20) <= cheb.max_error + 1e-9);
 
     let (client, ev) = mock_sessions(&p, None, 1);
-    let rep = diff_test(&client, &ev, &p, 200, 42).unwrap();
+    let rep = diff_test(&client, &ev, &p, 200, 42)
+        .unwrap()
+        .approx()
+        .unwrap()
+        .clone();
     assert!(rep.passed, "{rep:#?}");
 }
 
@@ -56,7 +60,11 @@ fn similarity_demo_on_mock() {
     assert!(plan_error(&p, 5) < 1e-12);
 
     let (client, ev) = mock_sessions(&p, None, 2);
-    let rep = diff_test(&client, &ev, &p, 20, 42).unwrap();
+    let rep = diff_test(&client, &ev, &p, 20, 42)
+        .unwrap()
+        .approx()
+        .unwrap()
+        .clone();
     assert!(rep.passed, "{rep:#?}");
 }
 
@@ -132,7 +140,11 @@ fn diff_test_reports_failures() {
     let mut params = c.params.clone();
     params.scale_bits = 20; // noise σ = 2^-3, far above 1e-3
     let (client, ev) = mock_sessions(&p, Some(&params), 3);
-    let rep = diff_test(&client, &ev, &p, 10, 1).unwrap();
+    let rep = diff_test(&client, &ev, &p, 10, 1)
+        .unwrap()
+        .approx()
+        .unwrap()
+        .clone();
     assert!(!rep.passed);
     assert!(rep.failing.is_some());
 }

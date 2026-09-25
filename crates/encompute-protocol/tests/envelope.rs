@@ -18,6 +18,7 @@ fn header(kind: Kind) -> Header {
 fn expect(kind: Kind) -> Expect<'static> {
     Expect {
         kind,
+        scheme: "CKKS",
         backend: "openfhe",
         backend_version: "1.5.1",
         parameter_set_id: "p1",
@@ -54,6 +55,14 @@ fn every_binding_is_enforced() {
             ..expect(Kind::Inputs)
         }),
         Code::Incompatible
+    );
+    assert_eq!(
+        code(Expect {
+            scheme: "TFHE",
+            ..expect(Kind::Inputs)
+        }),
+        Code::Incompatible,
+        "a CKKS envelope is not accepted where TFHE is expected"
     );
     assert_eq!(
         code(Expect {
