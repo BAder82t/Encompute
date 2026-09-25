@@ -8,7 +8,9 @@ members = [
     "crates/encompute-protocol",
     "crates/encompute-openfhe",
     "crates/encompute-openfhe-client",
+    "crates/encompute-exact",
     "crates/encompute-tfhe",
+    "crates/encompute-tfhe-client",
     "crates/encompute-evaluator",
     "crates/encompute-runtime",
     "crates/encompute-cli",
@@ -22,6 +24,9 @@ default-members = [
     "crates/encompute-ckks",
     "crates/encompute-backend",
     "crates/encompute-protocol",
+    "crates/encompute-exact",
+    "crates/encompute-tfhe",
+    "crates/encompute-tfhe-client",
     "crates/encompute-evaluator",
     "crates/encompute-runtime",
     "crates/encompute-cli",
@@ -41,7 +46,9 @@ encompute-backend = { path = "crates/encompute-backend" }
 encompute-protocol = { path = "crates/encompute-protocol" }
 encompute-openfhe = { path = "crates/encompute-openfhe" }
 encompute-openfhe-client = { path = "crates/encompute-openfhe-client" }
+encompute-exact = { path = "crates/encompute-exact" }
 encompute-tfhe = { path = "crates/encompute-tfhe" }
+encompute-tfhe-client = { path = "crates/encompute-tfhe-client" }
 encompute-evaluator = { path = "crates/encompute-evaluator" }
 encompute-runtime = { path = "crates/encompute-runtime" }
 serde = { version = "1.0", features = ["derive"] }

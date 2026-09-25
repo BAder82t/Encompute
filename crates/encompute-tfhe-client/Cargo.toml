@@ -1,0 +1,22 @@
+[package]
+name = "encompute-tfhe-client"
+description = "TFHE-rs client for Encompute exact programs: keys, encryption, decryption (research use only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+encompute-ir.workspace = true
+encompute-backend.workspace = true
+encompute-tfhe = { workspace = true }
+tfhe = { version = "=1.8.1", default-features = false, features = ["integer"], optional = true }
+
+[dev-dependencies]
+encompute-exact.workspace = true
+
+[features]
+tfhe-rs = ["dep:tfhe", "encompute-tfhe/tfhe-rs"]
+
+[lints]
+workspace = true

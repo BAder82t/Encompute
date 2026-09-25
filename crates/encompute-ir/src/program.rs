@@ -60,7 +60,8 @@ pub enum Op {
     Rem(ValueId, ValueId),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CmpOp {
     Eq,
     Ne,
@@ -70,7 +71,8 @@ pub enum CmpOp {
     Ge,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LogicOp {
     And,
     Or,

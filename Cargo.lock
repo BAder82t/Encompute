@@ -482,6 +482,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "encompute-exact"
+version = "0.2.0"
+dependencies = [
+ "encompute-analysis",
+ "encompute-backend",
+ "encompute-ir",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "encompute-ir"
 version = "0.2.0"
 dependencies = [
@@ -559,7 +571,20 @@ dependencies = [
 name = "encompute-tfhe"
 version = "0.2.0"
 dependencies = [
+ "encompute-backend",
+ "encompute-exact",
  "encompute-ir",
+ "tfhe",
+]
+
+[[package]]
+name = "encompute-tfhe-client"
+version = "0.2.0"
+dependencies = [
+ "encompute-backend",
+ "encompute-exact",
+ "encompute-ir",
+ "encompute-tfhe",
  "tfhe",
 ]
 

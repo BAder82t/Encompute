@@ -1,6 +1,6 @@
 [package]
 name = "encompute-tfhe"
-description = "Exact (TFHE-family) evaluation for Encompute"
+description = "TFHE-rs implementation of Encompute's exact evaluator (research use only)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,11 @@ license.workspace = true
 
 [dependencies]
 encompute-ir.workspace = true
-# Research use only: Zama licenses TFHE-rs under BSD-3-Clause-Clear for
-# development, research, prototyping and experimentation; commercial use
-# requires Zama's patent license (docs/threat-model.md, README).
+encompute-backend.workspace = true
+encompute-exact.workspace = true
+# TFHE-rs source is BSD-3-Clause-Clear; Zama states that commercial use of its
+# technology requires a separate patent license. Keeping it behind an
+# off-by-default feature does not change that requirement.
 tfhe = { version = "=1.8.1", default-features = false, features = ["integer"], optional = true }
 
 [features]

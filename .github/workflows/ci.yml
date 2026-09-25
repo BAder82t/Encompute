@@ -42,8 +42,8 @@ jobs:
           path: .deps/openfhe
           key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
       - run: ./scripts/install-openfhe.sh
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features --release
+      - run: cargo clippy --workspace --all-targets --features encompute-runtime/openfhe,encompute-evaluator/openfhe,encompute-cli/openfhe -- -D warnings
+      - run: cargo test --workspace --release --features encompute-runtime/openfhe,encompute-evaluator/openfhe,encompute-cli/openfhe
       - name: evaluator links no client crypto
         run: |
           cargo build --release -p encompute-evaluator --features openfhe
@@ -84,3 +84,15 @@ jobs:
           maturin develop --release --features openfhe
       - name: demo
         run: PYTHON=.venv/bin/python ./scripts/two-machine-demo.sh
+
+  exact-research:
+    name: exact backend (TFHE-rs, research feature)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p encompute-tfhe -p encompute-tfhe-client --all-targets --features encompute-tfhe-client/tfhe-rs -- -D warnings
+      - run: cargo test --release -p encompute-tfhe -p encompute-tfhe-client --features encompute-tfhe-client/tfhe-rs

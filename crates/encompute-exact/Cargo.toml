@@ -1,0 +1,21 @@
+[package]
+name = "encompute-exact"
+description = "Backend-independent exact (integer/Boolean) plans, lowering and evaluation for Encompute"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# No FHE library dependency: backends implement encompute_backend::ExactEvaluator.
+[dependencies]
+encompute-ir.workspace = true
+encompute-analysis.workspace = true
+encompute-backend.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

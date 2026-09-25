@@ -15,10 +15,12 @@
 //! The traits are CKKS-shaped on purpose; they become scheme-generic when a
 //! second scheme exists.
 
+pub mod exact;
 mod mock;
 pub mod rng;
 
 use encompute_ir::Result;
+pub use exact::{ExactClient, ExactEvaluator, PlainExactClient, PlainExactEvaluator};
 pub use mock::{MockClient, MockConfig, MockEvaluator};
 
 /// Client side: key owner.
