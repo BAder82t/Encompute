@@ -7,8 +7,9 @@
 //! decryption; those live in `encompute-openfhe-client`, which the evaluator
 //! binary does not link (0.2 plan, D2).
 
-use encompute_backend::CkksEvaluator;
+use encompute_backend::{CkksEvaluator, ExactEvaluator};
 use encompute_ckks::CkksParams;
+use encompute_ir::{CmpOp, Elem, LogicOp};
 use encompute_ir::{Code, Error, Result};
 
 /// OpenFHE release this crate is built and tested against.
@@ -31,6 +32,7 @@ mod ffi {
             num_large_digits: u32,
             slots: u32,
         ) -> Result<UniquePtr<Context>>;
+        fn new_bgv_context(mult_depth: u32) -> Result<UniquePtr<Context>>;
         fn ring_dimension(ctx: &Context) -> Result<u32>;
         fn log_qp(ctx: &Context) -> Result<u32>;
         fn load_evaluation_keys(ctx: Pin<&mut Context>, bytes: &[u8]) -> Result<String>;
@@ -47,9 +49,13 @@ mod ffi {
         fn mul_const(ctx: &Context, a: &Ciphertext, c: f64) -> Result<UniquePtr<Ciphertext>>;
         fn rotate(ctx: &Context, a: &Ciphertext, k: i32) -> Result<UniquePtr<Ciphertext>>;
         fn level(ct: &Ciphertext) -> u32;
+        fn clone_ciphertext(ct: &Ciphertext) -> Result<UniquePtr<Ciphertext>>;
+        fn bgv_add_scalar(ctx: &Context, a: &Ciphertext, c: i64) -> Result<UniquePtr<Ciphertext>>;
+        fn bgv_mul_scalar(ctx: &Context, a: &Ciphertext, c: i64) -> Result<UniquePtr<Ciphertext>>;
     }
 }
 
+// SAFETY (BgvCiphertext holds ffi::Ciphertext): see below.
 // SAFETY: every shim function, including the wrappers' destructors, holds the
 // process-wide OpenFHE mutex (ADR-001), so these objects may be used from and
 // dropped on any thread.
@@ -229,5 +235,240 @@ impl CkksEvaluator for OpenFheEvaluator {
 
     fn rotate(&self, a: &Ct, k: u32) -> Result<Ct> {
         wrap(ffi::rotate(&self.ctx, &a.0, k as i32))
+    }
+}
+
+/// Exact-program evaluator over OpenFHE BGV-RNS (0.4 V3, ADR-009): unsigned
+/// 8/16-bit integers and Booleans in slot 0, plaintext modulus 65537. Range
+/// analysis proves no value leaves its type, so arithmetic modulo 65537 is
+/// exact. Evaluation is deterministic: the same inputs and keys give the
+/// same output bytes, which is what re-execution verification checks.
+/// Holds evaluation keys only.
+pub struct BgvEvaluator {
+    ctx: cxx::UniquePtr<ffi::Context>,
+    loaded: bool,
+}
+
+/// A BGV ciphertext with the exact type it holds.
+pub struct BgvCiphertext {
+    ct: cxx::UniquePtr<ffi::Ciphertext>,
+    elem: Elem,
+}
+
+impl Clone for BgvCiphertext {
+    fn clone(&self) -> Self {
+        // A deep copy: OpenFHE ciphertexts are shared handles.
+        Self {
+            ct: ffi::clone_ciphertext(&self.ct).expect("OpenFHE clone"),
+            elem: self.elem,
+        }
+    }
+}
+
+fn unsupported(what: &str) -> Error {
+    Error::new(
+        Code::Unsupported,
+        format!("the BGV backend does not support {what} (ADR-009 subset)"),
+    )
+}
+
+fn subset(e: Elem) -> Result<()> {
+    match e {
+        Elem::U8 | Elem::U16 | Elem::Bool => Ok(()),
+        other => Err(unsupported(&format!("type {other}"))),
+    }
+}
+
+impl BgvEvaluator {
+    /// Context for multiplicative depth `mult_depth` (from the plan).
+    pub fn new(mult_depth: u32) -> Result<Self> {
+        Ok(Self {
+            ctx: ffi::new_bgv_context(mult_depth).map_err(backend_err)?,
+            loaded: false,
+        })
+    }
+
+    /// Load evaluation keys exported by the BGV client.
+    pub fn load_keys(&mut self, bytes: &[u8]) -> Result<()> {
+        ffi::load_evaluation_keys(self.ctx.pin_mut(), bytes).map_err(backend_err)?;
+        self.loaded = true;
+        Ok(())
+    }
+
+    fn wrap(
+        &self,
+        r: std::result::Result<cxx::UniquePtr<ffi::Ciphertext>, cxx::Exception>,
+        elem: Elem,
+    ) -> Result<BgvCiphertext> {
+        Ok(BgvCiphertext {
+            ct: r.map_err(backend_err)?,
+            elem,
+        })
+    }
+
+    fn same(a: &BgvCiphertext, b: &BgvCiphertext) -> Result<Elem> {
+        if a.elem != b.elem {
+            return Err(Error::new(Code::Backend, "operands of different types"));
+        }
+        Ok(a.elem)
+    }
+
+    fn scalar(c: i128) -> Result<i64> {
+        i64::try_from(c)
+            .ok()
+            .filter(|c| (0..65537).contains(c))
+            .ok_or_else(|| unsupported("constants outside [0, 65537)"))
+    }
+
+    fn mul_ct(&self, a: &BgvCiphertext, b: &BgvCiphertext, elem: Elem) -> Result<BgvCiphertext> {
+        self.wrap(ffi::mul(&self.ctx, &a.ct, &b.ct), elem)
+    }
+}
+
+impl ExactEvaluator for BgvEvaluator {
+    type Ciphertext = BgvCiphertext;
+
+    fn name(&self) -> &'static str {
+        "openfhe-bgv"
+    }
+
+    fn load(&self, elem: Elem, bytes: &[u8]) -> Result<BgvCiphertext> {
+        subset(elem)?;
+        if !self.loaded {
+            return Err(Error::new(Code::WrongKey, "no evaluation keys are loaded"));
+        }
+        self.wrap(ffi::load_ciphertext(&self.ctx, bytes), elem)
+    }
+
+    fn store(&self, ct: &BgvCiphertext) -> Result<Vec<u8>> {
+        ffi::store_ciphertext(&ct.ct).map_err(backend_err)
+    }
+
+    fn elem_of(&self, ct: &BgvCiphertext) -> Elem {
+        ct.elem
+    }
+
+    fn trivial(&self, _: Elem, _: i128) -> Result<BgvCiphertext> {
+        Err(unsupported("public constants as ciphertexts"))
+    }
+
+    fn add(&self, a: &BgvCiphertext, b: &BgvCiphertext) -> Result<BgvCiphertext> {
+        let e = Self::same(a, b)?;
+        self.wrap(ffi::add(&self.ctx, &a.ct, &b.ct), e)
+    }
+
+    fn sub(&self, a: &BgvCiphertext, b: &BgvCiphertext) -> Result<BgvCiphertext> {
+        let e = Self::same(a, b)?;
+        self.wrap(ffi::sub(&self.ctx, &a.ct, &b.ct), e)
+    }
+
+    fn mul(&self, a: &BgvCiphertext, b: &BgvCiphertext) -> Result<BgvCiphertext> {
+        let e = Self::same(a, b)?;
+        self.mul_ct(a, b, e)
+    }
+
+    fn neg(&self, _: &BgvCiphertext) -> Result<BgvCiphertext> {
+        Err(unsupported("negation"))
+    }
+
+    fn add_scalar(&self, a: &BgvCiphertext, c: i128) -> Result<BgvCiphertext> {
+        self.wrap(
+            ffi::bgv_add_scalar(&self.ctx, &a.ct, Self::scalar(c)?),
+            a.elem,
+        )
+    }
+
+    fn sub_scalar(&self, a: &BgvCiphertext, c: i128) -> Result<BgvCiphertext> {
+        let c = Self::scalar(c)?;
+        self.wrap(
+            ffi::bgv_add_scalar(&self.ctx, &a.ct, (65537 - c) % 65537),
+            a.elem,
+        )
+    }
+
+    fn mul_scalar(&self, a: &BgvCiphertext, c: i128) -> Result<BgvCiphertext> {
+        self.wrap(
+            ffi::bgv_mul_scalar(&self.ctx, &a.ct, Self::scalar(c)?),
+            a.elem,
+        )
+    }
+
+    fn scalar_sub(&self, c: i128, a: &BgvCiphertext) -> Result<BgvCiphertext> {
+        let neg = self.wrap(ffi::neg(&self.ctx, &a.ct), a.elem)?;
+        self.wrap(
+            ffi::bgv_add_scalar(&self.ctx, &neg.ct, Self::scalar(c)?),
+            a.elem,
+        )
+    }
+
+    fn div_scalar(&self, _: &BgvCiphertext, _: i128) -> Result<BgvCiphertext> {
+        Err(unsupported("division"))
+    }
+
+    fn rem_scalar(&self, _: &BgvCiphertext, _: i128) -> Result<BgvCiphertext> {
+        Err(unsupported("remainder"))
+    }
+
+    fn cmp(&self, _: CmpOp, _: &BgvCiphertext, _: &BgvCiphertext) -> Result<BgvCiphertext> {
+        Err(unsupported("comparisons"))
+    }
+
+    fn cmp_scalar(&self, _: CmpOp, _: &BgvCiphertext, _: i128) -> Result<BgvCiphertext> {
+        Err(unsupported("comparisons"))
+    }
+
+    /// Booleans only: and = ab, or = a + b − ab, xor = a + b − ab − ab
+    /// (one multiplicative level each).
+    fn logic(&self, op: LogicOp, a: &BgvCiphertext, b: &BgvCiphertext) -> Result<BgvCiphertext> {
+        if Self::same(a, b)? != Elem::Bool {
+            return Err(unsupported("bitwise logic on integers"));
+        }
+        let ab = self.mul_ct(a, b, Elem::Bool)?;
+        if op == LogicOp::And {
+            return Ok(ab);
+        }
+        // No product by a constant: that would need another level.
+        let or = self.sub(&self.add(a, b)?, &ab)?;
+        if op == LogicOp::Or {
+            return Ok(or);
+        }
+        self.sub(&or, &ab)
+    }
+
+    /// Booleans only: not = 1 − a.
+    fn not(&self, a: &BgvCiphertext) -> Result<BgvCiphertext> {
+        if a.elem != Elem::Bool {
+            return Err(unsupported("bitwise not on integers"));
+        }
+        self.scalar_sub(1, a)
+    }
+
+    fn shift(&self, _: &BgvCiphertext, _: bool, _: u32) -> Result<BgvCiphertext> {
+        Err(unsupported("shifts"))
+    }
+
+    fn min(&self, _: &BgvCiphertext, _: &BgvCiphertext) -> Result<BgvCiphertext> {
+        Err(unsupported("min"))
+    }
+
+    fn max(&self, _: &BgvCiphertext, _: &BgvCiphertext) -> Result<BgvCiphertext> {
+        Err(unsupported("max"))
+    }
+
+    fn select(
+        &self,
+        _: &BgvCiphertext,
+        _: &BgvCiphertext,
+        _: &BgvCiphertext,
+    ) -> Result<BgvCiphertext> {
+        Err(unsupported("select"))
+    }
+
+    fn lookup(&self, _: &BgvCiphertext, _: &[i128], _: Elem) -> Result<BgvCiphertext> {
+        Err(unsupported("lookup"))
+    }
+
+    fn cast(&self, _: &BgvCiphertext, _: Elem) -> Result<BgvCiphertext> {
+        Err(unsupported("casts"))
     }
 }

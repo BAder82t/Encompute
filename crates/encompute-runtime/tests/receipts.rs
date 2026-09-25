@@ -176,6 +176,7 @@ fn tampering_fails_closed() {
             request_commitment: &rc,
             output_commitment: &oc,
             transcript_hash: None,
+            proof_expected: false,
             trusted_evaluator: &trusted,
         }
     )

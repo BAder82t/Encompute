@@ -33,6 +33,8 @@ std::unique_ptr<Context> new_context(uint32_t ring_dim, uint32_t mult_depth,
                                      uint32_t first_mod_bits,
                                      uint32_t num_large_digits,
                                      uint32_t slots);
+// BGV context for exact programs (see common.h).
+std::unique_ptr<Context> new_bgv_context(uint32_t mult_depth);
 uint32_t ring_dimension(const Context& ctx);
 uint32_t log_qp(const Context& ctx);
 
@@ -56,5 +58,9 @@ std::unique_ptr<Ciphertext> add_const(const Context& ctx, const Ciphertext& a, d
 std::unique_ptr<Ciphertext> mul_const(const Context& ctx, const Ciphertext& a, double c);
 std::unique_ptr<Ciphertext> rotate(const Context& ctx, const Ciphertext& a, int32_t k);
 uint32_t level(const Ciphertext& ct);
+std::unique_ptr<Ciphertext> clone_ciphertext(const Ciphertext& ct);
+// BGV: add / multiply slot 0 by a public integer (other slots are unused).
+std::unique_ptr<Ciphertext> bgv_add_scalar(const Context& ctx, const Ciphertext& a, int64_t c);
+std::unique_ptr<Ciphertext> bgv_mul_scalar(const Context& ctx, const Ciphertext& a, int64_t c);
 
 }  // namespace encompute_openfhe

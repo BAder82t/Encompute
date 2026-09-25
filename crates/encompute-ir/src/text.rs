@@ -26,12 +26,18 @@ const _: () = assert!(HEADER.len() == "encompute ".len() + crate::IR_VERSION.len
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{HEADER}")?;
-        writeln!(
+        write!(
             f,
             "program {} precision {:?}",
             self.name(),
             self.precision()
         )?;
+        // The default is not written, so receipt-only programs keep the
+        // same text and program ID as before 0.4 V3.
+        if self.verification() != crate::program::Verification::Receipt {
+            write!(f, " verification {}", self.verification().name())?;
+        }
+        writeln!(f)?;
         for (id, node) in self.iter() {
             write!(f, "{id} = {}", node.op.mnemonic())?;
             match &node.op {
@@ -89,8 +95,20 @@ pub fn parse(src: &str) -> Result<Program> {
     let name = c.word()?;
     c.keyword("precision")?;
     let precision = c.float()?;
+    c.skip_ws();
+    let verification = if c.rest.is_empty() {
+        crate::program::Verification::Receipt
+    } else {
+        c.keyword("verification")?;
+        match crate::program::Verification::parse(&c.word()?) {
+            // Only the non-default mode is written (canonical text).
+            Some(v @ crate::program::Verification::Required) => v,
+            _ => return c.fail("`required`"),
+        }
+    };
     c.end()?;
     let mut b = Builder::new(&name, precision).map_err(|e| at(n, e))?;
+    b.verification(verification);
 
     for (n, line) in lines {
         let mut c = Cursor::new(n, line);

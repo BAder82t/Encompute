@@ -49,6 +49,9 @@ pub enum Code {
     /// A semantic transcript is malformed, of an unknown version, or does
     /// not match the plan or the verification metadata.
     Transcript,
+    /// An execution proof is missing, malformed or invalid, or a program
+    /// requiring verified execution cannot be fully proven.
+    Unverified,
 }
 
 impl Code {
@@ -76,13 +79,14 @@ impl Code {
             Code::Receipt => "ENC1606",
             Code::Remote => "ENC1701",
             Code::Transcript => "ENC1702",
+            Code::Unverified => "ENC1801",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 22] = [
+    pub const ALL: [Code; 23] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -105,6 +109,7 @@ impl Code {
         Code::Receipt,
         Code::Remote,
         Code::Transcript,
+        Code::Unverified,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

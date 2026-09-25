@@ -2,9 +2,9 @@
 //! and export of evaluation keys. The only crate that touches the secret key.
 //! The evaluator binary does not depend on it (0.2 plan, D2).
 
-use encompute_backend::CkksClient;
+use encompute_backend::{CkksClient, ExactClient};
 use encompute_ckks::CkksParams;
-use encompute_ir::{Code, Error, Result};
+use encompute_ir::{Code, Elem, Error, Result};
 
 #[allow(unsafe_code)]
 #[cxx::bridge(namespace = "encompute_openfhe_client")]
@@ -34,6 +34,10 @@ mod ffi {
             slots: u32,
             secret: &[u8],
         ) -> Result<UniquePtr<Client>>;
+        fn bgv_generate(mult_depth: u32) -> Result<UniquePtr<Client>>;
+        fn bgv_restore(mult_depth: u32, secret: &[u8]) -> Result<UniquePtr<Client>>;
+        fn bgv_encrypt(c: &Client, value: i64) -> Result<Vec<u8>>;
+        fn bgv_decrypt(c: &Client, ciphertext: &[u8]) -> Result<i64>;
         fn export_evaluation_keys(c: &Client) -> Result<Vec<u8>>;
         fn export_secret_key(c: &Client) -> Result<Vec<u8>>;
         fn encrypt(c: &Client, values: &[f64]) -> Result<Vec<u8>>;
@@ -127,6 +131,74 @@ impl CkksClient for OpenFheClient {
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<f64>> {
         ffi::decrypt(&self.inner, ciphertext).map_err(backend_err)
+    }
+
+    fn evaluation_keys(&self) -> Result<Vec<u8>> {
+        ffi::export_evaluation_keys(&self.inner).map_err(backend_err)
+    }
+}
+
+/// BGV client for exact programs (0.4 V3, ADR-009): keys, encryption and
+/// decryption of unsigned 8/16-bit integers and Booleans in slot 0.
+pub struct BgvClient {
+    inner: cxx::UniquePtr<ffi::Client>,
+}
+
+impl BgvClient {
+    /// Fresh keys and relinearization key for multiplicative depth
+    /// `mult_depth` (from the plan).
+    pub fn generate(mult_depth: u32) -> Result<Self> {
+        Ok(Self {
+            inner: ffi::bgv_generate(mult_depth).map_err(backend_err)?,
+        })
+    }
+
+    /// Restore from [`BgvClient::secret_key`] bytes.
+    pub fn restore(mult_depth: u32, secret: &[u8]) -> Result<Self> {
+        Ok(Self {
+            inner: ffi::bgv_restore(mult_depth, secret).map_err(backend_err)?,
+        })
+    }
+
+    /// Serialized key pair. Store with owner-only permissions.
+    pub fn secret_key(&self) -> Result<Vec<u8>> {
+        ffi::export_secret_key(&self.inner).map_err(backend_err)
+    }
+}
+
+fn check(elem: Elem, v: i128) -> Result<i64> {
+    let (lo, hi) = elem.bounds();
+    match elem {
+        Elem::U8 | Elem::U16 | Elem::Bool if lo <= v && v <= hi => Ok(v as i64),
+        Elem::U8 | Elem::U16 | Elem::Bool => {
+            Err(Error::new(Code::BadInput, format!("{v} is not a {elem}")))
+        }
+        other => Err(Error::new(
+            Code::Unsupported,
+            format!("the BGV backend does not support type {other}"),
+        )),
+    }
+}
+
+impl ExactClient for BgvClient {
+    fn name(&self) -> &'static str {
+        "openfhe-bgv"
+    }
+
+    fn encrypt(&self, elem: Elem, value: i128) -> Result<Vec<u8>> {
+        ffi::bgv_encrypt(&self.inner, check(elem, value)?).map_err(backend_err)
+    }
+
+    fn decrypt(&self, elem: Elem, ciphertext: &[u8]) -> Result<i128> {
+        let v = ffi::bgv_decrypt(&self.inner, ciphertext).map_err(backend_err)? as i128;
+        // Range analysis proves results fit their type; anything else means
+        // a wrong or tampered result.
+        check(elem, v).map(i128::from).map_err(|_| {
+            Error::new(
+                Code::Backend,
+                format!("decrypted {v}, which is not a {elem}: the result is wrong"),
+            )
+        })
     }
 
     fn evaluation_keys(&self) -> Result<Vec<u8>> {

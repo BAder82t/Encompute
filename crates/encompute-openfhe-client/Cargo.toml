@@ -13,6 +13,9 @@ encompute-ckks.workspace = true
 encompute-backend.workspace = true
 encompute-openfhe.workspace = true
 
+[dev-dependencies]
+encompute-exact.workspace = true
+
 [build-dependencies]
 cxx-build.workspace = true
 

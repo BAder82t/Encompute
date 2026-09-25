@@ -100,6 +100,10 @@ struct Security<'a> {
     outputs: Vec<Io>,
     evaluation_keys: EvalKeys<'a>,
     evaluator_observes: &'a [&'static str],
+    /// "receipt" or "required" (a cryptographic execution proof).
+    verification: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof_protocol: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -223,11 +227,13 @@ impl Model {
                     rotations: &c.plan.rotations,
                 },
                 evaluator_observes: &privacy.evaluator_observes,
+                verification: "receipt",
+                proof_protocol: None,
             },
             CompiledProgram::Exact(e) => Security {
                 semantics: "exact",
                 security_level: &e.profile.security,
-                scheme: "TFHE",
+                scheme: c.scheme(),
                 security_table: None,
                 backend: Some(&e.profile.backend),
                 parameter_profile: Some(&e.profile.profile),
@@ -235,8 +241,13 @@ impl Model {
                 result_semantics: "exact",
                 evaluator_receives_secret_key: false,
                 plaintext_logging: false,
-                key_ownership: "the client generates all keys; the evaluator receives the \
-                                (compressed) server key only",
+                key_ownership: if e.proof_required {
+                    "the client generates all keys; the evaluator receives the relinearization \
+                     key only"
+                } else {
+                    "the client generates all keys; the evaluator receives the (compressed) \
+                     server key only"
+                },
                 threat_model,
                 conditions: vec![
                     range_condition,
@@ -245,9 +256,21 @@ impl Model {
                 inputs,
                 outputs,
                 evaluation_keys: EvalKeys::Exact {
-                    server_key: "compressed TFHE server key (bootstrapping and key-switching keys)",
+                    server_key: if e.proof_required {
+                        "BGV relinearization key"
+                    } else {
+                        "compressed TFHE server key (bootstrapping and key-switching keys)"
+                    },
                 },
                 evaluator_observes: &privacy.evaluator_observes,
+                verification: if e.proof_required {
+                    "required"
+                } else {
+                    "receipt"
+                },
+                proof_protocol: e
+                    .proof_required
+                    .then_some(encompute_exact::bgv::PROTOCOL),
             },
         };
         let spec = self.target_spec();
@@ -271,11 +294,11 @@ impl Model {
 
     /// The execution spec on the artifact's target (real) backend.
     pub fn target_spec(&self) -> encompute_verification::ExecutionSpec {
-        let kind = match self.compiled() {
-            CompiledProgram::Approx(_) => encompute_evaluator::BackendKind::OpenFhe,
-            CompiledProgram::Exact(_) => encompute_evaluator::BackendKind::TfheRs,
-        };
-        encompute_evaluator::execution_spec(&self.ids(), self.compiled(), kind)
+        encompute_evaluator::execution_spec(
+            &self.ids(),
+            self.compiled(),
+            self.compiled().target_backend(),
+        )
     }
 
     /// The semantic transcript on the target backend (exact programs).
@@ -299,7 +322,7 @@ impl Model {
             },
             CompiledProgram::Exact(e) => Crypto {
                 semantics: "exact",
-                scheme: "TFHE",
+                scheme: c.scheme(),
                 backend: &e.profile.backend,
                 backend_version: &e.profile.backend_version,
                 parameter_profile: &e.profile.profile,

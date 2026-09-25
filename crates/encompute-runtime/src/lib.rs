@@ -37,3 +37,87 @@ pub fn verification_transcript(
 ) -> Option<verification::SemanticTranscript> {
     encompute_evaluator::transcript_for(model.compiled(), &verification_spec(model, kind))
 }
+
+/// Offline check of a saved execution (`encompute verify`): the receipt
+/// against `model` on its target backend, then the execution proof by
+/// re-execution with the client's evaluation keys (`eval.keys` envelope).
+/// Needs the research `vfhe-research` build.
+pub fn verify_execution_offline(
+    model: &Model,
+    receipt: &verification::SignedExecutionReceipt,
+    trusted: &verification::EvaluatorIdentity,
+    request: &[u8],
+    response: &[u8],
+    proof: &verification::ExecutionProof,
+    evaluation_keys: &[u8],
+) -> encompute_ir::Result<verification::VerificationState> {
+    #[cfg(feature = "vfhe-research")]
+    {
+        use encompute_ir::{Code, Error};
+        use verification::{
+            output_commitment, request_commitment, verify_execution, verify_receipt,
+            CiphertextBinding, ExecutionStatement, ExpectedExecution,
+        };
+        let spec = verification_spec(model, model.compiled().target_backend());
+        let transcript = verification_transcript(model, model.compiled().target_backend())
+            .ok_or_else(|| {
+                Error::new(
+                    Code::Unverified,
+                    "only exact programs have execution proofs",
+                )
+            })?;
+        let key_id = encompute_protocol::Envelope::decode(request)?
+            .header
+            .key_id
+            .ok_or_else(|| Error::new(Code::WrongKey, "request carries no key ID"))?;
+        let keys = encompute_protocol::Envelope::decode(evaluation_keys)?.payload;
+        if encompute_protocol::sha256_hex(&keys) != key_id {
+            return Err(Error::new(
+                Code::WrongKey,
+                "evaluation keys of another key pair",
+            ));
+        }
+        let (rc, oc) = (request_commitment(request), output_commitment(response));
+        let th = transcript.id().hex();
+        let verified = verify_receipt(
+            receipt,
+            &ExpectedExecution {
+                spec: &spec,
+                key_id: &key_id,
+                request_commitment: &rc,
+                output_commitment: &oc,
+                transcript_hash: Some(&th),
+                proof_expected: true,
+                trusted_evaluator: trusted,
+            },
+        )?;
+        let statement = ExecutionStatement::new(&verified, &transcript)?;
+        let binding = CiphertextBinding::new(request, response, &statement)?;
+        let plan = &model.compiled().exact().expect("exact").plan;
+        let key = encompute_vfhe::ReexecutionKey::new(plan, &spec.plan_id, &key_id, &keys);
+        verify_execution(
+            &verified,
+            &statement,
+            &binding,
+            proof,
+            &encompute_vfhe::ReexecutionBackend,
+            &key,
+        )
+    }
+    #[cfg(not(feature = "vfhe-research"))]
+    {
+        let _ = (
+            model,
+            receipt,
+            trusted,
+            request,
+            response,
+            proof,
+            evaluation_keys,
+        );
+        Err(encompute_ir::Error::new(
+            encompute_ir::Code::Unverified,
+            "verifying execution proofs needs the research `vfhe-research` build",
+        ))
+    }
+}

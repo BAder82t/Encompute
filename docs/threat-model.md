@@ -82,7 +82,9 @@ itself (encrypted weights) is out of scope.
 
 ## Not covered in v0.3
 
-Side channels on the client, malicious-evaluator integrity (receipts bind
-what the evaluator claims but no execution proof exists yet: an evaluator
-can sign a fabricated result), key rotation, threshold decryption, and
+Side channels on the client; malicious-evaluator integrity outside
+verified execution (receipts bind what the evaluator claims, and an
+evaluator can sign a fabricated result: only programs compiled with
+`verification="required"`, in the research build, carry execution proofs
+that rule this out; ADR-009); key rotation, threshold decryption, and
 multi-party settings.

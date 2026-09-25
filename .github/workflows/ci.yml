@@ -44,6 +44,10 @@ jobs:
       - run: ./scripts/install-openfhe.sh
       - run: cargo clippy --workspace --all-targets --features encompute-runtime/openfhe,encompute-evaluator/openfhe,encompute-cli/openfhe -- -D warnings
       - run: cargo test --workspace --release --features encompute-runtime/openfhe,encompute-evaluator/openfhe,encompute-cli/openfhe
+      - name: verified execution (re-execution proofs on OpenFHE BGV, research)
+        run: |
+          cargo clippy -p encompute-runtime -p encompute-cli -p encompute-vfhe --all-targets --features encompute-runtime/vfhe-research,encompute-cli/vfhe-research -- -D warnings
+          cargo test --release -p encompute-runtime --features vfhe-research --test vfhe -- --nocapture
       - name: evaluator links no client crypto
         run: |
           cargo build --release -p encompute-evaluator --features openfhe

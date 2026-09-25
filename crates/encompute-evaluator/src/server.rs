@@ -9,6 +9,7 @@
 //! | POST | /v1/programs/{p}/jobs | inputs envelope → `{job_id, timings, receipt}` |
 //! | GET  | /v1/jobs/{j}/result | → outputs envelope |
 //! | GET  | /v1/jobs/{j}/receipt | → signed execution receipt (canonical JSON) |
+//! | GET  | /v1/jobs/{j}/proof | → execution proof (`ENCP`), for programs requiring one |
 //!
 //! Every job gets a receipt signed with the evaluator's identity key,
 //! binding the execution spec, key, and the exact request and response
@@ -31,7 +32,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use encompute_verification::EvaluatorSigner;
 
 use crate::engine::{Engine, Local};
-use crate::session::{issue_receipt, BackendKind, Backends};
+use crate::session::{execution_proof, issue_receipt, BackendKind, Backends};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -61,8 +62,9 @@ impl Default for Limits {
     }
 }
 
-/// A finished job: (job ID, outputs envelope, signed receipt bytes).
-type Job = (String, Vec<u8>, Vec<u8>);
+/// A finished job: (job ID, outputs envelope, signed receipt bytes,
+/// execution proof bytes or empty).
+type Job = (String, Vec<u8>, Vec<u8>, Vec<u8>);
 
 /// HTTP front end over an [`Engine`].
 pub struct Evaluator {
@@ -196,14 +198,17 @@ impl Evaluator {
                 .register_keys(pid, body)
                 .map(|k| ok_json(json!({ "key_id": k }))),
             (Method::Post, ["v1", "programs", pid, "jobs"]) => self.job(pid, body),
-            (Method::Get, ["v1", "jobs", jid, what @ ("result" | "receipt")]) => {
+            (Method::Get, ["v1", "jobs", jid, what @ ("result" | "receipt" | "proof")]) => {
                 return match self.results.lock().unwrap().iter().find(|(j, ..)| j == jid) {
-                    Some((_, out, receipt)) => Reply {
+                    Some((_, _, _, proof)) if *what == "proof" && proof.is_empty() => {
+                        not_found("proof")
+                    }
+                    Some((_, out, receipt, proof)) => Reply {
                         status: 200,
-                        body: if *what == "result" {
-                            out.clone()
-                        } else {
-                            receipt.clone()
+                        body: match *what {
+                            "result" => out.clone(),
+                            "receipt" => receipt.clone(),
+                            _ => proof.clone(),
                         },
                         json: *what == "receipt",
                     },
@@ -224,20 +229,32 @@ impl Evaluator {
             .into_iter()
             .find(|p| p.program_id == pid)
             .ok_or_else(crate::engine::unknown_program)?;
+        let proof = execution_proof(
+            &info.spec,
+            info.transcript_hash.as_deref(),
+            info.proof_required,
+            body,
+            &out,
+        )?;
         let receipt = issue_receipt(
             &info.spec,
             info.transcript_hash.as_deref(),
             body,
             &out,
+            proof.as_ref(),
             &self.signer,
         )?;
+        let proof_bytes = match &proof {
+            Some(p) => p.to_bytes()?,
+            None => vec![],
+        };
         let receipt_json: serde_json::Value =
             serde_json::from_slice(&receipt.to_bytes()?).expect("canonical JSON");
         let n = self.jobs.fetch_add(1, Ordering::Relaxed);
         let tail = &out[out.len().saturating_sub(32)..];
         let job = sha256_hex(&[&n.to_le_bytes()[..], tail].concat())[..32].to_owned();
         let mut results = self.results.lock().unwrap();
-        results.push_back((job.clone(), out, receipt.to_bytes()?));
+        results.push_back((job.clone(), out, receipt.to_bytes()?, proof_bytes));
         while results.len() > self.limits.kept_results {
             results.pop_front();
         }
@@ -247,6 +264,7 @@ impl Evaluator {
             "timings_ms": times,
             "execution_id": receipt.receipt.execution_id,
             "receipt": receipt_json,
+            "proof": proof.is_some(),
         })))
     }
 

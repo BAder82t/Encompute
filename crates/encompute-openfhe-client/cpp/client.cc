@@ -81,15 +81,9 @@ std::unique_ptr<Client> generate(uint32_t ring_dim, uint32_t mult_depth,
   return std::make_unique<Client>(std::move(impl));
 }
 
-std::unique_ptr<Client> restore(uint32_t ring_dim, uint32_t mult_depth,
-                                uint32_t scale_bits, uint32_t first_mod_bits,
-                                uint32_t num_large_digits, uint32_t slots,
-                                rust::Slice<const uint8_t> secret) {
-  Guard lock(openfhe_mutex());
-  auto impl = std::make_unique<ClientImpl>();
-  impl->cc = encompute_openfhe::make_context(ring_dim, mult_depth, scale_bits,
-                                             first_mod_bits, num_large_digits, slots);
-  // Framing: u64 length + secret key, u64 length + public key.
+namespace {
+// Framing: u64 length + secret key, u64 length + public key.
+void load_key_pair(ClientImpl& impl, rust::Slice<const uint8_t> secret) {
   std::string all = str_of(secret);
   auto read = [&](size_t& at) {
     if (at + 8 > all.size()) throw std::runtime_error("secret key file is truncated");
@@ -104,14 +98,79 @@ std::unique_ptr<Client> restore(uint32_t ring_dim, uint32_t mult_depth,
   size_t at = 0;
   std::istringstream sks(read(at)), pks(read(at));
   if (at != all.size()) throw std::runtime_error("trailing bytes after the key pair");
-  lbcrypto::Serial::Deserialize(impl->sk, sks, lbcrypto::SerType::BINARY);
-  lbcrypto::Serial::Deserialize(impl->pk, pks, lbcrypto::SerType::BINARY);
-  if (!impl->sk || !impl->pk) throw std::runtime_error("key pair could not be deserialized");
-  if (impl->sk->GetCryptoContext() != impl->cc || impl->pk->GetCryptoContext() != impl->cc)
+  lbcrypto::Serial::Deserialize(impl.sk, sks, lbcrypto::SerType::BINARY);
+  lbcrypto::Serial::Deserialize(impl.pk, pks, lbcrypto::SerType::BINARY);
+  if (!impl.sk || !impl.pk) throw std::runtime_error("key pair could not be deserialized");
+  if (impl.sk->GetCryptoContext() != impl.cc || impl.pk->GetCryptoContext() != impl.cc)
     throw std::runtime_error("key pair belongs to another parameter set");
-  impl->tag = impl->sk->GetKeyTag();
+  impl.tag = impl.sk->GetKeyTag();
+}
+
+lbcrypto::Ciphertext<DCRTPoly> load_own(const Client& c, rust::Slice<const uint8_t> ciphertext) {
+  std::istringstream s(str_of(ciphertext));
+  lbcrypto::Ciphertext<DCRTPoly> ct;
+  lbcrypto::Serial::Deserialize(ct, s, lbcrypto::SerType::BINARY);
+  if (!ct) throw std::runtime_error("ciphertext could not be deserialized");
+  if (ct->GetCryptoContext() != c.impl->cc)
+    throw std::runtime_error("ciphertext belongs to another parameter set");
+  if (ct->GetKeyTag() != c.impl->tag)
+    throw std::runtime_error("ciphertext was encrypted under another key");
+  return ct;
+}
+}  // namespace
+
+std::unique_ptr<Client> restore(uint32_t ring_dim, uint32_t mult_depth,
+                                uint32_t scale_bits, uint32_t first_mod_bits,
+                                uint32_t num_large_digits, uint32_t slots,
+                                rust::Slice<const uint8_t> secret) {
+  Guard lock(openfhe_mutex());
+  auto impl = std::make_unique<ClientImpl>();
+  impl->cc = encompute_openfhe::make_context(ring_dim, mult_depth, scale_bits,
+                                             first_mod_bits, num_large_digits, slots);
+  load_key_pair(*impl, secret);
   impl->slots = slots;
   return std::make_unique<Client>(std::move(impl));
+}
+
+std::unique_ptr<Client> bgv_generate(uint32_t mult_depth) {
+  Guard lock(openfhe_mutex());
+  auto impl = std::make_unique<ClientImpl>();
+  impl->cc = encompute_openfhe::make_bgv_context(mult_depth);
+  auto kp = impl->cc->KeyGen();
+  impl->cc->EvalMultKeyGen(kp.secretKey);
+  impl->pk = kp.publicKey;
+  impl->sk = kp.secretKey;
+  impl->tag = kp.secretKey->GetKeyTag();
+  impl->owns_eval_keys = true;
+  encompute_openfhe::retain_key_tag(impl->tag);
+  return std::make_unique<Client>(std::move(impl));
+}
+
+std::unique_ptr<Client> bgv_restore(uint32_t mult_depth, rust::Slice<const uint8_t> secret) {
+  Guard lock(openfhe_mutex());
+  auto impl = std::make_unique<ClientImpl>();
+  impl->cc = encompute_openfhe::make_bgv_context(mult_depth);
+  load_key_pair(*impl, secret);
+  return std::make_unique<Client>(std::move(impl));
+}
+
+rust::Vec<uint8_t> bgv_encrypt(const Client& c, int64_t value) {
+  Guard lock(openfhe_mutex());
+  if (value < 0 || value >= encompute_openfhe::kBgvPlaintextModulus)
+    throw std::runtime_error("value outside the BGV plaintext space");
+  auto pt = c.impl->cc->MakePackedPlaintext(std::vector<int64_t>{value});
+  return bytes_of(serialize(c.impl->cc->Encrypt(c.impl->pk, pt)));
+}
+
+int64_t bgv_decrypt(const Client& c, rust::Slice<const uint8_t> ciphertext) {
+  Guard lock(openfhe_mutex());
+  auto ct = load_own(c, ciphertext);
+  lbcrypto::Plaintext pt;
+  c.impl->cc->Decrypt(c.impl->sk, ct, &pt);
+  // Packed values come back centred in (-t/2, t/2]; map to [0, t).
+  int64_t v = pt->GetPackedValue().at(0);
+  const int64_t t = encompute_openfhe::kBgvPlaintextModulus;
+  return ((v % t) + t) % t;
 }
 
 rust::Vec<uint8_t> export_evaluation_keys(const Client& c) {

@@ -12,6 +12,7 @@ members = [
     "crates/encompute-tfhe",
     "crates/encompute-tfhe-client",
     "crates/encompute-verification",
+    "crates/encompute-vfhe",
     "crates/encompute-evaluator",
     "crates/encompute-runtime",
     "crates/encompute-cli",
@@ -52,6 +53,7 @@ encompute-exact = { path = "crates/encompute-exact" }
 encompute-tfhe = { path = "crates/encompute-tfhe" }
 encompute-tfhe-client = { path = "crates/encompute-tfhe-client" }
 encompute-verification = { path = "crates/encompute-verification" }
+encompute-vfhe = { path = "crates/encompute-vfhe" }
 encompute-evaluator = { path = "crates/encompute-evaluator" }
 encompute-runtime = { path = "crates/encompute-runtime" }
 serde = { version = "1.0", features = ["derive"] }

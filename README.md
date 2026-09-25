@@ -47,7 +47,7 @@ score.save("score.encompute")              # reproducible artifact, no keys
 | Client/evaluator split over HTTP, worker processes | working |
 | Signed execution receipts | working, CKKS and exact |
 | Semantic transcripts (the statement a proof must satisfy) | working, exact programs |
-| Cryptographic proof of correct execution | **not yet** (0.4 V3, research) |
+| Proof of correct execution | research build: re-execution proofs on OpenFHE BGV for a small exact subset (sound, not succinct) |
 
 ## What Encompute does
 
@@ -83,7 +83,7 @@ results: within the precision for approximate programs, exactly (matches
 and mismatches, boundary values first) for exact ones.
 
 **Backends.**
-- OpenFHE v1.5.1 (CKKS), statically linked.
+- OpenFHE v1.5.1 (CKKS; BGV for verified exact programs), statically linked.
 - A plaintext mock for both kinds, for development and tests.
 - TFHE-rs 1.8.1 for exact programs, behind the off-by-default `tfhe-rs`
   feature, for research use only: Zama requires a patent license for
@@ -108,13 +108,32 @@ Encompute keeps three verification states apart:
 |---|---|
 | `UNVERIFIED` | No receipt. |
 | `RECEIPT VERIFIED` | This evaluator signed a statement binding this spec, key, request and response. |
-| `EXECUTION VERIFIED` | A cryptographic proof shows the response is a correct homomorphic evaluation of the transcript over the request. **Not available yet.** |
+| `EXECUTION VERIFIED` | A proof shows the response is a correct homomorphic evaluation of the transcript over the request. Research build, small exact subset. |
 
 A receipt does **not** prove that the evaluator computed honestly, that the
 result is correct, or that it was not fabricated: an evaluator can sign a
-lie. Only an execution proof rules that out (0.4 V3). Encompute prints
-`RECEIPT VERIFIED` and `EXECUTION PROOF NOT PRESENT` until then (ADR-007,
-ADR-008).
+lie. Only an execution proof rules that out.
+
+**Verified execution (research, 0.4 V3a).** Programs compiled with
+`verification="required"` run on OpenFHE BGV (u8, u16, bool; `+ - *`,
+constants, `& | ^ ~`) and every result carries an execution proof. The
+client re-runs the computation over the exact ciphertexts it sent, with its
+own evaluation keys, and decrypts only if the response matches byte for
+byte: no proof, no decryption. A malicious evaluator returning a random,
+replayed, skipped, substituted or mutated result, even with a valid signed
+receipt, is rejected. This proof is sound but not succinct: verifying costs
+about one evaluation (ADR-009). A succinct proof is next (0.4 V3b).
+
+```python
+@encompute.compile(verification="required")
+def precheck(income: secret[u16, 0:5000], member: secret[bool_], flagged: secret[bool_]):
+    return {"score": income * 3 + 7, "ok": member & ~flagged}
+```
+
+Build with `--features vfhe-research` (implies `openfhe`) for the verifier;
+`encompute run --remote` then prints `VERIFIED PRIVATE EXECUTION`, and
+`encompute verify ... --proof exchange/proof.bin --evaluation-keys KEYS/eval.keys`
+re-checks a saved result.
 
 ## Build
 
@@ -190,7 +209,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-exact` | Exact plans: lowering, validation, execution, semantic transcripts |
 | `crates/encompute-backend` | Client and evaluator traits; mock backends |
 | `crates/encompute-protocol` | Versioned, checksummed envelopes |
-| `crates/encompute-verification` | Execution specs, signed receipts, transcripts, proof interfaces (no FHE dependency) |
+| `crates/encompute-verification` | Execution specs, signed receipts, transcripts, proofs and proof interfaces (no FHE dependency) |
+| `crates/encompute-vfhe` | Re-execution proof verifier on OpenFHE BGV (research) |
 | `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption) |
 | `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature) |
 | `crates/encompute-evaluator` | Evaluator sessions and HTTP service; never links client crypto |
@@ -201,8 +221,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 ## Roadmap
 
-- **0.4 V3**: a first cryptographic proof of correct encrypted execution for
-  a small exact subset (research).
+- **0.4 V3b**: a succinct (zkVM) proof of the same relation, starting with
+  a cost benchmark of one BGV ciphertext multiplication.
 - **Next**: first-class parties, assets and confidentiality policies in the
   IR.
 

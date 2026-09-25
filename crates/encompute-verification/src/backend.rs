@@ -32,6 +32,8 @@ pub struct PublicValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionStatement {
     pub version: u32,
+    /// Which relation is to be proven (never inferred).
+    pub relation: crate::proof::VerificationRelation,
     pub spec_id: String,
     pub request_commitment: String,
     pub output_commitment: String,
@@ -60,6 +62,7 @@ impl ExecutionStatement {
         }
         Ok(Self {
             version: STATEMENT_VERSION,
+            relation: crate::proof::VerificationRelation::FheEvaluationV1,
             spec_id: r.spec_id.clone(),
             request_commitment: r.request_commitment.clone(),
             output_commitment: r.output_commitment.clone(),
@@ -90,14 +93,31 @@ impl StatementShape {
     }
 }
 
-/// Which operations and types a proof backend can prove.
+/// What a proof backend can prove: protocol, relation, transcript version,
+/// FHE backend and parameter profiles, operations and types.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VerificationCapabilities {
+    pub protocol: String,
+    pub transcript_version: u32,
+    /// FHE backend whose evaluations it proves (e.g. `openfhe`).
+    pub fhe_backend: String,
+    /// Parameter profile families it accepts.
+    pub parameter_profiles: Vec<String>,
     pub supported_ops: BTreeSet<ProofOp>,
     pub supported_types: BTreeSet<Elem>,
 }
 
 impl VerificationCapabilities {
+    /// The first instruction of `t` it cannot prove, if any.
+    pub fn first_unsupported<'a>(
+        &self,
+        t: &'a SemanticTranscript,
+    ) -> Option<&'a crate::transcript::TranscriptEntry> {
+        t.entries.iter().find(|e| {
+            !(self.supported_ops.contains(&e.op) && self.supported_types.contains(&e.ty.0))
+        })
+    }
+
     /// `(covered, total)` instructions of `t` this backend could prove.
     pub fn coverage(&self, t: &SemanticTranscript) -> (usize, usize) {
         let covered = t
@@ -121,6 +141,12 @@ pub trait VerificationBackend {
 
     fn capabilities(&self) -> VerificationCapabilities;
 
+    /// ID of a verification key (`encvk1:`), which proofs name.
+    fn verification_key_id(&self, key: &Self::VerificationKey) -> crate::proof::VerificationKeyId;
+
+    /// Decode the proof bytes of an `ExecutionProof`.
+    fn decode_evidence(&self, bytes: &[u8]) -> Result<Self::Evidence>;
+
     fn setup(&self, shape: &StatementShape) -> Result<(Self::ProvingKey, Self::VerificationKey)>;
 
     fn prove(
@@ -130,10 +156,13 @@ pub trait VerificationBackend {
         witness: &Self::Witness,
     ) -> Result<Self::Evidence>;
 
+    /// Check `evidence` for `statement` against exactly the committed
+    /// ciphertexts in `binding` (already checked against the commitments).
     fn verify(
         &self,
         key: &Self::VerificationKey,
         statement: &ExecutionStatement,
+        binding: &crate::proof::CiphertextBinding<'_>,
         evidence: &Self::Evidence,
     ) -> Result<()>;
 }
@@ -158,6 +187,14 @@ impl VerificationBackend for NoProofBackend {
         VerificationCapabilities::default()
     }
 
+    fn verification_key_id(&self, key: &Self::VerificationKey) -> crate::proof::VerificationKeyId {
+        match *key {}
+    }
+
+    fn decode_evidence(&self, _: &[u8]) -> Result<Self::Evidence> {
+        Err(no_proof())
+    }
+
     fn setup(&self, _: &StatementShape) -> Result<(Self::ProvingKey, Self::VerificationKey)> {
         Err(no_proof())
     }
@@ -175,6 +212,7 @@ impl VerificationBackend for NoProofBackend {
         &self,
         key: &Self::VerificationKey,
         _: &ExecutionStatement,
+        _: &crate::proof::CiphertextBinding<'_>,
         _: &Self::Evidence,
     ) -> Result<()> {
         match *key {}

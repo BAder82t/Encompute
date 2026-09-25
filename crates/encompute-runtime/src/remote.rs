@@ -4,7 +4,9 @@ use std::io::Read;
 use std::time::Duration;
 
 use encompute_ir::{Code, Error, Program, Result};
-use encompute_verification::{EvaluatorIdentity, SignedExecutionReceipt, VerifiedReceipt};
+use encompute_verification::{
+    EvaluatorIdentity, ExecutionProof, SignedExecutionReceipt, VerificationState,
+};
 use serde_json::Value;
 
 use crate::client::ClientSession;
@@ -15,7 +17,12 @@ pub struct RemoteRun {
     pub stats: RemoteStats,
     /// The evaluator's signed receipt, verified before decryption.
     pub receipt: SignedExecutionReceipt,
-    pub verified: VerifiedReceipt,
+    /// The verified receipt.
+    pub verified: encompute_verification::VerifiedReceipt,
+    /// How far the result was verified before decryption.
+    pub state: VerificationState,
+    /// The execution proof, for programs requiring verified execution.
+    pub proof: Option<ExecutionProof>,
     /// The exact envelopes exchanged (for `encompute verify`).
     pub request: Vec<u8>,
     pub response: Vec<u8>,
@@ -214,8 +221,25 @@ impl Remote {
                     format!("evaluator sent no valid receipt: {e}"),
                 )
             })?;
-        let (outputs, verified) =
-            client.decrypt_verified(&request, &response, &receipt, trusted)?;
+        let proof = if job["proof"] == true {
+            let id = job["job_id"].as_str().unwrap_or_default();
+            let resp = self
+                .agent
+                .get(&self.url(&format!("/v1/jobs/{id}/proof")))
+                .call()
+                .map_err(remote_err)?;
+            let mut bytes = Vec::new();
+            resp.into_reader()
+                .take(encompute_verification::proof::MAX_PROOF_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| Error::new(Code::Remote, format!("reading proof: {e}")))?;
+            Some(ExecutionProof::from_bytes(&bytes)?)
+        } else {
+            None
+        };
+        let (outputs, state) =
+            client.decrypt_proven(&request, &response, &receipt, proof.as_ref(), trusted)?;
+        let verified = client.verify_receipt(&request, &response, &receipt, trusted)?;
         let timings = &job["timings_ms"];
         Ok(RemoteRun {
             outputs,
@@ -229,6 +253,8 @@ impl Remote {
             },
             receipt,
             verified,
+            state,
+            proof,
             request,
             response,
         })

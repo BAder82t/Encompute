@@ -601,6 +601,7 @@ dependencies = [
  "cxx-build",
  "encompute-backend",
  "encompute-ckks",
+ "encompute-exact",
  "encompute-ir",
  "encompute-openfhe",
 ]
@@ -644,6 +645,7 @@ dependencies = [
  "encompute-tfhe",
  "encompute-tfhe-client",
  "encompute-verification",
+ "encompute-vfhe",
  "proptest",
  "serde",
  "serde_json",
@@ -684,6 +686,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "encompute-vfhe"
+version = "0.2.0"
+dependencies = [
+ "encompute-backend",
+ "encompute-exact",
+ "encompute-ir",
+ "encompute-openfhe",
+ "encompute-protocol",
+ "encompute-verification",
 ]
 
 [[package]]

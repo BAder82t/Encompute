@@ -6,7 +6,8 @@ use std::process::{Command, ExitCode};
 use clap::{Parser, Subcommand};
 use encompute_ir::{Code, Error, Inputs, Result};
 use encompute_runtime::verification::{
-    output_commitment, request_commitment, EvaluatorIdentity, SignedExecutionReceipt,
+    output_commitment, request_commitment, EvaluatorIdentity, ExecutionProof,
+    SignedExecutionReceipt, VerificationState,
 };
 use encompute_runtime::{BackendKind, BenchDetail, ClientSession, Mode, Model, Remote, TestReport};
 
@@ -91,6 +92,13 @@ enum Cmd {
         /// the request envelope, which you made; never from the receipt.
         #[arg(long)]
         backend: Option<String>,
+        /// Execution proof (`proof.bin` from --save-envelopes): verified by
+        /// re-execution (research build).
+        #[arg(long)]
+        proof: Option<PathBuf>,
+        /// Your evaluation keys (`eval.keys`), needed to verify a proof.
+        #[arg(long)]
+        evaluation_keys: Option<PathBuf>,
     },
     /// Manage client keys.
     Keys {
@@ -213,9 +221,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             Error::new(Code::WrongKey, format!("{}: {e}", dir.join(f).display()))
                         })
                     };
-                    let client =
+                    let mut client =
                         ClientSession::restore(m.ids(), m.compiled(), &read("secret.key")?)?;
                     let eval_keys = read("eval.keys").ok();
+                    // Needed to verify execution proofs by re-execution.
+                    if let Some(k) = &eval_keys {
+                        client.attach_evaluation_keys(k)?;
+                    }
                     let remote = Remote::new(&url);
                     let trusted = trusted_evaluator(&remote, &dir, trust_evaluator.as_deref())?;
                     let run = remote.run(
@@ -235,8 +247,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         stats.round_trip_ms
                     );
                     eprintln!("Evaluator receipt       verified");
-                    eprintln!("Execution proof         not present");
-                    eprintln!("Encrypted result        accepted");
+                    match (&run.state, &run.proof) {
+                        (VerificationState::ExecutionVerified(v), _) => {
+                            eprintln!(
+                                "Execution proof         verified ({}, {})",
+                                v.protocol(),
+                                v.relation()
+                            );
+                            eprintln!("Encrypted result        accepted");
+                            eprintln!("VERIFIED PRIVATE EXECUTION");
+                        }
+                        _ => {
+                            eprintln!("Execution proof         not present");
+                            eprintln!("Encrypted result        accepted (receipt only)");
+                        }
+                    }
                     let io = |p: &Path, e: std::io::Error| {
                         Error::new(Code::Artifact, format!("{}: {e}", p.display()))
                     };
@@ -249,6 +274,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             .map_err(|e| io(d, e))?;
                         std::fs::write(d.join("response.bin"), &run.response)
                             .map_err(|e| io(d, e))?;
+                        if let Some(p) = &run.proof {
+                            std::fs::write(d.join("proof.bin"), p.to_bytes()?)
+                                .map_err(|e| io(d, e))?;
+                        }
                     }
                     run.outputs
                 }
@@ -314,6 +343,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             response,
             trust_evaluator,
             backend,
+            proof,
+            evaluation_keys,
         } => verify(
             &receipt,
             model.as_deref(),
@@ -321,6 +352,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             response.as_deref(),
             trust_evaluator.as_deref(),
             backend.as_deref(),
+            proof.as_deref(),
+            evaluation_keys.as_deref(),
         ),
         Cmd::Keys {
             cmd:
@@ -504,6 +537,8 @@ fn short(s: &str) -> &str {
     s.char_indices().nth(16).map_or(s, |(i, _)| &s[..i])
 }
 
+// One parameter per command-line flag.
+#[allow(clippy::too_many_arguments)]
 fn verify(
     receipt: &Path,
     model: Option<&Path>,
@@ -511,6 +546,8 @@ fn verify(
     response: Option<&Path>,
     trust: Option<&str>,
     backend: Option<&str>,
+    proof: Option<&Path>,
+    evaluation_keys: Option<&Path>,
 ) -> Result<ExitCode> {
     let read = |p: &Path| {
         std::fs::read(p).map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", p.display())))
@@ -655,18 +692,71 @@ fn verify(
     println!("  {:<16}{}", "Request", checked(rc.is_some()));
     println!("  {:<16}{}", "Response", checked(oc.is_some()));
     println!("  {:<16}{}", "Transcript", checked(transcript.is_some()));
+    // The execution proof: only with every binding in hand.
+    let complete = trusted.is_some() && spec.is_some() && rc.is_some() && oc.is_some();
+    let proof_state = match (&result, proof, &model, &request_bytes, &trusted) {
+        (Ok(()), Some(p), Some(m), Some(req), Some(t)) if complete => {
+            let resp = read(response.expect("complete"))?;
+            let keys = match evaluation_keys {
+                Some(k) => read(k)?,
+                None => {
+                    return Err(Error::new(
+                        Code::Unverified,
+                        "verifying a proof needs --evaluation-keys (your eval.keys)",
+                    ))
+                }
+            };
+            let p = ExecutionProof::from_bytes(&read(p)?)?;
+            Some(
+                encompute_runtime::verify_execution_offline(m, &signed, t, req, &resp, &p, &keys)
+                    .map(|s| (s, p)),
+            )
+        }
+        _ => None,
+    };
     section("Execution proof");
-    if let Some(t) = &r.transcript_hash {
-        println!("  {:<16}enctrace1:{}", "Transcript", short(t));
+    match &proof_state {
+        Some(Ok((VerificationState::ExecutionVerified(v), p))) => {
+            println!("  {:<16}{}", "Relation", v.relation());
+            println!("  {:<16}{}", "Protocol", v.protocol());
+            println!(
+                "  {:<16}encvk1:{}",
+                "Verif. key",
+                short(v.verification_key_id())
+            );
+            println!("  {:<16}{} bytes", "Proof size", p.to_bytes()?.len());
+            println!("  {:<16}VALID", "Status");
+        }
+        Some(Ok(_)) | None => {
+            if let Some(t) = &r.transcript_hash {
+                println!("  {:<16}enctrace1:{}", "Transcript", short(t));
+            }
+            println!(
+                "  {:<16}{}",
+                "Status",
+                if proof.is_some() {
+                    "NOT CHECKED (needs a complete verification)"
+                } else {
+                    "NOT PRESENT"
+                }
+            );
+        }
+        Some(Err(e)) => println!("  {:<16}INVALID: {}", "Status", e.message),
     }
-    println!("  {:<16}NOT PRESENT", "Status");
     section("Receipt");
-    match result {
-        Ok(()) => {
-            // With the trusted key, artifact, request and response, every
-            // binding of verify_receipt was checked (the key ID is inside
-            // the request envelope the commitment covers).
-            let complete = trusted.is_some() && spec.is_some() && rc.is_some() && oc.is_some();
+    match (result, proof_state) {
+        (Ok(()), Some(Ok((VerificationState::ExecutionVerified(_), _)))) => {
+            println!("RECEIPT VERIFIED");
+            println!("EXECUTION VERIFIED");
+            println!("\nVERIFIED PRIVATE EXECUTION");
+            Ok(ExitCode::SUCCESS)
+        }
+        (Ok(()), Some(Err(e))) => {
+            println!("RECEIPT VERIFIED");
+            println!("EXECUTION PROOF INVALID: {}", e.message);
+            Ok(ExitCode::from(1))
+        }
+        (Ok(()), _) => {
             if r.transcript_hash.is_some() {
                 println!("TRANSCRIPT AVAILABLE");
             }
@@ -684,7 +774,7 @@ fn verify(
                 ExitCode::from(3)
             })
         }
-        Err(e) => {
+        (Err(e), _) => {
             println!("INVALID: {}", e.message);
             println!("EXECUTION PROOF NOT PRESENT");
             Ok(ExitCode::from(1))

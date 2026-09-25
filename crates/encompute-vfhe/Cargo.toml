@@ -1,0 +1,20 @@
+[package]
+name = "encompute-vfhe"
+description = "Verifiable-FHE proof backends for Encompute (research): re-execution on OpenFHE BGV"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Evaluator side of OpenFHE only: verifying needs the evaluation key, never
+# the secret key.
+[dependencies]
+encompute-ir.workspace = true
+encompute-backend.workspace = true
+encompute-exact.workspace = true
+encompute-protocol.workspace = true
+encompute-verification.workspace = true
+encompute-openfhe.workspace = true
+
+[lints]
+workspace = true

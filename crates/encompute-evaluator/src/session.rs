@@ -11,8 +11,8 @@ use encompute_exact::{
 use encompute_ir::{Code, Error, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
 use encompute_verification::{
-    EvaluatorSigner, ExecutionReceipt, ExecutionSpec, SemanticTranscript, SignedExecutionReceipt,
-    SPEC_VERSION,
+    EvaluatorSigner, ExecutionProof, ExecutionReceipt, ExecutionSpec, SemanticTranscript,
+    SignedExecutionReceipt, VerificationEvidence, SPEC_VERSION,
 };
 
 use crate::compiled::{compile_program, CompiledProgram, Semantics};
@@ -74,26 +74,59 @@ pub fn transcript_for(
         .map(|e| semantic_transcript(&e.plan, &spec.id().hex()))
 }
 
+fn request_key_id(request: &[u8]) -> Result<String> {
+    Envelope::decode(request)?
+        .header
+        .key_id
+        .ok_or_else(|| Error::new(Code::WrongKey, "inputs carry no key ID"))
+}
+
+/// The execution proof an evaluator attaches, when the program requires
+/// one and runs on the proof-capable OpenFHE BGV backend (ADR-009).
+pub fn execution_proof(
+    spec: &ExecutionSpec,
+    transcript_hash: Option<&str>,
+    proof_required: bool,
+    request: &[u8],
+    response: &[u8],
+) -> Result<Option<ExecutionProof>> {
+    if !proof_required || spec.backend != BackendKind::OpenFhe.label().0 {
+        return Ok(None);
+    }
+    let t = transcript_hash
+        .ok_or_else(|| Error::new(Code::Transcript, "exact program without a transcript"))?;
+    Ok(Some(encompute_exact::bgv::reexecution_proof(
+        spec,
+        t,
+        &request_key_id(request)?,
+        request,
+        response,
+    )))
+}
+
 /// Sign a receipt binding `spec`, the transcript hash (exact programs), the
-/// request's key ID, and the exact request and response envelope bytes.
+/// request's key ID, the exact request and response envelope bytes, and
+/// `proof` (by digest) if there is one.
 pub fn issue_receipt(
     spec: &ExecutionSpec,
     transcript_hash: Option<&str>,
     request: &[u8],
     response: &[u8],
+    proof: Option<&ExecutionProof>,
     signer: &EvaluatorSigner,
 ) -> Result<SignedExecutionReceipt> {
-    let key_id = Envelope::decode(request)?
-        .header
-        .key_id
-        .ok_or_else(|| Error::new(Code::WrongKey, "inputs carry no key ID"))?;
-    ExecutionReceipt::new(
+    let evidence = match proof {
+        Some(p) => encompute_exact::bgv::evidence(p)?,
+        None => VerificationEvidence::None,
+    };
+    ExecutionReceipt::with_evidence(
         spec,
         transcript_hash,
-        &key_id,
+        &request_key_id(request)?,
         request,
         response,
         &signer.identity(),
+        evidence,
     )?
     .sign(signer)
 }
@@ -152,17 +185,25 @@ impl BackendKind {
         }
     }
 
-    fn check(self, s: Semantics) -> Result<()> {
-        if !self.supports(s) {
+    /// Whether this backend can run `compiled` (the mock runs everything;
+    /// real backends only the programs targeting them).
+    pub fn runs(self, compiled: &CompiledProgram) -> bool {
+        self == BackendKind::Mock || self == compiled.target_backend()
+    }
+
+    fn check(self, compiled: &CompiledProgram) -> Result<()> {
+        let s = compiled.semantics();
+        if !self.runs(compiled) {
             return Err(Error::new(
                 Code::Backend,
                 format!(
-                    "{} cannot run {} programs",
+                    "{} cannot run {} programs of scheme {}",
                     self.name(),
                     match s {
-                        Semantics::Approximate => "approximate (CKKS)",
-                        Semantics::Exact => "exact (integer/Boolean)",
-                    }
+                        Semantics::Approximate => "approximate",
+                        Semantics::Exact => "exact",
+                    },
+                    compiled.scheme()
                 ),
             ));
         }
@@ -224,6 +265,21 @@ impl Backends {
         match s {
             Semantics::Approximate => self.approx,
             Semantics::Exact => self.exact,
+        }
+    }
+
+    /// The backend for `compiled`: exact programs targeting OpenFHE BGV run
+    /// on OpenFHE when this evaluator runs OpenFHE, else on the mock.
+    pub fn for_program(self, compiled: &CompiledProgram) -> BackendKind {
+        match (compiled, compiled.target_backend()) {
+            (CompiledProgram::Exact(_), BackendKind::OpenFhe) => {
+                if self.approx == BackendKind::OpenFhe {
+                    BackendKind::OpenFhe
+                } else {
+                    BackendKind::Mock
+                }
+            }
+            _ => self.for_semantics(compiled.semantics()),
         }
     }
 
@@ -295,6 +351,8 @@ enum Keyed {
     ExactMock(PlainExactEvaluator),
     #[cfg(feature = "tfhe-rs")]
     TfheRs(encompute_tfhe::tfhe_rs::TfheRsEvaluator),
+    #[cfg(feature = "openfhe")]
+    Bgv(encompute_openfhe::BgvEvaluator),
 }
 
 /// One compiled program, the evaluation keys registered for it, and nothing
@@ -323,7 +381,7 @@ impl EvaluatorSession {
     /// its own compilation, not the client's plan).
     pub fn new(program: Program, kind: BackendKind) -> Result<Self> {
         let compiled = compile_program(&program)?;
-        kind.check(compiled.semantics())?;
+        kind.check(&compiled)?;
         let ids = Ids::of(&program, &compiled);
         let spec = execution_spec(&ids, &compiled, kind);
         let transcript_hash = transcript_for(&compiled, &spec).map(|t| t.id().hex());
@@ -362,6 +420,18 @@ impl EvaluatorSession {
     /// The transcript hash receipts bind (exact programs).
     pub fn transcript_hash(&self) -> Option<&str> {
         self.transcript_hash.as_deref()
+    }
+
+    /// The execution proof for one execution, if this program requires one
+    /// and this session can produce it.
+    pub fn proof_for(&self, request: &[u8], response: &[u8]) -> Result<Option<ExecutionProof>> {
+        execution_proof(
+            &self.spec,
+            self.transcript_hash(),
+            self.compiled.proof_required(),
+            request,
+            response,
+        )
     }
 
     pub fn has_key(&self, key_id: &str) -> bool {
@@ -409,6 +479,14 @@ impl EvaluatorSession {
             }
             (CompiledProgram::Exact(_), BackendKind::Mock) => {
                 Keyed::ExactMock(PlainExactEvaluator::new(&env.payload)?)
+            }
+            #[cfg(feature = "openfhe")]
+            (CompiledProgram::Exact(e), BackendKind::OpenFhe) => {
+                let mut ev = encompute_openfhe::BgvEvaluator::new(
+                    encompute_exact::bgv::mult_depth(&e.plan),
+                )?;
+                ev.load_keys(&env.payload)?;
+                Keyed::Bgv(ev)
             }
             #[cfg(feature = "tfhe-rs")]
             (CompiledProgram::Exact(_), BackendKind::TfheRs) => {
@@ -461,6 +539,10 @@ impl EvaluatorSession {
             #[cfg(feature = "openfhe")]
             (Keyed::OpenFhe(ev), CompiledProgram::Approx(c)) => self.run(ev, c, &items)?,
             (Keyed::ExactMock(ev), CompiledProgram::Exact(e)) => {
+                run_exact(ev, &e.plan, &items, &self.context(), observer)?
+            }
+            #[cfg(feature = "openfhe")]
+            (Keyed::Bgv(ev), CompiledProgram::Exact(e)) => {
                 run_exact(ev, &e.plan, &items, &self.context(), observer)?
             }
             #[cfg(feature = "tfhe-rs")]

@@ -85,3 +85,18 @@ response 16 KiB, evaluation 2.1 s.
 
 Semantic transcript of the eligibility plan (8 instructions): built and
 hashed in ~70 µs (release), against ~2 s of TFHE-rs evaluation: far below 1 %.
+
+## Verified execution (0.4 V3a, research)
+
+Loan pre-check (4 inputs, 6 instructions: u16 `* + −`, Boolean `& ~`),
+OpenFHE BGV (t = 65537), Apple M3 Max, release, median of 5:
+
+| | |
+|---|---|
+| evaluation (evaluator) | 24 ms |
+| verification: re-execution + decryption (client) | 65 ms (2.7×) |
+| proof | 543 bytes (header only) |
+| verification key (the client's evaluation keys) | 769 KiB |
+| request / response | 1027 KiB / 514 KiB |
+
+Re-execution is sound but not succinct: the verifier redoes the work.

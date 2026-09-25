@@ -22,6 +22,16 @@ lbcrypto::CryptoContext<lbcrypto::DCRTPoly> make_context(
     uint32_t ring_dim, uint32_t mult_depth, uint32_t scale_bits,
     uint32_t first_mod_bits, uint32_t num_large_digits, uint32_t slots);
 
+// BGV-RNS context for exact programs (0.4 V3): plaintext modulus 65537,
+// 128-bit classical, HYBRID key switching, FIXEDAUTO. Evaluation is exact
+// modular arithmetic with no randomness, so it is reproducible byte for
+// byte (the basis of re-execution verification, ADR-009). Caller holds
+// openfhe_mutex().
+lbcrypto::CryptoContext<lbcrypto::DCRTPoly> make_bgv_context(uint32_t mult_depth);
+
+// Plaintext modulus of the BGV context.
+constexpr int64_t kBgvPlaintextModulus = 65537;
+
 // Evaluation keys live in OpenFHE's global maps under their key tag. Holders
 // (a client after keygen, an evaluator after loading) retain the tag; the
 // keys are erased when the last holder releases it. Caller holds the mutex.

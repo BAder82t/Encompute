@@ -151,11 +151,43 @@ pub struct Output {
     pub value: ValueId,
 }
 
+/// How strongly an execution must be verified (0.4 V3). Part of the
+/// program: it changes what the program compiles to, so it is part of the
+/// program ID.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Verification {
+    /// Signed execution receipts only (the default).
+    #[default]
+    Receipt,
+    /// A cryptographic execution proof is required; compilation fails unless
+    /// a proof backend covers the whole program, and clients never decrypt
+    /// without a valid proof.
+    Required,
+}
+
+impl Verification {
+    pub fn name(self) -> &'static str {
+        match self {
+            Verification::Receipt => "receipt",
+            Verification::Required => "required",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "receipt" => Some(Verification::Receipt),
+            "required" => Some(Verification::Required),
+            _ => None,
+        }
+    }
+}
+
 /// A verified Encompute program. Construct with [`Builder`] or [`crate::parse`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
     name: String,
     precision: f64,
+    verification: Verification,
     nodes: Vec<Node>,
     outputs: Vec<Output>,
 }
@@ -163,6 +195,11 @@ pub struct Program {
 impl Program {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The verification the program requires.
+    pub fn verification(&self) -> Verification {
+        self.verification
     }
 
     /// Maximum absolute error allowed on every output element.
@@ -231,6 +268,7 @@ impl Builder {
             program: Program {
                 name: name.to_owned(),
                 precision,
+                verification: Verification::Receipt,
                 nodes: vec![],
                 outputs: vec![],
             },
@@ -632,6 +670,11 @@ impl Builder {
             value,
         });
         Ok(())
+    }
+
+    /// Require verified execution (see [`Verification`]).
+    pub fn verification(&mut self, v: Verification) {
+        self.program.verification = v;
     }
 
     pub fn finish(self) -> Result<Program> {

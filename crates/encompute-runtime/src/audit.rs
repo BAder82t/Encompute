@@ -171,7 +171,11 @@ fn exact_checks(out: &mut Vec<Check>, model: &Model, e: &encompute_evaluator::Ex
         ),
         Err(err) => check("exact.ranges_proven", Status::Fail, err.message),
     });
-    let known = encompute_tfhe::default_profile();
+    let known = if e.proof_required {
+        encompute_exact::bgv::profile(&e.plan)
+    } else {
+        encompute_tfhe::default_profile()
+    };
     out.push(if e.profile == known {
         check(
             "params.profile",
@@ -211,26 +215,50 @@ fn exact_checks(out: &mut Vec<Check>, model: &Model, e: &encompute_evaluator::Ex
             "ENC1702 transcript commitment mismatch: the exact plan does not match the verification metadata",
         ),
     });
+    let scheme = model.compiled().scheme();
     out.push(check(
         "exact.bindings",
         Status::Pass,
-        "envelopes bind scheme TFHE, backend, parameter set, program and key; the evaluator \
-         checks ciphertexts against the parameter profile (TFHE-rs conformance) before use",
+        format!(
+            "envelopes bind scheme {scheme}, backend, parameter set, program, key and transcript"
+        ),
     ));
-    out.push(if has_tfhe() {
+    out.push(if e.proof_required {
         check(
+            "exact.verification",
+            Status::Pass,
+            format!(
+                "verification required: every result must carry an execution proof ({}, OpenFHE \
+                 BGV); clients never decrypt without a valid proof",
+                encompute_exact::bgv::PROTOCOL
+            ),
+        )
+    } else {
+        check(
+            "exact.verification",
+            Status::Info,
+            "receipts only: an evaluator can sign a wrong result; use verification=\"required\" \
+             for execution proofs",
+        )
+    });
+    out.push(match (e.proof_required, has_tfhe()) {
+        (true, _) => check(
+            "exact.backend",
+            Status::Pass,
+            "OpenFHE BGV (BSD 2-Clause): exact modular arithmetic, reproducible byte for byte",
+        ),
+        (false, true) => check(
             "exact.backend",
             Status::Warn,
             "TFHE-rs backend is research-only in this Encompute configuration; commercial use \
              needs a patent license from Zama",
-        )
-    } else {
-        check(
+        ),
+        (false, false) => check(
             "exact.backend",
             Status::Info,
             "no production exact cryptographic backend in this build: exact execution uses the \
              mock evaluator (TFHE-rs is behind the research `tfhe-rs` feature)",
-        )
+        ),
     });
 }
 

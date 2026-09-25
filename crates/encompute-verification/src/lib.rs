@@ -19,6 +19,7 @@ mod backend;
 pub mod canonical;
 mod hash;
 mod identity;
+pub mod proof;
 mod receipt;
 mod reference;
 mod spec;
@@ -31,6 +32,10 @@ pub use backend::{
 };
 pub use hash::{output_commitment, request_commitment, Digest32};
 pub use identity::{EvaluatorIdentity, EvaluatorSigner};
+pub use proof::{
+    verify_execution, CiphertextBinding, ExecutionProof, ExecutionVerified, ProofHeader,
+    VerificationKeyId, VerificationRelation, VerificationState, PROOF_VERSION,
+};
 pub use receipt::{
     ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence, RECEIPT_VERSION,
 };

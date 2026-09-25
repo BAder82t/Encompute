@@ -20,6 +20,16 @@ pub const MAX_RECEIPT_BYTES: usize = 16 << 10;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VerificationEvidence {
     None,
+    /// A verifiable-FHE correctness proof exists for this execution; the
+    /// receipt binds it by digest (the `ExecutionProof` travels separately,
+    /// so receipts stay small). Names the property, not the library.
+    Vfhe {
+        relation: crate::proof::VerificationRelation,
+        protocol: String,
+        protocol_version: u32,
+        verification_key_id: String,
+        proof_digest: String,
+    },
 }
 
 /// What an evaluator states it executed. Only commitments and public
@@ -90,6 +100,27 @@ impl ExecutionReceipt {
         response: &[u8],
         evaluator: &EvaluatorIdentity,
     ) -> Result<Self> {
+        Self::with_evidence(
+            spec,
+            transcript_hash,
+            key_id,
+            request,
+            response,
+            evaluator,
+            VerificationEvidence::None,
+        )
+    }
+
+    /// A receipt carrying `evidence` (e.g. the digest of an execution proof).
+    pub fn with_evidence(
+        spec: &ExecutionSpec,
+        transcript_hash: Option<&str>,
+        key_id: &str,
+        request: &[u8],
+        response: &[u8],
+        evaluator: &EvaluatorIdentity,
+        evidence: VerificationEvidence,
+    ) -> Result<Self> {
         Ok(Self {
             version: RECEIPT_VERSION,
             execution_id: random_uuid_v4()?,
@@ -105,7 +136,7 @@ impl ExecutionReceipt {
             backend_version: spec.backend_version.clone(),
             transcript_hash: transcript_hash.map(str::to_owned),
             evaluator_id: evaluator.evaluator_id(),
-            evidence: VerificationEvidence::None,
+            evidence,
         })
     }
 
@@ -170,6 +201,25 @@ impl SignedExecutionReceipt {
         }
         if let Some(t) = &r.transcript_hash {
             hex_of("transcript hash", t, 32)?;
+        }
+        if let VerificationEvidence::Vfhe {
+            protocol,
+            verification_key_id,
+            proof_digest,
+            ..
+        } = &r.evidence
+        {
+            hex_of("verification key ID", verification_key_id, 32)?;
+            hex_of("proof digest", proof_digest, 32)?;
+            if protocol.is_empty()
+                || protocol.len() > 64
+                || !protocol.bytes().all(|c| c.is_ascii_graphic())
+            {
+                return Err(Error::new(
+                    Code::Receipt,
+                    "receipt proof protocol is malformed",
+                ));
+            }
         }
         hex_of("public key", &self.evaluator_public_key, 32)?;
         hex_of("signature", &self.signature, 64)?;

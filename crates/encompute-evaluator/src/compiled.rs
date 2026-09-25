@@ -6,7 +6,7 @@
 pub use encompute_analysis::Semantics;
 use encompute_analysis::{semantics, PrivacyReport};
 use encompute_exact::{ExactPlan, ExactProfile};
-use encompute_ir::{Program, Result};
+use encompute_ir::{Code, Error, Program, Result, Verification};
 use serde::Serialize;
 
 /// Exact plan plus the vetted parameter profile it targets.
@@ -15,6 +15,9 @@ pub struct ExactProgram {
     pub plan: ExactPlan,
     pub privacy: PrivacyReport,
     pub profile: ExactProfile,
+    /// `verification required`: the plan targets the proof-capable OpenFHE
+    /// BGV backend (ADR-009).
+    pub proof_required: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,19 +30,61 @@ pub enum CompiledProgram {
 pub use encompute_exact::EXACT_PLAN_VERSION;
 
 /// Compile by semantics: approximate → CKKS, exact → exact plan. Programs
-/// mixing both are rejected (0.3).
+/// mixing both are refused (0.3). Programs with `verification required`
+/// compile to the proof-capable BGV profile, and fail (ENC1801) unless the
+/// proof backend covers every instruction.
 pub fn compile_program(program: &Program) -> Result<CompiledProgram> {
+    let required = program.verification() == Verification::Required;
     Ok(match semantics(program)? {
+        Semantics::Approximate if required => {
+            return Err(Error::new(
+                Code::Unverified,
+                "this program cannot be verified: execution proofs cover exact (integer/Boolean) \
+                 programs only; approximate (CKKS) programs support verification=\"receipt\"",
+            ))
+        }
         Semantics::Approximate => CompiledProgram::Approx(encompute_ckks::compile(program)?),
         Semantics::Exact => {
             let c = encompute_exact::compile(program)?;
+            let profile = if required {
+                check_coverage(&c.plan)?;
+                encompute_exact::bgv::profile(&c.plan)
+            } else {
+                encompute_tfhe::default_profile()
+            };
             CompiledProgram::Exact(ExactProgram {
                 plan: c.plan,
                 privacy: c.privacy,
-                profile: encompute_tfhe::default_profile(),
+                profile,
+                proof_required: required,
             })
         }
     })
+}
+
+/// Fail unless the proof backend covers every instruction of `plan`.
+fn check_coverage(plan: &ExactPlan) -> Result<()> {
+    let caps = encompute_exact::bgv::capabilities();
+    // Coverage depends on the plan only, not on the spec.
+    let t = encompute_exact::semantic_transcript(plan, &"0".repeat(64));
+    if let Some(e) = caps.first_unsupported(&t) {
+        let (covered, total) = caps.coverage(&t);
+        return Err(Error::new(
+            Code::Unverified,
+            format!(
+                "this program cannot be fully verified: unsupported proof operation {} on {} \
+                 (instruction {}); available proof coverage {}% ({covered}/{total}, protocol {}: \
+                 u8, u16 and bool; add, sub, mul, constants, and/or/xor/not). Use \
+                 verification=\"receipt\", or restrict the program to the proven subset",
+                e.op,
+                e.ty,
+                e.index,
+                100 * covered / total.max(1),
+                caps.protocol
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn json<T: Serialize>(v: &T) -> String {
@@ -60,6 +105,7 @@ impl CompiledProgram {
     pub fn scheme(&self) -> &'static str {
         match self {
             CompiledProgram::Approx(_) => "CKKS",
+            CompiledProgram::Exact(e) if e.profile.backend == "openfhe" => "BGV",
             CompiledProgram::Exact(_) => "TFHE",
         }
     }
@@ -69,6 +115,24 @@ impl CompiledProgram {
         match self {
             CompiledProgram::Approx(_) => ("ckks", encompute_ckks::PLAN_VERSION),
             CompiledProgram::Exact(_) => ("exact", EXACT_PLAN_VERSION),
+        }
+    }
+
+    /// Whether an execution proof is required (and possible) for this
+    /// program.
+    pub fn proof_required(&self) -> bool {
+        matches!(self, CompiledProgram::Exact(e) if e.proof_required)
+    }
+
+    /// The real backend this program targets: OpenFHE for CKKS and for
+    /// BGV exact programs, TFHE-rs for other exact programs.
+    pub fn target_backend(&self) -> crate::BackendKind {
+        match self {
+            CompiledProgram::Approx(_) => crate::BackendKind::OpenFhe,
+            CompiledProgram::Exact(e) if e.profile.backend == "openfhe" => {
+                crate::BackendKind::OpenFhe
+            }
+            CompiledProgram::Exact(_) => crate::BackendKind::TfheRs,
         }
     }
 

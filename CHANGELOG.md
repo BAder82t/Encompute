@@ -1,6 +1,34 @@
 # Changelog
 
-## Unreleased — 0.4 V2: semantic transcripts
+## Unreleased — 0.4 V3a: verified execution (research)
+
+- **Verified private execution.** `verification="required"` (Python) /
+  `verification required` (`.eir`) compiles exact programs to a new OpenFHE
+  BGV backend (u8, u16, bool; `+ - *`, constants, `& | ^ ~`) and fails with
+  ENC1801 unless every instruction is provable. Each result carries an
+  `ExecutionProof` (relation `FheEvaluationV1`, protocol `reexecution-v1`)
+  bound in the signed receipt; the client re-executes over the committed
+  request with its evaluation keys and decrypts only on a byte-for-byte
+  match. Sound, not succinct (ADR-009). Research feature `vfhe-research`
+  (crate `encompute-vfhe`).
+- **Malicious evaluator caught.** Random, replayed, skipped, substituted
+  and mutated results, each with a valid signed receipt, are rejected by
+  the proof; with receipts alone the same lie is accepted.
+- **Proof plumbing.** `VerificationRelation`, `CiphertextBinding` (checked
+  against the commitments before a backend sees them),
+  `VerificationKeyId` (`encvk1:`), `ExecutionProof` (`ENCP` encoding),
+  receipt evidence `Vfhe` (proof digest), `VerificationState`
+  (unverified / receipt verified / execution verified), capability
+  negotiation, `GET /v1/jobs/{j}/proof`.
+- **CLI.** `run --remote` prints `VERIFIED PRIVATE EXECUTION` only after the
+  proof verifies and saves `proof.bin`; `verify --proof --evaluation-keys`.
+- Research findings recorded in ADR-009: Fherret binds no output ciphertext
+  and has no license; ZHE's published analysis had a bug; TFHE-rs
+  evaluation is not byte-reproducible; OpenFHE BGV is.
+- Cost (loan pre-check, M3 Max): evaluation 24 ms, verification 65 ms,
+  proof 543 bytes.
+
+## 0.4 V2: semantic transcripts
 
 - **Semantic transcripts.** Every exact plan maps deterministically to a
   `SemanticTranscript` (stable numeric opcodes, typed canonical constants,

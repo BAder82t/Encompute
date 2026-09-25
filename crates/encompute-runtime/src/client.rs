@@ -7,8 +7,9 @@ use encompute_evaluator::{execution_spec, transcript_for, BackendKind, CompiledP
 use encompute_ir::{check_inputs, Code, Error, Inputs, Outputs, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
 use encompute_verification::{
-    output_commitment, request_commitment, verify_receipt, EvaluatorIdentity, ExecutionSpec,
-    ExpectedExecution, SemanticTranscript, SignedExecutionReceipt, VerifiedReceipt,
+    output_commitment, request_commitment, verify_receipt, EvaluatorIdentity, ExecutionProof,
+    ExecutionSpec, ExpectedExecution, SemanticTranscript, SignedExecutionReceipt,
+    VerificationState, VerifiedReceipt,
 };
 
 /// The concrete client, so the secret key can be exported.
@@ -19,6 +20,8 @@ enum Client {
     ExactMock(PlainExactClient),
     #[cfg(feature = "tfhe-rs")]
     TfheRs(Box<encompute_tfhe_client::TfheRsClient>),
+    #[cfg(feature = "openfhe")]
+    Bgv(encompute_openfhe_client::BgvClient),
 }
 
 impl Client {
@@ -36,6 +39,8 @@ impl Client {
             Client::ExactMock(c) => c,
             #[cfg(feature = "tfhe-rs")]
             Client::TfheRs(c) => c.as_ref(),
+            #[cfg(feature = "openfhe")]
+            Client::Bgv(c) => c,
             _ => unreachable!("CKKS client used for an exact program"),
         }
     }
@@ -45,6 +50,8 @@ impl Client {
             Client::ExactMock(_) => self.exact().evaluation_keys(),
             #[cfg(feature = "tfhe-rs")]
             Client::TfheRs(_) => self.exact().evaluation_keys(),
+            #[cfg(feature = "openfhe")]
+            Client::Bgv(_) => self.exact().evaluation_keys(),
             _ => self.ckks().evaluation_keys(),
         }
     }
@@ -57,6 +64,8 @@ impl Client {
             Client::ExactMock(c) => Ok(c.secret_key()),
             #[cfg(feature = "tfhe-rs")]
             Client::TfheRs(c) => c.secret_key(),
+            #[cfg(feature = "openfhe")]
+            Client::Bgv(c) => c.secret_key(),
         }
     }
 }
@@ -74,7 +83,8 @@ pub struct ClientSession {
     ids: Ids,
     key_id: String,
     compiled: CompiledProgram,
-    /// Evaluation-keys envelope, to send to the evaluator once.
+    /// Evaluation-keys envelope, to send to the evaluator once (and, for
+    /// programs requiring proofs, to verify by re-execution).
     evaluation_keys: Option<Vec<u8>>,
 }
 
@@ -131,7 +141,13 @@ impl ClientSession {
             (CompiledProgram::Exact(_), BackendKind::TfheRs) => {
                 Client::TfheRs(Box::new(encompute_tfhe_client::TfheRsClient::generate()?))
             }
-            (c, k) if !k.supports(c.semantics()) => {
+            #[cfg(feature = "openfhe")]
+            (CompiledProgram::Exact(e), BackendKind::OpenFhe) => {
+                Client::Bgv(encompute_openfhe_client::BgvClient::generate(
+                    encompute_exact::bgv::mult_depth(&e.plan),
+                )?)
+            }
+            (c, k) if !k.runs(c) => {
                 return Err(Error::new(
                     Code::Backend,
                     format!("{} cannot run {} programs", k.name(), c.scheme()),
@@ -192,6 +208,13 @@ impl ClientSession {
                 ),
                 (CompiledProgram::Exact(_), BackendKind::Mock) => {
                     Client::ExactMock(PlainExactClient::restore(&env.payload)?)
+                }
+                #[cfg(feature = "openfhe")]
+                (CompiledProgram::Exact(e), BackendKind::OpenFhe) => {
+                    Client::Bgv(encompute_openfhe_client::BgvClient::restore(
+                        encompute_exact::bgv::mult_depth(&e.plan),
+                        &env.payload,
+                    )?)
                 }
                 #[cfg(feature = "tfhe-rs")]
                 (CompiledProgram::Exact(_), BackendKind::TfheRs) => Client::TfheRs(Box::new(
@@ -291,6 +314,12 @@ impl ClientSession {
         receipt: &SignedExecutionReceipt,
         trusted: &EvaluatorIdentity,
     ) -> Result<(Outputs, VerifiedReceipt)> {
+        if self.compiled.proof_required() && self.kind != BackendKind::Mock {
+            return Err(Error::new(
+                Code::Unverified,
+                "this program requires verified execution: use decrypt_proven",
+            ));
+        }
         let spec = self.spec();
         let (rc, oc) = (request_commitment(request), output_commitment(response));
         let transcript_hash = self.transcript().map(|t| t.id().hex());
@@ -302,10 +331,144 @@ impl ClientSession {
                 request_commitment: &rc,
                 output_commitment: &oc,
                 transcript_hash: transcript_hash.as_deref(),
+                proof_expected: self.compiled.proof_required() && self.kind != BackendKind::Mock,
                 trusted_evaluator: trusted,
             },
         )?;
         Ok((self.decrypt(response)?, verified))
+    }
+
+    /// Give a restored client its evaluation-keys envelope (`eval.keys`),
+    /// needed to verify execution proofs by re-execution. Checked against
+    /// this client's key ID.
+    pub fn attach_evaluation_keys(&mut self, envelope: &[u8]) -> Result<()> {
+        let env = Envelope::decode(envelope)?;
+        if sha256_hex(&env.payload) != self.key_id {
+            return Err(Error::new(
+                Code::WrongKey,
+                "these evaluation keys belong to another key pair",
+            ));
+        }
+        self.evaluation_keys = Some(envelope.to_vec());
+        Ok(())
+    }
+
+    /// Verify the receipt and, for programs requiring verified execution,
+    /// the execution proof, before decrypting. No proof, no decryption:
+    /// when the program requires one, a missing or invalid proof is an
+    /// error (ENC1801) and nothing is decrypted. Mock runs are never
+    /// reported as verified.
+    pub fn decrypt_proven(
+        &self,
+        request: &[u8],
+        response: &[u8],
+        receipt: &SignedExecutionReceipt,
+        proof: Option<&ExecutionProof>,
+        trusted: &EvaluatorIdentity,
+    ) -> Result<(Outputs, VerificationState)> {
+        let (_, verified) = self.verify_receipt_only(request, response, receipt, trusted)?;
+        if !self.compiled.proof_required() || self.kind == BackendKind::Mock {
+            return Ok((self.decrypt(response)?, VerificationState::ReceiptVerified));
+        }
+        let proof = proof.ok_or_else(|| {
+            Error::new(
+                Code::Unverified,
+                "this program requires verified execution and the evaluator sent no execution \
+                 proof: no proof, no decryption",
+            )
+        })?;
+        let state = self.verify_proof(&verified, request, response, proof)?;
+        Ok((self.decrypt(response)?, state))
+    }
+
+    #[cfg(feature = "vfhe-research")]
+    fn verify_proof(
+        &self,
+        verified: &VerifiedReceipt,
+        request: &[u8],
+        response: &[u8],
+        proof: &ExecutionProof,
+    ) -> Result<VerificationState> {
+        use encompute_verification::{verify_execution, CiphertextBinding, ExecutionStatement};
+        use encompute_vfhe::{ReexecutionBackend, ReexecutionKey};
+        let transcript = self
+            .transcript()
+            .ok_or_else(|| Error::new(Code::Transcript, "exact program without a transcript"))?;
+        let statement = ExecutionStatement::new(verified, &transcript)?;
+        let binding = CiphertextBinding::new(request, response, &statement)?;
+        let keys = self.evaluation_keys.as_deref().ok_or_else(|| {
+            Error::new(
+                Code::Unverified,
+                "verifying needs this client's evaluation keys (eval.keys)",
+            )
+        })?;
+        let payload = Envelope::decode(keys)?.payload;
+        let plan = &self
+            .compiled
+            .exact()
+            .expect("proof-required programs are exact")
+            .plan;
+        let key = ReexecutionKey::new(plan, &self.spec().plan_id, &self.key_id, &payload);
+        verify_execution(
+            verified,
+            &statement,
+            &binding,
+            proof,
+            &ReexecutionBackend,
+            &key,
+        )
+    }
+
+    #[cfg(not(feature = "vfhe-research"))]
+    fn verify_proof(
+        &self,
+        _: &VerifiedReceipt,
+        _: &[u8],
+        _: &[u8],
+        _: &ExecutionProof,
+    ) -> Result<VerificationState> {
+        Err(Error::new(
+            Code::Unverified,
+            "verifying execution proofs needs the research `vfhe-research` build",
+        ))
+    }
+
+    /// Verify only the receipt against this client's spec, key, transcript
+    /// and the exact envelopes.
+    pub fn verify_receipt(
+        &self,
+        request: &[u8],
+        response: &[u8],
+        receipt: &SignedExecutionReceipt,
+        trusted: &EvaluatorIdentity,
+    ) -> Result<VerifiedReceipt> {
+        self.verify_receipt_only(request, response, receipt, trusted)
+            .map(|(_, v)| v)
+    }
+
+    fn verify_receipt_only(
+        &self,
+        request: &[u8],
+        response: &[u8],
+        receipt: &SignedExecutionReceipt,
+        trusted: &EvaluatorIdentity,
+    ) -> Result<((), VerifiedReceipt)> {
+        let spec = self.spec();
+        let (rc, oc) = (request_commitment(request), output_commitment(response));
+        let transcript_hash = self.transcript().map(|t| t.id().hex());
+        let verified = verify_receipt(
+            receipt,
+            &ExpectedExecution {
+                spec: &spec,
+                key_id: &self.key_id,
+                request_commitment: &rc,
+                output_commitment: &oc,
+                transcript_hash: transcript_hash.as_deref(),
+                proof_expected: self.compiled.proof_required() && self.kind != BackendKind::Mock,
+                trusted_evaluator: trusted,
+            },
+        )?;
+        Ok(((), verified))
     }
 
     /// Check and decrypt an outputs envelope, without a receipt.

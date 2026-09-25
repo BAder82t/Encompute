@@ -18,6 +18,7 @@ encompute-exact.workspace = true
 encompute-verification.workspace = true
 encompute-tfhe.workspace = true
 encompute-tfhe-client = { workspace = true, optional = true }
+encompute-vfhe = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
@@ -32,6 +33,8 @@ ureq = { version = "2.12", default-features = false }
 openfhe = ["encompute-evaluator/openfhe", "dep:encompute-openfhe-client"]
 # Research use only: TFHE-rs requires a patent license from Zama for commercial use.
 tfhe-rs = ["encompute-evaluator/tfhe-rs", "encompute-tfhe-client/tfhe-rs"]
+# Research: verify execution proofs (re-execution on OpenFHE BGV, ADR-009).
+vfhe-research = ["openfhe", "dep:encompute-vfhe"]
 
 [lints]
 workspace = true

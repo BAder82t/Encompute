@@ -45,6 +45,7 @@ fn check(r: &SignedExecutionReceipt, signer: &EvaluatorSigner) -> encompute_ir::
             request_commitment: &rc,
             output_commitment: &oc,
             transcript_hash: Some(TRANSCRIPT),
+            proof_expected: false,
             trusted_evaluator: &id,
         },
     )
@@ -96,6 +97,7 @@ fn valid_receipt_verifies_and_is_not_a_proof() {
             request_commitment: &rc,
             output_commitment: &oc,
             transcript_hash: Some(TRANSCRIPT),
+            proof_expected: false,
             trusted_evaluator: &id,
         },
     )
@@ -183,6 +185,7 @@ fn receipts_do_not_transfer_between_executions() {
                 request_commitment: &rc,
                 output_commitment: &oc,
                 transcript_hash: Some(TRANSCRIPT),
+                proof_expected: false,
                 trusted_evaluator: &id,
             },
         )
@@ -277,10 +280,64 @@ fn transcript_hash_is_bound() {
                 request_commitment: &rc,
                 output_commitment: &oc,
                 transcript_hash: want.as_deref(),
+                proof_expected: false,
                 trusted_evaluator: &id,
             },
         )
         .unwrap_err();
         assert_eq!(e.code, Code::Transcript, "{e}");
     }
+}
+
+/// The evidence must be what the verifier expects: a proof-less receipt is
+/// refused when a proof is required, and a proof-naming receipt when none
+/// is (checked by verify_receipt itself, not only downstream).
+#[test]
+fn evidence_must_match_expectation() {
+    let signer = EvaluatorSigner::generate().unwrap();
+    let id = signer.identity();
+    let (s, rc, oc) = (spec(), request_commitment(REQ), output_commitment(OUT));
+    let check = |r: &SignedExecutionReceipt, proof_expected: bool| {
+        verify_receipt(
+            r,
+            &ExpectedExecution {
+                spec: &s,
+                key_id: KEY,
+                request_commitment: &rc,
+                output_commitment: &oc,
+                transcript_hash: Some(TRANSCRIPT),
+                proof_expected,
+                trusted_evaluator: &id,
+            },
+        )
+        .map(|_| ())
+        .map_err(|e| e.code)
+    };
+    let plain = signed(&signer);
+    assert_eq!(check(&plain, false), Ok(()));
+    assert_eq!(check(&plain, true), Err(Code::Receipt), "stripped proof");
+    let with_proof = ExecutionReceipt::with_evidence(
+        &spec(),
+        Some(TRANSCRIPT),
+        KEY,
+        REQ,
+        OUT,
+        &id,
+        encompute_verification::VerificationEvidence::Vfhe {
+            relation: encompute_verification::VerificationRelation::FheEvaluationV1,
+            protocol: "reexecution-v1".into(),
+            protocol_version: 1,
+            verification_key_id: "5e".repeat(32),
+            proof_digest: "6f".repeat(32),
+        },
+    )
+    .unwrap()
+    .sign(&signer)
+    .unwrap();
+    assert_eq!(check(&with_proof, true), Ok(()));
+    assert_eq!(
+        check(&with_proof, false),
+        Err(Code::Receipt),
+        "unexpected proof"
+    );
 }

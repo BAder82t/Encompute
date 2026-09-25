@@ -16,6 +16,10 @@ pub struct ExpectedExecution<'a> {
     /// The transcript hash of the verifier's own plan (exact plans), or
     /// `None` (CKKS).
     pub transcript_hash: Option<&'a str>,
+    /// Whether the verifier requires the receipt to name an execution
+    /// proof (programs with `verification required`, on a real backend):
+    /// the evidence must then be a proof, and otherwise none.
+    pub proof_expected: bool,
     pub trusted_evaluator: &'a EvaluatorIdentity,
 }
 
@@ -32,7 +36,8 @@ impl VerifiedReceipt {
         &self.receipt
     }
 
-    /// Whether an execution proof is attached (never, in V1).
+    /// Whether the receipt names an execution proof. Naming one is not
+    /// verifying it: see [`crate::verify_execution`].
     pub fn has_execution_proof(&self) -> bool {
         !matches!(self.receipt.evidence, VerificationEvidence::None)
     }
@@ -110,7 +115,16 @@ pub fn verify_receipt(
             &r.backend_version,
             spec.backend_version.clone(),
         ),
-        ("evidence", evidence_kind(&r.evidence), "none".to_owned()),
+        (
+            "evidence",
+            evidence_kind(&r.evidence),
+            if expected.proof_expected {
+                "vfhe"
+            } else {
+                "none"
+            }
+            .to_owned(),
+        ),
     ];
     for (what, got, want) in checks {
         if got != want {
@@ -129,5 +143,6 @@ pub fn verify_receipt(
 fn evidence_kind(e: &VerificationEvidence) -> &'static str {
     match e {
         VerificationEvidence::None => "none",
+        VerificationEvidence::Vfhe { .. } => "vfhe",
     }
 }

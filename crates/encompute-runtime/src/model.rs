@@ -76,16 +76,22 @@ impl Session {
     fn run(&self, program: &Program, inputs: &Inputs) -> Result<Outputs> {
         let request = self.client.encrypt(program, inputs)?;
         let (response, _) = self.evaluator.execute(&request)?;
+        let proof = self.evaluator.proof_for(&request, &response)?;
         let receipt = issue_receipt(
             self.evaluator.spec(),
             self.evaluator.transcript_hash(),
             &request,
             &response,
+            proof.as_ref(),
             &self.signer,
         )?;
-        let (outputs, _) =
-            self.client
-                .decrypt_verified(&request, &response, &receipt, &self.signer.identity())?;
+        let (outputs, _) = self.client.decrypt_proven(
+            &request,
+            &response,
+            &receipt,
+            proof.as_ref(),
+            &self.signer.identity(),
+        )?;
         Ok(outputs)
     }
 }
@@ -174,6 +180,19 @@ impl Model {
                 "this build has no OpenFHE backend; rebuild with the `openfhe` feature \
                  (see README) or use mode \"mock\"",
             )),
+            (Mode::Encrypted, Semantics::Exact)
+                if self.compiled.target_backend() == BackendKind::OpenFhe =>
+            {
+                if has_openfhe() {
+                    Ok(BackendKind::OpenFhe)
+                } else {
+                    Err(Error::new(
+                        Code::Backend,
+                        "this program requires verified execution on OpenFHE BGV; rebuild with \
+                         the `openfhe` feature or use mode \"mock\"",
+                    ))
+                }
+            }
             (Mode::Encrypted, Semantics::Exact) if has_tfhe() => Ok(BackendKind::TfheRs),
             (Mode::Encrypted, Semantics::Exact) => Err(Error::new(
                 Code::Backend,

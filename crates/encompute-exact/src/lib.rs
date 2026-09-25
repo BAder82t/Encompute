@@ -3,6 +3,7 @@
 //! and runs it on any [`encompute_backend::ExactEvaluator`]. TFHE-rs is one
 //! implementation (`encompute-tfhe`); others can follow (0.3, D1).
 
+pub mod bgv;
 mod exec;
 mod lower;
 mod plan;

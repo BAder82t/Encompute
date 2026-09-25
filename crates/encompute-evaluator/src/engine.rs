@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use encompute_analysis::semantics;
 use encompute_ir::{parse, Code, Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +21,9 @@ pub struct ProgramInfo {
     pub spec: encompute_verification::ExecutionSpec,
     /// Exact programs: the semantic transcript hash receipts bind.
     pub transcript_hash: Option<String>,
+    /// The program requires an execution proof (`verification required`).
+    #[serde(default)]
+    pub proof_required: bool,
 }
 
 /// Timings of one job, in milliseconds.
@@ -102,6 +104,7 @@ fn info(s: &EvaluatorSession) -> ProgramInfo {
         backend: s.kind().name().to_owned(),
         spec: s.spec().clone(),
         transcript_hash: s.transcript_hash().map(str::to_owned),
+        proof_required: s.compiled().proof_required(),
     }
 }
 
@@ -112,7 +115,9 @@ impl Engine for Local {
 
     fn add_program(&self, eir: &str) -> Result<ProgramInfo> {
         let program = parse(eir)?;
-        let kind = self.backends.for_semantics(semantics(&program)?);
+        let kind = self
+            .backends
+            .for_program(&crate::compiled::compile_program(&program)?);
         let session = EvaluatorSession::new(program, kind)?;
         let i = info(&session);
         self.sessions

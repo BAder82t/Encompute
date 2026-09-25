@@ -712,7 +712,13 @@ def _ident(name: str) -> str:
     return safe if safe and not safe[0].isdigit() else "_" + safe
 
 
-def trace(fn: Any, precision: float, name: Optional[str], publics: Dict[str, Any]) -> Tuple[str, Outputs]:
+def trace(
+    fn: Any,
+    precision: float,
+    name: Optional[str],
+    publics: Dict[str, Any],
+    verification: str = "receipt",
+) -> Tuple[str, Outputs]:
     """Trace ``fn`` into ``.eir`` text."""
     g = _Graph()
     sig = inspect.signature(fn, eval_str=True)
@@ -771,7 +777,8 @@ def trace(fn: Any, precision: float, name: Optional[str], publics: Dict[str, Any
 
     header = [
         "encompute 0.1",
-        f"program {_ident(name or fn.__name__)} precision {_num(precision)}",
+        f"program {_ident(name or fn.__name__)} precision {_num(precision)}"
+        + (" verification required" if verification == "required" else ""),
     ]
     footer = [f'output "{n}" = %{i}' for n, i in outputs]
     return "\n".join(header + g.lines + footer) + "\n", ([n for n, _ in outputs], style)

@@ -292,3 +292,35 @@ def test_tfhe_rs_encrypted():
     yes = dict(age=35, income=100_000, debt=20_000, risk=400)
     assert approve(**yes, mode="encrypted") is True
     assert approve(**{**yes, "age": 17}, mode="encrypted") is False
+
+
+def test_verification_required_mode():
+    @compile(verification="required")
+    def precheck(income: secret[u16, 0:5000], member: secret[bool_], flagged: secret[bool_]):
+        return {"score": income * 3 + 7, "ok": member & ~flagged}
+
+    assert "verification required" in precheck.eir.splitlines()[1]
+    assert precheck.security["verification"] == "required"
+    assert precheck.security["scheme"] == "BGV"
+    # Mock runs work but never claim verification.
+    assert precheck(1000, True, False, mode="mock") == {"score": 3007, "ok": True}
+
+    def uncovered(age: secret[u8, 0:120]):
+        return age >= 18
+
+    e = code_of(lambda: compile(uncovered, verification="required"))
+    assert e == "ENC1801"
+    with pytest.raises(ValueError):
+        compile(uncovered, verification="maybe")
+
+
+@pytest.mark.skipif(not encompute.has_openfhe(), reason="built without OpenFHE")
+def test_verification_required_encrypted():
+    @compile(verification="required")
+    def precheck(income: secret[u16, 0:5000], member: secret[bool_]):
+        return {"score": income * 3 + 7, "ok": member & member}
+
+    try:
+        assert precheck(1000, True, mode="encrypted") == {"score": 3007, "ok": True}
+    except EncomputeError as e:  # built without the research proof verifier
+        assert e.code == "ENC1801", e

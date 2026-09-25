@@ -46,6 +46,20 @@ lbcrypto::CryptoContext<DCRTPoly> make_context(uint32_t ring_dim,
   return cc;
 }
 
+lbcrypto::CryptoContext<DCRTPoly> make_bgv_context(uint32_t mult_depth) {
+  lbcrypto::CCParams<lbcrypto::CryptoContextBGVRNS> params;
+  params.SetPlaintextModulus(kBgvPlaintextModulus);
+  params.SetMultiplicativeDepth(mult_depth);
+  params.SetSecurityLevel(lbcrypto::HEStd_128_classic);
+  params.SetKeySwitchTechnique(lbcrypto::HYBRID);
+  params.SetScalingTechnique(lbcrypto::FIXEDAUTO);
+  auto cc = lbcrypto::GenCryptoContext(params);
+  cc->Enable(lbcrypto::PKE);
+  cc->Enable(lbcrypto::KEYSWITCH);
+  cc->Enable(lbcrypto::LEVELEDSHE);
+  return cc;
+}
+
 namespace {
 std::map<std::string, int>& tag_counts() {
   static std::map<std::string, int> m;
@@ -145,6 +159,13 @@ std::unique_ptr<Context> new_context(uint32_t ring_dim, uint32_t mult_depth,
   impl->cc = make_context(ring_dim, mult_depth, scale_bits, first_mod_bits,
                           num_large_digits, slots);
   impl->slots = slots;
+  return std::make_unique<Context>(std::move(impl));
+}
+
+std::unique_ptr<Context> new_bgv_context(uint32_t mult_depth) {
+  Guard lock(openfhe_mutex());
+  auto impl = std::make_unique<ContextImpl>();
+  impl->cc = make_bgv_context(mult_depth);
   return std::make_unique<Context>(std::move(impl));
 }
 
@@ -275,6 +296,30 @@ std::unique_ptr<Ciphertext> rotate(const Context& ctx, const Ciphertext& a, int3
 uint32_t level(const Ciphertext& ct) {
   Guard lock(openfhe_mutex());
   return ct.impl->ct->GetLevel();
+}
+
+std::unique_ptr<Ciphertext> clone_ciphertext(const Ciphertext& ct) {
+  Guard lock(openfhe_mutex());
+  return wrap(ct.impl->ct->Clone());
+}
+
+namespace {
+// Packed plaintext holding `c` in slot 0 (deterministic encoding).
+lbcrypto::Plaintext bgv_scalar(const ContextImpl& c, int64_t k) {
+  return c.cc->MakePackedPlaintext(std::vector<int64_t>{k});
+}
+}  // namespace
+
+std::unique_ptr<Ciphertext> bgv_add_scalar(const Context& ctx, const Ciphertext& a, int64_t c) {
+  Guard lock(openfhe_mutex());
+  auto pt = bgv_scalar(*ctx.impl, c);
+  return wrap(ctx.impl->cc->EvalAdd(a.impl->ct, pt));
+}
+
+std::unique_ptr<Ciphertext> bgv_mul_scalar(const Context& ctx, const Ciphertext& a, int64_t c) {
+  Guard lock(openfhe_mutex());
+  auto pt = bgv_scalar(*ctx.impl, c);
+  return wrap(ctx.impl->cc->EvalMult(a.impl->ct, pt));
 }
 
 }  // namespace encompute_openfhe

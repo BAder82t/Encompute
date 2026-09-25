@@ -273,6 +273,7 @@ def compile(
     fn: Optional[Callable[..., Any]] = None,
     *,
     precision: float = 1e-3,
+    verification: str = "receipt",
     name: Optional[str] = None,
     **publics: Any,
 ) -> Any:
@@ -282,13 +283,20 @@ def compile(
     ``encompute.compile(f, weights=W)``, or taken from their defaults.
 
     The types choose the scheme: approximate programs compile to CKKS,
-    exact ones to an exact plan. ``precision`` is the maximum absolute error
+    exact ones to an exact plan. ``verification="required"`` asks for a
+    cryptographic execution proof on every result (exact programs within
+    the proven subset: u8/u16/bool, + - *, constants, & | ^ ~); compilation
+    fails otherwise (ENC1801), and encrypted results are never decrypted
+    without a valid proof. ``precision`` is the maximum absolute error
     allowed on every approximate output. Usable as ``@encompute.compile``,
     ``@encompute.compile(precision=...)`` or a call.
     """
 
+    if verification not in ("receipt", "required"):
+        raise ValueError('verification must be "receipt" or "required"')
+
     def build(f: Callable[..., Any]) -> Model:
-        text, (_, style) = trace(f, precision, name, publics)
+        text, (_, style) = trace(f, precision, name, publics, verification)
         return Model(_call(_native.Model.compile, text), style)
 
     if fn is None:

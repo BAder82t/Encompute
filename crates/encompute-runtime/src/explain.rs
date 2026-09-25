@@ -6,7 +6,6 @@ use serde::Serialize;
 
 use crate::diff::TestReport;
 use crate::model::{has_tfhe, BenchReport, Mode, Model};
-use encompute_verification::VerificationBackend;
 
 /// Measured behaviour of a model: accuracy and cost from real runs.
 #[derive(Clone, Debug, Serialize)]
@@ -21,9 +20,8 @@ fn verification(s: &mut String, model: &Model) {
     let _ = writeln!(s, "  {:<24}supported (signed by the evaluator)", "receipt");
     match model.transcript_for_target() {
         Some(t) => {
-            let cov = encompute_verification::NoProofBackend
-                .capabilities()
-                .coverage(&t);
+            let caps = encompute_exact::bgv::capabilities();
+            let cov = caps.coverage(&t);
             let _ = writeln!(s, "  {:<24}v{}", "transcript", t.transcript_version);
             let _ = writeln!(
                 s,
@@ -31,7 +29,21 @@ fn verification(s: &mut String, model: &Model) {
                 "transcript hash",
                 &t.id().to_string()[..26]
             );
-            let _ = writeln!(s, "  {:<24}none", "proof backend");
+            if model.compiled().proof_required() {
+                let _ = writeln!(s, "  {:<24}required", "verification");
+                let _ = writeln!(
+                    s,
+                    "  {:<24}{} (sound, not succinct: verifying costs one evaluation)",
+                    "proof backend", caps.protocol
+                );
+            } else {
+                let _ = writeln!(s, "  {:<24}receipt only", "verification");
+                let _ = writeln!(
+                    s,
+                    "  {:<24}none (the {} subset would cover {}/{})",
+                    "proof backend", caps.protocol, cov.0, cov.1
+                );
+            }
             let _ = writeln!(
                 s,
                 "  {:<24}{}%",
@@ -50,8 +62,13 @@ fn verification(s: &mut String, model: &Model) {
     }
     let _ = writeln!(
         s,
-        "  {:<24}NOT PRESENT (a receipt is a signed claim, not a proof)",
-        "execution proof"
+        "  {:<24}{}",
+        "execution proof",
+        if model.compiled().proof_required() {
+            "REQUIRED: results are decrypted only after the proof verifies"
+        } else {
+            "NOT PRESENT (a receipt is a signed claim, not a proof)"
+        }
     );
 }
 
@@ -213,18 +230,17 @@ impl Model {
 
         section(&mut s, "Execution");
         let pr = &e.profile;
-        let _ = writeln!(s, "  {:<24}TFHE", "scheme");
+        let _ = writeln!(s, "  {:<24}{}", "scheme", self.compiled().scheme());
+        let note = match (e.proof_required, has_tfhe(), crate::model::has_openfhe()) {
+            (true, _, true) => " (proof-capable: re-execution)",
+            (true, _, false) => " (not in this build: mock only)",
+            (false, true, _) => " (research use only)",
+            (false, false, _) => " (not in this build: mock only)",
+        };
         let _ = writeln!(
             s,
-            "  {:<24}{} {}{}",
-            "backend",
-            pr.backend,
-            pr.backend_version,
-            if has_tfhe() {
-                " (research use only)"
-            } else {
-                " (not in this build: mock only)"
-            }
+            "  {:<24}{} {}{note}",
+            "backend", pr.backend, pr.backend_version
         );
         let _ = writeln!(s, "  {:<24}{}", "parameter profile", pr.profile);
         let _ = writeln!(
