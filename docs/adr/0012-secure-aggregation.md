@@ -126,18 +126,31 @@ gradient, and the coordinator learns only the sum.
    - `verify_aggregation_receipt` checks all of it against the reader's own
      spec.
 
-8. **Attested contributors (optional).** A spec may require an attestation
+8. **Signed contribution metadata.** Before any protocol message, each
+   party signs a `ContributionMetadata` with its identity key. It names the
+   RoundID, its AssetID, PolicyID, training ExecutionSpecID, codec ID,
+   vector length, a digest of its protocol keys, and its attestation record.
+   The coordinator refuses a mismatch with ENC2102, naming the field. The
+   receipt carries every contributor's metadata, and the verifier re-checks
+   it. The aggregate asset gets an AssetID derived from the receipt, so it
+   takes its place in the asset graph with the contributing assets as
+   parents.
+
+9. **Attested contributors (optional).** A spec may require an attestation
    policy (ADR-011). Each party's contribution key must then be the evaluator
    key bound by an attestation record that satisfies the policy. The
    coordinator checks the record, and the receipt lists record IDs. This is
    how "only the approved training workload may contribute" will be enforced.
 
-9. **Key broker storage** (hardening from ADR-011). A `SecretStore` trait
+10. **Key broker storage** (hardening from ADR-011). A `SecretStore` trait
    holds broker keys. `DevelopmentFileStore` stores plaintext and is refused
    by production brokers. `LocalKekStore` wraps each key with
    ChaCha20-Poly1305 under a KEK kept outside the state file, bound to
-   broker, asset and version. A KMS, HSM, KMIP or vault store implements the
-   same trait.
+   broker, asset and version. `revoke` destroys the material of a revoked
+   version rather than only flagging it. `rotate` re-wraps keys under
+   another store (`encompute keys rewrap --new-kek`), for KEK rotation or a
+   move to a KMS. A KMS, HSM, KMIP or vault store implements the same
+   trait.
 
 ## Security
 
@@ -185,4 +198,4 @@ under what spec, not that the sum is right.
   - attested contributors;
   - the explain output.
 - `crates/encompute-cli/tests/cli.rs` (`secure_aggregation_round`),
-  `python/tests/test_aggregation.py`, and `examples/secure_aggregation.sh`.
+  `python/tests/test_aggregation.py`, and `examples/confidential_federated_update/`.

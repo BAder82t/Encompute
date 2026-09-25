@@ -37,6 +37,49 @@ const SPEC_DOMAIN: &str = "encompute.aggregation-spec.v1";
 const ROUND_DOMAIN: &str = "encompute.aggregation-round.v1";
 const RECEIPT_DOMAIN: &str = "encompute.aggregation-receipt.v1";
 const AGGREGATE_DOMAIN: &str = "encompute.aggregate.v1";
+const METADATA_DOMAIN: &str = "encompute.contribution-metadata.v1";
+const CODEC_DOMAIN: &str = "encompute.aggregation-codec.v1";
+const KEYS_DOMAIN: &str = "encompute.contribution-keys.v1";
+const ASSET_DOMAIN: &str = "encompute.aggregate-asset.v1";
+
+/// `SHA256("encompute.aggregation-codec.v1", canonical codec)`, hex.
+pub fn codec_id(codec: &FixedPointCodec) -> Result<String> {
+    digest(CODEC_DOMAIN, codec)
+}
+
+/// What a party states about its contribution, signed with its identity
+/// key before any protocol message: which round, asset, policy, training
+/// execution, encoding and shape, and which protocol keys carry it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContributionMetadata {
+    pub round_id: String,
+    pub party: PartyId,
+    pub asset_id: String,
+    pub policy_id: Option<String>,
+    pub execution_spec_id: Option<String>,
+    pub codec_id: String,
+    pub vector_len: usize,
+    /// Digest of the advertised protocol keys (c_pk, s_pk).
+    pub keys_digest: String,
+    pub attestation_id: Option<String>,
+}
+
+/// Round 0 as a party sends it: its protocol keys and its signed metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Join {
+    pub advertise: Advertise,
+    pub metadata: Signed<ContributionMetadata>,
+}
+
+fn keys_digest(a: &Advertise) -> String {
+    let b = &a.signed.body;
+    hex(&tagged(
+        KEYS_DOMAIN,
+        &[b.c_pk.as_bytes(), b.s_pk.as_bytes()],
+    ))
+}
 
 fn binding(m: impl Into<String>) -> Error {
     Error::new(Code::AggregationBinding, m)
@@ -329,6 +372,7 @@ impl AggregationRound {
 pub struct RoundParticipant {
     pub spec: AggregationSpec,
     pub round: AggregationRound,
+    identity: SigningKey,
     protocol: Participant,
 }
 
@@ -391,13 +435,14 @@ impl RoundParticipant {
         let protocol = Participant::new(
             approved.params(round.id()?),
             party.clone(),
-            identity,
+            identity.clone(),
             encoded,
             attestation,
         )?;
         Ok(Self {
             spec: approved.clone(),
             round: round.clone(),
+            identity,
             protocol,
         })
     }
@@ -406,8 +451,30 @@ impl RoundParticipant {
         self.protocol.party()
     }
 
-    pub fn advertise(&mut self) -> Result<Advertise> {
-        self.protocol.advertise()
+    /// Round 0: protocol keys plus the signed contribution metadata.
+    pub fn advertise(&mut self) -> Result<Join> {
+        let advertise = self.protocol.advertise()?;
+        let plan = &self.spec.plan;
+        let party = self.protocol.party().clone();
+        let metadata = ContributionMetadata {
+            round_id: self.round.id()?,
+            asset_id: plan
+                .participant(&party)
+                .expect("checked at join")
+                .asset
+                .clone(),
+            party,
+            policy_id: plan.policy_id.clone(),
+            execution_spec_id: self.spec.training_execution_spec_id.clone(),
+            codec_id: codec_id(&plan.codec)?,
+            vector_len: plan.vector_len,
+            keys_digest: keys_digest(&advertise),
+            attestation_id: advertise.signed.body.attestation_id.clone(),
+        };
+        Ok(Join {
+            metadata: Signed::new(&self.identity, METADATA_DOMAIN, metadata)?,
+            advertise,
+        })
     }
 
     pub fn share_keys(&mut self, k: &KeysBroadcast) -> Result<Signed<SharesBody>> {
@@ -431,6 +498,9 @@ impl RoundParticipant {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateAsset {
+    /// `SHA256("encompute.aggregate-asset.v1", receipt ID, output)`: this
+    /// instance, in the asset graph.
+    pub asset_id: String,
     pub output: String,
     pub kind: AssetKind,
     pub function: AggregationFunction,
@@ -463,6 +533,7 @@ pub struct AggregationManifest {
     pub protocol: String,
     pub protocol_version: u32,
     pub codec: FixedPointCodec,
+    pub codec_id: String,
     pub vector_len: usize,
     pub minimum: usize,
     pub threshold: usize,
@@ -471,6 +542,9 @@ pub struct AggregationManifest {
     pub advertised: Vec<PartyId>,
     pub contributors: Vec<PartyId>,
     pub dropped: Vec<PartyId>,
+    /// Each contributor's signed metadata (round, asset, policy, execution,
+    /// codec, shape, keys, attestation).
+    pub metadata: Vec<Signed<ContributionMetadata>>,
     /// Each contributor's signed commitment to its masked contribution.
     pub contributions: Vec<Signed<ContributionStatement>>,
     /// The contributor set, as signed by the parties that confirmed it.
@@ -522,6 +596,7 @@ pub struct RoundCoordinator {
     key: SigningKey,
     verifier: Option<Verifier>,
     protocol: Coordinator,
+    metadata: BTreeMap<PartyId, Signed<ContributionMetadata>>,
 }
 
 impl RoundCoordinator {
@@ -549,6 +624,7 @@ impl RoundCoordinator {
             key,
             verifier,
             protocol,
+            metadata: BTreeMap::new(),
         })
     }
 
@@ -560,7 +636,15 @@ impl RoundCoordinator {
         self.protocol.awaiting()
     }
 
-    pub fn receive_advertise(&mut self, a: Advertise) -> Result<()> {
+    /// Round 0: checks the party's signed metadata against the plan (round,
+    /// asset, PolicyID, ExecutionSpecID, codec, shape, keys, attestation),
+    /// then its attestation if the spec requires one.
+    pub fn receive_advertise(&mut self, join: Join) -> Result<()> {
+        let Join {
+            advertise: a,
+            metadata,
+        } = join;
+        self.check_metadata(&a, &metadata)?;
         if let Some(policy) = &self.spec.attestation {
             let party = &a.signed.body.party;
             let record = a.attestation.as_ref().ok_or_else(|| {
@@ -589,7 +673,58 @@ impl RoundCoordinator {
             }
             record.verify(self.verifier.as_ref().expect("checked at open"), policy)?;
         }
-        self.protocol.receive_advertise(a)
+        self.protocol.receive_advertise(a)?;
+        self.metadata.insert(metadata.body.party.clone(), metadata);
+        Ok(())
+    }
+
+    fn check_metadata(&self, a: &Advertise, m: &Signed<ContributionMetadata>) -> Result<()> {
+        let party = &a.signed.body.party;
+        let key = self
+            .spec
+            .parties
+            .iter()
+            .find(|p| &p.party == party)
+            .map(|p| p.public_key.clone())
+            .ok_or_else(|| {
+                Error::new(
+                    Code::AggregationUnauthorized,
+                    format!("party {party} is not authorized for this round"),
+                )
+            })?;
+        crate::crypto::verify(
+            &unhex32(&key, "party key")?,
+            METADATA_DOMAIN,
+            &canonical_json(&m.body)?,
+            &m.signature,
+        )?;
+        let plan = &self.spec.plan;
+        let b = &m.body;
+        let want_asset = &plan.participant(party).expect("authorized").asset;
+        let checks: [(&str, bool); 8] = [
+            ("party", &b.party == party),
+            ("RoundID", b.round_id == self.round.id()?),
+            ("AssetID", &b.asset_id == want_asset),
+            ("PolicyID", b.policy_id == plan.policy_id),
+            (
+                "ExecutionSpecID",
+                b.execution_spec_id == self.spec.training_execution_spec_id,
+            ),
+            ("codec", b.codec_id == codec_id(&plan.codec)?),
+            ("vector shape", b.vector_len == plan.vector_len),
+            ("protocol keys", b.keys_digest == keys_digest(a)),
+        ];
+        if let Some((what, _)) = checks.iter().find(|(_, ok)| !ok) {
+            return Err(binding(format!(
+                "{party}'s contribution names the wrong {what} for this round"
+            )));
+        }
+        if b.attestation_id != a.signed.body.attestation_id {
+            return Err(binding(format!(
+                "{party}'s metadata names another attestation"
+            )));
+        }
+        Ok(())
     }
 
     pub fn close_advertise(&mut self) -> Result<KeysBroadcast> {
@@ -665,6 +800,7 @@ impl RoundCoordinator {
             protocol: self.spec.protocol.clone(),
             protocol_version: self.spec.protocol_version,
             codec: plan.codec,
+            codec_id: codec_id(&plan.codec)?,
             vector_len: plan.vector_len,
             minimum: plan.minimum,
             threshold: self.spec.threshold,
@@ -677,6 +813,7 @@ impl RoundCoordinator {
             eligible,
             advertised,
             contributors: survivors.clone(),
+            metadata: survivors.iter().map(|p| self.metadata[p].clone()).collect(),
             contributions,
             confirmations,
             attestations: attestations
@@ -712,7 +849,12 @@ impl RoundCoordinator {
             })
             .collect();
         let p = &plan.aggregate_policy;
+        let receipt_id = receipt.id()?;
         let asset = AggregateAsset {
+            asset_id: hex(&tagged(
+                ASSET_DOMAIN,
+                &[receipt_id.as_bytes(), plan.output.as_bytes()],
+            )),
             output: plan.output.clone(),
             kind: plan.output_asset_kind,
             function: plan.function,
@@ -726,7 +868,7 @@ impl RoundCoordinator {
                 purposes: p.purposes.clone(),
                 release: p.release,
             },
-            receipt_id: receipt.id()?,
+            receipt_id,
         };
         Ok((asset, receipt))
     }
@@ -783,6 +925,9 @@ pub fn verify_aggregation_receipt(
             "the receipt's policy, codec or shape differs from the spec",
         ));
     }
+    if m.codec_id != codec_id(&plan.codec)? {
+        return Err(binding("the receipt's codec ID differs from the spec"));
+    }
     let params = spec.params(m.round_id.clone());
     let contributors: BTreeSet<&PartyId> = m.contributors.iter().collect();
     if m.contributors.len() < plan.minimum || m.contributors.len() < spec.threshold {
@@ -800,6 +945,39 @@ pub fn verify_aggregation_receipt(
     }
     for c in &m.contributions {
         verify_contribution(&params, c)?;
+    }
+    let described: BTreeSet<&PartyId> = m.metadata.iter().map(|d| &d.body.party).collect();
+    if described != contributors || m.metadata.len() != contributors.len() {
+        return bad("the contribution metadata does not match the contributors".into());
+    }
+    for d in &m.metadata {
+        let b = &d.body;
+        let key = spec
+            .parties
+            .iter()
+            .find(|p| p.party == b.party)
+            .map(|p| p.public_key.clone())
+            .ok_or_else(|| Error::new(Code::AggregationUnauthorized, "unknown contributor"))?;
+        crate::crypto::verify(
+            &unhex32(&key, "key")?,
+            METADATA_DOMAIN,
+            &canonical_json(b)?,
+            &d.signature,
+        )?;
+        let asset = &plan.participant(&b.party).expect("in spec").asset;
+        if b.round_id != m.round_id
+            || &b.asset_id != asset
+            || b.policy_id != plan.policy_id
+            || b.execution_spec_id != spec.training_execution_spec_id
+            || b.codec_id != m.codec_id
+            || b.vector_len != plan.vector_len
+            || b.attestation_id.as_ref() != m.attestations.get(&b.party)
+        {
+            return Err(binding(format!(
+                "{}'s signed metadata does not match the round",
+                b.party
+            )));
+        }
     }
     let mut confirmed = BTreeSet::new();
     for c in &m.confirmations {

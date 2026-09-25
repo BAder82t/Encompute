@@ -154,7 +154,7 @@ pub struct Signed<T> {
 }
 
 impl<T: Serialize> Signed<T> {
-    fn new(key: &SigningKey, domain: &str, body: T) -> Result<Self> {
+    pub(crate) fn new(key: &SigningKey, domain: &str, body: T) -> Result<Self> {
         let signature = sign(key, domain, &body_bytes(&body)?);
         Ok(Self { body, signature })
     }

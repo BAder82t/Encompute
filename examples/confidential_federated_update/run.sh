@@ -4,9 +4,9 @@
 # only their sum. Hospital D, not in the consortium, is refused.
 #
 #   cargo build --bin encompute
-#   examples/secure_aggregation.sh
+#   examples/confidential_federated_update/run.sh
 set -eu
-E="${BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug}/encompute"
+E="${BIN:-$(cd "$(dirname "$0")/../.." && pwd)/target/debug}/encompute"
 W="$(mktemp -d)"
 cd "$W"
 trap 'kill $(jobs -p) 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$W"' EXIT
@@ -46,8 +46,8 @@ sleep 1
 echo; echo "== Hospital D (not in the consortium) tries to join"
 "$E" aggregate identity --party hospital-d --key d.key > /dev/null
 if "$E" aggregate join fedavg.encompute --parties parties.json --coordinator http://127.0.0.1:18770 \
-     --party hospital-d --key d.key --values gradient-d.json 2>&1; then
-  echo "UNEXPECTED: D joined"; exit 1
+     --party hospital-d --key d.key --values gradient-d.json --state d.round 2>&1 | tee d.log | grep -q ENC2101; then cat d.log; else
+  cat d.log; echo "UNEXPECTED: D was not refused as unauthorized"; exit 1
 fi
 
 echo; echo "== Hospitals A, B and C contribute"

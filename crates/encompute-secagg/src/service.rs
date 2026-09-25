@@ -4,7 +4,7 @@
 //! |---|---|---|
 //! | GET | /v1/round | the spec and round |
 //! | GET | /v1/status | stage, awaited parties, outcome |
-//! | POST | /v1/advertise, /v1/shares, /v1/masked, /v1/consistency, /v1/reveal | a party's message |
+//! | POST | /v1/join, /v1/shares, /v1/masked, /v1/consistency, /v1/reveal | a party's message |
 //! | GET | /v1/keys, /v1/inbox/{party}, /v1/survivors, /v1/unmask | the coordinator's broadcasts |
 //! | GET | /v1/receipt | the signed aggregation receipt, once done |
 //!
@@ -217,7 +217,7 @@ impl CoordinatorService {
         let mut s = self.lock();
         let c = &mut s.coord;
         match what {
-            "advertise" => c.receive_advertise(serde_json::from_slice(body).map_err(parse)?),
+            "join" => c.receive_advertise(serde_json::from_slice(body).map_err(parse)?),
             "shares" => c.receive_shares(serde_json::from_slice(body).map_err(parse)?),
             "masked" => c.receive_masked(serde_json::from_slice(body).map_err(parse)?),
             "consistency" => c.receive_consistency(serde_json::from_slice(body).map_err(parse)?),
@@ -420,7 +420,7 @@ impl ParticipantClient {
     /// receipt.
     pub fn participate(&self, mut p: RoundParticipant) -> Result<AggregationReceipt> {
         let party = p.party().as_str().to_owned();
-        self.send("advertise", &p.advertise()?)?;
+        self.send("join", &p.advertise()?)?;
         let keys: KeysBroadcast = self.wait("keys")?;
         self.send("shares", &p.share_keys(&keys)?)?;
         let inbox: Inbox = self.wait(&format!("inbox/{party}"))?;

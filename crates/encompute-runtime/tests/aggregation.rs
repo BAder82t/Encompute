@@ -639,6 +639,9 @@ fn explain_shows_policy_and_mechanism() {
         "clip [-1, 1], scale 65536, modulus 2^32",
         "✓ individual gradients never released",
         "STATUS        SATISFIED",
+        "individual release   PROHIBITED",
+        "aggregate release    PERMITTED (≥ 3 contributions)",
+        "runtime enforcement  ACTIVE",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
@@ -651,4 +654,78 @@ fn explain_shows_policy_and_mechanism() {
     ] {
         assert!(plan.contains(want), "missing {want:?}\n{plan}");
     }
+}
+
+/// A party (misconfigured or malicious) that signs metadata naming another
+/// asset, training execution, codec, shape or key set is refused by the
+/// coordinator, even though its identity signature is valid.
+#[test]
+fn contribution_metadata_is_bound() {
+    use encompute_runtime::secagg::ContributionMetadata;
+    let m = fedavg(3, 8, 3, CODEC);
+    let mut spec = spec_of(&m);
+    spec.training_execution_spec_id = Some("11".repeat(32));
+    let resign = |j: &mut encompute_runtime::secagg::Join,
+                  i: usize,
+                  edit: &dyn Fn(&mut ContributionMetadata)| {
+        edit(&mut j.metadata.body);
+        let body =
+            encompute_runtime::verification::canonical::canonical_json(&j.metadata.body).unwrap();
+        let mut h = sha2::Sha256::new();
+        use sha2::Digest;
+        h.update(b"encompute.contribution-metadata.v1\0");
+        h.update((body.len() as u64).to_le_bytes());
+        h.update(&body);
+        use ed25519_dalek::Signer;
+        j.metadata.signature = key(i)
+            .sign(&h.finalize())
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+    };
+    type Edit<'a> = (&'a str, &'a dyn Fn(&mut ContributionMetadata));
+    let edits: [Edit; 5] = [
+        ("AssetID", &|b| b.asset_id = "gradient-b".into()),
+        ("ExecutionSpecID", &|b| {
+            b.execution_spec_id = Some("22".repeat(32))
+        }),
+        ("codec", &|b| b.codec_id = "33".repeat(32)),
+        ("vector shape", &|b| b.vector_len = 9),
+        ("protocol keys", &|b| b.keys_digest = "44".repeat(32)),
+    ];
+    for (what, edit) in edits {
+        let mut c = RoundCoordinator::open(spec.clone(), 1, coordinator_key(), None, T0).unwrap();
+        let mut p = participants(&spec, &c, 1).pop().unwrap();
+        let mut j = p.advertise().unwrap();
+        // The honest message verifies…
+        resign(&mut j, 0, &|_| {});
+        let mut honest = j.clone();
+        // …an edited one does not.
+        resign(&mut j, 0, edit);
+        let e = c.receive_advertise(j).unwrap_err();
+        assert_eq!(e.code, Code::AggregationBinding, "{what}: {e}");
+        assert!(e.message.contains(what), "{what}: {e}");
+        // A forged signature is an authorization failure.
+        honest.metadata.body.vector_len = 9;
+        assert_eq!(
+            c.receive_advertise(honest).unwrap_err().code,
+            Code::AggregationUnauthorized
+        );
+    }
+
+    // The receipt carries the signed metadata; tampering with it fails.
+    let mut c = RoundCoordinator::open(spec.clone(), 2, coordinator_key(), None, T0).unwrap();
+    let mut parts = participants(&spec, &c, 3);
+    let (agg, receipt) = run(&mut c, &mut parts, &[]).unwrap();
+    assert_eq!(receipt.manifest.metadata.len(), 3);
+    assert_eq!(receipt.manifest.metadata[1].body.asset_id, "gradient-b");
+    assert_eq!(agg.asset_id.len(), 64);
+    verify_aggregation_receipt(&receipt, &spec, None, Some(&agg)).unwrap();
+    let mut t = receipt.clone();
+    t.manifest.metadata[0].body.asset_id = "gradient-c".into();
+    assert!(verify_aggregation_receipt(&t, &spec, None, None).is_err());
+    let mut t = receipt.clone();
+    t.manifest.metadata.pop();
+    assert!(verify_aggregation_receipt(&t, &spec, None, None).is_err());
 }

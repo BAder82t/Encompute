@@ -456,3 +456,46 @@ fn wrapped_key_store() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Revocation destroys key material; re-wrapping moves every key to a new
+/// store (KEK rotation, or plaintext development keys into a wrapped store).
+#[test]
+fn revoke_destroys_and_rewrap_rotates() {
+    let mut s = setup("hospital");
+    s.broker.rotate_key("patients").unwrap();
+    s.broker.revoke("patients", Some(1)).unwrap();
+    assert!(matches!(
+        s.broker.secret("patients").unwrap().versions[&1].key,
+        StoredKey::Destroyed
+    ));
+    // Development plaintext → KEK 1 → KEK 2.
+    s.broker.rewrap(kek_store(1)).unwrap();
+    s.broker.rewrap(kek_store(2)).unwrap();
+    assert_eq!(s.broker.state().store, "local-kek");
+    let dir = std::env::temp_dir().join(format!("encompute-rewrap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("broker.json");
+    s.broker.save(&path).unwrap();
+    let verifier = || Verifier::new().with(MockProvider::new(&hw().public_key()).unwrap());
+    assert!(
+        KeyBroker::load(&path, verifier(), kek_store(1)).is_err(),
+        "old KEK"
+    );
+    let mut b = KeyBroker::load(&path, verifier(), kek_store(2))
+        .unwrap()
+        .with_clock(|| T0);
+    let c = b.challenge().unwrap();
+    let e = hw()
+        .attester(IMAGE)
+        .issued_at(T0)
+        .attest(&c, &s.session.binding(&c, SPEC, Some(POLICY), ARTIFACT))
+        .unwrap();
+    let info = b.verify_attestation(&e).unwrap();
+    let g = b.release_key(&info.session, "patients").unwrap();
+    assert_eq!(g.header.key_version, 2);
+    assert_eq!(s.session.open(&g).unwrap().len(), 32);
+    // A production broker cannot move keys back to plaintext.
+    let mut prod = KeyBroker::new("p", BrokerMode::Production, verifier(), kek_store(3)).unwrap();
+    assert_eq!(prod.rewrap(dev_store()).unwrap_err().code, Code::KeyRelease);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

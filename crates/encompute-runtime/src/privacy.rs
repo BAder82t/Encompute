@@ -223,6 +223,17 @@ impl Model {
                 "  ✓ output satisfies the {} requirement",
                 b.contribution_policy.release
             );
+            let _ = writeln!(s, "  {:<21}PROHIBITED", "individual release");
+            let _ = writeln!(
+                s,
+                "  {:<21}PERMITTED (≥ {} contributions)",
+                "aggregate release", b.minimum
+            );
+            let _ = writeln!(
+                s,
+                "  {:<21}ACTIVE (secure aggregation only; evaluators refuse this program)",
+                "runtime enforcement"
+            );
             row(&mut s, "STATUS", "SATISFIED".into());
         }
         section(&mut s, "Warnings");

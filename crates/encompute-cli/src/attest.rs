@@ -412,6 +412,15 @@ pub enum BrokerCmd {
         #[command(flatten)]
         file: BrokerFile,
     },
+    /// Re-wrap every key under a new KEK (rotation), or move development
+    /// plaintext keys under one.
+    Rewrap {
+        /// The new key-encryption key file (created, mode 0600, if missing).
+        #[arg(long)]
+        new_kek: PathBuf,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
     /// Serve challenges, attestation and key release over HTTP.
     Serve {
         #[arg(long, default_value = "127.0.0.1:8760")]
@@ -570,6 +579,17 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             let v = b.revoke(&asset, version)?;
             b.save(&file.broker)?;
             println!("{asset}: key version {v} revoked");
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::Rewrap { new_kek, file } => {
+            let mut b = open_broker(&file, None)?;
+            b.rewrap(Box::new(LocalKekStore::open_or_create(&new_kek)?))?;
+            b.save(&file.broker)?;
+            println!(
+                "keys re-wrapped under KEK {}; open this broker with --kek {}",
+                b.state().kek_id.as_deref().unwrap_or("?"),
+                new_kek.display()
+            );
             Ok(ExitCode::SUCCESS)
         }
         BrokerCmd::Serve {

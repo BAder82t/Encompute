@@ -22,11 +22,18 @@
   contributors, dropouts, commitments, attestations and the aggregate
   commitment. Optional attested contributors (ADR-011).
 - Aggregation programs never run on a single evaluator (ENC1905).
+- Each contribution carries signed metadata: RoundID, AssetID, PolicyID,
+  ExecutionSpecID, codec ID, shape, protocol keys and attestation. The
+  coordinator checks it and the receipt records it. The aggregate asset has
+  its own AssetID, with the contributing assets as parents.
+  `privacy explain` shows individual release PROHIBITED, aggregate release
+  PERMITTED, and runtime enforcement ACTIVE.
 - CLI: `encompute aggregate identity|serve|join|verify`;
-  `examples/secure_aggregation.sh`. Errors ENC2101–ENC2106.
+  `examples/confidential_federated_update/`. Errors ENC2101–ENC2106.
 - **Key broker storage**: `SecretStore` (`DevelopmentFileStore`,
   `LocalKekStore`); production brokers refuse plaintext key storage
-  (`encompute keys … --kek FILE`).
+  (`encompute keys … --kek FILE`). Revocation destroys key material, and
+  `encompute keys rewrap --new-kek` rotates the KEK.
 
 ### Attested confidential compute
 

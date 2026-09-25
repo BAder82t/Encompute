@@ -21,7 +21,8 @@ pub mod round;
 pub mod service;
 
 pub use round::{
-    identity_of, party_key_from_seed, verify_aggregation_receipt, AggregateAsset, AggregatePolicy,
-    AggregationManifest, AggregationPlan, AggregationReceipt, AggregationRound, AggregationSpec,
-    PartyIdentity, PlanParticipant, RoundCoordinator, RoundParticipant, PROTOCOL, PROTOCOL_VERSION,
+    codec_id, identity_of, party_key_from_seed, verify_aggregation_receipt, AggregateAsset,
+    AggregatePolicy, AggregationManifest, AggregationPlan, AggregationReceipt, AggregationRound,
+    AggregationSpec, ContributionMetadata, Join, PartyIdentity, PlanParticipant, RoundCoordinator,
+    RoundParticipant, PROTOCOL, PROTOCOL_VERSION,
 };

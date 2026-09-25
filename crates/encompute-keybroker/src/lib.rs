@@ -364,18 +364,63 @@ impl KeyBroker {
     /// Revokes a version (default: the current one). A revoked current key
     /// is never released; rotate to release again.
     pub fn revoke(&mut self, asset_id: &str, version: Option<u64>) -> Result<u64> {
-        let s = self.secret_mut(asset_id)?;
+        let broker_id = self.state.broker_id.clone();
+        let s = self
+            .state
+            .secrets
+            .get_mut(asset_id)
+            .ok_or_else(|| err(Code::KeyRelease, format!("no key for asset {asset_id}")))?;
         let v = version.unwrap_or(s.key_version);
-        s.versions
-            .get_mut(&v)
-            .ok_or_else(|| {
-                err(
-                    Code::KeyRelease,
-                    format!("{asset_id} has no key version {v}"),
-                )
-            })?
-            .revoked = true;
+        let kv = s.versions.get_mut(&v).ok_or_else(|| {
+            err(
+                Code::KeyRelease,
+                format!("{asset_id} has no key version {v}"),
+            )
+        })?;
+        kv.key = self.store.revoke(
+            &KeyContext {
+                broker_id: &broker_id,
+                asset_id,
+                version: v,
+            },
+            &kv.key,
+        )?;
+        kv.revoked = true;
         Ok(v)
+    }
+
+    /// Re-wraps every key under `store` (KEK rotation, or a move to a KMS),
+    /// which then replaces the current store. A production broker still
+    /// needs a production store.
+    pub fn rewrap(&mut self, store: Box<dyn SecretStore>) -> Result<()> {
+        if self.state.mode == BrokerMode::Production
+            && store.security() != StoreSecurity::Production
+        {
+            return Err(err(
+                Code::KeyRelease,
+                format!(
+                    "a production broker cannot move keys to the {} store",
+                    store.name()
+                ),
+            ));
+        }
+        let broker_id = self.state.broker_id.clone();
+        let mut secrets = self.state.secrets.clone();
+        for (asset_id, s) in secrets.iter_mut() {
+            for (v, kv) in s.versions.iter_mut() {
+                let ctx = KeyContext {
+                    broker_id: &broker_id,
+                    asset_id,
+                    version: *v,
+                };
+                kv.key = store.rotate(&ctx, &kv.key, self.store.as_ref())?;
+            }
+        }
+        self.state.secrets = secrets;
+        self.state.store = store.name().into();
+        self.state.kek_id = store.key_id();
+        self.store = store;
+        Ok(())
     }
 
     /// Replaces an asset's release policy.

@@ -41,6 +41,8 @@ pub enum StoreSecurity {
 pub enum StoredKey {
     /// Development only.
     Plaintext { key: KeyMaterial },
+    /// Revoked: the material is gone.
+    Destroyed,
     Wrapped {
         /// The store that wrapped it (e.g. `local-kek`).
         store: String,
@@ -80,6 +82,30 @@ pub trait SecretStore: Send {
     fn wrap(&self, ctx: &KeyContext<'_>, key: &KeyMaterial) -> Result<StoredKey>;
     /// Recovers a key, only to seal it into a grant.
     fn unwrap_for_release(&self, ctx: &KeyContext<'_>, stored: &StoredKey) -> Result<KeyMaterial>;
+
+    /// Revokes a stored key: its material is destroyed, not merely flagged.
+    /// A KMS store would schedule the key version's destruction here.
+    fn revoke(&self, _ctx: &KeyContext<'_>, _stored: &StoredKey) -> Result<StoredKey> {
+        Ok(StoredKey::Destroyed)
+    }
+
+    /// Re-wraps a key stored by `from` under this store (KEK rotation, or a
+    /// move to a KMS). Destroyed keys stay destroyed.
+    fn rotate(
+        &self,
+        ctx: &KeyContext<'_>,
+        stored: &StoredKey,
+        from: &dyn SecretStore,
+    ) -> Result<StoredKey> {
+        match stored {
+            StoredKey::Destroyed => Ok(StoredKey::Destroyed),
+            s => self.wrap(ctx, &from.unwrap_for_release(ctx, s)?),
+        }
+    }
+}
+
+fn destroyed() -> Error {
+    err("this key version was revoked and its material destroyed")
 }
 
 /// Plaintext keys in the owner-only state file. Development only.
@@ -105,6 +131,7 @@ impl SecretStore for DevelopmentFileStore {
     fn unwrap_for_release(&self, _: &KeyContext<'_>, stored: &StoredKey) -> Result<KeyMaterial> {
         match stored {
             StoredKey::Plaintext { key } => Ok(key.clone()),
+            StoredKey::Destroyed => Err(destroyed()),
             StoredKey::Wrapped { store, .. } => Err(err(format!(
                 "this key is wrapped by {store}; open the broker with that store"
             ))),
@@ -208,14 +235,15 @@ impl SecretStore for LocalKekStore {
     }
 
     fn unwrap_for_release(&self, ctx: &KeyContext<'_>, stored: &StoredKey) -> Result<KeyMaterial> {
-        let StoredKey::Wrapped {
-            store,
-            kek_id,
-            nonce,
-            ciphertext,
-        } = stored
-        else {
-            return Err(err("a plaintext key in a wrapped store"));
+        let (store, kek_id, nonce, ciphertext) = match stored {
+            StoredKey::Wrapped {
+                store,
+                kek_id,
+                nonce,
+                ciphertext,
+            } => (store, kek_id, nonce, ciphertext),
+            StoredKey::Destroyed => return Err(destroyed()),
+            StoredKey::Plaintext { .. } => return Err(err("a plaintext key in a wrapped store")),
         };
         if store != self.name() || Some(kek_id) != self.key_id().as_ref() {
             return Err(err("the key was wrapped under another KEK"));
