@@ -1,6 +1,6 @@
 //! The evaluator role: runs a compiled plan (CKKS or exact) on encrypted
 //! inputs using only evaluation keys. Has no access to key generation,
-//! encryption or decryption (0.2 plan, D2).
+//! encryption or decryption.
 //!
 //! [`EvaluatorSession`] is the protocol-facing object: it accepts evaluation
 //! keys and input envelopes, checks every binding (parameter set, program,

@@ -1,4 +1,4 @@
-//! Semantic transcripts (0.4 V2): deterministic, bound to every semantic
+//! Semantic transcripts: deterministic, bound to every semantic
 //! detail, and replaying to exactly the plan's results.
 
 use encompute_backend::{ExactClient, ExactEvaluator, PlainExactClient, PlainExactEvaluator};

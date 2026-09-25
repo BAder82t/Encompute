@@ -1,4 +1,4 @@
-//! Execution receipts end to end (0.4 V1): CKKS and exact programs, local
+//! Execution receipts end to end: CKKS and exact programs, local
 //! and remote; every tampering fails closed; identities are deterministic.
 
 mod common;

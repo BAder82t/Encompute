@@ -1,4 +1,4 @@
-//! Exact plan → semantic transcript (0.4 V2). Derived from the plan alone,
+//! Exact plan → semantic transcript (ADR-008). Derived from the plan alone,
 //! so it is identical on every evaluator, thread schedule and backend
 //! implementation.
 

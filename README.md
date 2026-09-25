@@ -114,7 +114,7 @@ A receipt does **not** prove that the evaluator computed honestly, that the
 result is correct, or that it was not fabricated: an evaluator can sign a
 lie. Only an execution proof rules that out.
 
-**Verified execution (research, 0.4 V3a).** Programs compiled with
+**Verified execution (research).** Programs compiled with
 `verification="required"` run on OpenFHE BGV (u8, u16, bool; `+ - *`,
 constants, `& | ^ ~`) and every result carries an execution proof. The
 client re-runs the computation over the exact ciphertexts it sent, with its
@@ -122,7 +122,7 @@ own evaluation keys, and decrypts only if the response matches byte for
 byte: no proof, no decryption. A malicious evaluator returning a random,
 replayed, skipped, substituted or mutated result, even with a valid signed
 receipt, is rejected. This proof is sound but not succinct: verifying costs
-about one evaluation (ADR-009). A succinct proof is next (0.4 V3b).
+about one evaluation (ADR-009). A succinct proof is next.
 
 ```python
 @encompute.compile(verification="required")
@@ -221,7 +221,7 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 ## Roadmap
 
-- **0.4 V3b**: a succinct (zkVM) proof of the same relation, starting with
+- **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
 - **Next**: first-class parties, assets and confidentiality policies in the
   IR.

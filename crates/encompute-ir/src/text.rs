@@ -33,7 +33,7 @@ impl fmt::Display for Program {
             self.precision()
         )?;
         // The default is not written, so receipt-only programs keep the
-        // same text and program ID as before 0.4 V3.
+        // same text and program ID as before verified execution existed.
         if self.verification() != crate::program::Verification::Receipt {
             write!(f, " verification {}", self.verification().name())?;
         }

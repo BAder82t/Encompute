@@ -1,4 +1,4 @@
-//! Encompute envelopes (0.2 plan, D3). Every object exchanged between client
+//! Encompute envelopes. Every object exchanged between client
 //! and evaluator or written to disk is wrapped, never raw backend bytes:
 //!
 //! ```text

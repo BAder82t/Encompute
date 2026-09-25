@@ -1,4 +1,4 @@
-//! HTTP/1.1 evaluator service (0.2 plan, D4).
+//! HTTP/1.1 evaluator service.
 //!
 //! | Method | Path | Body → Response |
 //! |---|---|---|

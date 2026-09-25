@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased — 0.4 V3a: verified execution (research)
+## Unreleased
+
+### Verified execution (research)
 
 - **Verified private execution.** `verification="required"` (Python) /
   `verification required` (`.eir`) compiles exact programs to a new OpenFHE
@@ -28,7 +30,7 @@
 - Cost (loan pre-check, M3 Max): evaluation 24 ms, verification 65 ms,
   proof 543 bytes.
 
-## 0.4 V2: semantic transcripts
+### Semantic transcripts
 
 - **Semantic transcripts.** Every exact plan maps deterministically to a
   `SemanticTranscript` (stable numeric opcodes, typed canonical constants,
@@ -50,7 +52,7 @@
 - Fix: evaluator worker processes kept the gateway's backends (a mock for
   one semantics replaced OpenFHE for the other).
 
-## 0.4 V1: execution identity and receipts
+### Execution identity and receipts
 
 - **Execution specs.** `ExecutionSpec` binds program, plan, parameters,
   plan kind and version, semantics, scheme and backend; its domain-separated
@@ -73,7 +75,7 @@
   operation at the boundaries of all eight integer widths and on random
   programs; benchmark example `exact_ops`.
 
-## 0.3 (in progress)
+### Exact programs
 
 Exact private computation: integers and Booleans, computed exactly.
 

@@ -1,5 +1,5 @@
 //! Integer range analysis for exact programs: proves that no operation can
-//! overflow its type for any input in the declared ranges (0.3, checked
+//! overflow its type for any input in the declared ranges (checked
 //! arithmetic), and that lookup indices stay in their tables.
 
 use encompute_ir::{Code, Elem, Error, LogicOp, Op, Program, Result, ValueId};

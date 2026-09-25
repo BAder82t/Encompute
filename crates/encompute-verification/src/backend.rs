@@ -1,5 +1,5 @@
-//! The proof boundary (0.4 V2): the public statement an execution proof is
-//! about, and the interface a proof engine implements (0.4 V3). Nothing
+//! The proof boundary: the public statement an execution proof is
+//! about, and the interface a proof engine implements. Nothing
 //! here produces evidence yet. No FHE library type appears in this API.
 
 use std::collections::BTreeSet;

@@ -1,6 +1,6 @@
-# ADR-009 — Verifiable-FHE proof backend (0.4 V3)
+# ADR-009 — Verifiable-FHE proof backend
 
-Status: **Accepted** (2026-09-25): A (re-execution on OpenFHE BGV) as V3a, then B (zkVM) as V3b.
+Status: **Accepted** (2026-09-25): A (re-execution on OpenFHE BGV) first, then B (zkVM).
 
 ## Context
 
@@ -78,13 +78,13 @@ Revisit only for private-program verification.
 ## Recommendation
 
 A first, then B:
-1. **V3a — re-execution (A)** on a new OpenFHE BGV exact backend for the
+1. **Re-execution (A)** on a new OpenFHE BGV exact backend for the
    first subset (u8/u16 `ADD`, `SUB`, `MUL_CONST`, `AND`/`OR`/`NOT` on
    bools), end to end with receipts, `ExecutionProof`, the malicious-
    evaluator demo and CI byte-reproducibility tests. Labelled honestly:
    relation `FheEvaluationV1`, protocol `reexecution-v1`, "sound, not
    succinct: verification costs one evaluation".
-2. **V3b — zkVM proof (B)**, starting with a benchmark of one BGV
+2. **Succinct zkVM proof (B)**, starting with a benchmark of one BGV
    ciphertext multiplication inside RISC Zero/SP1, then the same subset;
    same relation, protocol `vfhe-zkvm-v1`, same `ExecutionProof` object.
 
@@ -108,7 +108,7 @@ Both keep TFHE-rs execution-only.
 | Parallelizable | as evaluation | yes (zkVM segments) |
 | First backend | OpenFHE BGV (new exact backend) | integer BGV in a zkVM |
 
-## V3a result (2026-09-25)
+## Re-execution result (2026-09-25)
 
 Implemented: `verification required` programs (Python
 `@encompute.compile(verification="required")`) compile to the OpenFHE BGV
@@ -140,4 +140,4 @@ evaluation keys, 769 KiB; request 1027 KiB, response 514 KiB.
 
 Open: cross-platform byte reproducibility of OpenFHE BGV (Linux vs macOS,
 HEXL/NATIVE_SIZE builds) is argued from the source, not yet tested against
-shared fixtures; V3b (succinct zkVM proof) is next.
+shared fixtures; the succinct zkVM proof is next. The re-execution backend stays as the reference verifier against which succinct proof systems are differential-tested.

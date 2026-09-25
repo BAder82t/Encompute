@@ -1,4 +1,4 @@
-//! The BGV exact subset (0.4 V3, ADR-009): what the OpenFHE BGV backend
+//! The BGV exact subset (ADR-009): what the OpenFHE BGV backend
 //! executes and the re-execution proof covers. Plaintext modulus 65537;
 //! unsigned 8/16-bit integers and Booleans, whose values (proven in range)
 //! never wrap modulo 65537.

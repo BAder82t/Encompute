@@ -1,7 +1,7 @@
 //! Exact encrypted computation, independent of any FHE library: lowers exact
 //! IR (integers, bools, comparisons, logic, selection) to an [`ExactPlan`]
 //! and runs it on any [`encompute_backend::ExactEvaluator`]. TFHE-rs is one
-//! implementation (`encompute-tfhe`); others can follow (0.3, D1).
+//! implementation (`encompute-tfhe`); others can follow.
 
 pub mod bgv;
 mod exec;

@@ -1,4 +1,4 @@
-//! OpenFHE BGV exact backend (0.4 V3): results equal the clear reference,
+//! OpenFHE BGV exact backend (ADR-009): results equal the clear reference,
 //! and evaluation is byte-for-byte reproducible (the basis of re-execution
 //! verification, ADR-009).
 

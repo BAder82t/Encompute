@@ -1,4 +1,4 @@
-//! HTTP client for a remote `encompute-evaluator` (0.2 plan, D4).
+//! HTTP client for a remote `encompute-evaluator`.
 
 use std::io::Read;
 use std::time::Duration;

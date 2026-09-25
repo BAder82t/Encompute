@@ -1,5 +1,5 @@
 //! Exact (TFHE-family) backend traits and a mock. Backend-neutral: TFHE-rs
-//! and OpenFHE BinFHE can both implement them (0.3, D1).
+//! and OpenFHE BinFHE can both implement them.
 //!
 //! Every ciphertext carries its element type; operations take operands of
 //! one type (the plan guarantees it). Range analysis has proven that no

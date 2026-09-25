@@ -1,4 +1,4 @@
-//! Worker processes (0.2 plan, D5). The gateway owns HTTP and forwards work
+//! Worker processes. The gateway owns HTTP and forwards work
 //! to `encompute-evaluator worker` processes over stdin/stdout. Each worker
 //! has its own OpenFHE instance, so a crash or corruption stays in one
 //! process; a dead worker is restarted and its programs and keys replayed.

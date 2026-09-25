@@ -1,6 +1,6 @@
 //! CKKS backend traits and a mock backend.
 //!
-//! The two roles are separate traits (0.2 plan, D2):
+//! The two roles are separate traits:
 //!
 //! - [`CkksClient`] holds the secret key: it encrypts, decrypts and exports
 //!   evaluation keys.

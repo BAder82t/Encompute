@@ -1,6 +1,6 @@
 //! OpenFHE CKKS client for Encompute: key generation, encryption, decryption
 //! and export of evaluation keys. The only crate that touches the secret key.
-//! The evaluator binary does not depend on it (0.2 plan, D2).
+//! The evaluator binary does not depend on it.
 
 use encompute_backend::{CkksClient, ExactClient};
 use encompute_ckks::CkksParams;
@@ -138,7 +138,7 @@ impl CkksClient for OpenFheClient {
     }
 }
 
-/// BGV client for exact programs (0.4 V3, ADR-009): keys, encryption and
+/// BGV client for exact programs (ADR-009): keys, encryption and
 /// decryption of unsigned 8/16-bit integers and Booleans in slot 0.
 pub struct BgvClient {
     inner: cxx::UniquePtr<ffi::Client>,

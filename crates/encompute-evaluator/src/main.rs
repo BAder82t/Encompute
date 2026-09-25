@@ -1,5 +1,5 @@
 //! `encompute-evaluator`: the evaluator service. Holds no secret key and
-//! links no client crypto (0.2 plan, D1/D2).
+//! links no client crypto.
 //!
 //!     encompute-evaluator serve <program.eir | model.encompute/>... [--listen ADDR]
 //!                               [--backend mock|openfhe|tfhe-rs]... [--workers N]

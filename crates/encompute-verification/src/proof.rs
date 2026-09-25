@@ -1,4 +1,4 @@
-//! Execution proofs (0.4 V3 groundwork): the object a proof backend returns,
+//! Execution proofs: the object a proof backend returns,
 //! the ciphertext bindings it must be checked against, and the verification
 //! states a client can reach. No proof backend ships in the default build;
 //! nothing here turns a receipt into a proof.

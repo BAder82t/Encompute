@@ -1,4 +1,4 @@
-//! Execution identity and signed execution receipts (0.4 V1, ADR-007).
+//! Execution identity and signed execution receipts (ADR-007).
 //!
 //! An [`ExecutionReceipt`](ExecutionReceipt) is what an evaluator *claims*
 //! it executed, with cryptographic bindings to the execution specification
@@ -11,7 +11,7 @@
 //! correct. That needs [`VerificationEvidence`] from a future
 //! [`VerificationBackend`]; receipts carry `VerificationEvidence::None`.
 //!
-//! A [`SemanticTranscript`] (0.4 V2) is the canonical statement of which
+//! A [`SemanticTranscript`] is the canonical statement of which
 //! operations connect an execution's inputs to its outputs; receipts bind
 //! its hash. It fixes what a proof must show; it is not a proof either.
 

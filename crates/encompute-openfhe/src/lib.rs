@@ -5,7 +5,7 @@
 //! parameters, loads evaluation keys exported by a client, and computes on
 //! serialized ciphertexts. It has no key generation, encryption or
 //! decryption; those live in `encompute-openfhe-client`, which the evaluator
-//! binary does not link (0.2 plan, D2).
+//! binary does not link.
 
 use encompute_backend::{CkksEvaluator, ExactEvaluator};
 use encompute_ckks::CkksParams;
@@ -238,7 +238,7 @@ impl CkksEvaluator for OpenFheEvaluator {
     }
 }
 
-/// Exact-program evaluator over OpenFHE BGV-RNS (0.4 V3, ADR-009): unsigned
+/// Exact-program evaluator over OpenFHE BGV-RNS (ADR-009): unsigned
 /// 8/16-bit integers and Booleans in slot 0, plaintext modulus 65537. Range
 /// analysis proves no value leaves its type, so arithmetic modulo 65537 is
 /// exact. Evaluation is deterministic: the same inputs and keys give the

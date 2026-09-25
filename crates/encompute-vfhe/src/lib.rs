@@ -1,4 +1,4 @@
-//! Verifiable-FHE proof backends (0.4 V3, ADR-009; research).
+//! Verifiable-FHE proof backends (ADR-009; research).
 //!
 //! [`ReexecutionBackend`] (`reexecution-v1`) proves the relation
 //! `FheEvaluationV1`, `C_out = Eval_T(C_in, evk)`, for exact programs on

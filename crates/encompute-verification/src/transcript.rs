@@ -1,4 +1,4 @@
-//! Semantic transcripts (0.4 V2, ADR-008): the canonical, deterministic
+//! Semantic transcripts (ADR-008): the canonical, deterministic
 //! statement of which Encompute operations connect an execution's inputs
 //! to its outputs. A transcript describes compiled exact-plan semantics,
 //! not how a backend implements them (one `select` stays one `select`

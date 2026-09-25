@@ -63,7 +63,7 @@ pub fn execution_spec(ids: &Ids, compiled: &CompiledProgram, kind: BackendKind) 
     }
 }
 
-/// The semantic transcript of an exact program under `spec` (0.4 V2);
+/// The semantic transcript of an exact program under `spec`;
 /// `None` for CKKS programs, which are not transcribed yet.
 pub fn transcript_for(
     compiled: &CompiledProgram,

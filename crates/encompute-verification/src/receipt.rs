@@ -6,7 +6,7 @@ use crate::hash::{hex, tagged, unhex, RECEIPT};
 use crate::identity::{EvaluatorIdentity, EvaluatorSigner};
 use crate::spec::ExecutionSpec;
 
-/// 2 adds `transcript_hash` (0.4 V2).
+/// 2 adds `transcript_hash` (semantic transcripts).
 pub const RECEIPT_VERSION: u32 = 2;
 
 /// Largest receipt accepted on parse (receipts are ~1 KiB).

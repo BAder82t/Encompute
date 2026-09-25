@@ -151,7 +151,7 @@ pub struct Output {
     pub value: ValueId,
 }
 
-/// How strongly an execution must be verified (0.4 V3). Part of the
+/// How strongly an execution must be verified (ADR-009). Part of the
 /// program: it changes what the program compiles to, so it is part of the
 /// program ID.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

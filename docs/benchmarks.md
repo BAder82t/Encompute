@@ -53,7 +53,7 @@ Caveat: the 8 benchmark clients share one process, whose client-side
 OpenFHE calls (encrypt, decrypt) are also serialized. Real clients are
 separate processes, so the evaluator scales further than shown.
 
-## Exact programs on TFHE-rs (0.3 P7, research feature)
+## Exact programs on TFHE-rs (research feature)
 
 Apple M3 Max, 14 cores; TFHE-rs 1.8.1, profile
 `PARAM_MESSAGE_2_CARRY_2_KS_PBS_TUNIFORM_2M128`.
@@ -86,7 +86,7 @@ response 16 KiB, evaluation 2.1 s.
 Semantic transcript of the eligibility plan (8 instructions): built and
 hashed in ~70 µs (release), against ~2 s of TFHE-rs evaluation: far below 1 %.
 
-## Verified execution (0.4 V3a, research)
+## Verified execution (research)
 
 Loan pre-check (4 inputs, 6 instructions: u16 `* + −`, Boolean `& ~`),
 OpenFHE BGV (t = 65537), Apple M3 Max, release, median of 5:

@@ -1,4 +1,4 @@
-//! Verified private execution (0.4 V3a, ADR-009): OpenFHE BGV with
+//! Verified private execution (ADR-009): OpenFHE BGV with
 //! re-execution proofs. A malicious evaluator signs valid receipts for
 //! wrong results; only the execution proof exposes them.
 #![cfg(feature = "vfhe-research")]
