@@ -184,6 +184,190 @@ impl fmt::Display for Release {
     }
 }
 
+/// Whose privacy a budget protects: the unit two neighbouring datasets
+/// differ by. Explicit, because one training example is not always one
+/// person.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyUnit {
+    Record,
+    User,
+    Patient,
+    Device,
+    Organization,
+    Custom(String),
+}
+
+impl PrivacyUnit {
+    pub fn parse(s: &str) -> Result<Self> {
+        Ok(match s {
+            "record" => Self::Record,
+            "user" => Self::User,
+            "patient" => Self::Patient,
+            "device" => Self::Device,
+            "organization" => Self::Organization,
+            other => {
+                check_id("privacy unit", other)
+                    .map_err(|e| Error::new(Code::PrivacyPolicy, e.message))?;
+                Self::Custom(other.to_owned())
+            }
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Record => "record",
+            Self::User => "user",
+            Self::Patient => "patient",
+            Self::Device => "device",
+            Self::Organization => "organization",
+            Self::Custom(s) => s,
+        }
+    }
+}
+
+impl fmt::Display for PrivacyUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// An asset's differential-privacy budget: every release derived from it
+/// is charged, and a release that would exceed `(epsilon, delta)` for its
+/// `unit` is refused.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivacyBudget {
+    pub unit: PrivacyUnit,
+    #[serde(with = "exact_f64")]
+    pub epsilon: f64,
+    #[serde(with = "exact_f64")]
+    pub delta: f64,
+}
+
+// Validated finite.
+impl Eq for PrivacyBudget {}
+
+impl PrivacyBudget {
+    pub fn validate(&self) -> Result<()> {
+        if !(self.epsilon.is_finite() && self.epsilon > 0.0) {
+            return Err(Error::new(
+                Code::PrivacyPolicy,
+                format!(
+                    "privacy budget epsilon must be positive, got {}",
+                    self.epsilon
+                ),
+            ));
+        }
+        if !(self.delta.is_finite() && (0.0..1.0).contains(&self.delta)) {
+            return Err(Error::new(
+                Code::PrivacyPolicy,
+                format!("privacy budget delta must be in [0, 1), got {}", self.delta),
+            ));
+        }
+        if self.delta == 0.0 {
+            return Err(Error::new(
+                Code::PrivacyPolicy,
+                "privacy budget delta must be positive: Gaussian mechanisms need delta > 0",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Named privacy levels: a per-asset budget and the noise that goes with
+/// it, so applications can say `privacy="strong"` and `explain` shows what
+/// that means. `(name, epsilon, delta, noise_multiplier)`; the clip norm is
+/// 1.0 (contributions are clipped to unit L2 norm). Each level's noise
+/// affords about ten full-participation releases (no sampling
+/// amplification) of a record-, patient- or user-level budget.
+pub const PRIVACY_PRESETS: [(&str, f64, f64, f64); 3] = [
+    ("standard", 8.0, 1e-5, 2.2),
+    ("strong", 3.0, 1e-6, 6.0),
+    ("maximum", 1.0, 1e-7, 18.0),
+];
+
+/// The budget and mechanism of a named privacy level.
+pub fn privacy_preset(name: &str, unit: PrivacyUnit) -> Result<(PrivacyBudget, DpMechanism)> {
+    let (_, epsilon, delta, noise_multiplier) = PRIVACY_PRESETS
+        .iter()
+        .find(|p| p.0 == name)
+        .copied()
+        .ok_or_else(|| {
+            Error::new(
+                Code::PrivacyPolicy,
+                format!("unknown privacy level {name:?} (standard, strong, maximum)"),
+            )
+        })?;
+    Ok((
+        PrivacyBudget {
+            unit,
+            epsilon,
+            delta,
+        },
+        DpMechanism {
+            kind: DpKind::DiscreteGaussian,
+            clip_norm: 1.0,
+            noise_multiplier,
+        },
+    ))
+}
+
+/// A differential-privacy mechanism on an aggregation boundary: each
+/// party's vector is clipped to L2 norm `clip_norm`, and discrete Gaussian
+/// noise with standard deviation `noise_multiplier` times the sensitivity
+/// is added to the integer aggregate before release.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DpMechanism {
+    pub kind: DpKind,
+    #[serde(with = "exact_f64")]
+    pub clip_norm: f64,
+    #[serde(with = "exact_f64")]
+    pub noise_multiplier: f64,
+}
+
+impl Eq for DpMechanism {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DpKind {
+    /// Canonne, Kamath and Steinke (2020): exact integer sampling, no
+    /// floating-point attack surface.
+    DiscreteGaussian,
+}
+
+impl DpKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            DpKind::DiscreteGaussian => "discrete_gaussian",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        (s == "discrete_gaussian").then_some(DpKind::DiscreteGaussian)
+    }
+}
+
+impl DpMechanism {
+    pub fn validate(&self) -> Result<()> {
+        let bad = |m: String| Err(Error::new(Code::PrivacyPolicy, m));
+        if !(self.clip_norm.is_finite() && self.clip_norm > 0.0) {
+            return bad(format!(
+                "clip_norm must be positive, got {}",
+                self.clip_norm
+            ));
+        }
+        if !(self.noise_multiplier.is_finite() && self.noise_multiplier > 0.0) {
+            return bad(format!(
+                "noise_multiplier must be positive (no noise is no privacy), got {}",
+                self.noise_multiplier
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// An asset's policy as declared by its owners.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetPolicy {
@@ -198,6 +382,9 @@ pub struct AssetPolicy {
     /// coordinator): the owners' consent to an explicit, weaker
     /// derivation. Nothing else may weaken the policy.
     pub derive: BTreeMap<AssetKind, DerivePermission>,
+    /// Differential-privacy budget for everything released from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<PrivacyBudget>,
 }
 
 /// Owners' consent for derived values of one kind.
@@ -326,9 +513,10 @@ impl FixedPointCodec {
         if self.scale == 0 {
             return bad("scale must be at least 1".into());
         }
-        if !(8..=64).contains(&self.modulus_bits) {
+        // At most 2^62 so sums (and sums plus privacy noise) fit an i64.
+        if !(8..=62).contains(&self.modulus_bits) {
             return bad(format!(
-                "modulus must be 2^8 to 2^64, got 2^{}",
+                "modulus must be 2^8 to 2^62, got 2^{}",
                 self.modulus_bits
             ));
         }
@@ -377,8 +565,9 @@ impl FixedPointCodec {
         (((c - self.clip_min) * self.scale as f64).round() as u64).min(self.levels())
     }
 
-    /// The real sum of `n` values whose codes sum to `sum`.
-    pub fn decode_sum(&self, sum: u64, n: usize) -> f64 {
+    /// The real sum of `n` values whose codes sum to `sum` (which privacy
+    /// noise can make negative).
+    pub fn decode_sum(&self, sum: i64, n: usize) -> f64 {
         sum as f64 / self.scale as f64 + n as f64 * self.clip_min
     }
 
@@ -403,6 +592,9 @@ pub struct AggregationRule {
     /// `t > (n + colluding) / 2`, so this is declared, never assumed.
     pub colluding: usize,
     pub codec: FixedPointCodec,
+    /// Differential privacy applied to the aggregate before release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp: Option<DpMechanism>,
 }
 
 /// All confidentiality declarations of a program.
@@ -481,6 +673,9 @@ impl Confidentiality {
             for p in &a.policy.purposes {
                 check_text(&format!("asset {} purpose", a.id), p)?;
             }
+            if let Some(b) = &a.policy.privacy {
+                b.validate()?;
+            }
             for (k, d) in &a.policy.derive {
                 if d.release == Release::Public && !d.to.is_empty() {
                     return Err(bad(format!(
@@ -519,6 +714,9 @@ impl Confidentiality {
                 ));
             }
             a.codec.validate()?;
+            if let Some(dp) = &a.dp {
+                dp.validate()?;
+            }
         }
         Ok(())
     }

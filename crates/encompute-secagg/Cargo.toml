@@ -12,6 +12,7 @@ encompute-ir.workspace = true
 encompute-analysis.workspace = true
 encompute-verification.workspace = true
 encompute-attestation.workspace = true
+encompute-privacy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

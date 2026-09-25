@@ -134,6 +134,7 @@ impl WorkloadSession {
             evaluator_public_key: hex(&self.evaluator_public_key),
             session_public_key: self.session_public_key_hex(),
             challenge_nonce: challenge.nonce.clone(),
+            privacy_policy_id: None,
         }
     }
 

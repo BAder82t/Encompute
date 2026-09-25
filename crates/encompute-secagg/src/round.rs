@@ -13,10 +13,14 @@ use serde::{Deserialize, Serialize};
 use encompute_analysis::confidentiality::AggregationBoundary;
 use encompute_attestation::{AttestationPolicy, AttestationRecord, Verifier};
 use encompute_ir::confidentiality::{
-    AggregationFunction, AssetKind, FixedPointCodec, OutputRelease, PartyId, Release,
+    AggregationFunction, AssetKind, DpMechanism, FixedPointCodec, OutputRelease, PartyId,
+    PrivacyBudget, Release,
 };
 use encompute_ir::{Code, Error, Result};
+use encompute_privacy::ledger::{Checkpoint, Genesis, LedgerView};
+use encompute_privacy::{Charged, Csprng, PrivacyReceipt, ReleaseSpec};
 use encompute_verification::canonical::canonical_json;
+use std::path::{Path, PathBuf};
 
 use crate::crypto::{hex, random32, tagged, unhex, unhex32};
 use crate::protocol::{
@@ -41,6 +45,7 @@ const METADATA_DOMAIN: &str = "encompute.contribution-metadata.v1";
 const CODEC_DOMAIN: &str = "encompute.aggregation-codec.v1";
 const KEYS_DOMAIN: &str = "encompute.contribution-keys.v1";
 const ASSET_DOMAIN: &str = "encompute.aggregate-asset.v1";
+const PLAN_DOMAIN: &str = "encompute.aggregation-plan.v1";
 
 /// `SHA256("encompute.aggregation-codec.v1", canonical codec)`, hex.
 pub fn codec_id(codec: &FixedPointCodec) -> Result<String> {
@@ -96,6 +101,9 @@ pub struct PlanParticipant {
     pub party: PartyId,
     pub input: String,
     pub asset: String,
+    /// The asset's privacy budget (ADR-013), charged per release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<PrivacyBudget>,
 }
 
 /// The aggregate's derived policy.
@@ -131,12 +139,18 @@ pub struct AggregationPlan {
     pub codec: FixedPointCodec,
     pub recipient: OutputRelease,
     pub aggregate_policy: AggregatePolicy,
+    /// Differential privacy applied before release (ADR-013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp: Option<DpMechanism>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy_id: Option<String>,
 }
 
 impl AggregationPlan {
     pub fn from_boundary(
         program_id: &str,
         policy_id: Option<&str>,
+        privacy_policy_id: Option<&str>,
         b: &AggregationBoundary,
     ) -> Self {
         let a = &b.aggregate_policy;
@@ -155,6 +169,7 @@ impl AggregationPlan {
                     party: k.party.clone(),
                     input: k.input.clone(),
                     asset: k.asset.clone(),
+                    budget: k.budget.clone(),
                 })
                 .collect(),
             minimum: b.minimum,
@@ -168,11 +183,76 @@ impl AggregationPlan {
                 purposes: a.purposes.clone(),
                 release: a.release,
             },
+            dp: b.dp.clone(),
+            privacy_policy_id: privacy_policy_id.map(str::to_owned),
         }
     }
 
     pub fn participant(&self, party: &PartyId) -> Option<&PlanParticipant> {
         self.participants.iter().find(|p| &p.party == party)
+    }
+
+    /// `SHA256("encompute.aggregation-plan.v1", canonical plan)`: what an
+    /// attested coordinator binds as its execution.
+    pub fn id(&self) -> Result<String> {
+        digest(PLAN_DOMAIN, self)
+    }
+
+    /// The release a round of this plan performs, charged to the budgets
+    /// of `contributors`; `None` without differential privacy.
+    pub fn release_spec(
+        &self,
+        round_id: &str,
+        execution_spec_id: Option<&str>,
+        contributors: &[PartyId],
+    ) -> Result<Option<ReleaseSpec>> {
+        let Some(dp) = &self.dp else {
+            return Ok(None);
+        };
+        let privacy_policy_id = self.privacy_policy_id.clone().ok_or_else(|| {
+            Error::new(Code::PrivacyPolicy, "a DP plan without a privacy policy ID")
+        })?;
+        Ok(Some(ReleaseSpec {
+            round_id: round_id.to_owned(),
+            output: self.output.clone(),
+            policy_id: self.policy_id.clone(),
+            privacy_policy_id,
+            execution_spec_id: execution_spec_id.map(str::to_owned),
+            mechanism: dp.clone(),
+            codec: self.codec,
+            vector_len: self.vector_len,
+            charged: contributors
+                .iter()
+                .filter_map(|p| self.participant(p))
+                .filter_map(|p| {
+                    p.budget.clone().map(|budget| Charged {
+                        asset_id: p.asset.clone(),
+                        budget,
+                    })
+                })
+                .collect(),
+        }))
+    }
+
+    /// The asset's ledger as found in `dir` (a genesis-only ledger if it
+    /// has none yet).
+    pub fn ledger_view(&self, dir: &Path, p: &PlanParticipant) -> Result<Option<LedgerView>> {
+        let (Some(budget), Some(ppid)) = (&p.budget, &self.privacy_policy_id) else {
+            return Ok(None);
+        };
+        let path = dir.join(format!("{}.ledger", p.asset));
+        if path.exists() {
+            return encompute_privacy::ledger::read(&path).map(Some);
+        }
+        Ok(Some(LedgerView {
+            genesis: Genesis {
+                version: encompute_privacy::ledger::LEDGER_VERSION,
+                asset_id: p.asset.clone(),
+                budget: budget.clone(),
+                privacy_policy_id: ppid.clone(),
+            },
+            entries: vec![],
+        }))
     }
 }
 
@@ -205,6 +285,12 @@ pub struct AggregationSpec {
     /// attestation satisfies this policy.
     #[serde(default)]
     pub attestation: Option<AttestationPolicy>,
+    /// If set, the coordinator must be an attested workload satisfying this
+    /// policy, bound to the plan, the round and its privacy policy: parties
+    /// contribute only to a coordinator that provably adds the approved
+    /// noise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_attestation: Option<AttestationPolicy>,
 }
 
 impl AggregationSpec {
@@ -223,6 +309,7 @@ impl AggregationSpec {
             protocol_version: PROTOCOL_VERSION,
             training_execution_spec_id: None,
             attestation: None,
+            coordinator_attestation: None,
         };
         spec.validate()?;
         Ok(spec)
@@ -313,7 +400,11 @@ impl AggregationSpec {
                 "training ExecutionSpecID",
                 self.training_execution_spec_id != other.training_execution_spec_id,
             ),
-            ("attestation policy", self.attestation != other.attestation),
+            (
+                "attestation policy",
+                (&self.attestation, &self.coordinator_attestation)
+                    != (&other.attestation, &other.coordinator_attestation),
+            ),
         ];
         let diff: Vec<&str> = fields.iter().filter(|(_, d)| *d).map(|(n, _)| *n).collect();
         (!diff.is_empty() || self != other).then(|| {
@@ -371,6 +462,122 @@ pub struct RoundParticipant {
     protocol: Participant,
 }
 
+/// What a party checks before contributing, beyond the spec.
+#[derive(Default)]
+pub struct JoinOptions<'a> {
+    /// The attestation of the workload holding this party's key.
+    pub attestation: Option<AttestationRecord>,
+    /// The last round sequence this party joined (replay protection).
+    pub last_sequence: Option<u64>,
+    /// This party's asset's privacy ledger, as the coordinator shows it.
+    pub ledger: Option<&'a LedgerView>,
+    /// The last ledger checkpoint this party saw (rollback detection).
+    pub seen: Option<&'a Checkpoint>,
+    /// The coordinator's attestation record and a verifier for it.
+    pub coordinator: Option<(&'a AttestationRecord, &'a Verifier)>,
+}
+
+/// The coordinator is an approved attested workload bound to this plan,
+/// round (its key and nonce) and privacy policy.
+fn check_coordinator(
+    spec: &AggregationSpec,
+    round: &AggregationRound,
+    policy: &AttestationPolicy,
+    coordinator: Option<(&AttestationRecord, &Verifier)>,
+) -> Result<()> {
+    let unauthorized = |m: &str| Error::new(Code::AggregationUnauthorized, m.to_owned());
+    let (record, verifier) =
+        coordinator.ok_or_else(|| unauthorized("this spec requires an attested coordinator"))?;
+    let b = &record.evidence.binding;
+    if b.evaluator_public_key != round.coordinator_key {
+        return Err(unauthorized(
+            "the coordinator's attestation binds another key",
+        ));
+    }
+    if b.challenge_nonce != round.nonce {
+        return Err(unauthorized(
+            "the coordinator's attestation is for another round",
+        ));
+    }
+    if b.execution_spec_id != spec.plan.id()? {
+        return Err(unauthorized(
+            "the coordinator's attestation is for another plan",
+        ));
+    }
+    record.verify(verifier, policy)?;
+    Ok(())
+}
+
+impl RoundCoordinator {
+    /// Attests this round's coordinator with `attester`: the binding names
+    /// the plan (as execution), its policy and privacy policy, the round's
+    /// coordinator key and nonce. Parties requiring an attested coordinator
+    /// check it before contributing.
+    pub fn attest(
+        &mut self,
+        attester: &dyn encompute_attestation::Attester,
+    ) -> Result<AttestationRecord> {
+        let plan = &self.spec.plan;
+        let challenge = encompute_attestation::AttestationChallenge {
+            broker_id: format!("encagg1:{}", self.spec.id()?),
+            nonce: self.round.nonce.clone(),
+            issued_at: self.round.opened_at,
+            expires_at: self.round.opened_at.saturating_add(3600),
+        };
+        let evaluator = encompute_verification::EvaluatorIdentity::from_public_key(
+            &self.key.verifying_key().to_bytes(),
+        )?;
+        let mut binding = encompute_attestation::WorkloadSession::new(&evaluator).binding(
+            &challenge,
+            &plan.id()?,
+            plan.policy_id.as_deref(),
+            &plan.program_id,
+        );
+        binding.privacy_policy_id = plan.privacy_policy_id.clone();
+        let record = AttestationRecord::new(attester.attest(&challenge, &binding)?);
+        self.coordinator_attestation = Some(record.clone());
+        Ok(record)
+    }
+
+    pub fn coordinator_attestation(&self) -> Option<&AttestationRecord> {
+        self.coordinator_attestation.as_ref()
+    }
+
+    /// Where the privacy ledgers live; required for DP plans. Checks now
+    /// that every budgeted party can afford a round, so a round that could
+    /// never be released does not start.
+    pub fn with_ledger(mut self, dir: &Path) -> Result<Self> {
+        let plan = &self.spec.plan;
+        let all: Vec<PartyId> = plan.participants.iter().map(|p| p.party.clone()).collect();
+        if let Some(r) = plan.release_spec(&self.round.id()?, None, &all)? {
+            for c in &r.charged {
+                let p = plan
+                    .participants
+                    .iter()
+                    .find(|p| p.asset == c.asset_id)
+                    .expect("from plan");
+                let view = plan.ledger_view(dir, p)?.expect("budgeted");
+                r.check(c, &view)?;
+            }
+        }
+        self.ledger_dir = Some(dir.to_owned());
+        Ok(self)
+    }
+
+    /// The budgeted assets' ledgers, for parties to check before joining.
+    pub fn ledger_views(&self) -> Result<BTreeMap<String, LedgerView>> {
+        let mut out = BTreeMap::new();
+        if let Some(dir) = &self.ledger_dir {
+            for p in &self.spec.plan.participants {
+                if let Some(v) = self.spec.plan.ledger_view(dir, p)? {
+                    out.insert(p.asset.clone(), v);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
 impl RoundParticipant {
     /// Joins `round` of `offered` if it is exactly the spec this party
     /// approved (`approved`), names this party, and is newer than the last
@@ -390,6 +597,43 @@ impl RoundParticipant {
         attestation: Option<AttestationRecord>,
         last_sequence: Option<u64>,
     ) -> Result<Self> {
+        Self::join_with(
+            approved,
+            offered,
+            round,
+            party,
+            identity,
+            values,
+            JoinOptions {
+                attestation,
+                last_sequence,
+                ..JoinOptions::default()
+            },
+        )
+    }
+
+    /// [`Self::join`], with privacy and coordinator checks: under a DP plan
+    /// the party's contribution is L2-clipped, and it joins only if its
+    /// asset's ledger (shown by the coordinator) is intact, extends the last
+    /// checkpoint it saw, and can afford this round; and, if the spec
+    /// requires it, only an attested coordinator bound to this plan, round
+    /// and privacy policy.
+    pub fn join_with(
+        approved: &AggregationSpec,
+        offered: &AggregationSpec,
+        round: &AggregationRound,
+        party: &PartyId,
+        identity: SigningKey,
+        values: &[f64],
+        opts: JoinOptions<'_>,
+    ) -> Result<Self> {
+        let JoinOptions {
+            attestation,
+            last_sequence,
+            ledger,
+            seen,
+            coordinator,
+        } = opts;
         if let Some(why) = approved.difference(offered) {
             return Err(binding(format!(
                 "the coordinator's aggregation spec is not the approved one: {why}"
@@ -425,7 +669,49 @@ impl RoundParticipant {
                 "this spec requires an attested contribution workload",
             ));
         }
-        let codec = &approved.plan.codec;
+        if let Some(policy) = &approved.coordinator_attestation {
+            check_coordinator(approved, round, policy, coordinator)?;
+        }
+        let plan = &approved.plan;
+        let mut values = values.to_vec();
+        if let Some(dp) = &plan.dp {
+            let me = plan.participant(party).expect("checked above");
+            if let Some(release) =
+                plan.release_spec(&round.id()?, None, std::slice::from_ref(party))?
+            {
+                if let Some(c) = release.charged.first() {
+                    let view = ledger.ok_or_else(|| {
+                        Error::new(
+                            Code::PrivacyLedger,
+                            format!(
+                                "the coordinator did not show asset {}'s privacy ledger",
+                                me.asset
+                            ),
+                        )
+                    })?;
+                    view.verify()?;
+                    if view.entries.iter().any(|e| matches!(&e.event,
+                        encompute_privacy::PrivacyEvent::Reserve { rng, .. } if rng != encompute_privacy::CSPRNG))
+                    {
+                        return Err(Error::new(
+                            Code::PrivacyMechanism,
+                            "the ledger records releases with non-production randomness",
+                        ));
+                    }
+                    if let Some(seen) = seen {
+                        view.extends(seen)?;
+                    }
+                    release.check(c, view)?;
+                }
+            }
+            // Clip the whole contribution to L2 norm clip_norm.
+            let norm = values.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if norm > dp.clip_norm {
+                let f = dp.clip_norm / norm;
+                values.iter_mut().for_each(|x| *x *= f);
+            }
+        }
+        let codec = &plan.codec;
         let encoded: Vec<u64> = values.iter().map(|&x| codec.encode(x)).collect();
         let protocol = Participant::new(
             approved.params(round.id()?)?,
@@ -501,8 +787,9 @@ pub struct AggregateAsset {
     pub function: AggregationFunction,
     /// Decoded values (the sum, or the mean over `contributors`).
     pub values: Vec<f64>,
-    /// The integer aggregate mod 2^m, as secure aggregation produced it.
-    pub encoded_sum: Vec<u64>,
+    /// The released integer aggregate (with privacy noise, if any), in
+    /// code units.
+    pub encoded_sum: Vec<i64>,
     pub contributors: Vec<PartyId>,
     /// The assets it was derived from (contributors' only).
     pub parents: Vec<String>,
@@ -511,6 +798,9 @@ pub struct AggregateAsset {
     pub policy: AggregatePolicy,
     /// ID of the receipt that produced it.
     pub receipt_id: String,
+    /// What the release cost each budgeted source (ADR-013).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub privacy: Vec<PrivacyReceipt>,
 }
 
 /// Public metadata of a finished round: no contribution values.
@@ -546,8 +836,11 @@ pub struct AggregationManifest {
     pub confirmations: Vec<Signed<ConsistencyBody>>,
     /// Attestation record IDs of attested contributors.
     pub attestations: BTreeMap<PartyId, String>,
-    /// `SHA256("encompute.aggregate.v1", round, encoded sum)`.
+    /// `SHA256("encompute.aggregate.v1", round, released sum)`.
     pub aggregate_commitment: String,
+    /// Privacy receipts of the release, one per budgeted contributor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub privacy: Vec<PrivacyReceipt>,
     pub parents: Vec<String>,
 }
 
@@ -579,7 +872,7 @@ impl AggregationReceipt {
     }
 }
 
-fn aggregate_commitment(round_id: &str, sum: &[u64]) -> String {
+fn aggregate_commitment(round_id: &str, sum: &[i64]) -> String {
     let bytes: Vec<u8> = sum.iter().flat_map(|v| v.to_le_bytes()).collect();
     hex(&tagged(AGGREGATE_DOMAIN, &[round_id.as_bytes(), &bytes]))
 }
@@ -592,6 +885,8 @@ pub struct RoundCoordinator {
     verifier: Option<Verifier>,
     protocol: Coordinator,
     metadata: BTreeMap<PartyId, Signed<ContributionMetadata>>,
+    ledger_dir: Option<PathBuf>,
+    coordinator_attestation: Option<AttestationRecord>,
 }
 
 impl RoundCoordinator {
@@ -620,6 +915,8 @@ impl RoundCoordinator {
             verifier,
             protocol,
             metadata: BTreeMap::new(),
+            ledger_dir: None,
+            coordinator_attestation: None,
         })
     }
 
@@ -778,6 +1075,26 @@ impl RoundCoordinator {
         }
         let round_id = self.round.id()?;
         let n = survivors.len();
+        // The released aggregate: with privacy noise under a DP plan, after
+        // the cost is reserved in every contributor's ledger.
+        let (released, privacy): (Vec<i64>, Vec<PrivacyReceipt>) = match plan.release_spec(
+            &round_id,
+            self.spec.training_execution_spec_id.as_deref(),
+            &survivors,
+        )? {
+            None => (sum.iter().map(|&v| v as i64).collect(), vec![]),
+            Some(r) => {
+                let dir = self.ledger_dir.as_ref().ok_or_else(|| {
+                    Error::new(
+                        Code::PrivacyLedger,
+                        "a DP round needs a privacy ledger directory",
+                    )
+                })?;
+                let out =
+                    encompute_privacy::release(&r, dir, &sum, &mut Csprng::from_os()?, &self.key)?;
+                (out.noisy, out.receipts)
+            }
+        };
         let parents: Vec<String> = survivors
             .iter()
             .map(|p| plan.participant(p).expect("spec party").asset.clone())
@@ -815,7 +1132,8 @@ impl RoundCoordinator {
                 .iter()
                 .map(|(p, r)| Ok((p.clone(), r.id()?)))
                 .collect::<Result<_>>()?,
-            aggregate_commitment: aggregate_commitment(&round_id, &sum),
+            aggregate_commitment: aggregate_commitment(&round_id, &released),
+            privacy: privacy.clone(),
             parents: parents.clone(),
         };
         let signature = hex(&self
@@ -828,15 +1146,10 @@ impl RoundCoordinator {
             signature,
         };
         let codec = &plan.codec;
-        let mask = if codec.modulus_bits == 64 {
-            u64::MAX
-        } else {
-            (1u64 << codec.modulus_bits) - 1
-        };
-        let values = sum
+        let values = released
             .iter()
             .map(|&s| {
-                let total = codec.decode_sum(s & mask, n);
+                let total = codec.decode_sum(s, n);
                 match plan.function {
                     AggregationFunction::Sum => total,
                     AggregationFunction::Mean => total / n as f64,
@@ -854,7 +1167,7 @@ impl RoundCoordinator {
             kind: plan.output_asset_kind,
             function: plan.function,
             values,
-            encoded_sum: sum,
+            encoded_sum: released,
             contributors: survivors.clone(),
             parents,
             policy: AggregatePolicy {
@@ -864,6 +1177,7 @@ impl RoundCoordinator {
                 release: p.release,
             },
             receipt_id,
+            privacy,
         };
         Ok((asset, receipt))
     }

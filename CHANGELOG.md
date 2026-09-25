@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Differential privacy
+
+- **Privacy budgets per asset** (ADR-013): `privacy unit "patient"
+  epsilon 3.0 delta 1e-6` (Python `asset(..., privacy="strong",
+  unit="patient")` or `DP(epsilon, delta)`), with named levels
+  `standard`, `strong` and `maximum`.
+- **Release boundaries**: outputs that reveal a budgeted asset must go
+  through a DP mechanism (ENC2203); sealed values cost nothing.
+- **Discrete Gaussian mechanism** on the secure-aggregation sum (`dp
+  discrete_gaussian clip_norm C noise_multiplier z`; Python
+  `secure_aggregate(..., privacy="strong")`): parties clip to L2 norm C,
+  the coordinator adds exact integer noise (CKS 2020 sampler, CSPRNG).
+- **zCDP accounting** with the CKS conversion; a hash-chained, locked,
+  persistent **ledger** per asset with reserve-then-commit releases (no
+  unaccounted release, no concurrent double spend); signed
+  **PrivacyReceipts**; owners check their ledger (and its last checkpoint)
+  before contributing and refuse over-budget rounds (ENC2201) or
+  rolled-back ledgers (ENC2202).
+- **PrivacyPolicyId** (`encprivacy1:`) in the execution spec, aggregation
+  plan, ledgers, receipts and coordinator attestation.
+- New crate `encompute-privacy`. CLI: `encompute privacy budget`,
+  `explain --ledger`, `aggregate serve --ledger`. Errors ENC2201–ENC2204.
+  `examples/private_federated_training/`.
+
 ### Multi-party secure aggregation
 
 - **Aggregation boundaries** (ADR-012). `aggregate "out" sum|mean minimum

@@ -53,6 +53,12 @@ pub struct RoundOffer {
     pub spec: AggregationSpec,
     pub round: AggregationRound,
     pub round_id: String,
+    /// Budgeted assets' privacy ledgers, for parties to check (ADR-013).
+    #[serde(default)]
+    pub ledgers: BTreeMap<String, encompute_privacy::LedgerView>,
+    /// The coordinator's attestation, if it has one.
+    #[serde(default)]
+    pub coordinator_attestation: Option<AttestationRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,6 +118,8 @@ impl CoordinatorService {
             spec: coord.spec.clone(),
             round: coord.round.clone(),
             round_id: coord.round_id()?,
+            ledgers: coord.ledger_views()?,
+            coordinator_attestation: coord.coordinator_attestation().cloned(),
         };
         Ok(Self {
             state: Arc::new(Mutex::new(State {
@@ -495,6 +503,40 @@ pub fn join(
     attestation: Option<AttestationRecord>,
     last_sequence: Option<u64>,
 ) -> Result<RoundParticipant> {
+    join_checked(
+        client,
+        approved,
+        party,
+        identity,
+        values,
+        PartyState {
+            attestation,
+            last_sequence,
+            ..PartyState::default()
+        },
+    )
+}
+
+/// What a party brings to a round: its attestation, replay state, the last
+/// ledger checkpoint it saw, and a verifier for an attested coordinator.
+#[derive(Default)]
+pub struct PartyState<'a> {
+    pub attestation: Option<AttestationRecord>,
+    pub last_sequence: Option<u64>,
+    pub seen: Option<encompute_privacy::Checkpoint>,
+    pub verifier: Option<&'a encompute_attestation::Verifier>,
+}
+
+/// Joins with the privacy and coordinator checks (see
+/// [`RoundParticipant::join_with`]).
+pub fn join_checked(
+    client: &ParticipantClient,
+    approved: &AggregationSpec,
+    party: &PartyId,
+    identity: ed25519_dalek::SigningKey,
+    values: &[f64],
+    state: PartyState<'_>,
+) -> Result<RoundParticipant> {
     let offer = client.offer()?;
     if offer.round.id()? != offer.round_id {
         return Err(Error::new(
@@ -502,14 +544,25 @@ pub fn join(
             "the round's ID does not match the round",
         ));
     }
-    RoundParticipant::join(
+    let asset = approved.plan.participant(party).map(|p| p.asset.clone());
+    let ledger = asset.as_ref().and_then(|a| offer.ledgers.get(a));
+    let coordinator = match (&offer.coordinator_attestation, state.verifier) {
+        (Some(r), Some(v)) => Some((r, v)),
+        _ => None,
+    };
+    RoundParticipant::join_with(
         approved,
         &offer.spec,
         &offer.round,
         party,
         identity,
         values,
-        attestation,
-        last_sequence,
+        crate::round::JoinOptions {
+            attestation: state.attestation,
+            last_sequence: state.last_sequence,
+            ledger,
+            seen: state.seen.as_ref(),
+            coordinator,
+        },
     )
 }

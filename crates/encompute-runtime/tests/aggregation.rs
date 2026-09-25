@@ -132,7 +132,9 @@ fn three_hospitals_over_http() {
     let codec = spec.plan.codec;
     for j in 0..len {
         let clear: f64 = (0..3).map(|i| gradient(i, len)[j]).sum();
-        let encoded: u64 = (0..3).map(|i| codec.encode(gradient(i, len)[j])).sum();
+        let encoded: i64 = (0..3)
+            .map(|i| codec.encode(gradient(i, len)[j]) as i64)
+            .sum();
         assert_eq!(aggregate.encoded_sum[j], encoded);
         assert_eq!(aggregate.values[j], codec.decode_sum(encoded, 3));
         assert!((aggregate.values[j] - clear).abs() <= 3.0 * codec.resolution() + 1e-12);
@@ -270,9 +272,9 @@ fn dropouts_within_the_threshold() {
     );
     let codec = spec.plan.codec;
     for j in 0..64 {
-        let enc: u64 = [0, 2, 4]
+        let enc: i64 = [0, 2, 4]
             .iter()
-            .map(|&i| codec.encode(gradient(i, 64)[j]))
+            .map(|&i| codec.encode(gradient(i, 64)[j]) as i64)
             .sum();
         assert_eq!(agg.encoded_sum[j], enc);
     }
@@ -298,9 +300,9 @@ fn mean_divides_by_the_contributors() {
     let (agg, _) = run(&mut c, &mut parts, &[None, None, Some(2), None]).unwrap();
     let codec = spec.plan.codec;
     for j in 0..8 {
-        let enc: u64 = [0, 1, 3]
+        let enc: i64 = [0, 1, 3]
             .iter()
-            .map(|&i| codec.encode(gradient(i, 8)[j]))
+            .map(|&i| codec.encode(gradient(i, 8)[j]) as i64)
             .sum();
         assert_eq!(agg.values[j], codec.decode_sum(enc, 3) / 3.0);
     }

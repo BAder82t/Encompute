@@ -201,6 +201,30 @@ replaced by a new one. Secure
 aggregation hides contributions, not what the aggregate reveals: that needs
 differential privacy.
 
+## Differential privacy
+
+Secure aggregation hides each party's contribution; differential privacy
+limits what the released aggregates reveal, across every round (ADR-013).
+Budgets belong to assets; the compiler finds every release of a budgeted
+asset and requires a mechanism; the runtime charges each release to a
+tamper-evident ledger and refuses releases over budget.
+
+```python
+grads = [asset(f"gradient-{x}", owner=h, readers=[coordinator], kind="gradient",
+               release="aggregate_only", privacy="strong", unit="patient")
+         for x, h in zip("abc", hospitals)]
+...
+    return secure_aggregate(ga + gb + gc, to=coordinator, minimum=3, colluding=2,
+                            clip=(-1, 1), scale=4096, modulus_bits=40, privacy="strong")
+```
+
+`encompute privacy explain` shows each budget, what one release costs and
+how many releases it affords; `encompute privacy budget --ledger DIR` shows
+what has been spent. Each layer answers one question: FHE/MPC keeps the
+computation confidential, secure aggregation hides contributions,
+differential privacy bounds what outputs reveal, attestation says which
+workload ran, and execution proofs say it computed correctly.
+
 ## Attested key release
 
 Owners release asset keys only to a workload that proves, with hardware
@@ -307,6 +331,7 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-attestation` | Provider-neutral workload attestation, bindings, attestation policies, sealed key grants |
 | `crates/encompute-keybroker` | Policy-gated key release to attested workloads (library, HTTP server, client) |
 | `crates/encompute-secagg` | Secure aggregation (Bonawitz et al.) bound to policies, rounds and receipts |
+| `crates/encompute-privacy` | Differential privacy: budgets, discrete Gaussian noise, zCDP accounting, ledger, receipts |
 | `crates/encompute-vfhe` | Re-execution proof verifier on OpenFHE BGV (research) |
 | `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption) |
 | `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature) |
@@ -320,8 +345,9 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
-- **Next**: privacy accounting and distributed differential privacy: what
-  an aggregate may reveal, not only who sees each message.
+- **Next**: the trust graph (lineage, governance, authorization and
+  revocation in one graph), then an automatic planner that chooses the
+  protection for declared parties, assets and policies.
 
 ## License
 

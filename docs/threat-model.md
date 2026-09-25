@@ -54,8 +54,13 @@ scope.
   masked contributions and the aggregate; a malicious coordinator cannot
   obtain an honest party's input while it colludes with no more parties
   than the declaration's `colluding` bound, which sets the threshold. It can abort a round or report a wrong aggregate. The
-  aggregate itself is not protected (no differential privacy). See the
-  adversary table in ADR-012.
+  aggregate itself is protected only where differential privacy is declared.
+  See the adversary table in ADR-012.
+- Differential privacy (ADR-013) bounds what released aggregates reveal
+  about each privacy unit, per asset budget, composed across releases and
+  enforced by the coordinator's ledger and by each owner's own check. It is
+  central DP: the coordinator sees the aggregate before noise and is trusted
+  to add it, as far as its attestation (bound to the privacy policy) goes.
 - Artifacts never contain key material.
 
 ## Deployment

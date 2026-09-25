@@ -76,6 +76,13 @@ impl fmt::Display for Program {
                         .collect();
                     write!(f, " derive [{}]", d.join(", "))?;
                 }
+                if let Some(b) = &pol.privacy {
+                    write!(
+                        f,
+                        " privacy unit \"{}\" epsilon {:?} delta {:?}",
+                        b.unit, b.epsilon, b.delta
+                    )?;
+                }
                 writeln!(f)?;
             }
         }
@@ -115,7 +122,7 @@ impl fmt::Display for Program {
         }
         for a in conf.iter().flat_map(|c| &c.aggregations) {
             let k = &a.codec;
-            writeln!(
+            write!(
                 f,
                 "aggregate \"{}\" {} minimum {} colluding {} clip {} scale {} modulus {}",
                 a.output,
@@ -126,6 +133,16 @@ impl fmt::Display for Program {
                 k.scale,
                 k.modulus_bits
             )?;
+            if let Some(dp) = &a.dp {
+                write!(
+                    f,
+                    " dp {} clip_norm {:?} noise_multiplier {:?}",
+                    dp.kind.name(),
+                    dp.clip_norm,
+                    dp.noise_multiplier
+                )?;
+            }
+            writeln!(f)?;
         }
         Ok(())
     }
@@ -248,12 +265,32 @@ pub fn parse(src: &str) -> Result<Program> {
             c.keyword("modulus")?;
             c.skip_ws();
             let modulus_bits = u32::try_from(c.usize()?).map_err(|_| err(n, "modulus bits"))?;
+            c.skip_ws();
+            let dp = if c.rest.starts_with("dp") {
+                c.keyword("dp")?;
+                let kind = crate::confidentiality::DpKind::parse(&c.word()?)
+                    .ok_or_else(|| err(n, "unknown DP mechanism (discrete_gaussian)"))?;
+                c.keyword("clip_norm")?;
+                c.skip_ws();
+                let clip_norm = c.float()?;
+                c.keyword("noise_multiplier")?;
+                c.skip_ws();
+                let noise_multiplier = c.float()?;
+                Some(crate::confidentiality::DpMechanism {
+                    kind,
+                    clip_norm,
+                    noise_multiplier,
+                })
+            } else {
+                None
+            };
             c.end()?;
             b.aggregate(crate::confidentiality::AggregationRule {
                 output,
                 function,
                 minimum,
                 colluding,
+                dp,
                 codec: crate::confidentiality::FixedPointCodec {
                     clip_min: clip[0],
                     clip_max: clip[1],
@@ -433,6 +470,26 @@ fn parse_asset(c: &mut Cursor<'_>) -> Result<crate::confidentiality::AssetDecl> 
         }
         c.punct(']')?;
     }
+    c.skip_ws();
+    let privacy = if c.rest.starts_with("privacy") {
+        c.keyword("privacy")?;
+        c.keyword("unit")?;
+        let unit =
+            crate::confidentiality::PrivacyUnit::parse(&c.string()?).map_err(|e| at(c.line, e))?;
+        c.keyword("epsilon")?;
+        c.skip_ws();
+        let epsilon = c.float()?;
+        c.keyword("delta")?;
+        c.skip_ws();
+        let delta = c.float()?;
+        Some(crate::confidentiality::PrivacyBudget {
+            unit,
+            epsilon,
+            delta,
+        })
+    } else {
+        None
+    };
     c.end()?;
     Ok(AssetDecl {
         id,
@@ -443,6 +500,7 @@ fn parse_asset(c: &mut Cursor<'_>) -> Result<crate::confidentiality::AssetDecl> 
             purposes,
             release,
             derive,
+            privacy,
         },
     })
 }

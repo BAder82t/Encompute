@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use encompute_ir::confidentiality::{
     AggregationFunction, AggregationRule, AssetDecl, AssetKind, Confidentiality, DerivePermission,
-    FixedPointCodec, OutputRelease, PartyId, Release,
+    DpMechanism, FixedPointCodec, OutputRelease, PartyId, PrivacyBudget, Release,
 };
 use encompute_ir::{Code, Error, Op, Program, Result, Shape, ValueId};
 use serde::Serialize;
@@ -165,7 +165,22 @@ pub struct ConfidentialityReport {
     /// Aggregation boundaries: the mechanism satisfying `aggregate_only`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub aggregations: Vec<AggregationBoundary>,
+    /// Outputs that release information from privacy-budgeted assets: the
+    /// accounting points (ADR-013).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub privacy_releases: Vec<PrivacyRelease>,
     pub warnings: Vec<String>,
+}
+
+/// An output that releases information from budgeted assets, and the
+/// mechanism that pays for it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PrivacyRelease {
+    pub output: String,
+    /// Budgeted source assets, each charged for this release.
+    pub charged: Vec<(String, PrivacyBudget)>,
+    pub mechanism: DpMechanism,
+    pub recipient: OutputRelease,
 }
 
 /// One party's contribution to an aggregate.
@@ -174,6 +189,8 @@ pub struct Contribution {
     pub party: PartyId,
     pub input: String,
     pub asset: String,
+    /// The asset's privacy budget, charged when the aggregate is released.
+    pub budget: Option<PrivacyBudget>,
 }
 
 /// A lowered `aggregate` declaration.
@@ -192,6 +209,8 @@ pub struct AggregationBoundary {
     pub contributions: Vec<Contribution>,
     pub vector_len: usize,
     pub recipient: OutputRelease,
+    /// Differential privacy on the aggregate, if declared.
+    pub dp: Option<DpMechanism>,
     /// The joined policy of the contributions (before aggregation).
     pub contribution_policy: Policy,
     /// The aggregate's derived policy: owners and purposes inherited, the
@@ -296,8 +315,14 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
         ops.push(via);
     }
     let mut aggregations = vec![];
+    let mut privacy_releases = vec![];
     for o in program.outputs() {
         let dest = c.output(&o.name).clone();
+        let sources = &policies[o.value.index()].sources;
+        let dp = c.aggregation(&o.name).and_then(|a| a.dp.clone());
+        if let Some(r) = privacy_release(c, &o.name, sources, &dest, dp.as_ref(), &mut warnings)? {
+            privacy_releases.push(r);
+        }
         if let Some(rule) = c.aggregation(&o.name) {
             let b = boundary(program, c, rule, o.value, &policies[o.value.index()], &dest)?;
             check_output(&o.name, &b.aggregate_policy, &dest)?;
@@ -366,8 +391,74 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
         nodes,
         flows,
         aggregations,
+        privacy_releases,
         warnings,
     }))
+}
+
+/// Release-boundary detection: an output that leaves confidential
+/// computation (to a party, or public) and derives from budgeted assets is
+/// a privacy release; it must go through a DP mechanism, which charges
+/// every budgeted source. Sealed outputs stay confidential and cost
+/// nothing.
+fn privacy_release(
+    c: &Confidentiality,
+    output: &str,
+    sources: &BTreeSet<String>,
+    dest: &OutputRelease,
+    dp: Option<&DpMechanism>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PrivacyRelease>> {
+    let charged: Vec<(String, PrivacyBudget)> = sources
+        .iter()
+        .filter_map(|s| {
+            c.asset(s)
+                .and_then(|a| a.policy.privacy.clone())
+                .map(|b| (s.clone(), b))
+        })
+        .collect();
+    let releases = !matches!(dest, OutputRelease::Sealed);
+    match (charged.is_empty(), releases, dp) {
+        (true, _, Some(_)) => {
+            warnings.push(format!(
+                "output {output:?} adds differential-privacy noise but no source asset has a \
+                 privacy budget: nothing is accounted"
+            ));
+            Ok(None)
+        }
+        (true, _, None) | (false, false, _) => Ok(None),
+        (false, true, None) => Err(err(
+            Code::PrivacyPolicy,
+            format!(
+                "output {output:?} releases information from privacy-budgeted asset{} {} \
+                 without a privacy mechanism: declare `dp` on its aggregation",
+                if charged.len() == 1 { "" } else { "s" },
+                charged
+                    .iter()
+                    .map(|(a, _)| a.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
+        (false, true, Some(m)) => {
+            for (a, b) in &charged {
+                if b.unit != encompute_ir::confidentiality::PrivacyUnit::Organization {
+                    warnings.push(format!(
+                        "asset {a}'s budget protects each {}: Encompute clips each party's \
+                         contribution to L2 norm {}; bounding one {}'s influence within it is \
+                         the contributing (attested) workload's job",
+                        b.unit, m.clip_norm, b.unit
+                    ));
+                }
+            }
+            Ok(Some(PrivacyRelease {
+                output: output.to_owned(),
+                charged,
+                mechanism: m.clone(),
+                recipient: dest.clone(),
+            }))
+        }
+    }
 }
 
 /// The inputs an output sums, each once: `None` if it is not a pure sum.
@@ -441,6 +532,7 @@ fn boundary(
             party: party.clone(),
             input: name.clone(),
             asset: asset.id.clone(),
+            budget: asset.policy.privacy.clone(),
         });
     }
     contributions.sort_by(|a, b| a.party.cmp(&b.party));
@@ -462,6 +554,16 @@ fn boundary(
         )));
     }
     rule.codec.check_overflow(n)?;
+    if rule.dp.is_some() && !(rule.codec.clip_min <= 0.0 && 0.0 <= rule.codec.clip_max) {
+        return Err(err(
+            Code::PrivacyPolicy,
+            format!(
+                "aggregate {:?}: differential privacy needs a clip range containing 0 (got \
+                 [{}, {}]), so that clipping never increases a contribution's norm",
+                rule.output, rule.codec.clip_min, rule.codec.clip_max
+            ),
+        ));
+    }
     if matches!(joined.release, Release::Never | Release::OwnerOnly) {
         return Err(err(
             Code::Declassification,
@@ -500,6 +602,7 @@ fn boundary(
         contributions,
         vector_len,
         recipient: dest.clone(),
+        dp: rule.dp.clone(),
         contribution_policy: joined,
         aggregate_policy,
     })

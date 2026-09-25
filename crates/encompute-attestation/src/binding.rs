@@ -31,6 +31,11 @@ pub struct WorkloadBinding {
     pub session_public_key: String,
     /// The broker's challenge nonce (32 bytes hex).
     pub challenge_nonce: String,
+    /// Lowercase hex `PrivacyPolicyId`: the differential-privacy mechanism
+    /// and budgets the workload applies (ADR-013), so a host cannot run it
+    /// with less noise. Absent without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy_id: Option<String>,
 }
 
 impl WorkloadBinding {
@@ -62,6 +67,9 @@ impl WorkloadBinding {
         check_hex(c, "binding evaluator key", &self.evaluator_public_key, 32)?;
         check_hex(c, "binding session key", &self.session_public_key, 32)?;
         check_hex(c, "binding challenge nonce", &self.challenge_nonce, 32)?;
+        if let Some(p) = &self.privacy_policy_id {
+            check_hex(c, "binding privacy policy ID", p, 32)?;
+        }
         Ok(())
     }
 }

@@ -233,7 +233,7 @@ fn codec_round_trip() {
     assert_eq!(k.encode(f64::NAN), 0);
     let xs = [0.123, -0.456, 0.789];
     let sum: u64 = xs.iter().map(|&x| k.encode(x)).sum();
-    let back = k.decode_sum(sum, 3);
+    let back = k.decode_sum(sum as i64, 3);
     assert!((back - xs.iter().sum::<f64>()).abs() <= 3.0 * k.resolution() + 1e-12);
 }
 
@@ -264,4 +264,80 @@ fn collusion_bound_sets_the_threshold() {
     assert_eq!(t(with(3, 2)), 3, "unanimity tolerates n - 1 colluders");
     assert_eq!(code(&with(3, 3)), Code::AggregationPlan);
     assert_eq!(code(&with(2, 3)), Code::AggregationPlan);
+}
+
+/// Release-boundary detection (ADR-013): revealing a budgeted asset needs a
+/// DP mechanism; sealed values are internal and cost nothing.
+#[test]
+fn privacy_budgets_need_a_mechanism_at_the_release_boundary() {
+    let budgeted = |dp: &str| {
+        fedavg(&format!("{SUM}{OUT}"), &format!("{}{dp}\n", AGG.trim_end())).replace(
+            "release aggregate_only",
+            "release aggregate_only privacy unit \"patient\" epsilon 3.0 delta 1e-6",
+        )
+    };
+    // Released without noise: refused.
+    assert_eq!(code(&budgeted("")), Code::PrivacyPolicy);
+    // With the mechanism: a privacy release charging all three budgets.
+    let dp = " dp discrete_gaussian clip_norm 1.0 noise_multiplier 1.2";
+    let text = budgeted(dp);
+    let p = parse(&text).unwrap();
+    assert_eq!(p.to_string(), text, "canonical text");
+    let r = analyze(&p).unwrap().unwrap();
+    assert_eq!(r.privacy_releases.len(), 1);
+    assert_eq!(r.privacy_releases[0].charged.len(), 3);
+    assert!(r.warnings.iter().any(|w| w.contains("each patient")));
+    // Sealed: internal, nothing charged, no mechanism needed.
+    let sealed = budgeted("").replace(" to \"coordinator\"", "");
+    let r = analyze(&parse(&sealed).unwrap()).unwrap().unwrap();
+    assert!(r.privacy_releases.is_empty());
+    // Invalid budgets and mechanisms.
+    for bad in ["epsilon 0.0", "epsilon -1.0"] {
+        let t = budgeted(dp).replace("epsilon 3.0", bad);
+        assert_eq!(code(&t), Code::PrivacyPolicy, "{bad}");
+    }
+    let t = budgeted(dp).replace("delta 1e-6", "delta 1.0");
+    assert_eq!(code(&t), Code::PrivacyPolicy);
+    let t = budgeted(dp).replace("noise_multiplier 1.2", "noise_multiplier 0.0");
+    assert_eq!(code(&t), Code::PrivacyPolicy, "no noise, no privacy");
+    // A clip range not containing zero.
+    let t = budgeted(dp).replace("clip [-1.0, 1.0]", "clip [0.5, 1.0]");
+    assert_eq!(code(&t), Code::PrivacyPolicy);
+    // The privacy policy ID changes with the mechanism or a budget.
+    let id = |t: &str| {
+        encompute_verification::PrivacyPolicyId::of(parse(t).unwrap().confidentiality().unwrap())
+            .unwrap()
+            .hex()
+    };
+    assert_ne!(
+        id(&text),
+        id(&text.replace("noise_multiplier 1.2", "noise_multiplier 1.3"))
+    );
+    assert_ne!(
+        id(&text),
+        id(&text.replacen("epsilon 3.0", "epsilon 4.0", 1))
+    );
+}
+
+#[test]
+fn privacy_presets() {
+    use encompute_ir::confidentiality::{privacy_preset, PrivacyUnit};
+    let (b, m) = privacy_preset("strong", PrivacyUnit::Patient).unwrap();
+    assert_eq!(
+        (b.epsilon, b.delta, m.noise_multiplier, m.clip_norm),
+        (3.0, 1e-6, 6.0, 1.0)
+    );
+    assert!(
+        privacy_preset("maximum", PrivacyUnit::Record)
+            .unwrap()
+            .0
+            .epsilon
+            < b.epsilon
+    );
+    assert_eq!(
+        privacy_preset("weak", PrivacyUnit::Record)
+            .unwrap_err()
+            .code,
+        Code::PrivacyPolicy
+    );
 }

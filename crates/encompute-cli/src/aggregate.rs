@@ -12,7 +12,9 @@ use clap::{Args, Subcommand};
 use encompute_ir::confidentiality::PartyId;
 use encompute_ir::{Code, Error, Result};
 use encompute_runtime::attestation::{AttestationPolicy, AttestationRecord};
-use encompute_runtime::secagg::service::{join, CoordinatorService, ParticipantClient};
+use encompute_runtime::secagg::service::{
+    join_checked, CoordinatorService, ParticipantClient, PartyState,
+};
 use encompute_runtime::secagg::{
     identity_of, party_key_from_seed, verify_aggregation_receipt, AggregateAsset,
     AggregationReceipt, AggregationSpec, PartyIdentity, RoundCoordinator,
@@ -61,6 +63,34 @@ fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
         .map_err(|e| Error::new(Code::AggregationProtocol, format!("no randomness: {e}")))?;
     write_private(p, seed.as_ref())?;
     Ok(party_key_from_seed(&seed))
+}
+
+/// A party's `--state`: the last round joined and, per budgeted asset, the
+/// last privacy-ledger checkpoint seen. (A bare number is the old format.)
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PartyStateFile {
+    sequence: Option<u64>,
+    #[serde(default)]
+    checkpoints: std::collections::BTreeMap<String, encompute_runtime::dp::Checkpoint>,
+}
+
+impl PartyStateFile {
+    fn read(p: &Path) -> Result<Self> {
+        let text = String::from_utf8(read(p)?)
+            .map_err(|_| Error::new(Code::AggregationBinding, "state file is not UTF-8"))?;
+        if let Ok(n) = text.trim().parse::<u64>() {
+            return Ok(Self {
+                sequence: Some(n),
+                ..Self::default()
+            });
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| Error::new(Code::AggregationBinding, format!("{}: {e}", p.display())))
+    }
+
+    fn write(&self, p: &Path) -> Result<()> {
+        std::fs::write(p, serde_json::to_vec_pretty(self).expect("JSON")).map_err(|e| io(p, e))
+    }
 }
 
 /// What fixes the spec: the same flags on every side.
@@ -144,6 +174,10 @@ pub enum AggregateCmd {
         stage_timeout: u64,
         #[arg(short, long, default_value = "aggregate.json")]
         out: PathBuf,
+        /// Privacy ledger directory (required for DP aggregations; keep it
+        /// across rounds and restarts).
+        #[arg(long)]
+        ledger: Option<PathBuf>,
         #[arg(long, default_value = "aggregation-receipt.json")]
         receipt: PathBuf,
         #[command(flatten)]
@@ -240,6 +274,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             sequence,
             stage_timeout,
             out,
+            ledger,
             receipt,
             trust,
         } => {
@@ -249,7 +284,16 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 None => None,
             };
             let now = encompute_runtime::attestation::unix_now();
-            let coord = RoundCoordinator::open(spec, sequence, key_file(&key)?, verifier, now)?;
+            let mut coord = RoundCoordinator::open(spec, sequence, key_file(&key)?, verifier, now)?;
+            if let Some(dir) = &ledger {
+                std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+                coord = coord.with_ledger(dir)?;
+            } else if coord.spec.plan.dp.is_some() {
+                return Err(Error::new(
+                    Code::PrivacyLedger,
+                    "a differentially private aggregation needs --ledger DIR",
+                ));
+            }
             let round_id = coord.round_id()?;
             let svc = CoordinatorService::new(coord, Duration::from_secs(stage_timeout))?;
             let server = tiny_http::Server::http(&listen)
@@ -289,31 +333,66 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             let approved = spec.spec()?;
             let party = PartyId::new(&party)?;
             let values: Vec<f64> = json(&values)?;
-            let last: Option<u64> = if state.exists() {
-                Some(json(&state)?)
+            let mut st: PartyStateFile = if state.exists() {
+                PartyStateFile::read(&state)?
             } else {
-                None
+                PartyStateFile::default()
             };
+            let asset = approved.plan.participant(&party).map(|p| p.asset.clone());
+            let seen = asset.as_ref().and_then(|a| st.checkpoints.get(a).cloned());
             let attestation = match &attestation {
                 Some(p) => Some(AttestationRecord::from_bytes(&read(p)?)?),
                 None => None,
             };
             let client = ParticipantClient::new(&coordinator, Duration::from_secs(timeout));
-            let p = join(
+            let p = join_checked(
                 &client,
                 &approved,
                 &party,
                 key_file(&key)?,
                 &values,
-                attestation,
-                last,
+                PartyState {
+                    attestation,
+                    last_sequence: st.sequence,
+                    seen,
+                    verifier: None,
+                },
             )?;
-            let sequence = p.round.sequence;
-            std::fs::write(&state, sequence.to_string()).map_err(|e| io(&state, e))?;
+            st.sequence = Some(p.round.sequence);
+            st.write(&state)?;
+            let coordinator_key = p.round.coordinator_key.clone();
             let r = client.participate(p)?;
             verify_aggregation_receipt(&r, &approved, None, None)?;
+            // Remember where this asset's ledger stands: a later ledger must
+            // extend it (rollback and reset detection).
+            let mut spent = None;
+            if let Some(a) = &asset {
+                if let Some(pr) = r.manifest.privacy.iter().find(|pr| &pr.asset_id == a) {
+                    encompute_runtime::dp::verify_privacy_receipt(
+                        pr,
+                        Some(&coordinator_key),
+                        None,
+                        None,
+                    )?;
+                    st.checkpoints.insert(
+                        a.clone(),
+                        encompute_runtime::dp::Checkpoint {
+                            seq: pr.ledger_seq,
+                            root: pr.ledger_root.clone(),
+                        },
+                    );
+                    st.write(&state)?;
+                    spent = Some(format!(
+                        "{:<16}epsilon {} spent of {} (this round {})",
+                        "Privacy", pr.cumulative_epsilon, pr.budget_epsilon, pr.epsilon_cost
+                    ));
+                }
+            }
             println!("CONTRIBUTION ACCEPTED (only the aggregate is released)");
             print_manifest(&r);
+            if let Some(line) = spent {
+                println!("{line}");
+            }
             Ok(ExitCode::SUCCESS)
         }
         AggregateCmd::Verify {

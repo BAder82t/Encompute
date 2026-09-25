@@ -93,6 +93,13 @@ impl Model {
                 let _ = writeln!(s, "    {:<14}{}", "purposes", v.join(", "));
             }
             let _ = writeln!(s, "    {:<14}{}", "release", pol.release);
+            if let Some(b) = c.asset(&n.label).and_then(|a| a.policy.privacy.as_ref()) {
+                let _ = writeln!(
+                    s,
+                    "    {:<14}{} (epsilon {} delta {:e})",
+                    "privacy unit", b.unit, b.epsilon, b.delta
+                );
+            }
             match &n.destination {
                 Some(OutputRelease::Sealed) => {
                     let _ = writeln!(s, "    {:<14}sealed (stays encrypted)", "goes to");
@@ -236,6 +243,70 @@ impl Model {
             );
             row(&mut s, "STATUS", "SATISFIED".into());
         }
+        for rel in &r.privacy_releases {
+            section(&mut s, &format!("Differential privacy  {}", rel.output));
+            let m = &rel.mechanism;
+            let _ = writeln!(
+                s,
+                "  {:<21}{} (clip_norm {}, noise_multiplier {})",
+                "mechanism",
+                m.kind.name(),
+                m.clip_norm,
+                m.noise_multiplier
+            );
+            let boundary = r.aggregations.iter().find(|b| b.output == rel.output);
+            for (asset, b) in &rel.charged {
+                let per = boundary.map(|bd| {
+                    let spec = encompute_privacy::ReleaseSpec {
+                        round_id: String::new(),
+                        output: rel.output.clone(),
+                        policy_id: None,
+                        privacy_policy_id: String::new(),
+                        execution_spec_id: None,
+                        mechanism: m.clone(),
+                        codec: bd.codec,
+                        vector_len: bd.vector_len,
+                        charged: vec![],
+                    };
+                    let c = encompute_privacy::Charged {
+                        asset_id: asset.clone(),
+                        budget: b.clone(),
+                    };
+                    spec.rho(&c)
+                        .and_then(|rho| encompute_privacy::Cost::of(rho, b))
+                        .map(|c| c.epsilon)
+                });
+                let _ = writeln!(
+                    s,
+                    "  {:<21}{asset}: privacy unit {}, epsilon {} delta {:e}{}",
+                    "budget",
+                    b.unit,
+                    b.epsilon,
+                    b.delta,
+                    match per {
+                        Some(Ok(e)) => {
+                            let n = affordable(b, e);
+                            format!(
+                                ", one release costs epsilon {e:.3}; the budget affords {n} release{}",
+                                if n == 1 { "" } else { "s" }
+                            )
+                        }
+                        _ => String::new(),
+                    }
+                );
+            }
+            let _ = writeln!(
+                s,
+                "  {:<21}zCDP, composed across releases (CKS 2020)",
+                "accounting"
+            );
+            let _ = writeln!(
+                s,
+                "  {:<21}ACTIVE (a hash-chained ledger per asset; the coordinator and each owner refuse releases over budget)",
+                "runtime enforcement"
+            );
+            let _ = writeln!(s, "  {:<21}SATISFIED", "STATUS");
+        }
         section(&mut s, "Warnings");
         if r.warnings.is_empty() {
             let _ = writeln!(s, "  none");
@@ -284,4 +355,164 @@ impl Model {
         s.push_str("}\n");
         Ok(Some(s))
     }
+}
+
+impl Model {
+    /// `explain --ledger`: what the next release of each DP aggregation
+    /// would cost each budgeted asset, given the ledgers in `dir`.
+    pub fn privacy_preview(&self, dir: &std::path::Path) -> Result<String> {
+        let mut s = String::from("PROPOSED PRIVACY RELEASE\n");
+        let Some(r) = analyze(self.program())? else {
+            return Ok(s + "  (no privacy budgets)\n");
+        };
+        for b in &r.aggregations {
+            let plan = self.aggregation_plan(Some(&b.output))?;
+            let all: Vec<_> = plan.participants.iter().map(|p| p.party.clone()).collect();
+            let Some(spec) = plan.release_spec("", None, &all)? else {
+                continue;
+            };
+            let m = &spec.mechanism;
+            let _ = writeln!(s, "\n{}", b.output);
+            let _ = writeln!(
+                s,
+                "  {:<18}{} clip_norm {} noise_multiplier {}",
+                "mechanism",
+                m.kind.name(),
+                m.clip_norm,
+                m.noise_multiplier
+            );
+            for c in &spec.charged {
+                let p = plan
+                    .participants
+                    .iter()
+                    .find(|p| p.asset == c.asset_id)
+                    .expect("plan");
+                let view = plan.ledger_view(dir, p)?.expect("budgeted");
+                let now = view.cost()?;
+                let after = view.cost_after(spec.rho(c)?)?;
+                let ok = after.epsilon <= c.budget.epsilon;
+                let _ = writeln!(
+                    s,
+                    "  {:<18}epsilon {:.3} now, {:.3} after, budget {} (delta {:e})  {}",
+                    c.asset_id,
+                    now.epsilon,
+                    after.epsilon,
+                    c.budget.epsilon,
+                    c.budget.delta,
+                    if ok {
+                        "PERMITTED"
+                    } else {
+                        "DENIED: privacy budget exceeded"
+                    }
+                );
+            }
+        }
+        Ok(s)
+    }
+}
+
+/// `encompute privacy budget`: every ledger in `dir` (or one asset's).
+pub fn privacy_budget_report(dir: &std::path::Path, asset: Option<&str>) -> Result<String> {
+    let io = |e: std::io::Error| {
+        encompute_ir::Error::new(
+            encompute_ir::Code::PrivacyLedger,
+            format!("{}: {e}", dir.display()),
+        )
+    };
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(io)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "ledger"))
+        .collect();
+    files.sort();
+    let mut s = String::from("PRIVACY BUDGET\n");
+    for f in files {
+        let v = encompute_privacy::ledger::read(&f)?;
+        let g = &v.genesis;
+        if asset.is_some_and(|a| a != g.asset_id) {
+            continue;
+        }
+        let cost = v.cost()?;
+        let section = |s: &mut String, t: &str| {
+            let _ = write!(s, "\n{t}\n{}\n", "─".repeat(40));
+        };
+        section(&mut s, &format!("Asset {}", g.asset_id));
+        let _ = writeln!(s, "  {:<14}{}", "unit", g.budget.unit);
+        let _ = writeln!(
+            s,
+            "  {:<14}encprivacy1:{}",
+            "policy",
+            &g.privacy_policy_id[..16]
+        );
+        let _ = writeln!(
+            s,
+            "  {:<14}epsilon {}  delta {:e}",
+            "Budget", g.budget.epsilon, g.budget.delta
+        );
+        let _ = writeln!(
+            s,
+            "  {:<14}epsilon {:.3}  (rho {:.5})",
+            "Consumed", cost.epsilon, cost.rho
+        );
+        let _ = writeln!(
+            s,
+            "  {:<14}epsilon {:.3}",
+            "Remaining",
+            (g.budget.epsilon - cost.epsilon).max(0.0)
+        );
+        let _ = writeln!(
+            s,
+            "  {:<14}{} (root {})",
+            "Ledger",
+            v.entries.len(),
+            &v.root()?[..16]
+        );
+        let mut rho = 0.0;
+        for e in &v.entries {
+            if let encompute_privacy::PrivacyEvent::Reserve { round_id, .. } = &e.event {
+                let before = encompute_privacy::Cost::of(rho, &g.budget)?.epsilon;
+                rho += e.event.rho()?;
+                let after = encompute_privacy::Cost::of(rho, &g.budget)?.epsilon;
+                let committed = v.entries.iter().any(|c| matches!(&c.event,
+                    encompute_privacy::PrivacyEvent::Commit { event_id, .. } if event_id == e.event.event_id()));
+                let _ = writeln!(
+                    s,
+                    "  round {:<10}+{:.3}{}",
+                    round_id.as_deref().map(|r| &r[..8]).unwrap_or("-"),
+                    after - before,
+                    if committed {
+                        ""
+                    } else {
+                        "  (reserved; released output not recorded)"
+                    }
+                );
+            }
+        }
+    }
+    Ok(s)
+}
+
+/// How many releases, each costing epsilon `one` alone, a budget affords
+/// under zCDP composition (at most 100000).
+fn affordable(b: &encompute_ir::confidentiality::PrivacyBudget, one: f64) -> u64 {
+    use encompute_privacy::PrivacyAccountant;
+    if one > b.epsilon {
+        return 0;
+    }
+    // One release's rho, recovered by bisection on the conversion.
+    let (mut lo, mut hi) = (0.0f64, 1e6f64);
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        if encompute_privacy::Zcdp.epsilon(mid, b.delta) < one {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let mut n = 1u64;
+    while n < 100_000 && encompute_privacy::Zcdp.epsilon(hi * (n + 1) as f64, b.delta) <= b.epsilon
+    {
+        n += 1;
+    }
+    n
 }

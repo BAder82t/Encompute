@@ -20,6 +20,7 @@ fn spec() -> ExecutionSpec {
         backend: "tfhe-rs".into(),
         backend_version: "1.8.1".into(),
         policy_id: None,
+        privacy_policy_id: None,
     }
 }
 

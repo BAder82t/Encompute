@@ -157,9 +157,19 @@ fn has_tfhe() -> bool {
     encompute_runtime::has_tfhe()
 }
 
+/// Named privacy levels: `(name, epsilon, delta, noise_multiplier)`.
+#[pyfunction]
+fn privacy_presets() -> Vec<(String, f64, f64, f64)> {
+    encompute_ir::confidentiality::PRIVACY_PRESETS
+        .iter()
+        .map(|(n, e, d, z)| (n.to_string(), *e, *d, *z))
+        .collect()
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Model>()?;
+    m.add_function(wrap_pyfunction!(privacy_presets, m)?)?;
     m.add_function(wrap_pyfunction!(has_openfhe, m)?)?;
     m.add_function(wrap_pyfunction!(has_tfhe, m)?)?;
     m.add("NativeError", m.py().get_type::<NativeError>())?;

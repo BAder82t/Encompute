@@ -30,6 +30,8 @@ pub struct Ids {
     pub program_id: String,
     /// Hex `PolicyId` of the program's confidentiality declarations.
     pub policy_id: Option<String>,
+    /// Hex `PrivacyPolicyId` of its privacy budgets and mechanisms.
+    pub privacy_policy_id: Option<String>,
 }
 
 impl Ids {
@@ -40,6 +42,10 @@ impl Ids {
             policy_id: program
                 .confidentiality()
                 .map(|c| encompute_verification::PolicyId::of(c).hex()),
+            privacy_policy_id: program
+                .confidentiality()
+                .and_then(encompute_verification::PrivacyPolicyId::of)
+                .map(|p| p.hex()),
         }
     }
 }
@@ -66,6 +72,7 @@ pub fn execution_spec(ids: &Ids, compiled: &CompiledProgram, kind: BackendKind) 
         backend: backend.into(),
         backend_version: backend_version.into(),
         policy_id: ids.policy_id.clone(),
+        privacy_policy_id: ids.privacy_policy_id.clone(),
     }
 }
 

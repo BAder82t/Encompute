@@ -11,6 +11,7 @@ encompute-ir.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+encompute-verification.workspace = true
 proptest.workspace = true
 
 [lints]

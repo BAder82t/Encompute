@@ -31,6 +31,7 @@ impl Model {
         Ok(AggregationPlan::from_boundary(
             &ids.program_id,
             ids.policy_id.as_deref(),
+            ids.privacy_policy_id.as_deref(),
             b,
         ))
     }

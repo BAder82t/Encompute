@@ -94,6 +94,17 @@ pub enum Code {
     /// An aggregation declaration is invalid: not a sum of distinct
     /// parties' inputs, bad codec, or an impossible threshold (ENC2106).
     AggregationPlan,
+    /// A release would exceed an asset's privacy budget (ENC2201).
+    PrivacyBudgetExceeded,
+    /// A privacy ledger is malformed, tampered, rolled back, reset or for
+    /// another asset or policy (ENC2202).
+    PrivacyLedger,
+    /// Privacy declarations are invalid, or a budgeted asset would be
+    /// released without a privacy mechanism (ENC2203).
+    PrivacyPolicy,
+    /// A privacy mechanism, its parameters, randomness or receipt do not
+    /// match the approved configuration (ENC2204).
+    PrivacyMechanism,
 }
 
 impl Code {
@@ -138,13 +149,17 @@ impl Code {
             Code::AggregationProtocol => "ENC2104",
             Code::AggregationOverflow => "ENC2105",
             Code::AggregationPlan => "ENC2106",
+            Code::PrivacyBudgetExceeded => "ENC2201",
+            Code::PrivacyLedger => "ENC2202",
+            Code::PrivacyPolicy => "ENC2203",
+            Code::PrivacyMechanism => "ENC2204",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 39] = [
+    pub const ALL: [Code; 43] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -184,6 +199,10 @@ impl Code {
         Code::AggregationProtocol,
         Code::AggregationOverflow,
         Code::AggregationPlan,
+        Code::PrivacyBudgetExceeded,
+        Code::PrivacyLedger,
+        Code::PrivacyPolicy,
+        Code::PrivacyMechanism,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

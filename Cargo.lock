@@ -731,6 +731,7 @@ name = "encompute-analysis"
 version = "0.2.0"
 dependencies = [
  "encompute-ir",
+ "encompute-verification",
  "proptest",
  "serde",
 ]
@@ -869,6 +870,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "encompute-privacy"
+version = "0.2.0"
+dependencies = [
+ "chacha20",
+ "ed25519-dalek",
+ "encompute-ir",
+ "encompute-verification",
+ "getrandom 0.2.17",
+ "libm",
+ "num-bigint 0.4.8",
+ "num-integer",
+ "num-rational",
+ "num-traits",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "encompute-protocol"
 version = "0.2.0"
 dependencies = [
@@ -906,6 +927,7 @@ dependencies = [
  "encompute-ir",
  "encompute-keybroker",
  "encompute-openfhe-client",
+ "encompute-privacy",
  "encompute-protocol",
  "encompute-secagg",
  "encompute-tfhe",
@@ -930,6 +952,7 @@ dependencies = [
  "encompute-analysis",
  "encompute-attestation",
  "encompute-ir",
+ "encompute-privacy",
  "encompute-verification",
  "getrandom 0.2.17",
  "rand_core 0.10.1",
@@ -1610,6 +1633,17 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c92800bd69a1eac91786bcfe9da64a897eb72911b8dc3095decbd07429e8048b"
 dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
 ]

@@ -177,6 +177,10 @@ enum Cmd {
         measure: Option<usize>,
         #[arg(long, default_value = "mock")]
         mode: String,
+        /// Preview the next differential-privacy release against the
+        /// ledgers in this directory.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
     },
     /// Time keygen, encryption, evaluation and decryption.
     Bench {
@@ -199,6 +203,16 @@ enum PrivacyCmd {
         model: PathBuf,
         #[arg(long, default_value = "dot")]
         format: String,
+    },
+    /// Differential-privacy budgets: spent, remaining, and every release,
+    /// from the privacy ledgers.
+    Budget {
+        /// The coordinator's ledger directory.
+        #[arg(long)]
+        ledger: PathBuf,
+        /// One asset only.
+        #[arg(long)]
+        asset: Option<String>,
     },
 }
 
@@ -335,6 +349,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Privacy {
+            cmd: PrivacyCmd::Budget { ledger, asset },
+        } => {
+            print!(
+                "{}",
+                encompute_runtime::privacy_budget_report(&ledger, asset.as_deref())?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Privacy { cmd } => {
             let (m, out) = match cmd {
                 PrivacyCmd::Explain { model } => {
@@ -350,6 +373,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     let out = m.privacy_dot()?;
                     (m, out)
                 }
+                PrivacyCmd::Budget { .. } => unreachable!("handled above"),
             };
             match out {
                 Some(text) => print!("{text}"),
@@ -530,6 +554,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             model,
             measure,
             mode,
+            ledger,
         } => {
             let m = load(&model)?;
             let measured = match measure {
@@ -537,6 +562,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 None => None,
             };
             print!("{}", m.explain(measured.as_ref()));
+            if let Some(dir) = ledger {
+                print!("\n{}", m.privacy_preview(&dir)?);
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Bench {

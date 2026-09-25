@@ -145,6 +145,62 @@ def _kind(k: str) -> str:
     return k
 
 
+_UNITS = ("record", "user", "patient", "device", "organization")
+
+
+def _privacy_levels() -> Dict[str, Tuple[float, float, float]]:
+    """Named privacy levels from the native library: one source of truth."""
+    from . import _native
+
+    return {n: (e, d, z) for n, e, d, z in _native.privacy_presets()}
+
+
+class DP:
+    """An explicit differential-privacy budget for an asset: every release
+    derived from it is charged, and releases over ``(epsilon, delta)`` are
+    refused. Most applications use a level instead: ``privacy="strong"``."""
+
+    def __init__(self, epsilon: float, delta: float):
+        if not (isinstance(epsilon, (int, float)) and math.isfinite(epsilon) and epsilon > 0):
+            raise _err("ENC2203", f"epsilon must be positive, got {epsilon!r}")
+        if not (isinstance(delta, (int, float)) and 0 < delta < 1):
+            raise _err("ENC2203", f"delta must be in (0, 1), got {delta!r}")
+        self.epsilon = float(epsilon)
+        self.delta = float(delta)
+
+
+class DiscreteGaussian:
+    """An explicit DP mechanism for an aggregation: each party's vector is
+    clipped to L2 norm ``clip_norm`` and discrete Gaussian noise with
+    standard deviation ``noise_multiplier * clip_norm`` is added."""
+
+    def __init__(self, clip_norm: float, noise_multiplier: float):
+        for name, v in (("clip_norm", clip_norm), ("noise_multiplier", noise_multiplier)):
+            if not (isinstance(v, (int, float)) and math.isfinite(v) and v > 0):
+                raise _err("ENC2203", f"{name} must be positive, got {v!r}")
+        self.clip_norm = float(clip_norm)
+        self.noise_multiplier = float(noise_multiplier)
+
+
+def _budget(privacy: Any) -> Optional[DP]:
+    if privacy is None or isinstance(privacy, DP):
+        return privacy
+    levels = _privacy_levels()
+    if privacy not in levels:
+        raise _err("ENC2203", f"privacy must be one of {', '.join(levels)} or DP(...), got {privacy!r}")
+    e, d, _ = levels[privacy]
+    return DP(e, d)
+
+
+def _mechanism(privacy: Any) -> Optional[DiscreteGaussian]:
+    if privacy is None or isinstance(privacy, DiscreteGaussian):
+        return privacy
+    levels = _privacy_levels()
+    if privacy not in levels:
+        raise _err("ENC2203", f"privacy must be one of {', '.join(levels)} or DiscreteGaussian(...), got {privacy!r}")
+    return DiscreteGaussian(1.0, levels[privacy][2])
+
+
 class Asset:
     """A confidential asset and its owners' policy. Bind a secret input to
     it with ``secret[shape, lo:hi, asset]``."""
@@ -159,8 +215,14 @@ class Asset:
         release: str = "never",
         kind: str = "dataset",
         derive: Optional[Dict[str, Any]] = None,
+        privacy: Any = None,
+        unit: str = "record",
     ):
         self.id = _check_id("asset", id)
+        self.privacy = _budget(privacy)
+        if unit not in _UNITS:
+            _check_id("privacy unit", unit)
+        self.unit = unit
         self.owners = list(owners)
         if not self.owners:
             raise _err("ENC1906", f"asset {id} has no owner")
@@ -190,6 +252,8 @@ class Asset:
         if self.derive:
             parts = [f"{k} {r} to {q(p.id for p in to)}" for k, (r, to) in sorted(self.derive.items())]
             line += " derive [" + ", ".join(parts) + "]"
+        if self.privacy is not None:
+            line += f' privacy unit "{self.unit}" epsilon {_num(self.privacy.epsilon)} delta {_num(self.privacy.delta)}'
         return line
 
     def __repr__(self) -> str:
@@ -206,6 +270,8 @@ def asset(
     release: str = "never",
     kind: str = "dataset",
     derive: Optional[Dict[str, Any]] = None,
+    privacy: Any = None,
+    unit: str = "record",
 ) -> Asset:
     """Declare a confidential asset: who owns it, who may read it, what it
     may be used for, how it may be released, and which derived kinds its
@@ -218,6 +284,8 @@ def asset(
         release=release,
         kind=kind,
         derive=derive,
+        privacy=privacy,
+        unit=unit,
     )
 
 
@@ -246,6 +314,7 @@ def secure_aggregate(
     scale: int,
     modulus_bits: int,
     function: str = "sum",
+    privacy: Any = None,
 ) -> _Output:
     """Output ``value``, a sum of one input per party, computed only by
     secure aggregation (ADR-012) and released to ``to`` (default: sealed)
@@ -255,6 +324,9 @@ def secure_aggregate(
     ``(n + colluding) // 2 + 1``). Values are clipped to
     ``clip`` and encoded as integers ``round((x - clip[0]) * scale)`` modulo
     ``2**modulus_bits``; the compiler refuses encodings that could overflow.
+    ``privacy`` (``"standard"``, ``"strong"``, ``"maximum"`` or
+    ``DiscreteGaussian(...)``) adds differential-privacy noise, charged to
+    the budgets of the contributing assets.
     """
     if function not in ("sum", "mean"):
         raise _err("ENC2106", f"aggregation function must be 'sum' or 'mean', got {function!r}")
@@ -263,6 +335,9 @@ def secure_aggregate(
         if not isinstance(v, int) or isinstance(v, bool) or v < 0:
             raise _err("ENC2106", f"{name} must be a non-negative integer, got {v!r}")
     rule = f"{function} minimum {minimum} colluding {colluding} clip [{_num(lo)}, {_num(hi)}] scale {scale} modulus {modulus_bits}"
+    mech = _mechanism(privacy)
+    if mech is not None:
+        rule += f" dp discrete_gaussian clip_norm {_num(mech.clip_norm)} noise_multiplier {_num(mech.noise_multiplier)}"
     return _Output(value, f'to "{to.id}"' if to is not None else "", to, aggregate=rule)
 
 

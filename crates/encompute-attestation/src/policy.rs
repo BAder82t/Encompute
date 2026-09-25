@@ -131,6 +131,9 @@ pub struct AttestationPolicy {
     /// If set, the artifact digest the workload must bind.
     #[serde(default)]
     pub artifact_digest: Option<String>,
+    /// The `PrivacyPolicyId` the workload must bind (absent: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy_id: Option<String>,
     pub allowed_tee: Vec<TeeKind>,
     /// Exact image digests (`sha256:…`) allowed to run.
     pub allowed_images: Vec<String>,
@@ -156,6 +159,7 @@ impl AttestationPolicy {
             execution_spec_id: execution_spec_id.to_owned(),
             policy_id: policy_id.map(str::to_owned),
             artifact_digest: None,
+            privacy_policy_id: None,
             allowed_tee: Vec::new(),
             allowed_images: Vec::new(),
             debug: DebugPolicy::Forbidden,
@@ -230,6 +234,13 @@ impl AttestationPolicy {
                 "the workload is bound to policy {}, not {}",
                 b.policy_id.as_deref().unwrap_or("(none)"),
                 self.policy_id.as_deref().unwrap_or("(none)")
+            ));
+        }
+        if b.privacy_policy_id != self.privacy_policy_id {
+            return deny(format!(
+                "the workload is bound to privacy policy {}, not {}",
+                b.privacy_policy_id.as_deref().unwrap_or("(none)"),
+                self.privacy_policy_id.as_deref().unwrap_or("(none)")
             ));
         }
         if let Some(a) = &self.artifact_digest {
