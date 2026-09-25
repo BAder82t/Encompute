@@ -46,14 +46,19 @@ fn main() -> ExitCode {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--listen" => listen = it.next().unwrap_or_default(),
-            "--backend" => match it.next().as_deref().and_then(BackendKind::parse) {
-                Some(k) if k.built() => backends = backends.with(k),
-                Some(k) => {
-                    eprintln!("error: this evaluator was built without {}", k.name());
-                    return ExitCode::from(2);
+            "--backend" | "--approx-backend" | "--exact-backend" => {
+                let value = it.next().unwrap_or_default();
+                match BackendKind::parse(&value) {
+                    Some(k) if !k.built() => {
+                        eprintln!("error: this evaluator was built without {}", k.name());
+                        return ExitCode::from(2);
+                    }
+                    _ => match backends.apply(&a, &value) {
+                        Some(b) => backends = b,
+                        None => return usage(),
+                    },
                 }
-                None => return usage(),
-            },
+            }
             "--identity" => identity = it.next(),
             "--workers" => match it.next().and_then(|n| n.parse().ok()) {
                 Some(n) => workers = n,

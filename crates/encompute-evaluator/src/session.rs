@@ -203,14 +203,61 @@ impl Backends {
         }
     }
 
-    /// Command-line arguments reproducing this choice.
+    /// Command-line arguments reproducing exactly this choice (for worker
+    /// processes): one flag per semantics, so no flag overrides the other.
     pub fn args(self) -> Vec<&'static str> {
         vec![
-            "--backend",
+            "--approx-backend",
             self.approx.name(),
-            "--backend",
+            "--exact-backend",
             self.exact.name(),
         ]
+    }
+
+    /// Apply one command-line flag: `--backend` (every semantics the
+    /// backend supports; `mock` means both), `--approx-backend` or
+    /// `--exact-backend` (that semantics only). `None` if the flag or value
+    /// is not valid.
+    pub fn apply(self, flag: &str, value: &str) -> Option<Self> {
+        let k = BackendKind::parse(value)?;
+        match flag {
+            "--backend" => Some(self.with(k)),
+            "--approx-backend" if k.supports(Semantics::Approximate) => {
+                Some(Self { approx: k, ..self })
+            }
+            "--exact-backend" if k.supports(Semantics::Exact) => Some(Self { exact: k, ..self }),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Workers get exactly the gateway's backends (a mock for one semantics
+    /// must not replace the real backend of the other).
+    #[test]
+    fn backend_args_round_trip() {
+        use BackendKind::*;
+        for (approx, exact) in [
+            (Mock, Mock),
+            (OpenFhe, Mock),
+            (Mock, TfheRs),
+            (OpenFhe, TfheRs),
+        ] {
+            let b = Backends { approx, exact };
+            let mut got = Backends::MOCK;
+            for pair in b.args().chunks(2) {
+                got = got.apply(pair[0], pair[1]).unwrap();
+            }
+            assert_eq!(got, b);
+        }
+        assert_eq!(
+            Backends::MOCK.apply("--approx-backend", "tfhe-rs"),
+            None,
+            "TFHE-rs cannot run approximate programs"
+        );
     }
 }
 
