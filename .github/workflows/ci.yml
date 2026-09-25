@@ -22,6 +22,25 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # The release gate: every documented security invariant, quick scale.
+  # Fails the build when any invariant is violated (docs/assurance.md).
+  assurance:
+    name: assurance (security invariants)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p encompute-assurance --bins --examples
+      - run: ./target/release/assurance-report --json assurance-report.json --md assurance-report.md
+      - if: always()
+        run: cat assurance-report.md >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: assurance-report
+          path: assurance-report.*
+
   openfhe:
     name: openfhe ${{ matrix.os }}
     strategy:

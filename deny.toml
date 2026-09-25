@@ -1,0 +1,29 @@
+# cargo-deny: run nightly and before releases (`cargo deny check advisories
+# bans sources`). Licenses are reviewed separately (AGPL-3.0 plus commercial).
+
+[graph]
+all-features = false
+
+[advisories]
+# Unmaintained crates are reported but do not fail the gate; vulnerabilities
+# and yanked versions do.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = [
+    # Marvin (RSA private-key timing side channel). `rsa` comes in through
+    # jsonwebtoken, used in production only to *verify* RS256 Confidential
+    # Space tokens with Google's public keys; only tests sign, locally. No
+    # private-key operation is exposed to an attacker. Revisit when a fixed
+    # `rsa` release exists.
+    { id = "RUSTSEC-2023-0071", reason = "public-key verification only; no attacker-observable private-key operation" },
+]
+
+[bans]
+multiple-versions = "allow"
+# Internal path dependencies carry no version (the crates are not on crates.io).
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

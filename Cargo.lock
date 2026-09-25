@@ -737,6 +737,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "encompute-assurance"
+version = "0.2.0"
+dependencies = [
+ "ed25519-dalek",
+ "encompute-analysis",
+ "encompute-attestation",
+ "encompute-evaluator",
+ "encompute-ir",
+ "encompute-keybroker",
+ "encompute-privacy",
+ "encompute-protocol",
+ "encompute-runtime",
+ "encompute-secagg",
+ "encompute-verification",
+ "getrandom 0.2.17",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "encompute-attestation"
 version = "0.2.0"
 dependencies = [

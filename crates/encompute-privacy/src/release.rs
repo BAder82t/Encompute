@@ -232,6 +232,7 @@ pub fn release(
         )?;
         spec.check(c, l.view())?;
         ledgers.push(l);
+        crate::failpoint("after-lock");
     }
     let mut before = vec![];
     for (l, c) in ledgers.iter_mut().zip(&charged) {
@@ -254,21 +255,25 @@ pub fn release(
             rng: rng.label().into(),
         })?;
     }
+    crate::failpoint("after-reserve");
     // Only now does a noisy output exist.
     let noisy = sum
         .iter()
         .map(|&v| {
             let z = discrete_gaussian(s2, rng)?;
+            crate::failpoint("during-noise");
             i64::try_from(v as i128 + z as i128).map_err(|_| mech_err("noisy value out of range"))
         })
         .collect::<Result<Vec<i64>>>()?;
     let commitment = output_commitment(&spec.round_id, &spec.output, &noisy);
+    crate::failpoint("before-commit");
     let mut receipts = vec![];
     for ((l, c), before) in ledgers.iter_mut().zip(&charged).zip(before) {
         l.append(PrivacyEvent::Commit {
             event_id: spec.event_id(&c.asset_id),
             output_commitment: commitment.clone(),
         })?;
+        crate::failpoint("after-first-commit");
         let v = l.view();
         let after = v.cost()?;
         let mut r = PrivacyReceipt {

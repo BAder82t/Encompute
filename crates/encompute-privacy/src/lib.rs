@@ -33,6 +33,17 @@ pub(crate) fn tagged(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Crash injection for the assurance suite: with the `failpoints` feature,
+/// aborts the process when `ENCOMPUTE_FAILPOINT` names this point. Compiled
+/// out otherwise.
+#[inline]
+pub fn failpoint(_name: &str) {
+    #[cfg(feature = "failpoints")]
+    if std::env::var("ENCOMPUTE_FAILPOINT").as_deref() == Ok(_name) {
+        std::process::abort();
+    }
+}
+
 /// Asset IDs name ledger files: refuse anything that is not a plain ID.
 pub(crate) fn check_asset_file_name(id: &str) -> Result<()> {
     encompute_ir::confidentiality::check_id("asset", id)

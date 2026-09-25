@@ -1,0 +1,43 @@
+[package]
+name = "encompute-assurance"
+description = "Encompute's adversarial assurance suite: tries to break every documented security invariant (not production code)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+encompute-ir.workspace = true
+encompute-analysis.workspace = true
+encompute-protocol.workspace = true
+encompute-evaluator.workspace = true
+encompute-runtime.workspace = true
+encompute-verification.workspace = true
+encompute-attestation.workspace = true
+encompute-keybroker.workspace = true
+encompute-secagg.workspace = true
+encompute-privacy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+getrandom = "0.2"
+ed25519-dalek = "2.2"
+
+[[bin]]
+name = "assurance-report"
+path = "src/bin/report.rs"
+
+# The helper (crash injection and restart child process) is an example so
+# that failpoints, enabled through this dev-dependency, never reach a
+# production build: resolver 2 activates dev-dependency features only for
+# tests and examples. Build it with `--examples`.
+[dev-dependencies]
+encompute-privacy = { workspace = true, features = ["failpoints"] }
+
+[[example]]
+name = "assurance-helper"
+path = "examples/helper.rs"
+
+[lints]
+workspace = true

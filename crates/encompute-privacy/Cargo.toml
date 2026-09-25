@@ -30,6 +30,8 @@ getrandom = "0.2"
 # Reproducible noise for tests. Every sample is labelled; production
 # verification refuses it. Never enable in a release build.
 insecure-deterministic-noise = []
+# Crash injection points for the assurance suite (ENCOMPUTE_FAILPOINT).
+failpoints = []
 
 [lints]
 workspace = true

@@ -1,0 +1,38 @@
+name: assurance
+
+# The assurance suite at nightly scale (larger populations, 100 racing
+# processes, repeated crash injection) and supply-chain checks. See
+# docs/assurance.md.
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  invariants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p encompute-assurance --bins --examples
+      - run: ./target/release/assurance-report --nightly --json assurance-report.json --md assurance-report.md
+      - if: always()
+        run: cat assurance-report.md >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: assurance-report-nightly
+          path: assurance-report.*
+
+  supply-chain:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans sources

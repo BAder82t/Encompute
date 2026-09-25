@@ -7,3 +7,7 @@ __pycache__/
 *.so
 docs/*-plan.md
 .claude/
+
+# Assurance reports (CI artifacts)
+/assurance-report.json
+/assurance-report.md
