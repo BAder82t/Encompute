@@ -98,7 +98,7 @@ fn hex32(s: &str, what: &str) -> Result<[u8; 32]> {
         .ok_or_else(|| Error::new(Code::Attestation, format!("{what} must be 32 bytes of hex")))
 }
 
-fn tee(s: &str) -> Result<TeeKind> {
+pub(crate) fn tee(s: &str) -> Result<TeeKind> {
     Ok(match s {
         "intel_tdx" | "tdx" => TeeKind::IntelTdx,
         "amd_sev_snp" | "sev-snp" => TeeKind::AmdSevSnp,
@@ -625,7 +625,7 @@ pub struct AttesterArgs {
 }
 
 impl AttesterArgs {
-    fn attester(&self) -> Result<Box<dyn Attester>> {
+    pub(crate) fn attester(&self) -> Result<Box<dyn Attester>> {
         match self.attester.as_str() {
             "confidential-space" => Ok(Box::new(ConfidentialSpaceAttester::default())),
             "mock" => {

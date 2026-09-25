@@ -692,3 +692,163 @@ fn secure_aggregation_round() {
     assert!(err.contains("ENC2102") && err.contains("replay"), "{err}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Parties that require an attested coordinator contribute to an approved
+/// one and refuse a coordinator running another image.
+#[test]
+fn attested_coordinator_round() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-coord-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    let mut eir = String::from(
+        "encompute 0.1\nprogram fedavg precision 0.001 purpose \"t\"\nparty \"coordinator\" \"C\"\n",
+    );
+    for x in ["a", "b"] {
+        eir.push_str(&format!("party \"hospital-{x}\" \"H\"\n"));
+    }
+    for x in ["a", "b"] {
+        eir.push_str(&format!(
+            "asset \"gradient-{x}\" gradient owners [\"hospital-{x}\"] readers [\"coordinator\"] \
+             purposes [\"t\"] release aggregate_only\n"
+        ));
+    }
+    for (i, x) in ["a", "b"].iter().enumerate() {
+        eir.push_str(&format!(
+            "%{i} = input \"g{x}\" [-1.0, 1.0] asset \"gradient-{x}\" : secret vector<4>\n"
+        ));
+    }
+    eir.push_str(
+        "%2 = add %0, %1 : secret vector<4>\noutput \"g\" = %2 to \"coordinator\"\n\
+         aggregate \"g\" sum minimum 2 colluding 1 clip [-1.0, 1.0] scale 1000 modulus 16\n",
+    );
+    std::fs::write(p("f.eir"), eir).unwrap();
+    let ok = |args: &[&str]| {
+        let (code, out, err) = encompute(args);
+        assert_eq!(code, 0, "{args:?}: {out}{err}");
+        out
+    };
+    ok(&["compile", &p("f.eir"), "-o", &p("f.encompute")]);
+    let root = ok(&["attest", "mock-root", &p("hw.seed")])
+        .trim()
+        .to_owned();
+    let image = format!("sha256:{}", "8".repeat(64));
+    let policy = ok(&[
+        "aggregate",
+        "coordinator-policy",
+        &p("f.encompute"),
+        "--image",
+        &image,
+        "--tee",
+        "mock",
+        "--development",
+    ]);
+    std::fs::write(p("coord-policy.json"), policy).unwrap();
+    let mut ids = vec![];
+    for x in ["a", "b"] {
+        ids.push(
+            ok(&[
+                "aggregate",
+                "identity",
+                "--party",
+                &format!("hospital-{x}"),
+                "--key",
+                &p(&format!("{x}.key")),
+            ])
+            .trim()
+            .to_owned(),
+        );
+        std::fs::write(p(&format!("{x}.json")), "[0.5, -0.25, 1.0, 0.0]").unwrap();
+    }
+    std::fs::write(p("parties.json"), format!("[{}]", ids.join(","))).unwrap();
+    let port = 22000 + std::process::id() % 20000;
+    let run = |image: &str, seq: &str| {
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_encompute"))
+            .args([
+                "aggregate",
+                "serve",
+                &p("f.encompute"),
+                "--parties",
+                &p("parties.json"),
+                "--coordinator-policy",
+                &p("coord-policy.json"),
+                "--key",
+                &p("coord.key"),
+                "--listen",
+                &format!("127.0.0.1:{port}"),
+                "--stage-timeout",
+                "5",
+                "--sequence",
+                seq,
+                "--attester",
+                "mock",
+                "--mock-seed",
+                &p("hw.seed"),
+                "--mock-image",
+                image,
+                "--out",
+                &p("agg.json"),
+                "--receipt",
+                &p("receipt.json"),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while std::net::TcpStream::connect(("127.0.0.1", port as u16)).is_err() {
+            assert!(start.elapsed().as_secs() < 20, "coordinator did not start");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let url = format!("http://127.0.0.1:{port}");
+        let joins: Vec<_> = ["a", "b"]
+            .iter()
+            .map(|x| {
+                let args: Vec<String> = [
+                    "aggregate",
+                    "join",
+                    &p("f.encompute"),
+                    "--parties",
+                    &p("parties.json"),
+                    "--coordinator-policy",
+                    &p("coord-policy.json"),
+                    "--mock-root",
+                    &root,
+                    "--coordinator",
+                    &url,
+                    "--party",
+                    &format!("hospital-{x}"),
+                    "--key",
+                    &p(&format!("{x}.key")),
+                    "--values",
+                    &p(&format!("{x}.json")),
+                    "--state",
+                    &p(&format!("{x}-{seq}.state")),
+                    "--timeout",
+                    "10",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+                std::thread::spawn(move || {
+                    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                    encompute(&a)
+                })
+            })
+            .collect();
+        let results: Vec<_> = joins.into_iter().map(|j| j.join().unwrap()).collect();
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        results
+    };
+    for (code, out, err) in run(&image, "1") {
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.contains("CONTRIBUTION ACCEPTED"), "{out}");
+    }
+    for (code, _, err) in run("sha256:unapproved", "2") {
+        assert_ne!(code, 0);
+        assert!(err.contains("ENC2002"), "{err}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

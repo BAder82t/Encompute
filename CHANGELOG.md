@@ -22,6 +22,13 @@
   rolled-back ledgers (ENC2202).
 - **PrivacyPolicyId** (`encprivacy1:`) in the execution spec, aggregation
   plan, ledgers, receipts and coordinator attestation.
+- **Attested coordinators from the CLI**: `aggregate coordinator-policy`,
+  `--coordinator-policy`, `aggregate serve --attester …`, and `join
+  --mock-root`/`--jwks`.
+- **Every owner checks every ledger**: each owner records every charged
+  asset's checkpoint from the signed receipts and refuses a round that
+  rolls back any of them.
+- CI uses Node 24 actions (`checkout@v7`, `cache@v6`, `setup-python@v7`).
 - New crate `encompute-privacy`. CLI: `encompute privacy budget`,
   `explain --ledger`, `aggregate serve --ledger`. Errors ENC2201–ENC2204.
   `examples/private_federated_training/`.

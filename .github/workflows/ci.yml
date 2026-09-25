@@ -13,7 +13,7 @@ jobs:
     name: rust (no OpenFHE)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
@@ -30,14 +30,14 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - if: runner.os == 'macOS'
         run: brew install libomp
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .deps/openfhe
           key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
@@ -52,7 +52,7 @@ jobs:
         run: |
           cargo build --release -p encompute-evaluator --features openfhe
           ./scripts/audit-evaluator-binary.sh
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: python sdk
@@ -68,16 +68,16 @@ jobs:
     name: two-machine demo (client ↔ evaluator container)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .deps/openfhe
           key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
       - run: ./scripts/install-openfhe.sh
       - run: cargo build --release --features openfhe -p encompute-cli
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: client SDK
@@ -93,7 +93,7 @@ jobs:
     name: exact backend (TFHE-rs, research feature)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy

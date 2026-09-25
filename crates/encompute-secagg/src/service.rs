@@ -525,6 +525,8 @@ pub struct PartyState<'a> {
     pub last_sequence: Option<u64>,
     pub seen: Option<encompute_privacy::Checkpoint>,
     pub verifier: Option<&'a encompute_attestation::Verifier>,
+    /// Checkpoints of every budgeted asset this party has seen.
+    pub known: BTreeMap<String, encompute_privacy::Checkpoint>,
 }
 
 /// Joins with the privacy and coordinator checks (see
@@ -563,6 +565,8 @@ pub fn join_checked(
             ledger,
             seen: state.seen.as_ref(),
             coordinator,
+            all_ledgers: Some(&offer.ledgers),
+            known: Some(&state.known),
         },
     )
 }

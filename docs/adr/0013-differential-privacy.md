@@ -138,12 +138,15 @@ another:
      checkpoint (`--state`).
    - So a coordinator that deletes or rolls back its ledger loses its
      participants rather than gaining budget.
-   - **First contact is trust-on-first-use.** An owner with no checkpoint (a
-     new owner, or lost state) cannot tell a stale but well-formed ledger
-     from the real one. It detects the problem at its next round. Owners
-     must keep their state, and can bootstrap a checkpoint out of band, for
-     example from another owner or an earlier receipt. A transparency-log
-     witness would close this gap; it is future work.
+   - **One owner's state protects all.** Every aggregation receipt carries
+     each charged asset's signed checkpoint. Each owner records all of them
+     and, before contributing, checks every offered ledger against every
+     checkpoint it knows. So a rollback of hospital A's ledger is refused by
+     B and C even if A lost its state.
+   - What remains trust-on-first-use is a consortium where no owner holds
+     any state yet. Owners can bootstrap state out of band, for example by
+     copying another owner's state file. A transparency-log witness would
+     close this gap; it is future work.
 
 8. **Identity.**
    - A `PrivacyPolicyId` (`encprivacy1:`) hashes every budget (unit, ε, δ)
@@ -159,7 +162,14 @@ another:
      with less noise, a larger clip or a larger budget is a different spec,
      and parties refuse it.
 
-9. **Tools.**
+9. **In the CLI.**
+   - `aggregate coordinator-policy` writes the attestation policy a
+     coordinator must satisfy.
+   - `--coordinator-policy` requires that policy on both sides.
+   - `aggregate serve --attester …` attests the coordinator.
+   - `aggregate join --mock-root/--jwks` verifies it.
+
+10. **Tools.**
    - `privacy explain` shows each budget, the mechanism, the cost of one
      release and how many releases the budget affords, with runtime
      enforcement ACTIVE.

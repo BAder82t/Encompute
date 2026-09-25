@@ -475,6 +475,12 @@ pub struct JoinOptions<'a> {
     pub seen: Option<&'a Checkpoint>,
     /// The coordinator's attestation record and a verifier for it.
     pub coordinator: Option<(&'a AttestationRecord, &'a Verifier)>,
+    /// Every budgeted asset's ledger, as the coordinator shows them, and
+    /// every checkpoint this party knows (its own and, from signed
+    /// aggregation receipts, the other assets'): each known asset's ledger
+    /// must extend its checkpoint, so one owner's state protects all.
+    pub all_ledgers: Option<&'a BTreeMap<String, LedgerView>>,
+    pub known: Option<&'a BTreeMap<String, Checkpoint>>,
 }
 
 /// The coordinator is an approved attested workload bound to this plan,
@@ -633,7 +639,31 @@ impl RoundParticipant {
             ledger,
             seen,
             coordinator,
+            all_ledgers,
+            known,
         } = opts;
+        if let Some(known) = known {
+            let empty = BTreeMap::new();
+            let shown = all_ledgers.unwrap_or(&empty);
+            for (asset, cp) in known {
+                if !approved.plan.participants.iter().any(|p| &p.asset == asset) {
+                    continue;
+                }
+                let view = shown.get(asset).ok_or_else(|| {
+                    Error::new(
+                        Code::PrivacyLedger,
+                        format!("the coordinator did not show asset {asset}'s privacy ledger"),
+                    )
+                })?;
+                view.verify()?;
+                view.extends(cp).map_err(|e| {
+                    Error::new(
+                        Code::PrivacyLedger,
+                        format!("asset {asset}'s ledger: {}", e.message),
+                    )
+                })?;
+            }
+        }
         if let Some(why) = approved.difference(offered) {
             return Err(binding(format!(
                 "the coordinator's aggregation spec is not the approved one: {why}"

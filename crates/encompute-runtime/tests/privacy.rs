@@ -404,3 +404,69 @@ fn explain_shows_budgets_and_preview() {
         assert!(budget.contains(want), "missing {want:?}\n{budget}");
     }
 }
+
+/// One owner's state protects every asset: hospital A has lost its state,
+/// but B knows A's last checkpoint (from the signed receipt) and refuses a
+/// round whose offer rolls A's ledger back.
+#[test]
+fn any_owner_detects_another_assets_rollback() {
+    use std::collections::BTreeMap;
+    let m = approved();
+    let dir = ledger_dir("cross");
+    let mut ps = parties(&m);
+    round(&mut coordinator(&m, 1, &dir).unwrap(), &mut ps, None).unwrap();
+    let path = dir.join("gradient-a.ledger");
+    let after_one = std::fs::read_to_string(&path).unwrap();
+    let (agg, _) = round(&mut coordinator(&m, 2, &dir).unwrap(), &mut ps, None).unwrap();
+    // B records every asset's checkpoint from the round's receipts.
+    let known: BTreeMap<String, Checkpoint> = agg
+        .privacy
+        .iter()
+        .map(|r| {
+            (
+                r.asset_id.clone(),
+                Checkpoint {
+                    seq: r.ledger_seq,
+                    root: r.ledger_root.clone(),
+                },
+            )
+        })
+        .collect();
+    std::fs::write(&path, after_one).unwrap();
+    let c = coordinator(&m, 3, &dir).unwrap();
+    let views = c.ledger_views().unwrap();
+    // A (no state) would not notice…
+    RoundParticipant::join_with(
+        &spec_of(&m),
+        &c.spec,
+        &c.round,
+        &party(0),
+        key(0),
+        &gradient(0),
+        JoinOptions {
+            ledger: views.get("gradient-a"),
+            ..JoinOptions::default()
+        },
+    )
+    .unwrap();
+    // …but B does.
+    let e = RoundParticipant::join_with(
+        &spec_of(&m),
+        &c.spec,
+        &c.round,
+        &party(1),
+        key(1),
+        &gradient(1),
+        JoinOptions {
+            ledger: views.get("gradient-b"),
+            seen: known.get("gradient-b"),
+            all_ledgers: Some(&views),
+            known: Some(&known),
+            ..JoinOptions::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(e.code, Code::PrivacyLedger);
+    assert!(e.message.contains("gradient-a"), "{e}");
+}

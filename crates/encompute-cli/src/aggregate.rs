@@ -110,6 +110,11 @@ pub struct SpecArgs {
     /// Require attested contribution workloads under this policy.
     #[arg(long)]
     attestation_policy: Option<PathBuf>,
+    /// Require an attested coordinator under this policy (from `aggregate
+    /// coordinator-policy`): parties contribute only to a coordinator that
+    /// provably runs the approved plan and privacy configuration.
+    #[arg(long)]
+    coordinator_policy: Option<PathBuf>,
 }
 
 impl SpecArgs {
@@ -139,6 +144,9 @@ impl SpecArgs {
         spec.training_execution_spec_id = self.training_spec.clone();
         if let Some(p) = &self.attestation_policy {
             spec.attestation = Some(json::<AttestationPolicy>(p)?);
+        }
+        if let Some(p) = &self.coordinator_policy {
+            spec.coordinator_attestation = Some(json::<AttestationPolicy>(p)?);
         }
         spec.validate()?;
         Ok(spec)
@@ -182,6 +190,23 @@ pub enum AggregateCmd {
         receipt: PathBuf,
         #[command(flatten)]
         trust: TrustArgs,
+        /// How the coordinator attests itself, when the spec requires it.
+        #[command(flatten)]
+        attester: crate::attest::AttesterArgs,
+    },
+    /// Print the attestation policy a coordinator must satisfy: this plan,
+    /// its confidentiality and privacy policies, on these images and TEEs.
+    CoordinatorPolicy {
+        model: PathBuf,
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long, required = true)]
+        image: Vec<String>,
+        /// intel_tdx, amd_sev_snp, amd_sev (mock for development).
+        #[arg(long, required = true)]
+        tee: Vec<String>,
+        #[arg(long)]
+        development: bool,
     },
     /// Contribute this party's private vector to the coordinator's round.
     Join {
@@ -209,6 +234,9 @@ pub enum AggregateCmd {
         attestation: Option<PathBuf>,
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        /// Providers trusted for the coordinator's attestation.
+        #[command(flatten)]
+        trust: TrustArgs,
     },
     /// Check an aggregation receipt (and the aggregate, if you hold it).
     Verify {
@@ -277,6 +305,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             ledger,
             receipt,
             trust,
+            attester,
         } => {
             let spec = spec.spec()?;
             let verifier = match &spec.attestation {
@@ -293,6 +322,10 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                     Code::PrivacyLedger,
                     "a differentially private aggregation needs --ledger DIR",
                 ));
+            }
+            if coord.spec.coordinator_attestation.is_some() {
+                let record = coord.attest(attester.attester()?.as_ref())?;
+                eprintln!("coordinator attested (record {})", short(&record.id()?));
             }
             let round_id = coord.round_id()?;
             let svc = CoordinatorService::new(coord, Duration::from_secs(stage_timeout))?;
@@ -320,6 +353,27 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             std::thread::sleep(Duration::from_secs(2));
             Ok(ExitCode::SUCCESS)
         }
+        AggregateCmd::CoordinatorPolicy {
+            model,
+            output,
+            image,
+            tee,
+            development,
+        } => {
+            let plan = load(&model)?.aggregation_plan(output.as_deref())?;
+            let mut p = AttestationPolicy::new(&plan.id()?, plan.policy_id.as_deref());
+            p.privacy_policy_id = plan.privacy_policy_id.clone();
+            p.artifact_digest = Some(plan.program_id.clone());
+            p.allowed_images = image;
+            p.allowed_tee = tee
+                .iter()
+                .map(|t| crate::attest::tee(t))
+                .collect::<Result<_>>()?;
+            p.allow_development = development;
+            p.validate()?;
+            println!("{}", serde_json::to_string_pretty(&p).expect("JSON"));
+            Ok(ExitCode::SUCCESS)
+        }
         AggregateCmd::Join {
             spec,
             coordinator,
@@ -329,8 +383,13 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             state,
             attestation,
             timeout,
+            trust,
         } => {
             let approved = spec.spec()?;
+            let verifier = match &approved.coordinator_attestation {
+                Some(_) => Some(trust.verifier(Some(&format!("encagg1:{}", approved.id()?)))?),
+                None => None,
+            };
             let party = PartyId::new(&party)?;
             let values: Vec<f64> = json(&values)?;
             let mut st: PartyStateFile = if state.exists() {
@@ -355,7 +414,8 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                     attestation,
                     last_sequence: st.sequence,
                     seen,
-                    verifier: None,
+                    verifier: verifier.as_ref(),
+                    known: st.checkpoints.clone(),
                 },
             )?;
             st.sequence = Some(p.round.sequence);
@@ -365,29 +425,32 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             verify_aggregation_receipt(&r, &approved, None, None)?;
             // Remember where this asset's ledger stands: a later ledger must
             // extend it (rollback and reset detection).
+            // Remember where every budgeted asset's ledger stands (all are
+            // signed into the receipt): a later ledger must extend each, so
+            // this party also protects the others' budgets.
             let mut spent = None;
-            if let Some(a) = &asset {
-                if let Some(pr) = r.manifest.privacy.iter().find(|pr| &pr.asset_id == a) {
-                    encompute_runtime::dp::verify_privacy_receipt(
-                        pr,
-                        Some(&coordinator_key),
-                        None,
-                        None,
-                    )?;
-                    st.checkpoints.insert(
-                        a.clone(),
-                        encompute_runtime::dp::Checkpoint {
-                            seq: pr.ledger_seq,
-                            root: pr.ledger_root.clone(),
-                        },
-                    );
-                    st.write(&state)?;
+            for pr in &r.manifest.privacy {
+                encompute_runtime::dp::verify_privacy_receipt(
+                    pr,
+                    Some(&coordinator_key),
+                    None,
+                    None,
+                )?;
+                st.checkpoints.insert(
+                    pr.asset_id.clone(),
+                    encompute_runtime::dp::Checkpoint {
+                        seq: pr.ledger_seq,
+                        root: pr.ledger_root.clone(),
+                    },
+                );
+                if Some(&pr.asset_id) == asset.as_ref() {
                     spent = Some(format!(
                         "{:<16}epsilon {} spent of {} (this round {})",
                         "Privacy", pr.cumulative_epsilon, pr.budget_epsilon, pr.epsilon_cost
                     ));
                 }
             }
+            st.write(&state)?;
             println!("CONTRIBUTION ACCEPTED (only the aggregate is released)");
             print_manifest(&r);
             if let Some(line) = spent {
