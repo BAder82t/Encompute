@@ -1,7 +1,9 @@
 name: conformance
 
 # Full parameter-conformance grids: 10 080 parameter points checked against
-# OpenFHE, and 200 random programs executed encrypted. Nightly, and on demand.
+# OpenFHE, and 200 random programs executed encrypted. Exact programs: 25 000
+# random programs on the mock, and TFHE-rs on every operation and width,
+# random programs and the flagship. Nightly, and on demand.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -11,6 +13,9 @@ on:
     paths:
       - "crates/encompute-ckks/src/params.rs"
       - "crates/encompute-ckks/src/lower.rs"
+      - "crates/encompute-exact/**"
+      - "crates/encompute-tfhe/**"
+      - "crates/encompute-tfhe-client/**"
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,3 +38,21 @@ jobs:
         run: cargo test -p encompute-openfhe --release --test conformance -- --nocapture
       - name: run tier (encrypted execution)
         run: cargo test -p encompute-runtime --release --features openfhe --test conformance -- --nocapture
+
+  exact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: random exact programs on the mock (plan == interpreter)
+        run: ENCOMPUTE_EXACT_PROGRAMS=25000 cargo test --release -p encompute-exact --test lower -- --nocapture
+      - name: TFHE-rs (research feature) == clear reference
+        env:
+          ENCOMPUTE_EXACT_WIDTHS: all
+          ENCOMPUTE_EXACT_PROGRAMS: "24"
+          ENCOMPUTE_EXACT_CASES: "200"
+        run: cargo test --release -p encompute-tfhe-client --features tfhe-rs --test exact -- --nocapture --test-threads 1
+      - name: TFHE-rs end to end (sessions, envelopes, HTTP, wrong keys)
+        run: ENCOMPUTE_EXACT_CASES=100 cargo test --release -p encompute-runtime --features tfhe-rs --test exact -- --nocapture

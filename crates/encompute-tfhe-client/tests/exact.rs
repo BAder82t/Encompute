@@ -1,6 +1,14 @@
 //! TFHE-rs executes exact plans with results equal to the clear reference.
-//! `ENCOMPUTE_EXACT_CASES=1000` runs the flagship on 1000 random inputs.
+//!
+//! - `ENCOMPUTE_EXACT_CASES=1000` runs the flagship on 1000 random inputs;
+//! - `ENCOMPUTE_EXACT_WIDTHS=all` covers every operation on all eight
+//!   integer widths (default: u8 and i16);
+//! - `ENCOMPUTE_EXACT_PROGRAMS=N` runs N random programs (the mock tests'
+//!   generator) on TFHE-rs.
 #![cfg(feature = "tfhe-rs")]
+
+#[path = "../../encompute-exact/tests/gen/mod.rs"]
+mod gen;
 
 use encompute_backend::{ExactClient, ExactEvaluator};
 use encompute_exact::{compile, evaluate_exact};
@@ -48,7 +56,12 @@ fn coverage(elem: Elem) -> Program {
     let mut b = Builder::new("cov", 1e-3).unwrap();
     let x = b.input_exact("x", elem, Some(Range::new(lo, hi))).unwrap();
     let y = b.input_exact("y", elem, Some(Range::new(lo, hi))).unwrap();
-    let wide = if signed { Elem::I32 } else { Elem::U32 };
+    let wide = match (elem.bits() >= 32, signed) {
+        (false, true) => Elem::I32,
+        (false, false) => Elem::U32,
+        (true, true) => Elem::I64,
+        (true, false) => Elem::U64,
+    };
     let xw = b.cast(x, wide).unwrap();
     let yw = b.cast(y, wide).unwrap();
     let k3 = b.constant_exact(wide, 3.0).unwrap();
@@ -66,14 +79,25 @@ fn coverage(elem: Elem) -> Program {
     outs.push(("rem", b.rem(xw, k7).unwrap()));
     outs.push(("min", b.min(xw, yw).unwrap()));
     outs.push(("max", b.max(xw, yw).unwrap()));
-    outs.push(("and", b.logic(LogicOp::And, xw, yw).unwrap()));
-    outs.push(("xor", b.logic(LogicOp::Xor, xw, yw).unwrap()));
+    // Bitwise ops on negative 64-bit values have full-width ranges (beyond
+    // the ±2^53 output limit): offset them to non-negative first.
+    let (bx, by) = if signed && wide.bits() == 64 {
+        let k100 = b.constant_exact(wide, 100.0).unwrap();
+        (b.add(xw, k100).unwrap(), b.add(yw, k100).unwrap())
+    } else {
+        (xw, yw)
+    };
+    outs.push(("and", b.logic(LogicOp::And, bx, by).unwrap()));
+    outs.push(("xor", b.logic(LogicOp::Xor, bx, by).unwrap()));
     outs.push(("shl", b.shift(xw, true, 2).unwrap()));
     outs.push(("shr", b.shift(xw, false, 1).unwrap()));
     if signed {
         outs.push(("neg", b.neg(xw).unwrap()));
     } else {
-        outs.push(("not", b.not(x).unwrap()));
+        // Masked: `not` of a u64 exceeds the ±2^53 output limit (ENC1303).
+        let nx = b.not(x).unwrap();
+        let k255 = b.constant_exact(elem, 255.0).unwrap();
+        outs.push(("not", b.logic(LogicOp::And, nx, k255).unwrap()));
     }
     let lt = b.cmp(CmpOp::Lt, x, y).unwrap();
     let eq = b.cmp(CmpOp::Eq, x, y).unwrap();
@@ -106,7 +130,7 @@ fn coverage(elem: Elem) -> Program {
 }
 
 fn run(client: &TfheRsClient, ev: &TfheRsEvaluator, p: &Program, inputs: &Inputs) -> Inputs {
-    let c = compile(p).unwrap();
+    let c = compile(p).unwrap_or_else(|e| panic!("{e}\n{p}"));
     let cts = c
         .plan
         .inputs
@@ -148,7 +172,13 @@ fn tfhe_rs_equals_clear_reference() {
     eprintln!("compressed server key: {} MiB", keys.len() >> 20);
 
     // Operator coverage at boundaries, unsigned and signed.
-    for elem in [Elem::U8, Elem::I16] {
+    let widths: &[Elem] = if std::env::var("ENCOMPUTE_EXACT_WIDTHS").as_deref() == Ok("all") {
+        &gen::WIDTHS
+    } else {
+        &[Elem::U8, Elem::I16]
+    };
+    for &elem in widths {
+        let t = std::time::Instant::now();
         let p = coverage(elem);
         let (lo, hi) = if elem.is_signed() {
             (-100, 100)
@@ -173,6 +203,10 @@ fn tfhe_rs_equals_clear_reference() {
                 "{elem} x={x} y={y}"
             );
         }
+        eprintln!(
+            "coverage {elem}: 6 boundary cases exact in {:.1?}",
+            t.elapsed()
+        );
     }
 
     // Flagship on random and boundary inputs.
@@ -208,6 +242,44 @@ fn tfhe_rs_equals_clear_reference() {
         }
     }
     eprintln!("flagship: {cases} cases exact ({yes} approved, {no} rejected)");
+}
+
+/// The mock tests' random programs, on TFHE-rs.
+#[test]
+fn random_programs_on_tfhe_rs() {
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+    let n = gen::programs(3);
+    let client = TfheRsClient::generate().unwrap();
+    let ev = TfheRsEvaluator::new(&client.evaluation_keys().unwrap()).unwrap();
+    let mut runner = TestRunner::new_with_rng(
+        Config::default(),
+        TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+    );
+    let (mut done, mut cases) = (0, 0);
+    while done < n {
+        let (p, decl) = gen::arb_program().new_tree(&mut runner).unwrap().current();
+        if compile(&p).is_err() {
+            continue;
+        }
+        let t = std::time::Instant::now();
+        for case in 0..3 {
+            let inputs = gen::inputs_for(&decl, case, done as u64);
+            assert_eq!(
+                run(&client, &ev, &p, &inputs),
+                evaluate(&p, &inputs).unwrap(),
+                "{p}\n{inputs:?}"
+            );
+            cases += 1;
+        }
+        done += 1;
+        eprintln!(
+            "program {done}/{n}: {} instructions, 3 cases exact in {:.1?}",
+            compile(&p).unwrap().plan.instrs.len(),
+            t.elapsed()
+        );
+    }
+    eprintln!("random programs on TFHE-rs: {done} programs, {cases} cases, all exact");
 }
 
 #[test]

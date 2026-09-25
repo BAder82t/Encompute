@@ -14,6 +14,11 @@ tfhe = { version = "=1.8.1", default-features = false, features = ["integer"], o
 
 [dev-dependencies]
 encompute-exact.workspace = true
+proptest.workspace = true
+
+[[example]]
+name = "exact_ops"
+required-features = ["tfhe-rs"]
 
 [features]
 tfhe-rs = ["dep:tfhe", "encompute-tfhe/tfhe-rs"]
