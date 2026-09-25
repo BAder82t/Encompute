@@ -115,6 +115,7 @@ impl Engine for Local {
 
     fn add_program(&self, eir: &str) -> Result<ProgramInfo> {
         let program = parse(eir)?;
+        crate::compiled::refuse_aggregation(&program)?;
         let kind = self
             .backends
             .for_program(&crate::compiled::compile_program(&program)?);

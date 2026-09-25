@@ -238,6 +238,173 @@ pub enum OutputRelease {
     Public,
 }
 
+/// How contributions combine into an aggregate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregationFunction {
+    Sum,
+    Mean,
+}
+
+impl AggregationFunction {
+    pub fn name(self) -> &'static str {
+        match self {
+            AggregationFunction::Sum => "sum",
+            AggregationFunction::Mean => "mean",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "sum" => Some(AggregationFunction::Sum),
+            "mean" => Some(AggregationFunction::Mean),
+            _ => None,
+        }
+    }
+}
+
+/// Fixed-point encoding of real values for secure aggregation, which sums
+/// integers modulo `2^modulus_bits`. Nothing about it is hidden: clipping
+/// and rounding change what is aggregated, so they appear in `explain`,
+/// the round manifest and the receipt.
+///
+/// Encode: clip `x` to `[clip_min, clip_max]`, then
+/// `q = round((x - clip_min) * scale)` (half away from zero), an integer
+/// in `[0, levels]`. Decode a sum of `n` codes: `S / scale + n * clip_min`.
+/// Each value is off by at most `0.5 / scale` (plus clipping).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedPointCodec {
+    #[serde(with = "exact_f64")]
+    pub clip_min: f64,
+    #[serde(with = "exact_f64")]
+    pub clip_max: f64,
+    pub scale: u64,
+    pub modulus_bits: u32,
+}
+
+/// Clip bounds as exact decimal strings (Rust's shortest round-trip form):
+/// hashed identities (policy, aggregation spec) use canonical JSON, which
+/// carries no floats.
+mod exact_f64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(x: &f64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("{x:?}"))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.parse::<f64>() {
+            Ok(x) if x.is_finite() && format!("{x:?}") == s => Ok(x),
+            _ => Err(serde::de::Error::custom(format!(
+                "{s:?} is not an exact finite number"
+            ))),
+        }
+    }
+}
+
+// Clip bounds are validated finite (never NaN), so equality is total.
+impl Eq for FixedPointCodec {}
+
+impl FixedPointCodec {
+    /// Largest code: `round((clip_max - clip_min) * scale)`.
+    pub fn levels(&self) -> u64 {
+        ((self.clip_max - self.clip_min) * self.scale as f64).round() as u64
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let bad = |m: String| Err(Error::new(Code::AggregationPlan, m));
+        if !(self.clip_min.is_finite() && self.clip_max.is_finite())
+            || self.clip_min >= self.clip_max
+        {
+            return bad(format!(
+                "clip range [{}, {}] must be finite with min < max",
+                self.clip_min, self.clip_max
+            ));
+        }
+        if self.scale == 0 {
+            return bad("scale must be at least 1".into());
+        }
+        if !(8..=64).contains(&self.modulus_bits) {
+            return bad(format!(
+                "modulus must be 2^8 to 2^64, got 2^{}",
+                self.modulus_bits
+            ));
+        }
+        // Codes must be exact integers in an f64.
+        let span = (self.clip_max - self.clip_min) * self.scale as f64;
+        if span > (1u64 << 53) as f64 {
+            return bad(format!(
+                "clip range times scale ({span:e}) exceeds 2^53: codes would lose precision"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Largest possible sum of `participants` codes.
+    pub fn max_aggregate(&self, participants: usize) -> u128 {
+        self.levels() as u128 * participants as u128
+    }
+
+    /// Refuses a codec whose sum over `participants` could wrap the modulus
+    /// and silently corrupt the aggregate.
+    pub fn check_overflow(&self, participants: usize) -> Result<()> {
+        self.validate()?;
+        let max = self.max_aggregate(participants);
+        let modulus = 1u128 << self.modulus_bits;
+        if max >= modulus {
+            return Err(Error::new(
+                Code::AggregationOverflow,
+                format!(
+                    "secure aggregation may overflow: {participants} participants x maximum \
+                     encoded value {} = maximum aggregate {max}, but the modulus is 2^{} = \
+                     {modulus}; increase the modulus or reduce the clip range or scale",
+                    self.levels(),
+                    self.modulus_bits
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn encode(&self, x: f64) -> u64 {
+        let c = if x.is_nan() {
+            self.clip_min
+        } else {
+            x.clamp(self.clip_min, self.clip_max)
+        };
+        (((c - self.clip_min) * self.scale as f64).round() as u64).min(self.levels())
+    }
+
+    /// The real sum of `n` values whose codes sum to `sum`.
+    pub fn decode_sum(&self, sum: u64, n: usize) -> f64 {
+        sum as f64 / self.scale as f64 + n as f64 * self.clip_min
+    }
+
+    /// The largest error a single encoded value carries (excluding
+    /// clipping).
+    pub fn resolution(&self) -> f64 {
+        0.5 / self.scale as f64
+    }
+}
+
+/// A declared aggregation boundary: output `output` is the `function` of
+/// one contribution per party, computed by secure aggregation and released
+/// only if at least `minimum` parties contributed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AggregationRule {
+    pub output: String,
+    pub function: AggregationFunction,
+    pub minimum: usize,
+    /// How many parties may collude with the coordinator without learning
+    /// an honest party's contribution. Secure aggregation needs a threshold
+    /// `t > (n + colluding) / 2`, so this is declared, never assumed.
+    pub colluding: usize,
+    pub codec: FixedPointCodec,
+}
+
 /// All confidentiality declarations of a program.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Confidentiality {
@@ -250,6 +417,9 @@ pub struct Confidentiality {
     pub derivations: Vec<Derivation>,
     /// Output name → where it goes (absent: sealed).
     pub outputs: BTreeMap<String, OutputRelease>,
+    /// Aggregation boundaries (secure aggregation).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregations: Vec<AggregationRule>,
 }
 
 impl Confidentiality {
@@ -259,6 +429,10 @@ impl Confidentiality {
 
     pub fn asset(&self, id: &str) -> Option<&AssetDecl> {
         self.assets.iter().find(|a| a.id == id)
+    }
+
+    pub fn aggregation(&self, output: &str) -> Option<&AggregationRule> {
+        self.aggregations.iter().find(|a| a.output == output)
     }
 
     pub fn output(&self, name: &str) -> &OutputRelease {
@@ -326,6 +500,25 @@ impl Confidentiality {
             if let OutputRelease::Party(p) = o {
                 party(p, "output")?;
             }
+        }
+        let mut aggregated = BTreeSet::new();
+        for a in &self.aggregations {
+            if !aggregated.insert(a.output.as_str()) {
+                return Err(Error::new(
+                    Code::AggregationPlan,
+                    format!("output {:?} is aggregated twice", a.output),
+                ));
+            }
+            if a.minimum < 2 {
+                return Err(Error::new(
+                    Code::AggregationPlan,
+                    format!(
+                        "aggregate {:?}: minimum must be at least 2 (one contribution is not an aggregate)",
+                        a.output
+                    ),
+                ));
+            }
+            a.codec.validate()?;
         }
         Ok(())
     }

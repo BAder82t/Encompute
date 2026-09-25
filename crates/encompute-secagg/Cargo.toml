@@ -1,0 +1,30 @@
+[package]
+name = "encompute-secagg"
+description = "Secure aggregation (Bonawitz et al. SecAgg) bound to Encompute policies, rounds and receipts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# No ML framework, no FHE backend, no cloud SDK.
+[dependencies]
+encompute-ir.workspace = true
+encompute-analysis.workspace = true
+encompute-verification.workspace = true
+encompute-attestation.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+getrandom = "0.2"
+zeroize = "1.8"
+ed25519-dalek = "2.2"
+x25519-dalek = { version = "3.0", features = ["static_secrets", "zeroize"] }
+chacha20 = "0.10"
+chacha20poly1305 = "0.11"
+vsss-rs = { version = "6.0.1", default-features = false, features = ["std"] }
+rand_core = "0.10"
+tiny_http = "0.12"
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+
+[lints]
+workspace = true

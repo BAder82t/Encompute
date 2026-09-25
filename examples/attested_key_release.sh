@@ -11,7 +11,7 @@ BIN="${BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug}"
 E="$BIN/encompute"
 W="$(mktemp -d)"
 cd "$W"
-trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; rm -rf "$W"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$W"' EXIT
 
 cat > step.eir <<'EIR'
 encompute 0.1

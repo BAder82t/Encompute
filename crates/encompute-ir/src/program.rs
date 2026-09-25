@@ -759,6 +759,18 @@ impl Builder {
     }
 
     /// Where output `name` goes (default: sealed).
+    /// Declares output `rule.output` an aggregation boundary.
+    pub fn aggregate(&mut self, rule: crate::confidentiality::AggregationRule) -> Result<()> {
+        if !self.program.outputs.iter().any(|o| o.name == rule.output) {
+            return Err(Error::new(
+                Code::AggregationPlan,
+                format!("no output named {:?}", rule.output),
+            ));
+        }
+        self.conf().aggregations.push(rule);
+        Ok(())
+    }
+
     pub fn output_release(
         &mut self,
         name: &str,

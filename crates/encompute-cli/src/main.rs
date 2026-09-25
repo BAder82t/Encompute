@@ -1,5 +1,6 @@
 //! `encompute` command-line tool.
 
+mod aggregate;
 mod attest;
 
 use std::path::{Path, PathBuf};
@@ -121,6 +122,11 @@ enum Cmd {
     Attest {
         #[command(subcommand)]
         cmd: attest::AttestCmd,
+    },
+    /// Secure aggregation rounds: coordinate, contribute, verify.
+    Aggregate {
+        #[command(subcommand)]
+        cmd: aggregate::AggregateCmd,
     },
     /// Inside a TEE: attest and receive asset keys from key brokers.
     Workload {
@@ -431,6 +437,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             },
         ),
         Cmd::Attest { cmd } => attest::attest(cmd),
+        Cmd::Aggregate { cmd } => aggregate::aggregate(cmd),
         Cmd::Workload { cmd } => attest::workload(cmd),
         Cmd::Keys {
             cmd: KeysCmd::Broker(cmd),

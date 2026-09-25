@@ -14,7 +14,8 @@ use encompute_runtime::attestation::{
     TcbStatus, TeeKind, VerifiedWorkload, Verifier, WorkloadSession,
 };
 use encompute_runtime::keybroker::{
-    acquire_keys, BrokerClient, BrokerMode, KeyBroker, KeyMaterial,
+    acquire_keys, BrokerClient, BrokerMode, DevelopmentFileStore, KeyBroker, KeyMaterial,
+    LocalKekStore, SecretStore,
 };
 use encompute_runtime::verification::EvaluatorSigner;
 use encompute_runtime::{BackendKind, Model};
@@ -332,9 +333,24 @@ fn mock_hardware(seed: &Path) -> Result<MockHardware> {
 
 #[derive(Args, Clone)]
 pub struct BrokerFile {
-    /// The broker's state file (holds keys; mode 0600).
+    /// The broker's state file (mode 0600).
     #[arg(long, default_value = "broker.json")]
     pub broker: PathBuf,
+    /// Key-encryption key file (32 bytes, created mode 0600 if missing):
+    /// keys in the state file are wrapped under it. Required for
+    /// production brokers; without it keys are stored in plaintext
+    /// (development only).
+    #[arg(long)]
+    pub kek: Option<PathBuf>,
+}
+
+impl BrokerFile {
+    fn store(&self) -> Result<Box<dyn SecretStore>> {
+        Ok(match &self.kek {
+            Some(p) => Box::new(LocalKekStore::open_or_create(p)?),
+            None => Box::new(DevelopmentFileStore),
+        })
+    }
 }
 
 #[derive(Subcommand)]
@@ -428,7 +444,7 @@ fn open_broker(file: &BrokerFile, trust: Option<&TrustArgs>) -> Result<KeyBroker
         }
         None => Verifier::new(),
     };
-    KeyBroker::load(&file.broker, verifier)
+    KeyBroker::load(&file.broker, verifier, file.store()?)
 }
 
 pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
@@ -452,7 +468,7 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 } else {
                     BrokerMode::Production
                 };
-                KeyBroker::new(&id, mode, Verifier::new())?
+                KeyBroker::new(&id, mode, Verifier::new(), file.store()?)?
             };
             let key = match &key_file {
                 Some(p) => Some(KeyMaterial::from_bytes(&zeroize::Zeroizing::new(read(p)?))?),

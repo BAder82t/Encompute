@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Multi-party secure aggregation
+
+- **Aggregation boundaries** (ADR-012). `aggregate "out" sum|mean minimum
+  N colluding C clip [lo, hi] scale S modulus M` (Python
+  `secure_aggregate(...)`)
+  declares that an output is a sum of one input per party, released only by
+  secure aggregation to its recipient if at least N parties contributed. It
+  satisfies `aggregate_only` (ENC1905 otherwise); the aggregate gets a
+  derived policy (contributors as owners, never public by default).
+- **Compile-time quantization analysis**: clipping, scale and modulus are
+  explicit, and encodings that could wrap the modulus are refused
+  (ENC2105). Shown in `privacy explain`, `explain` and receipts.
+- **`encompute-secagg`**: Bonawitz et al. (CCS 2017) secure aggregation,
+  active-adversary variant (signed keys, consistency check). The declared
+  collusion bound sets the threshold `max(N, ⌊(n + C)/2⌋ + 1)`; dropouts
+  are tolerated down to it. Aggregation specs (`encagg1:`) and rounds
+  (`encround1:`) bind every message; signed `AggregationReceipt`s record
+  contributors, dropouts, commitments, attestations and the aggregate
+  commitment. Optional attested contributors (ADR-011).
+- Aggregation programs never run on a single evaluator (ENC1905).
+- CLI: `encompute aggregate identity|serve|join|verify`;
+  `examples/secure_aggregation.sh`. Errors ENC2101–ENC2106.
+- **Key broker storage**: `SecretStore` (`DevelopmentFileStore`,
+  `LocalKekStore`); production brokers refuse plaintext key storage
+  (`encompute keys … --kek FILE`).
+
 ### Attested confidential compute
 
 - **Policy-gated key release** (ADR-011). Asset keys are released only to a

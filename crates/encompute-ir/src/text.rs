@@ -113,6 +113,20 @@ impl fmt::Display for Program {
             }
             writeln!(f)?;
         }
+        for a in conf.iter().flat_map(|c| &c.aggregations) {
+            let k = &a.codec;
+            writeln!(
+                f,
+                "aggregate \"{}\" {} minimum {} colluding {} clip {} scale {} modulus {}",
+                a.output,
+                a.function.name(),
+                a.minimum,
+                a.colluding,
+                floats(&[k.clip_min, k.clip_max]),
+                k.scale,
+                k.modulus_bits
+            )?;
+        }
         Ok(())
     }
 }
@@ -210,6 +224,44 @@ pub fn parse(src: &str) -> Result<Program> {
         }
         if line.starts_with("asset") {
             b.asset(parse_asset(&mut c)?).map_err(|e| at(n, e))?;
+            continue;
+        }
+        if line.starts_with("aggregate") {
+            c.keyword("aggregate")?;
+            let output = c.string()?;
+            let function = crate::confidentiality::AggregationFunction::parse(&c.word()?)
+                .ok_or_else(|| err(n, "aggregation function must be `sum` or `mean`"))?;
+            c.keyword("minimum")?;
+            c.skip_ws();
+            let minimum = c.usize()?;
+            c.keyword("colluding")?;
+            c.skip_ws();
+            let colluding = c.usize()?;
+            c.keyword("clip")?;
+            let clip = c.floats()?;
+            if clip.len() != 2 {
+                return Err(err(n, "clip needs exactly [min, max]"));
+            }
+            c.keyword("scale")?;
+            c.skip_ws();
+            let scale = c.usize()? as u64;
+            c.keyword("modulus")?;
+            c.skip_ws();
+            let modulus_bits = u32::try_from(c.usize()?).map_err(|_| err(n, "modulus bits"))?;
+            c.end()?;
+            b.aggregate(crate::confidentiality::AggregationRule {
+                output,
+                function,
+                minimum,
+                colluding,
+                codec: crate::confidentiality::FixedPointCodec {
+                    clip_min: clip[0],
+                    clip_max: clip[1],
+                    scale,
+                    modulus_bits,
+                },
+            })
+            .map_err(|e| at(n, e))?;
             continue;
         }
         if line.starts_with("derive") {

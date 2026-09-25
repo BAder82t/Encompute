@@ -48,7 +48,14 @@ scope.
   session key. This trusts the TEE and its attestation service (for
   Confidential Space: Google's verifier and launcher), and the reviewed
   image: the image digest is the measurement. Development (mock) evidence
-  protects nothing and production brokers refuse it.
+  protects nothing and production brokers refuse it. Production brokers
+  keep keys wrapped under a key-encryption key outside their state file.
+- Secure aggregation (ADR-012): the coordinator and cloud operator see only
+  masked contributions and the aggregate; a malicious coordinator cannot
+  obtain an honest party's input while it colludes with no more parties
+  than the declaration's `colluding` bound, which sets the threshold. It can abort a round or report a wrong aggregate. The
+  aggregate itself is not protected (no differential privacy). See the
+  adversary table in ADR-012.
 - Artifacts never contain key material.
 
 ## Deployment

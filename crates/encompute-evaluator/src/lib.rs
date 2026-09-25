@@ -13,7 +13,10 @@ pub mod pool;
 pub mod server;
 mod session;
 
-pub use compiled::{compile_program, CompiledProgram, ExactProgram, Semantics, EXACT_PLAN_VERSION};
+pub use compiled::{
+    compile_program, refuse_aggregation, CompiledProgram, ExactProgram, Semantics,
+    EXACT_PLAN_VERSION,
+};
 pub use exec::evaluate_encrypted;
 pub use session::{
     execution_proof, execution_spec, issue_receipt, program_id, transcript_for, BackendKind,

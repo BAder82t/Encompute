@@ -2,6 +2,7 @@
 //! clear-vs-encrypted differential tests, explains plans, and reads and
 //! writes compiled artifacts.
 
+mod aggregation;
 mod artifact;
 pub mod attested;
 pub mod audit;
@@ -23,6 +24,7 @@ pub use encompute_evaluator::{
     BackendKind, Backends, CompiledProgram, EvaluatorSession, ExactProgram, Ids, Semantics,
 };
 pub use encompute_keybroker as keybroker;
+pub use encompute_secagg as secagg;
 pub use encompute_verification as verification;
 pub use explain::Measurement;
 pub use model::{has_openfhe, has_tfhe, BenchDetail, BenchReport, Mode, Model};

@@ -164,6 +164,41 @@ The policy's ID is part of the execution spec, so receipts and proofs bind
 it. The compiler checks these requirements; attested key release (below)
 enforces who may run the program.
 
+## Secure aggregation
+
+Several parties contribute private vectors; only the aggregate is released,
+and only if enough parties took part (ADR-012). An `aggregate_only` asset
+can reach its recipient only through this boundary.
+
+```python
+from encompute import Party, Tensor, asset, secret, secure_aggregate
+
+coordinator = Party("coordinator")
+a, b, c = (asset(f"gradient-{x}", owner=Party(f"hospital-{x}"), readers=[coordinator],
+                 purposes=["disease-training"], kind="gradient", release="aggregate_only")
+           for x in "abc")
+
+@encompute.compile(purpose="disease-training")
+def fedavg(ga: secret[Tensor[4096], -1.0:1.0, a], gb: secret[Tensor[4096], -1.0:1.0, b],
+           gc: secret[Tensor[4096], -1.0:1.0, c]):
+    return secure_aggregate(ga + gb + gc, to=coordinator, minimum=3, colluding=2,
+                            clip=(-1, 1), scale=65536, modulus_bits=32)
+```
+
+```sh
+encompute aggregate serve fedavg.encompute --parties parties.json --key coordinator.key
+encompute aggregate join fedavg.encompute --parties parties.json --coordinator URL \
+    --party hospital-a --key a.key --values gradient-a.json --state a.round
+```
+
+The protocol is Bonawitz et al.'s secure aggregation (malicious-coordinator
+variant): the coordinator sees masked vectors only, even if it colludes
+with up to the declared `colluding` parties; dropouts are tolerated down to
+the threshold; every message is signed and bound to its round.
+Quantization is explicit and checked for overflow at compile time. Secure
+aggregation hides contributions, not what the aggregate reveals: that needs
+differential privacy.
+
 ## Attested key release
 
 Owners release asset keys only to a workload that proves, with hardware
@@ -269,6 +304,7 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-verification` | Execution specs, signed receipts, transcripts, proofs and proof interfaces (no FHE dependency) |
 | `crates/encompute-attestation` | Provider-neutral workload attestation, bindings, attestation policies, sealed key grants |
 | `crates/encompute-keybroker` | Policy-gated key release to attested workloads (library, HTTP server, client) |
+| `crates/encompute-secagg` | Secure aggregation (Bonawitz et al.) bound to policies, rounds and receipts |
 | `crates/encompute-vfhe` | Re-execution proof verifier on OpenFHE BGV (research) |
 | `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption) |
 | `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature) |
@@ -282,8 +318,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
-- **Next**: multi-party confidential AI: secure aggregation over attested
-  workloads, using asset keys released by policy.
+- **Next**: privacy accounting and distributed differential privacy: what
+  an aggregate may reveal, not only who sees each message.
 
 ## License
 

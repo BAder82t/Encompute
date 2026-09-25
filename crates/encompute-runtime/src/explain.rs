@@ -144,9 +144,92 @@ impl Model {
     /// Human-readable execution plan; with a measurement, the data, cost
     /// and accuracy sections show measured values.
     pub fn explain(&self, measured: Option<&Measurement>) -> String {
-        match self.compiled() {
+        let mut s = match self.compiled() {
             CompiledProgram::Approx(c) => self.explain_approx(c, measured),
             CompiledProgram::Exact(e) => self.explain_exact(e, measured),
+        };
+        self.explain_multi_party(&mut s);
+        s
+    }
+
+    /// Aggregated outputs run as secure aggregation, not on an evaluator.
+    fn explain_multi_party(&self, s: &mut String) {
+        let Ok(Some(r)) = encompute_analysis::confidentiality::analyze(self.program()) else {
+            return;
+        };
+        for b in &r.aggregations {
+            let k = &b.codec;
+            let row = |s: &mut String, k: &str, v: String| {
+                let _ = writeln!(s, "  {k:<28}{v}");
+            };
+            section(s, &format!("MULTI-PARTY EXECUTION  {}", b.output));
+            row(s, "participants", b.contributions.len().to_string());
+            row(s, "required minimum", b.minimum.to_string());
+            row(s, "colluding parties tolerated", b.colluding.to_string());
+            row(s, "protocol threshold", b.threshold.to_string());
+            row(
+                s,
+                "dropouts tolerated",
+                (b.contributions.len() - b.threshold).to_string(),
+            );
+            row(s, "protected asset", b.contribution_policy.kind.to_string());
+            row(
+                s,
+                "release policy",
+                b.contribution_policy.release.to_string(),
+            );
+            row(s, "mechanism", "secure aggregation".into());
+            row(
+                s,
+                "protocol",
+                format!(
+                    "{} v{} (Bonawitz et al. 2017, malicious-coordinator variant)",
+                    encompute_secagg::PROTOCOL,
+                    encompute_secagg::PROTOCOL_VERSION
+                ),
+            );
+            row(s, "function", b.function.name().into());
+            row(s, "vector length", b.vector_len.to_string());
+            row(s, "encoding", "fixed point".into());
+            row(
+                s,
+                "clip range",
+                format!(
+                    "[{}, {}] (values outside are clipped)",
+                    k.clip_min, k.clip_max
+                ),
+            );
+            row(
+                s,
+                "scale",
+                format!(
+                    "{} (rounding error ≤ {:e} per value)",
+                    k.scale,
+                    k.resolution()
+                ),
+            );
+            row(
+                s,
+                "modulus",
+                format!(
+                    "2^{} (max aggregate {} for {} parties)",
+                    k.modulus_bits,
+                    k.max_aggregate(b.contributions.len()),
+                    b.contributions.len()
+                ),
+            );
+            row(s, "individual updates visible", "no".into());
+            let to = match &b.recipient {
+                encompute_ir::confidentiality::OutputRelease::Party(p) => p.to_string(),
+                encompute_ir::confidentiality::OutputRelease::Public => "public".into(),
+                encompute_ir::confidentiality::OutputRelease::Sealed => "nobody (sealed)".into(),
+            };
+            row(s, "aggregate visible", to);
+            row(
+                s,
+                "differential privacy",
+                "none (the aggregate itself is not protected)".into(),
+            );
         }
     }
 

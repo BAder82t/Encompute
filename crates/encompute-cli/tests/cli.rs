@@ -520,3 +520,161 @@ fn attestation_and_key_release() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn secure_aggregation_round() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-secagg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    let mut eir = String::from(
+        "encompute 0.1\nprogram fedavg precision 0.001 purpose \"t\"\nparty \"coordinator\" \"C\"\n",
+    );
+    for x in ["a", "b", "c"] {
+        eir.push_str(&format!("party \"hospital-{x}\" \"H\"\n"));
+    }
+    for x in ["a", "b", "c"] {
+        eir.push_str(&format!(
+            "asset \"gradient-{x}\" gradient owners [\"hospital-{x}\"] readers [\"coordinator\"] \
+             purposes [\"t\"] release aggregate_only\n"
+        ));
+    }
+    for (i, x) in ["a", "b", "c"].iter().enumerate() {
+        eir.push_str(&format!(
+            "%{i} = input \"g{x}\" [-1.0, 1.0] asset \"gradient-{x}\" : secret vector<4>\n"
+        ));
+    }
+    eir.push_str(
+        "%3 = add %0, %1 : secret vector<4>\n%4 = add %3, %2 : secret vector<4>\n\
+         output \"g\" = %4 to \"coordinator\"\n\
+         aggregate \"g\" sum minimum 3 colluding 2 clip [-1.0, 1.0] scale 1000 modulus 16\n",
+    );
+    std::fs::write(p("f.eir"), eir).unwrap();
+    let ok = |args: &[&str]| {
+        let (code, out, err) = encompute(args);
+        assert_eq!(code, 0, "{args:?}: {out}{err}");
+        out
+    };
+    ok(&["compile", &p("f.eir"), "-o", &p("f.encompute")]);
+    let out = ok(&["explain", &p("f.encompute")]);
+    assert!(out.contains("MULTI-PARTY EXECUTION"), "{out}");
+    let mut ids = vec![];
+    for x in ["a", "b", "c"] {
+        ids.push(
+            ok(&[
+                "aggregate",
+                "identity",
+                "--party",
+                &format!("hospital-{x}"),
+                "--key",
+                &p(&format!("{x}.key")),
+            ])
+            .trim()
+            .to_owned(),
+        );
+        std::fs::write(p(&format!("{x}.json")), "[0.25, -0.5, 1.0, 0.0]").unwrap();
+    }
+    std::fs::write(p("parties.json"), format!("[{}]", ids.join(","))).unwrap();
+    let port = 20000 + std::process::id() % 20000;
+    let url = format!("http://127.0.0.1:{port}");
+    let serve = std::process::Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .args([
+            "aggregate",
+            "serve",
+            &p("f.encompute"),
+            "--parties",
+            &p("parties.json"),
+            "--key",
+            &p("coord.key"),
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--stage-timeout",
+            "20",
+            "--out",
+            &p("agg.json"),
+            "--receipt",
+            &p("receipt.json"),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let joins: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|x| {
+            let args: Vec<String> = [
+                "aggregate",
+                "join",
+                &p("f.encompute"),
+                "--parties",
+                &p("parties.json"),
+                "--coordinator",
+                &url,
+                "--party",
+                &format!("hospital-{x}"),
+                "--key",
+                &p(&format!("{x}.key")),
+                "--values",
+                &p(&format!("{x}.json")),
+                "--state",
+                &p(&format!("{x}.round")),
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            std::thread::spawn(move || {
+                let a: Vec<&str> = args.iter().map(String::as_str).collect();
+                encompute(&a)
+            })
+        })
+        .collect();
+    for j in joins {
+        let (code, out, err) = j.join().unwrap();
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.contains("CONTRIBUTION ACCEPTED"), "{out}");
+    }
+    let o = serve.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        o.status.success() && out.contains("AGGREGATION COMPLETE"),
+        "{out}"
+    );
+    let agg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p("agg.json")).unwrap()).unwrap();
+    assert_eq!(agg["values"], serde_json::json!([0.75, -1.5, 3.0, 0.0]));
+    let out = ok(&[
+        "aggregate",
+        "verify",
+        &p("receipt.json"),
+        &p("f.encompute"),
+        "--parties",
+        &p("parties.json"),
+        "--aggregate",
+        &p("agg.json"),
+    ]);
+    assert!(out.contains("AGGREGATION RECEIPT VERIFIED"), "{out}");
+    // The same party state refuses to rejoin an old round.
+    let (code, _, err) = encompute(&[
+        "aggregate",
+        "join",
+        &p("f.encompute"),
+        "--parties",
+        &p("parties.json"),
+        "--coordinator",
+        &url,
+        "--party",
+        "hospital-a",
+        "--key",
+        &p("a.key"),
+        "--values",
+        &p("a.json"),
+        "--state",
+        &p("a.round"),
+        "--timeout",
+        "2",
+    ]);
+    assert_ne!(code, 0);
+    assert!(err.contains("ENC1701") || err.contains("ENC2102"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

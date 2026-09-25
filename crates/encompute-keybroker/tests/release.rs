@@ -9,7 +9,10 @@ use encompute_attestation::{
     AttestationEvidence, AttestationPolicy, Attester, TcbStatus, TeeKind, Verifier, WorkloadSession,
 };
 use encompute_ir::Code;
-use encompute_keybroker::{acquire_keys, serve, BrokerClient, BrokerMode, KeyBroker, KeyMaterial};
+use encompute_keybroker::{
+    acquire_keys, serve, BrokerClient, BrokerMode, DevelopmentFileStore, KeyBroker, KeyMaterial,
+    LocalKekStore, SecretStore, StoredKey,
+};
 use encompute_verification::EvaluatorSigner;
 
 const SPEC: &str = "11111111111111111111111111111111111111111111111111111111111111aa";
@@ -18,6 +21,14 @@ const ARTIFACT: &str = "33333333333333333333333333333333333333333333333333333333
 const IMAGE: &str = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
 const EVIL_IMAGE: &str = "sha256:6666666666666666666666666666666666666666666666666666666666666666";
 const T0: u64 = 1_900_000_000;
+
+fn dev_store() -> Box<dyn SecretStore> {
+    Box::new(DevelopmentFileStore)
+}
+
+fn kek_store(seed: u8) -> Box<dyn SecretStore> {
+    Box::new(LocalKekStore::from_key([seed; 32]))
+}
 
 fn hw() -> MockHardware {
     MockHardware::from_seed(&[7; 32])
@@ -42,7 +53,7 @@ fn setup(id: &str) -> Setup {
     let clock = Arc::new(AtomicU64::new(T0));
     let c = clock.clone();
     let verifier = Verifier::new().with(MockProvider::new(&hw().public_key()).unwrap());
-    let mut broker = KeyBroker::new(id, BrokerMode::Development, verifier)
+    let mut broker = KeyBroker::new(id, BrokerMode::Development, verifier, dev_store())
         .unwrap()
         .with_clock(move || c.load(Ordering::SeqCst));
     let key = b"hospital patient-data key 32 by.".to_vec();
@@ -226,7 +237,20 @@ fn no_key_without_attestation() {
 #[test]
 fn production_brokers_refuse_development_evidence() {
     let verifier = Verifier::new().with(MockProvider::new(&hw().public_key()).unwrap());
-    let mut b = KeyBroker::new("hospital", BrokerMode::Production, verifier)
+    // A production broker cannot keep plaintext keys...
+    assert_eq!(
+        KeyBroker::new(
+            "hospital",
+            BrokerMode::Production,
+            Verifier::new(),
+            dev_store()
+        )
+        .err()
+        .unwrap()
+        .code,
+        Code::KeyRelease
+    );
+    let mut b = KeyBroker::new("hospital", BrokerMode::Production, verifier, kek_store(1))
         .unwrap()
         .with_clock(|| T0);
     // No development policy can be installed...
@@ -264,10 +288,13 @@ fn state_round_trips_without_printing_keys() {
         );
     }
     let verifier = Verifier::new().with(MockProvider::new(&hw().public_key()).unwrap());
-    let back = KeyBroker::load(&path, verifier).unwrap();
+    let back = KeyBroker::load(&path, verifier, dev_store()).unwrap();
     assert_eq!(back.id(), "hospital");
     let secret = back.secret("patients").unwrap();
-    assert_eq!(secret.versions[&1].key.as_bytes(), s.key.as_slice());
+    match &secret.versions[&1].key {
+        StoredKey::Plaintext { key } => assert_eq!(key.as_bytes(), s.key.as_slice()),
+        other => panic!("{other:?}"),
+    }
     assert!(!format!("{secret:?}").contains("hospital patient"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -280,7 +307,7 @@ fn state_round_trips_without_printing_keys() {
 fn two_party_demo_over_http() {
     let start = |id: &str, asset: &str, key: &[u8]| {
         let verifier = Verifier::new().with(MockProvider::new(&hw().public_key()).unwrap());
-        let mut b = KeyBroker::new(id, BrokerMode::Development, verifier).unwrap();
+        let mut b = KeyBroker::new(id, BrokerMode::Development, verifier, dev_store()).unwrap();
         b.add_secret(asset, Some(KeyMaterial::from_bytes(key).unwrap()), policy())
             .unwrap();
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
@@ -338,4 +365,94 @@ fn two_party_demo_over_http() {
             .code,
         Code::KeyRelease
     );
+}
+
+/// Keys wrapped under a KEK: never on disk in the clear, bound to their
+/// asset and version, and only openable with the same KEK.
+#[test]
+fn wrapped_key_store() {
+    let clock = Arc::new(AtomicU64::new(T0));
+    let c = clock.clone();
+    let verifier = || Verifier::new().with(MockProvider::new(&hw().public_key()).unwrap());
+    let mut b = KeyBroker::new(
+        "hospital",
+        BrokerMode::Development,
+        verifier(),
+        kek_store(1),
+    )
+    .unwrap()
+    .with_clock(move || c.load(Ordering::SeqCst));
+    let key = b"wrapped patient-data key 32 byte".to_vec();
+    b.add_secret(
+        "patients",
+        Some(KeyMaterial::from_bytes(&key).unwrap()),
+        policy(),
+    )
+    .unwrap();
+    b.add_secret("weights", None, policy()).unwrap();
+    let dir = std::env::temp_dir().join(format!("encompute-kek-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("broker.json");
+    b.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let hex_key: String = key.iter().map(|x| format!("{x:02x}")).collect();
+    assert!(
+        !text.contains(&hex_key) && text.contains("local-kek"),
+        "{text}"
+    );
+
+    // Reopened with the same KEK, the key is released as before.
+    let mut back = KeyBroker::load(&path, verifier(), kek_store(1))
+        .unwrap()
+        .with_clock(move || T0);
+    let session = WorkloadSession::new(&EvaluatorSigner::from_seed(&[9; 32]).identity());
+    let ch = back.challenge().unwrap();
+    let e = hw()
+        .attester(IMAGE)
+        .issued_at(T0)
+        .attest(&ch, &session.binding(&ch, SPEC, Some(POLICY), ARTIFACT))
+        .unwrap();
+    let info = back.verify_attestation(&e).unwrap();
+    let g = back.release_key(&info.session, "patients").unwrap();
+    assert_eq!(session.open(&g).unwrap().as_slice(), key.as_slice());
+
+    // Another KEK, or the plaintext store, cannot open this broker.
+    assert_eq!(
+        KeyBroker::load(&path, verifier(), kek_store(2))
+            .err()
+            .unwrap()
+            .code,
+        Code::KeyRelease
+    );
+    assert_eq!(
+        KeyBroker::load(&path, verifier(), dev_store())
+            .err()
+            .unwrap()
+            .code,
+        Code::KeyRelease
+    );
+
+    // A wrapped key moved to another asset does not open.
+    let mut state: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let moved = state["secrets"]["patients"]["versions"]["1"]["key"].clone();
+    state["secrets"]["weights"]["versions"]["1"]["key"] = moved;
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let mut swapped = KeyBroker::load(&path, verifier(), kek_store(1))
+        .unwrap()
+        .with_clock(move || T0);
+    let ch = swapped.challenge().unwrap();
+    let e = hw()
+        .attester(IMAGE)
+        .issued_at(T0)
+        .attest(&ch, &session.binding(&ch, SPEC, Some(POLICY), ARTIFACT))
+        .unwrap();
+    let info = swapped.verify_attestation(&e).unwrap();
+    assert_eq!(
+        swapped
+            .release_key(&info.session, "weights")
+            .unwrap_err()
+            .code,
+        Code::KeyRelease
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }

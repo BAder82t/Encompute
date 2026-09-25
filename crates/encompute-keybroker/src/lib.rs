@@ -13,6 +13,7 @@
 
 mod client;
 mod server;
+pub mod store;
 mod workload;
 
 use std::collections::BTreeMap;
@@ -31,6 +32,9 @@ use encompute_ir::{Code, Error, Result};
 
 pub use client::BrokerClient;
 pub use server::serve;
+pub use store::{
+    DevelopmentFileStore, KeyContext, LocalKekStore, SecretStore, StoreSecurity, StoredKey,
+};
 pub use workload::{acquire_keys, AcquiredKey};
 
 /// Challenges live this long.
@@ -108,7 +112,7 @@ impl<'de> Deserialize<'de> for KeyMaterial {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyVersion {
-    pub key: KeyMaterial,
+    pub key: StoredKey,
     pub revoked: bool,
 }
 
@@ -130,6 +134,10 @@ pub struct ProtectedSecret {
 pub struct BrokerState {
     pub broker_id: String,
     pub mode: BrokerMode,
+    /// The [`SecretStore`] holding the keys, and its wrapping key's ID.
+    pub store: String,
+    #[serde(default)]
+    pub kek_id: Option<String>,
     pub secrets: BTreeMap<String, ProtectedSecret>,
     #[serde(default)]
     pub challenges: Vec<AttestationChallenge>,
@@ -154,6 +162,7 @@ struct Session {
 pub struct KeyBroker {
     state: BrokerState,
     verifier: Verifier,
+    store: Box<dyn SecretStore>,
     sessions: BTreeMap<String, Session>,
     clock: Box<dyn Fn() -> u64 + Send>,
 }
@@ -184,27 +193,77 @@ fn check_asset_id(id: &str) -> Result<()> {
 }
 
 impl KeyBroker {
-    /// A broker with no secrets. Its ID is the audience workloads attest to.
-    pub fn new(broker_id: &str, mode: BrokerMode, verifier: Verifier) -> Result<Self> {
+    /// A broker with no secrets, keeping keys in `store`. Its ID is the
+    /// audience workloads attest to. A production broker needs a production
+    /// store: plaintext keys on disk are for development only.
+    pub fn new(
+        broker_id: &str,
+        mode: BrokerMode,
+        verifier: Verifier,
+        store: Box<dyn SecretStore>,
+    ) -> Result<Self> {
         check_broker_id(broker_id)?;
-        Ok(Self::from_state(
+        Self::from_state(
             BrokerState {
                 broker_id: broker_id.to_owned(),
                 mode,
+                store: store.name().into(),
+                kek_id: store.key_id(),
                 secrets: BTreeMap::new(),
                 challenges: Vec::new(),
             },
             verifier,
-        ))
+            store,
+        )
     }
 
-    pub fn from_state(state: BrokerState, verifier: Verifier) -> Self {
-        Self {
+    /// Reopens a broker; `store` must be the one its keys were stored with.
+    pub fn from_state(
+        state: BrokerState,
+        verifier: Verifier,
+        store: Box<dyn SecretStore>,
+    ) -> Result<Self> {
+        if state.mode == BrokerMode::Production && store.security() != StoreSecurity::Production {
+            return Err(err(
+                Code::KeyRelease,
+                format!(
+                    "a production broker cannot keep keys in the {} store (development only)",
+                    store.name()
+                ),
+            ));
+        }
+        if state.store != store.name() || state.kek_id != store.key_id() {
+            return Err(err(
+                Code::KeyRelease,
+                format!(
+                    "this broker's keys are in the {} store{}; open it with that store",
+                    state.store,
+                    state
+                        .kek_id
+                        .as_deref()
+                        .map(|k| format!(" (KEK {k})"))
+                        .unwrap_or_default()
+                ),
+            ));
+        }
+        Ok(Self {
             state,
             verifier,
+            store,
             sessions: BTreeMap::new(),
             clock: Box::new(unix_now),
-        }
+        })
+    }
+
+    fn wrap(&self, asset_id: &str, version: u64, key: &KeyMaterial) -> Result<StoredKey> {
+        self.store.wrap(
+            &KeyContext {
+                broker_id: &self.state.broker_id,
+                asset_id,
+                version,
+            },
+            key,
+        )
     }
 
     /// Replaces the clock (tests).
@@ -259,6 +318,7 @@ impl KeyBroker {
             Some(k) => k,
             None => KeyMaterial::generate()?,
         };
+        let key = self.wrap(asset_id, 1, &key)?;
         self.state.secrets.insert(
             asset_id.to_owned(),
             ProtectedSecret {
@@ -287,17 +347,18 @@ impl KeyBroker {
 
     /// A new current key version; older versions are no longer released.
     pub fn rotate_key(&mut self, asset_id: &str) -> Result<u64> {
-        let key = KeyMaterial::generate()?;
+        let v = self.secret_mut(asset_id)?.key_version + 1;
+        let key = self.wrap(asset_id, v, &KeyMaterial::generate()?)?;
         let s = self.secret_mut(asset_id)?;
-        s.key_version += 1;
+        s.key_version = v;
         s.versions.insert(
-            s.key_version,
+            v,
             KeyVersion {
                 key,
                 revoked: false,
             },
         );
-        Ok(s.key_version)
+        Ok(v)
     }
 
     /// Revokes a version (default: the current one). A revoked current key
@@ -455,7 +516,15 @@ impl KeyBroker {
             attestation_digest: s.info.attestation_digest.clone(),
             expires_at: s.info.expires_at,
         };
-        seal_grant(header, b, current.key.as_bytes())
+        let key = self.store.unwrap_for_release(
+            &KeyContext {
+                broker_id: &self.state.broker_id,
+                asset_id,
+                version: secret.key_version,
+            },
+            &current.key,
+        )?;
+        seal_grant(header, b, key.as_bytes())
     }
 
     /// Verify and release in one step (debug CLI).
@@ -494,7 +563,7 @@ impl KeyBroker {
         std::fs::rename(&tmp, path).map_err(io)
     }
 
-    pub fn load(path: &Path, verifier: Verifier) -> Result<Self> {
+    pub fn load(path: &Path, verifier: Verifier, store: Box<dyn SecretStore>) -> Result<Self> {
         let bytes = Zeroizing::new(
             std::fs::read(path)
                 .map_err(|e| err(Code::KeyRelease, format!("{}: {e}", path.display())))?,
@@ -502,6 +571,6 @@ impl KeyBroker {
         let state: BrokerState = serde_json::from_slice(&bytes)
             .map_err(|e| err(Code::KeyRelease, format!("{}: {e}", path.display())))?;
         check_broker_id(&state.broker_id)?;
-        Ok(Self::from_state(state, verifier))
+        Self::from_state(state, verifier, store)
     }
 }

@@ -78,6 +78,22 @@ pub enum Code {
     /// A key release was refused: unknown asset or session, revoked key, or
     /// a grant that does not belong to this session (ENC2004).
     KeyRelease,
+    /// A party is not authorized for an aggregation round, or its
+    /// contribution is not signed by its identity (ENC2101).
+    AggregationUnauthorized,
+    /// A contribution is bound to another round, spec, policy, shape or
+    /// codec; or is a duplicate or replay (ENC2102).
+    AggregationBinding,
+    /// Too few participants remain to release an aggregate (ENC2103).
+    AggregationThreshold,
+    /// A secure-aggregation protocol message is malformed, tampered or out
+    /// of order, or the aggregate cannot be reconstructed (ENC2104).
+    AggregationProtocol,
+    /// The aggregation encoding may overflow its modulus (ENC2105).
+    AggregationOverflow,
+    /// An aggregation declaration is invalid: not a sum of distinct
+    /// parties' inputs, bad codec, or an impossible threshold (ENC2106).
+    AggregationPlan,
 }
 
 impl Code {
@@ -116,13 +132,19 @@ impl Code {
             Code::WorkloadPolicy => "ENC2002",
             Code::Freshness => "ENC2003",
             Code::KeyRelease => "ENC2004",
+            Code::AggregationUnauthorized => "ENC2101",
+            Code::AggregationBinding => "ENC2102",
+            Code::AggregationThreshold => "ENC2103",
+            Code::AggregationProtocol => "ENC2104",
+            Code::AggregationOverflow => "ENC2105",
+            Code::AggregationPlan => "ENC2106",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 33] = [
+    pub const ALL: [Code; 39] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -156,6 +178,12 @@ impl Code {
         Code::WorkloadPolicy,
         Code::Freshness,
         Code::KeyRelease,
+        Code::AggregationUnauthorized,
+        Code::AggregationBinding,
+        Code::AggregationThreshold,
+        Code::AggregationProtocol,
+        Code::AggregationOverflow,
+        Code::AggregationPlan,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

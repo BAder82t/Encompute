@@ -12,7 +12,7 @@ use encompute_runtime::attestation::{
     AttestationRecord, Attester, TeeKind, Verifier, WorkloadSession,
 };
 use encompute_runtime::attested::{attestation_policy, verify_receipt_attestation};
-use encompute_runtime::keybroker::{BrokerMode, KeyBroker};
+use encompute_runtime::keybroker::{BrokerMode, DevelopmentFileStore, KeyBroker};
 use encompute_runtime::verification::EvaluatorSigner;
 use encompute_runtime::{sample_inputs, BackendKind, Backends, Mode, Model, Remote};
 
@@ -52,7 +52,13 @@ fn receipts_bind_the_attested_session() {
     assert_eq!(policy.policy_id, m.ids().policy_id);
 
     // Hospital's broker releases the patient-data key to the workload.
-    let mut broker = KeyBroker::new("hospital", BrokerMode::Development, verifier(&hw)).unwrap();
+    let mut broker = KeyBroker::new(
+        "hospital",
+        BrokerMode::Development,
+        verifier(&hw),
+        Box::new(DevelopmentFileStore),
+    )
+    .unwrap();
     broker.add_secret("patients", None, policy.clone()).unwrap();
     let signer = EvaluatorSigner::generate().unwrap();
     let session = WorkloadSession::new(&signer.identity());

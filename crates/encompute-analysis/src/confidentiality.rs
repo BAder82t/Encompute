@@ -12,13 +12,20 @@
 //!
 //! Policies weaken only through an explicit derivation that every source
 //! asset permits. Violations are compile errors ENC1901–ENC1906.
+//!
+//! An `aggregate` declaration (ADR-012) lowers an output to an
+//! [`AggregationBoundary`]: the output must be the sum of one input per
+//! party, the codec must not overflow, and the aggregate gets a derived
+//! policy. That boundary is what lets an `aggregate_only` value reach its
+//! recipient; the secure-aggregation runtime enforces it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use encompute_ir::confidentiality::{
-    AssetDecl, AssetKind, Confidentiality, DerivePermission, OutputRelease, PartyId, Release,
+    AggregationFunction, AggregationRule, AssetDecl, AssetKind, Confidentiality, DerivePermission,
+    FixedPointCodec, OutputRelease, PartyId, Release,
 };
-use encompute_ir::{Code, Error, Op, Program, Result, ValueId};
+use encompute_ir::{Code, Error, Op, Program, Result, Shape, ValueId};
 use serde::Serialize;
 
 /// The effective policy of a value.
@@ -155,7 +162,42 @@ pub struct ConfidentialityReport {
     pub purpose: Option<String>,
     pub nodes: Vec<AssetNode>,
     pub flows: Vec<Flow>,
+    /// Aggregation boundaries: the mechanism satisfying `aggregate_only`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aggregations: Vec<AggregationBoundary>,
     pub warnings: Vec<String>,
+}
+
+/// One party's contribution to an aggregate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Contribution {
+    pub party: PartyId,
+    pub input: String,
+    pub asset: String,
+}
+
+/// A lowered `aggregate` declaration.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AggregationBoundary {
+    pub output: String,
+    pub function: AggregationFunction,
+    pub minimum: usize,
+    /// Parties that may collude with the coordinator (declared).
+    pub colluding: usize,
+    /// Secure-aggregation threshold: `max(minimum, ⌊(n + colluding)/2⌋ + 1)`;
+    /// the round completes only with at least this many parties.
+    pub threshold: usize,
+    pub codec: FixedPointCodec,
+    /// One per party, ordered by party ID.
+    pub contributions: Vec<Contribution>,
+    pub vector_len: usize,
+    pub recipient: OutputRelease,
+    /// The joined policy of the contributions (before aggregation).
+    pub contribution_policy: Policy,
+    /// The aggregate's derived policy: owners and purposes inherited, the
+    /// recipients every contribution allows, never public unless every
+    /// contribution is.
+    pub aggregate_policy: Policy,
 }
 
 fn err(code: Code, msg: impl Into<String>) -> Error {
@@ -253,9 +295,41 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
         nearest.push(near);
         ops.push(via);
     }
+    let mut aggregations = vec![];
     for o in program.outputs() {
-        let p = &policies[o.value.index()];
         let dest = c.output(&o.name).clone();
+        if let Some(rule) = c.aggregation(&o.name) {
+            let b = boundary(program, c, rule, o.value, &policies[o.value.index()], &dest)?;
+            check_output(&o.name, &b.aggregate_policy, &dest)?;
+            for (id, name, _, r) in program.inputs() {
+                if b.contributions.iter().any(|k| k.input == name)
+                    && (r.lo < b.codec.clip_min || r.hi > b.codec.clip_max)
+                {
+                    warnings.push(format!(
+                        "input {name:?} ({id}) ranges over [{}, {}] but aggregate {:?} clips \
+                         each value to [{}, {}]: clipping changes what is aggregated",
+                        r.lo, r.hi, o.name, b.codec.clip_min, b.codec.clip_max
+                    ));
+                }
+            }
+            let label = format!("aggregate:{}", o.name);
+            for k in &b.contributions {
+                flows.push(Flow {
+                    from: k.asset.clone(),
+                    to: label.clone(),
+                    ops: vec!["secure_aggregation"],
+                });
+            }
+            nodes.push(AssetNode {
+                label,
+                value: Some(o.value),
+                policy: b.aggregate_policy.clone(),
+                destination: Some(dest),
+            });
+            aggregations.push(b);
+            continue;
+        }
+        let p = &policies[o.value.index()];
         check_output(&o.name, p, &dest)?;
         if dest == OutputRelease::Sealed && p.release == Release::AggregateOnly {
             warnings.push(format!(
@@ -279,12 +353,156 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
             destination: Some(dest),
         });
     }
+    if !aggregations.is_empty() {
+        warnings.push(
+            "secure aggregation hides each party's contribution from everyone, including the \
+             coordinator; it does not limit what the aggregate itself reveals about a party \
+             (that needs differential privacy)"
+                .into(),
+        );
+    }
     Ok(Some(ConfidentialityReport {
         purpose: c.purpose.clone(),
         nodes,
         flows,
+        aggregations,
         warnings,
     }))
+}
+
+/// The inputs an output sums, each once: `None` if it is not a pure sum.
+fn summands(
+    program: &Program,
+    v: ValueId,
+    out: &mut Vec<ValueId>,
+) -> std::result::Result<(), String> {
+    match &program.node(v).op {
+        Op::Input { .. } => {
+            if out.contains(&v) {
+                return Err(format!("input {v} is added more than once"));
+            }
+            out.push(v);
+            Ok(())
+        }
+        Op::Add(a, b) => {
+            summands(program, *a, out)?;
+            summands(program, *b, out)
+        }
+        op => Err(format!("{v} is `{}`", op.mnemonic())),
+    }
+}
+
+fn boundary(
+    program: &Program,
+    c: &Confidentiality,
+    rule: &AggregationRule,
+    value: ValueId,
+    joined: &Policy,
+    dest: &OutputRelease,
+) -> Result<AggregationBoundary> {
+    let plan_err = |m: String| {
+        err(
+            Code::AggregationPlan,
+            format!("aggregate {:?}: {m}", rule.output),
+        )
+    };
+    let mut leaves = vec![];
+    summands(program, value, &mut leaves).map_err(|m| {
+        plan_err(format!(
+            "secure aggregation computes only a sum of one input per party, but {m}"
+        ))
+    })?;
+    let mut contributions = vec![];
+    for leaf in leaves {
+        let Op::Input { name, .. } = &program.node(leaf).op else {
+            unreachable!("summands returns inputs")
+        };
+        let asset = c
+            .inputs
+            .get(name)
+            .and_then(|a| c.asset(a))
+            .ok_or_else(|| plan_err(format!("input {name:?} is not bound to an asset")))?;
+        let mut owners = asset.policy.owners.iter();
+        let (Some(party), None) = (owners.next(), owners.next()) else {
+            return Err(plan_err(format!(
+                "asset {} must have exactly one owner, the party contributing it",
+                asset.id
+            )));
+        };
+        if contributions
+            .iter()
+            .any(|k: &Contribution| &k.party == party)
+        {
+            return Err(plan_err(format!(
+                "party {party} contributes more than one input; each party contributes one"
+            )));
+        }
+        contributions.push(Contribution {
+            party: party.clone(),
+            input: name.clone(),
+            asset: asset.id.clone(),
+        });
+    }
+    contributions.sort_by(|a, b| a.party.cmp(&b.party));
+    let n = contributions.len();
+    if rule.minimum > n {
+        return Err(plan_err(format!(
+            "minimum {} exceeds the {n} contributing parties",
+            rule.minimum
+        )));
+    }
+    // Privacy against a coordinator colluding with `colluding` parties needs
+    // t > (n + colluding) / 2 (Bonawitz et al. 2017).
+    let threshold = rule.minimum.max((n + rule.colluding) / 2 + 1);
+    if rule.colluding >= n || threshold > n {
+        return Err(plan_err(format!(
+            "{n} parties cannot tolerate {} colluding with the coordinator: that needs a \
+             threshold of {threshold}, more than the parties there are",
+            rule.colluding
+        )));
+    }
+    rule.codec.check_overflow(n)?;
+    if matches!(joined.release, Release::Never | Release::OwnerOnly) {
+        return Err(err(
+            Code::Declassification,
+            format!(
+                "aggregate {:?}: its contributions have release {}, which forbids releasing \
+                 them even as an aggregate",
+                rule.output, joined.release
+            ),
+        ));
+    }
+    let vector_len = match program.node(value).ty.shape {
+        Shape::Scalar => 1,
+        Shape::Vector(n) => n,
+        Shape::Matrix(r, c) => r * c,
+    };
+    // Contributions of one kind (all gradients, say) keep it.
+    let kinds: BTreeSet<AssetKind> = contributions
+        .iter()
+        .filter_map(|k| c.asset(&k.asset).map(|a| a.kind))
+        .collect();
+    let mut joined = joined.clone();
+    if let (1, Some(k)) = (kinds.len(), kinds.first()) {
+        joined.kind = *k;
+    }
+    let mut aggregate_policy = joined.clone();
+    if joined.release != Release::Public {
+        aggregate_policy.release = Release::AllowedParties;
+    }
+    Ok(AggregationBoundary {
+        output: rule.output.clone(),
+        function: rule.function,
+        minimum: rule.minimum,
+        colluding: rule.colluding,
+        threshold,
+        codec: rule.codec,
+        contributions,
+        vector_len,
+        recipient: dest.clone(),
+        contribution_policy: joined,
+        aggregate_policy,
+    })
 }
 
 fn check_purpose(c: &Confidentiality, asset: &AssetDecl) -> Result<()> {

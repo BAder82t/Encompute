@@ -204,6 +204,7 @@ impl Remote {
         inputs: &encompute_ir::Inputs,
         trusted: &EvaluatorIdentity,
     ) -> Result<RemoteRun> {
+        encompute_evaluator::refuse_aggregation(program)?;
         let t = std::time::Instant::now();
         let ids = client.ids();
         self.ensure_program(program, &ids.program_id)?;

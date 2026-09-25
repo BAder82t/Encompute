@@ -224,15 +224,46 @@ def asset(
 class _Output:
     """An output with a destination: ``reveal(x, to=party)``/``publish(x)``."""
 
-    def __init__(self, value: Any, dest: str, party: Optional[Party] = None):
+    def __init__(self, value: Any, dest: str, party: Optional[Party] = None, aggregate: Optional[str] = None):
         self.value = value
         self.dest = dest
         self.party = party
+        self.aggregate = aggregate
 
 
 def reveal(value: Any, to: Party) -> _Output:
     """Output ``value`` revealed to party ``to`` (checked at compile time)."""
     return _Output(value, f'to "{to.id}"', to)
+
+
+def secure_aggregate(
+    value: Any,
+    to: Optional[Party] = None,
+    *,
+    minimum: int,
+    colluding: int,
+    clip: Tuple[float, float],
+    scale: int,
+    modulus_bits: int,
+    function: str = "sum",
+) -> _Output:
+    """Output ``value``, a sum of one input per party, computed only by
+    secure aggregation (ADR-012) and released to ``to`` (default: sealed)
+    only if at least ``minimum`` parties contributed. ``colluding`` is how
+    many parties may collude with the coordinator without learning another
+    party's contribution (it raises the protocol threshold to
+    ``(n + colluding) // 2 + 1``). Values are clipped to
+    ``clip`` and encoded as integers ``round((x - clip[0]) * scale)`` modulo
+    ``2**modulus_bits``; the compiler refuses encodings that could overflow.
+    """
+    if function not in ("sum", "mean"):
+        raise _err("ENC2106", f"aggregation function must be 'sum' or 'mean', got {function!r}")
+    lo, hi = (float(c) for c in clip)
+    for name, v in (("minimum", minimum), ("colluding", colluding), ("scale", scale), ("modulus_bits", modulus_bits)):
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise _err("ENC2106", f"{name} must be a non-negative integer, got {v!r}")
+    rule = f"{function} minimum {minimum} colluding {colluding} clip [{_num(lo)}, {_num(hi)}] scale {scale} modulus {modulus_bits}"
+    return _Output(value, f'to "{to.id}"' if to is not None else "", to, aggregate=rule)
 
 
 def publish(value: Any) -> _Output:
@@ -965,12 +996,15 @@ def trace(
         items = [("out", result)]
         style = "single"
     outputs = []
+    aggregates = []
     for oname, v in items:
         dest = ""
         if isinstance(v, _Output):
-            dest = " " + v.dest
+            dest = " " + v.dest if v.dest else ""
             if v.party is not None:
                 add_party(v.party)
+            if v.aggregate is not None:
+                aggregates.append(f'aggregate "{_ident(str(oname))}" {v.aggregate}')
             v = v.value
         if not isinstance(v, Secret):
             raise _err(
@@ -989,6 +1023,6 @@ def trace(
     ]
     decls = [f'party "{p.id}" "{p.name}"' for p in parties.values()]
     decls += [a.eir() for a in assets.values()]
-    footer = [f'output "{n}" = %{i}{d}' for n, i, d in outputs]
+    footer = [f'output "{n}" = %{i}{d}' for n, i, d in outputs] + aggregates
     text = "\n".join(header + decls + g.lines + g.derives + footer) + "\n"
     return text, ([n for n, _, _ in outputs], style)

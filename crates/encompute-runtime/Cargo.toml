@@ -18,6 +18,7 @@ encompute-exact.workspace = true
 encompute-verification.workspace = true
 encompute-attestation.workspace = true
 encompute-keybroker.workspace = true
+encompute-secagg.workspace = true
 encompute-tfhe.workspace = true
 encompute-tfhe-client = { workspace = true, optional = true }
 encompute-vfhe = { workspace = true, optional = true }
@@ -27,6 +28,7 @@ sha2 = "0.10"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 
 [dev-dependencies]
+ed25519-dalek = "2.2"
 tiny_http = "0.12"
 proptest.workspace = true
 ureq = { version = "2.12", default-features = false }

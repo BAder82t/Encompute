@@ -42,6 +42,7 @@ fn label(n: &AssetNode) -> String {
     match n.label.split_once(':') {
         Some(("derived", v)) => format!("{} {v}", n.policy.kind),
         Some(("output", o)) => format!("output {o}"),
+        Some(("aggregate", o)) => format!("aggregate {o} ({})", n.policy.kind),
         _ => n.label.clone(),
     }
 }
@@ -132,6 +133,98 @@ impl Model {
             };
             let _ = writeln!(s, "  {}\n     ↓ {via}\n  {}\n", from.join(" + "), name(t));
         }
+        for b in &r.aggregations {
+            section(&mut s, &format!("Aggregation boundary  {}", b.output));
+            let k = &b.codec;
+            let parties: Vec<&str> = b.contributions.iter().map(|c| c.party.as_str()).collect();
+            let row = |s: &mut String, k: &str, v: String| {
+                let _ = writeln!(s, "  {k:<14}{v}");
+            };
+            row(
+                &mut s,
+                "POLICY",
+                format!(
+                    "{} contributions are {}",
+                    b.contribution_policy.kind, b.contribution_policy.release
+                ),
+            );
+            row(
+                &mut s,
+                "MECHANISM",
+                format!(
+                    "secure aggregation ({} v{})",
+                    encompute_secagg::PROTOCOL,
+                    encompute_secagg::PROTOCOL_VERSION
+                ),
+            );
+            row(
+                &mut s,
+                "participants",
+                format!("{} ({})", parties.join(", "), parties.len()),
+            );
+            row(&mut s, "minimum", b.minimum.to_string());
+            row(
+                &mut s,
+                "collusion",
+                format!(
+                    "private against the coordinator plus {} colluding part{} (threshold {}, \
+                     tolerates {} dropout{})",
+                    b.colluding,
+                    if b.colluding == 1 { "y" } else { "ies" },
+                    b.threshold,
+                    parties.len() - b.threshold,
+                    if parties.len() - b.threshold == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+            );
+            row(&mut s, "function", b.function.name().to_string());
+            row(&mut s, "vector", format!("{} values", b.vector_len));
+            row(
+                &mut s,
+                "encoding",
+                format!(
+                    "fixed point: clip [{}, {}], scale {}, modulus 2^{}",
+                    k.clip_min, k.clip_max, k.scale, k.modulus_bits
+                ),
+            );
+            row(
+                &mut s,
+                "overflow",
+                format!(
+                    "max aggregate {} < 2^{} (checked)",
+                    k.max_aggregate(parties.len()),
+                    k.modulus_bits
+                ),
+            );
+            row(
+                &mut s,
+                "rounding",
+                format!(
+                    "±{:e} per value; values outside the clip range are clipped",
+                    k.resolution()
+                ),
+            );
+            let to = match &b.recipient {
+                OutputRelease::Sealed => "sealed".to_owned(),
+                OutputRelease::Party(p) => p.to_string(),
+                OutputRelease::Public => "public".to_owned(),
+            };
+            row(&mut s, "aggregate to", to);
+            let _ = writeln!(
+                s,
+                "  ✓ individual {}s never released",
+                b.contribution_policy.kind
+            );
+            let _ = writeln!(
+                s,
+                "  ✓ output satisfies the {} requirement",
+                b.contribution_policy.release
+            );
+            row(&mut s, "STATUS", "SATISFIED".into());
+        }
         section(&mut s, "Warnings");
         if r.warnings.is_empty() {
             let _ = writeln!(s, "  none");
@@ -142,7 +235,8 @@ impl Model {
         let _ = writeln!(
             s,
             "\nThis is the policy the program declares and Encompute checked at compile time. \
-             Runtime enforcement (key release, secure aggregation, attestation) is future work."
+             At run time, attested key release (ADR-011) and secure aggregation (ADR-012) \
+             enforce it."
         );
         Ok(Some(s))
     }

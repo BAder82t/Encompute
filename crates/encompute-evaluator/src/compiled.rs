@@ -33,6 +33,27 @@ pub use encompute_exact::EXACT_PLAN_VERSION;
 /// mixing both are refused (0.3). Programs with `verification required`
 /// compile to the proof-capable BGV profile, and fail (ENC1801) unless the
 /// proof backend covers every instruction.
+/// A program whose outputs cross a party boundary only through secure
+/// aggregation (ADR-012) never runs on a single evaluator: that would put
+/// every party's contribution under one client's key.
+pub fn refuse_aggregation(program: &Program) -> Result<()> {
+    if let Some(a) = program
+        .confidentiality()
+        .and_then(|c| c.aggregations.first())
+    {
+        return Err(Error::new(
+            Code::AggregationRequired,
+            format!(
+                "output {:?} of {} is aggregate-only: it runs only as secure aggregation \
+                 (`encompute aggregate`), never on one evaluator",
+                a.output,
+                program.name()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub fn compile_program(program: &Program) -> Result<CompiledProgram> {
     // Confidentiality violations are compile errors (ENC1901–ENC1906).
     encompute_analysis::confidentiality::analyze(program)?;
