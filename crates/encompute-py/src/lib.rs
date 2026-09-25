@@ -125,6 +125,16 @@ impl Model {
         Ok(serde_json::to_string(&b).expect("serializable"))
     }
 
+    /// `encompute privacy explain` text, or None without declarations.
+    fn privacy_explain(&self) -> PyResult<Option<String>> {
+        self.inner.privacy_explain().map_err(err)
+    }
+
+    /// The confidentiality graph as Graphviz DOT, or None.
+    fn privacy_graph(&self) -> PyResult<Option<String>> {
+        self.inner.privacy_dot().map_err(err)
+    }
+
     /// Artifact file contents by name (parameters.json, security.json, ...).
     fn artifact_files(&self) -> BTreeMap<&'static str, String> {
         self.inner.artifact_files()

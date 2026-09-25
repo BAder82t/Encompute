@@ -15,15 +15,37 @@ use sha2::{Digest, Sha256};
 use crate::model::Model;
 
 /// Artifact format version; 1 was the unversioned 0.1 layout, 2 the
-/// CKKS-only 0.2 layout, 3 added exact plans, 4 `verification.json`.
-pub const FORMAT: u32 = 4;
-const FILES: [&str; 5] = [
+/// CKKS-only 0.2 layout, 3 added exact plans, 4 `verification.json`, 5
+/// `policy.json`.
+pub const FORMAT: u32 = 5;
+const FILES: [&str; 6] = [
     "program.eir",
     "plan.json",
     "parameters.json",
     "security.json",
     "verification.json",
+    "policy.json",
 ];
+
+/// `policy.json`: the confidentiality declarations, their `PolicyId`, and
+/// the analysis (each value's derived policy and the asset graph), with
+/// stable asset IDs. `null` for programs without declarations.
+#[derive(Serialize)]
+struct PolicyFile<'a> {
+    policy_id: String,
+    declarations: &'a encompute_ir::confidentiality::Confidentiality,
+    assets: Vec<PolicyAsset<'a>>,
+    flows: &'a [encompute_analysis::confidentiality::Flow],
+    warnings: &'a [String],
+}
+
+#[derive(Serialize)]
+struct PolicyAsset<'a> {
+    /// Stable asset-definition ID (`encasset1:` without the prefix).
+    id: String,
+    #[serde(flatten)]
+    node: &'a encompute_analysis::confidentiality::AssetNode,
+}
 
 /// `verification.json`: the execution spec for the artifact's target
 /// backend (OpenFHE for CKKS, TFHE-rs for exact) and its ID. Mock runs use
@@ -280,6 +302,7 @@ impl Model {
             ("plan.json", c.plan_json()),
             ("parameters.json", c.parameters_json()),
             ("security.json", json(&security)),
+            ("policy.json", self.policy_json()),
             (
                 "verification.json",
                 json(&Verification {
@@ -290,6 +313,33 @@ impl Model {
                 }),
             ),
         ])
+    }
+
+    /// `policy.json` contents (see [`PolicyFile`]).
+    fn policy_json(&self) -> String {
+        let p = self.program();
+        let Some(c) = p.confidentiality() else {
+            return "null\n".into();
+        };
+        let report = encompute_analysis::confidentiality::analyze(p)
+            .expect("checked at compile time")
+            .expect("declarations present");
+        let ids = self.ids();
+        let assets = report
+            .nodes
+            .iter()
+            .map(|n| PolicyAsset {
+                id: crate::privacy::asset_id(&ids.program_id, n),
+                node: n,
+            })
+            .collect();
+        json(&PolicyFile {
+            policy_id: ids.policy_id.clone().expect("declarations present"),
+            declarations: c,
+            assets,
+            flows: &report.flows,
+            warnings: &report.warnings,
+        })
     }
 
     /// The execution spec on the artifact's target (real) backend.
@@ -426,6 +476,7 @@ impl Model {
             "parameters.json",
             "security.json",
             "verification.json",
+            "policy.json",
         ] {
             if fresh[name] != stored[name] {
                 return Err(Error::new(

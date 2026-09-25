@@ -28,6 +28,11 @@ pub struct ExecutionSpec {
     pub scheme: String,
     pub backend: String,
     pub backend_version: String,
+    /// Hex `PolicyId` of the program's confidentiality declarations
+    /// (ADR-010); absent for programs without any, so their spec IDs are
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
 }
 
 /// `SHA256("encompute.execution-spec.v1" || 0x00 || canonical spec)`.
@@ -55,5 +60,28 @@ impl ExecutionSpec {
     pub fn id(&self) -> ExecutionSpecId {
         let bytes = self.canonical_bytes().expect("strings and integers only");
         ExecutionSpecId(tagged(SPEC, &bytes))
+    }
+}
+
+/// `SHA256("encompute.confidentiality-policy.v1" || 0x00 || canonical
+/// confidentiality declarations)`: binds parties, assets, policies,
+/// purpose, input bindings, derivations and output destinations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PolicyId(pub [u8; 32]);
+
+impl PolicyId {
+    pub fn of(c: &encompute_ir::confidentiality::Confidentiality) -> Self {
+        let bytes = crate::canonical::canonical_json(c).expect("strings and integers only");
+        Self(crate::hash::tagged(crate::hash::POLICY, &bytes))
+    }
+
+    pub fn hex(&self) -> String {
+        hex(&self.0)
+    }
+}
+
+impl fmt::Display for PolicyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "encpolicy1:{}", self.hex())
     }
 }

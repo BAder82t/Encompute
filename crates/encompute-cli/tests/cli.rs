@@ -269,3 +269,71 @@ fn remote_receipts_and_verify() {
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("ENC1606"), "{err}");
 }
+
+#[test]
+fn privacy_explain_and_graph() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-privacy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("step.eir");
+    std::fs::write(
+        &src,
+        r#"encompute 0.1
+program step precision 0.01 purpose "disease-training"
+party "hospital-a" "Hospital A"
+party "modelco" "ModelCo"
+party "coordinator" "Coordinator"
+asset "patients" dataset owners ["hospital-a"] readers ["hospital-a"] purposes ["disease-training"] release never derive [gradient aggregate_only to ["coordinator"]]
+asset "weights" model owners ["modelco"] readers ["modelco"] purposes ["disease-training"] release never derive [gradient aggregate_only to ["coordinator"]]
+%0 = input "x" [-1.0, 1.0] asset "patients" : secret vector<4>
+%1 = input "w" [-1.0, 1.0] asset "weights" : secret vector<4>
+%2 = mul %0, %1 : secret vector<4>
+derive %2 gradient aggregate_only
+output "gradient" = %2
+"#,
+    )
+    .unwrap();
+    let art = dir.join("step.encompute");
+    let (code, _, err) = encompute(&[
+        "compile",
+        src.to_str().unwrap(),
+        "-o",
+        art.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = encompute(&["privacy", "explain", art.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    for want in [
+        "CONFIDENTIALITY GRAPH",
+        "encpolicy1:",
+        "patients + weights",
+        "aggregate_only",
+        "aggregation boundary",
+    ] {
+        assert!(out.contains(want), "{want}: {out}");
+    }
+    let (code, out, _) = encompute(&["privacy", "graph", art.to_str().unwrap(), "--format", "dot"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.starts_with("digraph confidentiality")
+            && out.contains("\"patients\" -> \"derived:%2\""),
+        "{out}"
+    );
+    // Leaking the gradient is a compile error.
+    std::fs::write(
+        &src,
+        std::fs::read_to_string(&src).unwrap().replace(
+            "output \"gradient\" = %2",
+            "output \"gradient\" = %2 to \"coordinator\"",
+        ),
+    )
+    .unwrap();
+    let (code, _, err) = encompute(&[
+        "compile",
+        src.to_str().unwrap(),
+        "-o",
+        art.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2);
+    assert!(err.contains("ENC1905"), "{err}");
+}

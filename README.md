@@ -48,6 +48,7 @@ score.save("score.encompute")              # reproducible artifact, no keys
 | Signed execution receipts | working, CKKS and exact |
 | Semantic transcripts (the statement a proof must satisfy) | working, exact programs |
 | Proof of correct execution | research build: re-execution proofs on OpenFHE BGV for a small exact subset (sound, not succinct) |
+| Confidentiality policies (parties, assets, purposes, release) | checked at compile time and bound into execution identity; not yet enforced at run time |
 
 ## What Encompute does
 
@@ -135,6 +136,34 @@ Build with `--features vfhe-research` (implies `openfhe`) for the verifier;
 `encompute verify ... --proof exchange/proof.bin --evaluation-keys KEYS/eval.keys`
 re-checks a saved result.
 
+## Confidentiality policies
+
+Programs can say who owns each input, who may learn what, what the
+computation is for, and how results may be released; Encompute derives the
+policy of every value and rejects illegal flows at compile time (ADR-010).
+
+```python
+from encompute import Party, asset, confidential, secret, Tensor
+
+hospital, modelco, coordinator = Party("hospital-a"), Party("modelco"), Party("coordinator")
+patients = asset("patients", owner=hospital, readers=[hospital], purposes=["disease-training"],
+                 derive={"gradient": ("aggregate_only", [coordinator])})
+weights = asset("weights", owner=modelco, readers=[modelco], purposes=["disease-training"],
+                kind="model", derive={"gradient": ("aggregate_only", [coordinator])})
+
+@encompute.compile(purpose="disease-training", precision=1e-2)
+def step(x: secret[Tensor[4], -1.0:1.0, patients], w: secret[Tensor[4], -1.0:1.0, weights]):
+    return confidential(x * w, kind="gradient", release="aggregate_only")
+
+print(step.privacy())   # parties, assets, derived policies, flows, warnings
+```
+
+Neither owner may learn the other's asset; the gradient may leave only as
+part of an aggregate, to the coordinator; revealing it directly is ENC1905.
+The policy's ID is part of the execution spec, so receipts and proofs bind
+it. These are requirements the compiler checks; run-time enforcement
+(key release, attestation, secure aggregation) is future work.
+
 ## Build
 
 Requires Rust (pinned in `rust-toolchain.toml`), CMake, a C++17 compiler
@@ -179,6 +208,7 @@ encompute explain score.encompute --measure 100 --mode encrypted
 encompute bench score.encompute --mode encrypted
 encompute audit score.encompute
 encompute transcript approve.encompute          # exact programs
+encompute privacy explain step.encompute        # confidentiality graph
 ```
 
 ### Remote evaluation
@@ -223,8 +253,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
-- **Next**: first-class parties, assets and confidentiality policies in the
-  IR.
+- **Next**: attested confidential compute: workload identity, attestation
+  and policy-gated key release, enforcing these policies at run time.
 
 ## License
 

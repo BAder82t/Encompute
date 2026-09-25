@@ -170,6 +170,7 @@ def test_save_load_and_tamper(tmp_path):
         "parameters.json",
         "security.json",
         "verification.json",
+        "policy.json",
     }
     (path / "program.eir").write_text(score.eir.replace("0.5", "0.6"))
     assert code_of(lambda: encompute.load(path)) == "ENC1401"

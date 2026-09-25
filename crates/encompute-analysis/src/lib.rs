@@ -8,6 +8,7 @@
 //! Depth and precision depend on how a program is lowered, so they live in
 //! `encompute-ckks`.
 
+pub mod confidentiality;
 mod exact;
 mod privacy;
 mod range;

@@ -34,15 +34,59 @@ impl fmt::Display for Program {
         )?;
         // The default is not written, so receipt-only programs keep the
         // same text and program ID as before verified execution existed.
+        let conf = self.confidentiality();
+        if let Some(p) = conf.and_then(|c| c.purpose.as_ref()) {
+            write!(f, " purpose \"{p}\"")?;
+        }
         if self.verification() != crate::program::Verification::Receipt {
             write!(f, " verification {}", self.verification().name())?;
         }
         writeln!(f)?;
+        if let Some(c) = conf {
+            for p in &c.parties {
+                writeln!(f, "party \"{}\" \"{}\"", p.id, p.name)?;
+            }
+            for a in &c.assets {
+                let list = |xs: &mut dyn Iterator<Item = String>| {
+                    let v: Vec<String> = xs.map(|x| format!("\"{x}\"")).collect();
+                    format!("[{}]", v.join(", "))
+                };
+                let pol = &a.policy;
+                write!(
+                    f,
+                    "asset \"{}\" {} owners {} readers {} purposes {} release {}",
+                    a.id,
+                    a.kind,
+                    list(&mut pol.owners.iter().map(ToString::to_string)),
+                    list(&mut pol.readers.iter().map(ToString::to_string)),
+                    list(&mut pol.purposes.iter().cloned()),
+                    pol.release
+                )?;
+                if !pol.derive.is_empty() {
+                    let d: Vec<String> = pol
+                        .derive
+                        .iter()
+                        .map(|(k, d)| {
+                            format!(
+                                "{k} {} to {}",
+                                d.release,
+                                list(&mut d.to.iter().map(ToString::to_string))
+                            )
+                        })
+                        .collect();
+                    write!(f, " derive [{}]", d.join(", "))?;
+                }
+                writeln!(f)?;
+            }
+        }
         for (id, node) in self.iter() {
             write!(f, "{id} = {}", node.op.mnemonic())?;
             match &node.op {
                 Op::Input { name, range } => {
-                    write!(f, " \"{name}\" [{:?}, {:?}]", range.lo, range.hi)?
+                    write!(f, " \"{name}\" [{:?}, {:?}]", range.lo, range.hi)?;
+                    if let Some(asset) = conf.and_then(|c| c.inputs.get(name)) {
+                        write!(f, " asset \"{asset}\"")?;
+                    }
                 }
                 Op::Const { data } => write!(f, " {}", floats(data))?,
                 Op::Poly { x, coeffs } => write!(f, " {x} {}", floats(coeffs))?,
@@ -55,8 +99,19 @@ impl fmt::Display for Program {
             }
             writeln!(f, " : {}", node.ty)?;
         }
+        if let Some(c) = conf {
+            for d in &c.derivations {
+                writeln!(f, "derive {} {} {}", d.value, d.kind, d.release)?;
+            }
+        }
         for o in self.outputs() {
-            writeln!(f, "output \"{}\" = {}", o.name, o.value)?;
+            write!(f, "output \"{}\" = {}", o.name, o.value)?;
+            match conf.map(|c| c.output(&o.name)) {
+                Some(crate::confidentiality::OutputRelease::Party(p)) => write!(f, " to \"{p}\"")?,
+                Some(crate::confidentiality::OutputRelease::Public) => write!(f, " public")?,
+                _ => {}
+            }
+            writeln!(f)?;
         }
         Ok(())
     }
@@ -96,6 +151,13 @@ pub fn parse(src: &str) -> Result<Program> {
     c.keyword("precision")?;
     let precision = c.float()?;
     c.skip_ws();
+    let purpose = if c.rest.starts_with("purpose") {
+        c.keyword("purpose")?;
+        Some(c.string()?)
+    } else {
+        None
+    };
+    c.skip_ws();
     let verification = if c.rest.is_empty() {
         crate::program::Verification::Receipt
     } else {
@@ -109,6 +171,9 @@ pub fn parse(src: &str) -> Result<Program> {
     c.end()?;
     let mut b = Builder::new(&name, precision).map_err(|e| at(n, e))?;
     b.verification(verification);
+    if let Some(p) = purpose {
+        b.purpose(&p).map_err(|e| at(n, e))?;
+    }
 
     for (n, line) in lines {
         let mut c = Cursor::new(n, line);
@@ -117,10 +182,48 @@ pub fn parse(src: &str) -> Result<Program> {
             let name = c.string()?;
             c.punct('=')?;
             let v = c.value()?;
+            c.skip_ws();
+            let release = if c.rest.starts_with("to") {
+                c.keyword("to")?;
+                let p = crate::confidentiality::PartyId::new(&c.string()?).map_err(|e| at(n, e))?;
+                Some(crate::confidentiality::OutputRelease::Party(p))
+            } else if c.rest.starts_with("public") {
+                c.keyword("public")?;
+                Some(crate::confidentiality::OutputRelease::Public)
+            } else {
+                None
+            };
             c.end()?;
             b.output(&name, v).map_err(|e| at(n, e))?;
+            if let Some(r) = release {
+                b.output_release(&name, r).map_err(|e| at(n, e))?;
+            }
             continue;
         }
+        if line.starts_with("party") {
+            c.keyword("party")?;
+            let id = c.string()?;
+            let pname = c.string()?;
+            c.end()?;
+            b.party(&id, &pname).map_err(|e| at(n, e))?;
+            continue;
+        }
+        if line.starts_with("asset") {
+            b.asset(parse_asset(&mut c)?).map_err(|e| at(n, e))?;
+            continue;
+        }
+        if line.starts_with("derive") {
+            c.keyword("derive")?;
+            let v = c.value()?;
+            let kind = crate::confidentiality::AssetKind::parse(&c.word()?)
+                .ok_or_else(|| err(n, "unknown asset kind"))?;
+            let release = crate::confidentiality::Release::parse(&c.word()?)
+                .ok_or_else(|| err(n, "unknown release"))?;
+            c.end()?;
+            b.derive(v, kind, release).map_err(|e| at(n, e))?;
+            continue;
+        }
+        let mut input_asset: Option<(String, String)> = None;
         let id = c.value()?;
         if id.index() != b.len() {
             return Err(err(n, format!("expected %{}, got {id}", b.len())));
@@ -133,6 +236,11 @@ pub fn parse(src: &str) -> Result<Program> {
                 let r = c.floats()?;
                 if r.len() != 2 {
                     return Err(err(n, "input range needs exactly [lo, hi]"));
+                }
+                c.skip_ws();
+                if c.rest.starts_with("asset") {
+                    c.keyword("asset")?;
+                    input_asset = Some((name.clone(), c.string()?));
                 }
                 Op::Input {
                     name,
@@ -207,6 +315,9 @@ pub fn parse(src: &str) -> Result<Program> {
         let ty = c.ty()?;
         c.end()?;
         let id = b.push_op(op, ty).map_err(|e| at(n, e))?;
+        if let Some((input, asset)) = input_asset {
+            b.bind_input(&input, &asset).map_err(|e| at(n, e))?;
+        }
         let inferred = b.ty(id).map_err(|e| at(n, e))?;
         if inferred != ty {
             return Err(err(
@@ -224,6 +335,64 @@ fn err(line: usize, msg: impl Into<String>) -> Error {
 
 fn at(line: usize, e: Error) -> Error {
     Error::new(e.code, format!("line {line}: {}", e.message))
+}
+
+/// `asset "id" KIND owners [..] readers [..] purposes [..] release R [derive [KIND R, ..]]`
+fn parse_asset(c: &mut Cursor<'_>) -> Result<crate::confidentiality::AssetDecl> {
+    use crate::confidentiality::{AssetDecl, AssetKind, AssetPolicy, PartyId, Release};
+    c.keyword("asset")?;
+    let id = c.string()?;
+    let kind = AssetKind::parse(&c.word()?).ok_or_else(|| err(c.line, "unknown asset kind"))?;
+    let parties = |c: &mut Cursor<'_>| -> Result<std::collections::BTreeSet<PartyId>> {
+        c.strings()?
+            .iter()
+            .map(|p| PartyId::new(p).map_err(|e| at(c.line, e)))
+            .collect()
+    };
+    c.keyword("owners")?;
+    let owners = parties(c)?;
+    c.keyword("readers")?;
+    let readers = parties(c)?;
+    c.keyword("purposes")?;
+    let purposes = c.strings()?.into_iter().collect();
+    c.keyword("release")?;
+    let release = Release::parse(&c.word()?).ok_or_else(|| err(c.line, "unknown release"))?;
+    let mut derive = std::collections::BTreeMap::new();
+    c.skip_ws();
+    if c.rest.starts_with("derive") {
+        c.keyword("derive")?;
+        c.punct('[')?;
+        c.skip_ws();
+        while !c.rest.starts_with(']') {
+            let k =
+                AssetKind::parse(&c.word()?).ok_or_else(|| err(c.line, "unknown asset kind"))?;
+            let r = Release::parse(&c.word()?).ok_or_else(|| err(c.line, "unknown release"))?;
+            c.keyword("to")?;
+            let to = parties(c)?;
+            let d = crate::confidentiality::DerivePermission { release: r, to };
+            if derive.insert(k, d).is_some() {
+                return Err(err(c.line, format!("{k} derived twice")));
+            }
+            c.skip_ws();
+            if c.rest.starts_with(',') {
+                c.punct(',')?;
+                c.skip_ws();
+            }
+        }
+        c.punct(']')?;
+    }
+    c.end()?;
+    Ok(AssetDecl {
+        id,
+        kind,
+        policy: AssetPolicy {
+            owners,
+            readers,
+            purposes,
+            release,
+            derive,
+        },
+    })
 }
 
 struct Cursor<'a> {
@@ -327,6 +496,25 @@ impl<'a> Cursor<'a> {
             }
             self.punct(',')?;
         }
+    }
+
+    /// `["a", "b"]` (possibly empty).
+    fn strings(&mut self) -> Result<Vec<String>> {
+        self.punct('[')?;
+        let mut out = vec![];
+        self.skip_ws();
+        while !self.rest.starts_with(']') {
+            out.push(self.string()?);
+            self.skip_ws();
+            if self.rest.starts_with(',') {
+                self.punct(',')?;
+                self.skip_ws();
+            } else if !self.rest.starts_with(']') {
+                return self.fail("`,` or `]`");
+            }
+        }
+        self.punct(']')?;
+        Ok(out)
     }
 
     fn usize(&mut self) -> Result<usize> {

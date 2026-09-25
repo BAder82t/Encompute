@@ -59,6 +59,12 @@ enum Cmd {
         #[arg(long)]
         save_envelopes: Option<PathBuf>,
     },
+    /// Confidentiality: who owns each value, who may learn it, what it may
+    /// be used for, and where it goes.
+    Privacy {
+        #[command(subcommand)]
+        cmd: PrivacyCmd,
+    },
     /// Print the semantic transcript of an exact program: the operations a
     /// future execution proof must follow. Never contains runtime values.
     Transcript {
@@ -154,6 +160,18 @@ enum Cmd {
         mode: String,
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PrivacyCmd {
+    /// Parties, assets with their derived policies, flows and warnings.
+    Explain { model: PathBuf },
+    /// The confidentiality graph (Graphviz DOT).
+    Graph {
+        model: PathBuf,
+        #[arg(long, default_value = "dot")]
+        format: String,
     },
 }
 
@@ -286,6 +304,32 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 "{}",
                 serde_json::to_string_pretty(&m.outputs_json(&out)).unwrap()
             );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Privacy { cmd } => {
+            let (m, out) = match cmd {
+                PrivacyCmd::Explain { model } => {
+                    let m = load(&model)?;
+                    let out = m.privacy_explain()?;
+                    (m, out)
+                }
+                PrivacyCmd::Graph { model, format } => {
+                    if format != "dot" {
+                        return Err(Error::new(Code::BadInput, "only --format dot is supported"));
+                    }
+                    let m = load(&model)?;
+                    let out = m.privacy_dot()?;
+                    (m, out)
+                }
+            };
+            match out {
+                Some(text) => print!("{text}"),
+                None => println!(
+                    "{} declares no parties or assets: every secret input stays with the client \
+                     that encrypts it (see ADR-010 to declare a confidentiality policy)",
+                    m.program().name()
+                ),
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Transcript {
@@ -688,6 +732,9 @@ fn verify(
     section("Bindings");
     let checked = |b: bool| if b { "checked" } else { "NOT CHECKED" };
     println!("  {:<16}{}", "Artifact", checked(spec.is_some()));
+    if let Some(p) = spec.as_ref().and_then(|s| s.policy_id.as_ref()) {
+        println!("  {:<16}checked (encpolicy1:{})", "Policy", short(p));
+    }
     println!("  {:<16}{}", "Backend", checked(expected_backend.is_some()));
     println!("  {:<16}{}", "Request", checked(rc.is_some()));
     println!("  {:<16}{}", "Response", checked(oc.is_some()));

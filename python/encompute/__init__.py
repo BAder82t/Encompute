@@ -27,7 +27,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from . import _native
 from ._frontend import (
+    Asset,
     ExactType,
+    Party,
+    asset,
+    confidential,
+    publish,
+    reveal,
     Secret,
     SecretSpec,
     Tensor,
@@ -58,7 +64,13 @@ from ._frontend import (
 )
 
 __all__ = [
+    "Asset",
     "ExactType",
+    "Party",
+    "asset",
+    "confidential",
+    "publish",
+    "reveal",
     "Model",
     "Secret",
     "Tensor",
@@ -260,6 +272,12 @@ class Model:
         """Keygen, encrypt, evaluate and decrypt timings (ms) and ciphertext sizes."""
         return json.loads(_call(self._native.bench_json, mode, reps))
 
+    def privacy(self, graph: bool = False) -> Optional[str]:
+        """The confidentiality graph: parties, assets, derived policies,
+        flows and warnings (``graph=True``: Graphviz DOT). None if the
+        program declares no parties or assets."""
+        return _call(self._native.privacy_graph if graph else self._native.privacy_explain)
+
     def save(self, path: str) -> None:
         """Write the compiled artifact directory (never contains keys)."""
         _call(self._native.save, str(path))
@@ -274,6 +292,7 @@ def compile(
     *,
     precision: float = 1e-3,
     verification: str = "receipt",
+    purpose: Optional[str] = None,
     name: Optional[str] = None,
     **publics: Any,
 ) -> Any:
@@ -296,7 +315,7 @@ def compile(
         raise ValueError('verification must be "receipt" or "required"')
 
     def build(f: Callable[..., Any]) -> Model:
-        text, (_, style) = trace(f, precision, name, publics, verification)
+        text, (_, style) = trace(f, precision, name, publics, verification, purpose)
         return Model(_call(_native.Model.compile, text), style)
 
     if fn is None:

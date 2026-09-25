@@ -40,6 +40,6 @@ pub use receipt::{
     ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence, RECEIPT_VERSION,
 };
 pub use reference::ReferenceTranscriptEvaluator;
-pub use spec::{ExecutionSpec, ExecutionSpecId, SPEC_VERSION};
+pub use spec::{ExecutionSpec, ExecutionSpecId, PolicyId, SPEC_VERSION};
 pub use transcript::{SemanticTranscript, TranscriptId, TRANSCRIPT_VERSION};
 pub use verify::{verify_receipt, ExpectedExecution, VerifiedReceipt};

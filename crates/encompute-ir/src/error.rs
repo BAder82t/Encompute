@@ -52,6 +52,20 @@ pub enum Code {
     /// An execution proof is missing, malformed or invalid, or a program
     /// requiring verified execution cannot be fully proven.
     Unverified,
+    /// A confidential value flows to a public output (ENC1901).
+    PublicRelease,
+    /// A value is revealed to a party that may not learn it (ENC1902).
+    UnauthorizedParty,
+    /// An asset is used for a purpose it does not allow (ENC1903).
+    PurposeViolation,
+    /// A derivation weakens a policy more than its source assets allow
+    /// (ENC1904).
+    Declassification,
+    /// An aggregate-only value is revealed without an aggregation boundary
+    /// (ENC1905).
+    AggregationRequired,
+    /// Confidentiality declarations are malformed (ENC1906).
+    PolicyDeclaration,
 }
 
 impl Code {
@@ -80,13 +94,19 @@ impl Code {
             Code::Remote => "ENC1701",
             Code::Transcript => "ENC1702",
             Code::Unverified => "ENC1801",
+            Code::PublicRelease => "ENC1901",
+            Code::UnauthorizedParty => "ENC1902",
+            Code::PurposeViolation => "ENC1903",
+            Code::Declassification => "ENC1904",
+            Code::AggregationRequired => "ENC1905",
+            Code::PolicyDeclaration => "ENC1906",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 23] = [
+    pub const ALL: [Code; 29] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -110,6 +130,12 @@ impl Code {
         Code::Remote,
         Code::Transcript,
         Code::Unverified,
+        Code::PublicRelease,
+        Code::UnauthorizedParty,
+        Code::PurposeViolation,
+        Code::Declassification,
+        Code::AggregationRequired,
+        Code::PolicyDeclaration,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

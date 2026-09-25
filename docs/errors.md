@@ -28,3 +28,9 @@ Python raises `encompute.EncomputeError` with `.code` and `.message`.
 | ENC1701 | remote | Network or protocol failure between client and evaluator | — |
 | ENC1702 | client, audit | A semantic transcript is malformed, of an unknown version, or its hash does not match the exact plan or the verification metadata ("transcript commitment mismatch") | Recompile the artifact; do not trust a receipt whose transcript hash differs |
 | ENC1801 | compiler, client | Verified execution was required but is not possible or failed: the program uses an operation or type no proof backend covers, the evaluator sent no proof, or the proof does not verify | Use `verification="receipt"`, restrict the program to the proven subset, or refuse the result; never decrypt without a valid proof when verification is required |
+| ENC1901 | compiler | A confidential value flows to a public output | Keep it sealed, or derive a public value only where every source asset allows it |
+| ENC1902 | compiler | A value is revealed to a party that may not learn it (outside its audience, or release `never`) | Reveal only to parties every source asset allows |
+| ENC1903 | compiler | An input asset does not allow the program's purpose (or the program declares none) | Declare a purpose every input asset allows |
+| ENC1904 | compiler | A derivation weakens a policy more than its source assets permit | Ask the owners to permit that derivation (`derive [...]`), or keep it restricted |
+| ENC1905 | compiler | An aggregate-only value (e.g. a gradient) is revealed without an aggregation boundary | Keep it sealed until it is aggregated |
+| ENC1906 | compiler | Confidentiality declarations are malformed: unknown party or asset, duplicate IDs, unbound secret input, bad ID or release | Fix the declaration |

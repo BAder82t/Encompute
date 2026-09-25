@@ -87,6 +87,159 @@ i64 = ExactType("i64", -(2**63), 2**63 - 1)
 _EXACT: Dict[str, ExactType] = {t.name: t for t in (bool_, u8, u16, u32, u64, i8, i16, i32, i64)}
 
 
+# --- confidentiality (ADR-010) ------------------------------------------------
+
+_RELEASES = ("never", "owner_only", "allowed_parties", "aggregate_only", "public")
+_KINDS = (
+    "tensor", "dataset", "model", "embedding", "gradient", "model_update",
+    "checkpoint", "adapter", "optimizer_state", "output", "generic",
+)
+
+
+def _check_text(what: str, s: str) -> str:
+    if not isinstance(s, str) or not 0 < len(s) <= 128 or any(c in '"\\' or ord(c) < 32 or ord(c) == 127 for c in s):
+        raise _err("ENC1906", f"{what} {s!r} must be 1-128 characters without quotes, backslashes or control characters")
+    return s
+
+
+def _check_id(what: str, s: str) -> str:
+    ok = (
+        isinstance(s, str)
+        and 0 < len(s) <= 64
+        and s[0].isascii()
+        and s[0].isalnum()
+        and all(c.islower() or c.isdigit() or c in "-_." for c in s)
+    )
+    if not ok:
+        raise _err("ENC1906", f"{what} {s!r} must be 1-64 characters of a-z, 0-9, '-', '_', '.'")
+    return s
+
+
+class Party:
+    """An authorization principal (a hospital, a company, a service), not a
+    network host: ``Party("hospital-a", "Hospital A")``."""
+
+    def __init__(self, id: str, name: Optional[str] = None):  # noqa: A002
+        self.id = _check_id("party", id)
+        self.name = _check_text("party name", name or id)
+
+    def __eq__(self, other: Any) -> bool:
+        return isinstance(other, Party) and other.id == self.id
+
+    def __hash__(self) -> int:
+        return hash(self.id)
+
+    def __repr__(self) -> str:
+        return f"Party({self.id!r})"
+
+
+def _release(r: str) -> str:
+    if r not in _RELEASES:
+        raise _err("ENC1906", f"release must be one of {', '.join(_RELEASES)}, got {r!r}")
+    return r
+
+
+def _kind(k: str) -> str:
+    if k not in _KINDS:
+        raise _err("ENC1906", f"asset kind must be one of {', '.join(_KINDS)}, got {k!r}")
+    return k
+
+
+class Asset:
+    """A confidential asset and its owners' policy. Bind a secret input to
+    it with ``secret[shape, lo:hi, asset]``."""
+
+    def __init__(
+        self,
+        id: str,  # noqa: A002
+        *,
+        owners: Sequence[Party],
+        readers: Sequence[Party] = (),
+        purposes: Sequence[str] = (),
+        release: str = "never",
+        kind: str = "dataset",
+        derive: Optional[Dict[str, Any]] = None,
+    ):
+        self.id = _check_id("asset", id)
+        self.owners = list(owners)
+        if not self.owners:
+            raise _err("ENC1906", f"asset {id} has no owner")
+        self.readers = list(readers)
+        self.purposes = [_check_text(f"asset {id} purpose", p) for p in purposes]
+        self.release = _release(release)
+        self.kind = _kind(kind)
+        # {"gradient": ("aggregate_only", [coordinator])}
+        self.derive: Dict[str, Tuple[str, List[Party]]] = {}
+        for k, v in (derive or {}).items():
+            rel, to = (v, []) if isinstance(v, str) else (v[0], list(v[1]))
+            self.derive[_kind(k)] = (_release(rel), to)
+
+    def parties(self) -> List[Party]:
+        out = list(self.owners) + list(self.readers)
+        for _, to in self.derive.values():
+            out += to
+        return out
+
+    def eir(self) -> str:
+        q = lambda xs: "[" + ", ".join(f'"{x}"' for x in sorted(xs)) + "]"  # noqa: E731
+        line = (
+            f'asset "{self.id}" {self.kind} owners {q(p.id for p in self.owners)} '
+            f"readers {q(p.id for p in self.readers)} purposes {q(self.purposes)} "
+            f"release {self.release}"
+        )
+        if self.derive:
+            parts = [f"{k} {r} to {q(p.id for p in to)}" for k, (r, to) in sorted(self.derive.items())]
+            line += " derive [" + ", ".join(parts) + "]"
+        return line
+
+    def __repr__(self) -> str:
+        return f"Asset({self.id!r})"
+
+
+def asset(
+    id: str,  # noqa: A002
+    *,
+    owner: Optional[Party] = None,
+    owners: Sequence[Party] = (),
+    readers: Sequence[Party] = (),
+    purposes: Sequence[str] = (),
+    release: str = "never",
+    kind: str = "dataset",
+    derive: Optional[Dict[str, Any]] = None,
+) -> Asset:
+    """Declare a confidential asset: who owns it, who may read it, what it
+    may be used for, how it may be released, and which derived kinds its
+    owners allow (``derive={"gradient": ("aggregate_only", [coordinator])}``)."""
+    return Asset(
+        id,
+        owners=([owner] if owner else []) + list(owners),
+        readers=readers,
+        purposes=purposes,
+        release=release,
+        kind=kind,
+        derive=derive,
+    )
+
+
+class _Output:
+    """An output with a destination: ``reveal(x, to=party)``/``publish(x)``."""
+
+    def __init__(self, value: Any, dest: str, party: Optional[Party] = None):
+        self.value = value
+        self.dest = dest
+        self.party = party
+
+
+def reveal(value: Any, to: Party) -> _Output:
+    """Output ``value`` revealed to party ``to`` (checked at compile time)."""
+    return _Output(value, f'to "{to.id}"', to)
+
+
+def publish(value: Any) -> _Output:
+    """Output ``value`` publicly (only allowed for public-release data)."""
+    return _Output(value, "public")
+
+
 @dataclass(frozen=True)
 class SecretSpec:
     """Result of ``secret[shape, lo:hi]``. ``length`` is None for a scalar;
@@ -96,6 +249,7 @@ class SecretSpec:
     lo: Optional[float]
     hi: Optional[float]
     elem: str = "f64"
+    asset: Optional[Asset] = None
 
     def __repr__(self) -> str:
         if self.elem != "f64":
@@ -134,8 +288,20 @@ class _Secret:
     def __getitem__(self, item: Any) -> SecretSpec:
         if not isinstance(item, tuple):
             item = (item,)
+        assets = [x for x in item if isinstance(x, Asset)]
+        item = tuple(x for x in item if not isinstance(x, Asset))
+        if len(assets) > 1:
+            raise TypeError("a secret input is at most one asset")
+        spec = self._spec(item)
+        if assets:
+            from dataclasses import replace
+
+            spec = replace(spec, asset=assets[0])
+        return spec
+
+    def _spec(self, item: Tuple[Any, ...]) -> SecretSpec:
         if len(item) not in (1, 2):
-            raise TypeError("use secret[shape] or secret[shape, lo:hi]")
+            raise TypeError("use secret[shape], secret[shape, lo:hi] or secret[shape, lo:hi, asset]")
         shape = item[0]
         if isinstance(shape, ExactType):
             return _exact_spec(shape, item)
@@ -221,6 +387,7 @@ def _exact_int(value: Any, t: ExactType) -> int:
 class _Graph:
     def __init__(self) -> None:
         self.lines: List[str] = []
+        self.derives: List[str] = []
 
     def emit(self, op: str, ty: str) -> int:
         i = len(self.lines)
@@ -633,6 +800,16 @@ def square(x: Any) -> Any:
     return x * x
 
 
+def confidential(value: Any, *, kind: str = "generic", release: str = "never") -> Any:
+    """Mark ``value`` as a derived asset of ``kind`` released at most as
+    ``release``. Restricting is always allowed; weakening (e.g. a gradient
+    ``aggregate_only``) only if every source asset's owners permit it."""
+    if not isinstance(value, Secret):
+        raise _err("ENC1301", "encompute.confidential needs a secret value")
+    value._g.derives.append(f"derive %{value._id} {_kind(kind)} {_release(release)}")
+    return value
+
+
 def _narrowest(values: Sequence[int]) -> ExactType:
     for t in (u8, u16, u32, u64) if min(values) >= 0 else (i8, i16, i32, i64):
         if all(t.fits(v) for v in values):
@@ -718,9 +895,27 @@ def trace(
     name: Optional[str],
     publics: Dict[str, Any],
     verification: str = "receipt",
+    purpose: Optional[str] = None,
 ) -> Tuple[str, Outputs]:
     """Trace ``fn`` into ``.eir`` text."""
     g = _Graph()
+    assets: Dict[str, Asset] = {}
+    parties: Dict[str, Party] = {}
+
+    def add_party(p: Party) -> None:
+        known = parties.setdefault(p.id, p)
+        if known.name != p.name:
+            raise _err("ENC1906", f"party {p.id} is used with two names: {known.name!r} and {p.name!r}")
+
+    def bind(a: Optional[Asset]) -> str:
+        if a is None:
+            return ""
+        if a.id in assets and assets[a.id] is not a:
+            raise _err("ENC1906", f"two different assets are named {a.id}")
+        assets[a.id] = a
+        for p in a.parties():
+            add_party(p)
+        return f' asset "{a.id}"'
     sig = inspect.signature(fn, eval_str=True)
     args: Dict[str, Any] = {}
     unknown = set(publics) - set(sig.parameters)
@@ -732,7 +927,10 @@ def trace(
             if pname in publics:
                 raise TypeError(f"parameter {pname!r} is secret; it cannot be bound at compile time")
             if ann.elem != "f64":
-                i = g.emit(f'input "{pname}" [{_num(ann.lo)}, {_num(ann.hi)}]', f"secret {ann.elem}")
+                i = g.emit(
+                    f'input "{pname}" [{_num(ann.lo)}, {_num(ann.hi)}]{bind(ann.asset)}',
+                    f"secret {ann.elem}",
+                )
                 args[pname] = Secret(g, i, None, ann.elem)
                 continue
             if ann.lo is None:
@@ -742,7 +940,7 @@ def trace(
                     f"secret[{'float' if ann.length is None else f'Tensor[{ann.length}]'}, -1.0:1.0]",
                 )
             ty = f"secret {_shape_text(ann.length)}"
-            i = g.emit(f'input "{pname}" [{_num(ann.lo)}, {_num(ann.hi)}]', ty)
+            i = g.emit(f'input "{pname}" [{_num(ann.lo)}, {_num(ann.hi)}]{bind(ann.asset)}', ty)
             args[pname] = Secret(g, i, ann.length)
         elif pname in publics:
             args[pname] = publics[pname]
@@ -768,17 +966,29 @@ def trace(
         style = "single"
     outputs = []
     for oname, v in items:
+        dest = ""
+        if isinstance(v, _Output):
+            dest = " " + v.dest
+            if v.party is not None:
+                add_party(v.party)
+            v = v.value
         if not isinstance(v, Secret):
             raise _err(
                 "ENC1301",
                 f"output {oname!r} does not depend on any secret input; compute it outside Encompute",
             )
-        outputs.append((_ident(str(oname)), v._id))
+        outputs.append((_ident(str(oname)), v._id, dest))
 
+    if purpose is not None:
+        _check_text("purpose", purpose)
     header = [
         "encompute 0.1",
         f"program {_ident(name or fn.__name__)} precision {_num(precision)}"
+        + (f' purpose "{purpose}"' if purpose else "")
         + (" verification required" if verification == "required" else ""),
     ]
-    footer = [f'output "{n}" = %{i}' for n, i in outputs]
-    return "\n".join(header + g.lines + footer) + "\n", ([n for n, _ in outputs], style)
+    decls = [f'party "{p.id}" "{p.name}"' for p in parties.values()]
+    decls += [a.eir() for a in assets.values()]
+    footer = [f'output "{n}" = %{i}{d}' for n, i, d in outputs]
+    text = "\n".join(header + decls + g.lines + g.derives + footer) + "\n"
+    return text, ([n for n, _, _ in outputs], style)

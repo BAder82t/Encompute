@@ -8,6 +8,7 @@ mod client;
 mod diff;
 mod explain;
 mod model;
+pub mod privacy;
 mod remote;
 
 pub use artifact::FORMAT as ARTIFACT_FORMAT;

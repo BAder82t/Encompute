@@ -7,6 +7,7 @@
 //! Every op documents its MLIR lowering (ADR-004): upstream `arith`, `tensor`
 //! and `linalg` ops inside HEIR's `secret.generic`.
 
+pub mod confidentiality;
 mod error;
 mod eval;
 mod program;

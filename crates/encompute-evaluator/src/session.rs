@@ -28,6 +28,8 @@ pub fn program_id(program: &Program) -> String {
 pub struct Ids {
     pub parameter_set_id: String,
     pub program_id: String,
+    /// Hex `PolicyId` of the program's confidentiality declarations.
+    pub policy_id: Option<String>,
 }
 
 impl Ids {
@@ -35,6 +37,9 @@ impl Ids {
         Self {
             parameter_set_id: sha256_hex(compiled.parameters_json().as_bytes()),
             program_id: program_id(program),
+            policy_id: program
+                .confidentiality()
+                .map(|c| encompute_verification::PolicyId::of(c).hex()),
         }
     }
 }
@@ -60,6 +65,7 @@ pub fn execution_spec(ids: &Ids, compiled: &CompiledProgram, kind: BackendKind) 
         scheme: compiled.scheme().into(),
         backend: backend.into(),
         backend_version: backend_version.into(),
+        policy_id: ids.policy_id.clone(),
     }
 }
 

@@ -37,6 +37,10 @@ scope.
   (ADR-007). For exact programs the receipt also binds the semantic
   transcript a future proof must follow (ADR-008); that is public program
   structure, not a proof.
+- Confidentiality policies (ADR-010) are checked at compile time and bound
+  into the execution spec; they state which party may learn which value.
+  They are not yet enforced at run time: today the client that holds the
+  key decrypts every output it receives.
 - Artifacts never contain key material.
 
 ## Deployment

@@ -188,6 +188,9 @@ pub struct Program {
     name: String,
     precision: f64,
     verification: Verification,
+    /// Confidentiality declarations (ADR-010); `None` for programs that
+    /// declare no parties or assets.
+    confidentiality: Option<crate::confidentiality::Confidentiality>,
     nodes: Vec<Node>,
     outputs: Vec<Output>,
 }
@@ -200,6 +203,11 @@ impl Program {
     /// The verification the program requires.
     pub fn verification(&self) -> Verification {
         self.verification
+    }
+
+    /// Confidentiality declarations, if any.
+    pub fn confidentiality(&self) -> Option<&crate::confidentiality::Confidentiality> {
+        self.confidentiality.as_ref()
     }
 
     /// Maximum absolute error allowed on every output element.
@@ -269,6 +277,7 @@ impl Builder {
                 name: name.to_owned(),
                 precision,
                 verification: Verification::Receipt,
+                confidentiality: None,
                 nodes: vec![],
                 outputs: vec![],
             },
@@ -677,9 +686,102 @@ impl Builder {
         self.program.verification = v;
     }
 
+    fn conf(&mut self) -> &mut crate::confidentiality::Confidentiality {
+        self.program
+            .confidentiality
+            .get_or_insert_with(Default::default)
+    }
+
+    /// Declare the computation's purpose.
+    pub fn purpose(&mut self, purpose: &str) -> Result<()> {
+        crate::confidentiality::check_text("purpose", purpose)?;
+        self.conf().purpose = Some(purpose.to_owned());
+        Ok(())
+    }
+
+    pub fn party(&mut self, id: &str, name: &str) -> Result<()> {
+        let id = crate::confidentiality::PartyId::new(id)?;
+        crate::confidentiality::check_text("party name", name)?;
+        self.conf().parties.push(crate::confidentiality::Party {
+            id,
+            name: name.to_owned(),
+        });
+        Ok(())
+    }
+
+    pub fn asset(&mut self, decl: crate::confidentiality::AssetDecl) -> Result<()> {
+        crate::confidentiality::check_id("asset", &decl.id)?;
+        self.conf().assets.push(decl);
+        Ok(())
+    }
+
+    /// Secret input `input` is asset `asset`.
+    pub fn bind_input(&mut self, input: &str, asset: &str) -> Result<()> {
+        if !self.input_names.contains(input) {
+            return Err(Error::new(
+                Code::PolicyDeclaration,
+                format!("no input named {input:?}"),
+            ));
+        }
+        self.conf()
+            .inputs
+            .insert(input.to_owned(), asset.to_owned());
+        Ok(())
+    }
+
+    /// `value` is an asset of `kind` released at most as `release`.
+    pub fn derive(
+        &mut self,
+        value: ValueId,
+        kind: crate::confidentiality::AssetKind,
+        release: crate::confidentiality::Release,
+    ) -> Result<()> {
+        self.ty(value)?;
+        if self
+            .program
+            .confidentiality
+            .as_ref()
+            .is_some_and(|c| c.derivations.iter().any(|d| d.value == value))
+        {
+            return Err(Error::new(
+                Code::PolicyDeclaration,
+                format!("{value} is derived twice"),
+            ));
+        }
+        self.conf()
+            .derivations
+            .push(crate::confidentiality::Derivation {
+                value,
+                kind,
+                release,
+            });
+        Ok(())
+    }
+
+    /// Where output `name` goes (default: sealed).
+    pub fn output_release(
+        &mut self,
+        name: &str,
+        release: crate::confidentiality::OutputRelease,
+    ) -> Result<()> {
+        if !self.program.outputs.iter().any(|o| o.name == name) {
+            return Err(Error::new(
+                Code::PolicyDeclaration,
+                format!("no output named {name:?}"),
+            ));
+        }
+        if release != crate::confidentiality::OutputRelease::Sealed {
+            self.conf().outputs.insert(name.to_owned(), release);
+        }
+        Ok(())
+    }
+
     pub fn finish(self) -> Result<Program> {
         if self.program.outputs.is_empty() {
             return Err(type_error("program has no outputs"));
+        }
+        if let Some(c) = &self.program.confidentiality {
+            c.validate()?;
         }
         Ok(self.program)
     }

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Confidentiality IR
+
+- **Parties, assets and policies** in the IR (ADR-010): owners, readers,
+  purposes, release (`never`, `owner_only`, `allowed_parties`,
+  `aggregate_only`, `public`), and owner-permitted derivations; secret
+  inputs bind to assets; outputs are sealed, revealed to a party, or public.
+  Requirements only: execution is unchanged.
+- **Confidentiality analysis.** Every value's policy is the join of its
+  inputs' (owners union, audience and purposes intersection, most
+  restrictive release); policies weaken only through derivations every
+  source permits. Illegal flows are compile errors ENC1901–ENC1906.
+- **Policy identity.** `PolicyId` (`encpolicy1:`) is part of the execution
+  spec when a program declares a policy, so receipts and proofs bind it.
+  Artifacts (format 5) carry `policy.json`.
+- `encompute privacy explain` and `privacy graph --format dot`; Python
+  `Party`, `asset(...)`, `secret[shape, lo:hi, asset]`, `confidential(...)`,
+  `reveal(...)`, `publish(...)`, `compile(purpose=...)`, `Model.privacy()`;
+  `examples/confidential_training.py`.
+
 ### Verified execution (research)
 
 - **Verified private execution.** `verification="required"` (Python) /

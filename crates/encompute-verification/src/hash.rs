@@ -11,6 +11,7 @@ pub(crate) const EVALUATOR: &str = "encompute.evaluator.v1";
 pub(crate) const TRANSCRIPT: &str = "encompute.execution-transcript.v1";
 pub(crate) const VERIFICATION_KEY: &str = "encompute.verification-key.v1";
 pub(crate) const EXECUTION_PROOF: &str = "encompute.execution-proof.v1";
+pub(crate) const POLICY: &str = "encompute.confidentiality-policy.v1";
 
 /// A 32-byte SHA-256 digest.
 pub type Digest32 = [u8; 32];
