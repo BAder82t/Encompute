@@ -105,6 +105,15 @@ pub enum Code {
     /// A privacy mechanism, its parameters, randomness or receipt do not
     /// match the approved configuration (ENC2204).
     PrivacyMechanism,
+    /// A trust-graph evidence item is malformed or does not verify
+    /// (ENC2301).
+    TrustEvidence,
+    /// An owner authorization is missing, invalid, expired or revoked
+    /// (ENC2302).
+    TrustAuthorization,
+    /// The trust graph is inconsistent: a dangling edge, broken lineage,
+    /// or a node that contradicts its evidence (ENC2303).
+    TrustGraph,
 }
 
 impl Code {
@@ -153,13 +162,16 @@ impl Code {
             Code::PrivacyLedger => "ENC2202",
             Code::PrivacyPolicy => "ENC2203",
             Code::PrivacyMechanism => "ENC2204",
+            Code::TrustEvidence => "ENC2301",
+            Code::TrustAuthorization => "ENC2302",
+            Code::TrustGraph => "ENC2303",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 43] = [
+    pub const ALL: [Code; 46] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -203,6 +215,9 @@ impl Code {
         Code::PrivacyLedger,
         Code::PrivacyPolicy,
         Code::PrivacyMechanism,
+        Code::TrustEvidence,
+        Code::TrustAuthorization,
+        Code::TrustGraph,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

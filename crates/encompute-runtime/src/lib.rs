@@ -27,6 +27,7 @@ pub use encompute_evaluator::{
 pub use encompute_keybroker as keybroker;
 pub use encompute_privacy as dp;
 pub use encompute_secagg as secagg;
+pub use encompute_trust as trust;
 pub use encompute_verification as verification;
 pub use explain::Measurement;
 pub use model::{has_openfhe, has_tfhe, BenchDetail, BenchReport, Mode, Model};

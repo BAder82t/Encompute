@@ -47,6 +47,15 @@ const KEYS_DOMAIN: &str = "encompute.contribution-keys.v1";
 const ASSET_DOMAIN: &str = "encompute.aggregate-asset.v1";
 const PLAN_DOMAIN: &str = "encompute.aggregation-plan.v1";
 
+/// The asset ID of the aggregate a receipt released:
+/// `SHA256("encompute.aggregate-asset.v1", receipt ID, output)`, hex.
+pub fn aggregate_asset_id(receipt_id: &str, output: &str) -> String {
+    hex(&tagged(
+        ASSET_DOMAIN,
+        &[receipt_id.as_bytes(), output.as_bytes()],
+    ))
+}
+
 /// `SHA256("encompute.aggregation-codec.v1", canonical codec)`, hex.
 pub fn codec_id(codec: &FixedPointCodec) -> Result<String> {
     digest(CODEC_DOMAIN, codec)
@@ -1189,10 +1198,7 @@ impl RoundCoordinator {
         let p = &plan.aggregate_policy;
         let receipt_id = receipt.id()?;
         let asset = AggregateAsset {
-            asset_id: hex(&tagged(
-                ASSET_DOMAIN,
-                &[receipt_id.as_bytes(), plan.output.as_bytes()],
-            )),
+            asset_id: aggregate_asset_id(&receipt_id, &plan.output),
             output: plan.output.clone(),
             kind: plan.output_asset_kind,
             function: plan.function,

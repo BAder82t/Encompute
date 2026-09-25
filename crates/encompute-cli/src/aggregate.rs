@@ -186,6 +186,9 @@ pub enum AggregateCmd {
         /// across rounds and restarts).
         #[arg(long)]
         ledger: Option<PathBuf>,
+        /// Record the finished round in this trust bundle.
+        #[arg(long)]
+        trust_bundle: Option<PathBuf>,
         #[arg(long, default_value = "aggregation-receipt.json")]
         receipt: PathBuf,
         #[command(flatten)]
@@ -303,6 +306,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             stage_timeout,
             out,
             ledger,
+            trust_bundle,
             receipt,
             trust,
             attester,
@@ -340,6 +344,11 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             std::fs::write(&out, serde_json::to_vec_pretty(&asset).expect("JSON"))
                 .map_err(|e| io(&out, e))?;
             std::fs::write(&receipt, r.to_bytes()?).map_err(|e| io(&receipt, e))?;
+            if let Some(b) = &trust_bundle {
+                let mut g = crate::trust::open(b)?;
+                g.add_aggregation(r.clone())?;
+                crate::trust::save(b, &g)?;
+            }
             println!("AGGREGATION COMPLETE");
             print_manifest(&r);
             println!(

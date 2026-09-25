@@ -57,6 +57,8 @@ privacy, and every step leaves verifiable evidence.
 | Attested key release (TEE attestation, policy-gated keys) | working: Google Confidential Space and a development mock; the live Confidential Space run needs a GCP project |
 | Secure aggregation (`aggregate_only`) | working: Bonawitz et al., malicious-coordinator variant, dropouts, signed aggregation receipts |
 | Differential privacy (budgets, ledger, receipts) | working: discrete Gaussian on secure aggregates, zCDP accounting, tamper-evident ledgers, owner-side enforcement |
+| Trust graph (authorizations, revocation, lineage, one trust report) | working: owner-signed program approvals, revocation reach, a report rebuilt from evidence and checked against verifier-supplied keys |
+| Assurance (security invariants under attack) | 46 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## What Encompute does
 
@@ -233,6 +235,25 @@ computation confidential, secure aggregation hides contributions,
 differential privacy bounds what outputs reveal, attestation says which
 workload ran, and execution proofs say it computed correctly.
 
+## Trust graph
+
+Every mechanism leaves evidence; the trust graph joins it into one bundle
+and answers one question: can I trust what happened to my data (ADR-014)?
+Owners sign approvals of the program itself, and can revoke an asset,
+which lists everything derived from it.
+
+```sh
+encompute trust init step.encompute --parties parties.json
+encompute trust authorize --party hospital-a --key a.key
+encompute aggregate serve step.encompute ... --trust-bundle trust.json
+encompute trust report --parties parties.json --coordinator-key <hex>
+```
+
+The report rebuilds the graph from the signed evidence and checks every
+signature against the keys you pass, never against keys in the bundle;
+what it cannot check is reported as unchecked, and then it does not say
+SATISFIED.
+
 ## Attested key release
 
 Owners release asset keys only to a workload that proves, with hardware
@@ -340,6 +361,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-keybroker` | Policy-gated key release to attested workloads (library, HTTP server, client) |
 | `crates/encompute-secagg` | Secure aggregation (Bonawitz et al.) bound to policies, rounds and receipts |
 | `crates/encompute-privacy` | Differential privacy: budgets, discrete Gaussian noise, zCDP accounting, ledger, receipts |
+| `crates/encompute-trust` | Trust graph: authorizations, revocations, lineage, evidence, trust report |
+| `crates/encompute-assurance` | Assurance suite: invariant catalog, adversarial checks, release-gate report (not published) |
 | `crates/encompute-vfhe` | Re-execution proof verifier on OpenFHE BGV (research) |
 | `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption) |
 | `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature) |
@@ -353,9 +376,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
-- **Next**: the trust graph (lineage, governance, authorization and
-  revocation in one graph), then an automatic planner that chooses the
-  protection for declared parties, assets and policies.
+- **Next**: an automatic planner that chooses the protection for
+  declared parties, assets and policies, recorded in the trust graph.
 
 ## License
 

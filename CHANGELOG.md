@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Trust graph
+
+- **One verifiable record of a collaboration** (ADR-014, new crate
+  `encompute-trust`): parties, assets, programs, policies, owner
+  authorizations and revocations, aggregation rounds, aggregates, privacy
+  releases, attestations and executions in one content-addressed bundle,
+  with the signed evidence inside.
+- **Owners approve programs**: signed `Authorization`s (program, policy,
+  privacy policy, purpose, expiry) and `Revocation`s; a revocation lists
+  every aggregate derived from the asset.
+- **A trust report that trusts nothing the bundle says about itself**: it
+  rebuilds the graph from the evidence (edges, nodes and attributes must
+  match), checks signatures only against keys the verifier supplies
+  (`--parties`, `--coordinator-key`, `--evaluator-key`), compares privacy
+  spend with the budget the program declares, and never reports an empty
+  or unchecked bundle as satisfied (`--require` for rows that must be
+  present).
+- CLI: `encompute trust init | authorize | revoke | add | report | lineage
+  | graph`, `aggregate serve --trust-bundle`. Errors ENC2301–ENC2303.
+- `PrivacyReceipt::sign`.
+
+### Assurance
+
+- **System assurance suite** (`encompute-assurance`, `docs/assurance.md`):
+  46 security invariants, each with positive, negative, adversarial and
+  end-to-end evidence; adversarial checks for DP crash injection,
+  multi-parent atomicity, multi-process double spend, ledger tampering,
+  receipt mutation and SecAgg at scale; `assurance-report` as the release
+  gate in CI, nightly at larger scale with `cargo deny`.
+
 ### Differential privacy
 
 - **Privacy budgets per asset** (ADR-013): `privacy unit "patient"

@@ -2,6 +2,7 @@
 
 mod aggregate;
 mod attest;
+mod trust;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -122,6 +123,12 @@ enum Cmd {
     Attest {
         #[command(subcommand)]
         cmd: attest::AttestCmd,
+    },
+    /// The trust graph: assets, owners' authorizations, lineage and every
+    /// piece of evidence, checked as one trust report.
+    Trust {
+        #[command(subcommand)]
+        cmd: trust::TrustCmd,
     },
     /// Secure aggregation rounds: coordinate, contribute, verify.
     Aggregate {
@@ -472,6 +479,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         ),
         Cmd::Attest { cmd } => attest::attest(cmd),
         Cmd::Aggregate { cmd } => aggregate::aggregate(cmd),
+        Cmd::Trust { cmd } => trust::trust(cmd),
         Cmd::Workload { cmd } => attest::workload(cmd),
         Cmd::Keys {
             cmd: KeysCmd::Broker(cmd),

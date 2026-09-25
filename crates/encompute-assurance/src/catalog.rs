@@ -299,4 +299,27 @@ pub const INVARIANTS: &[Invariant] = &[
         (Positive, "test:crates/encompute-keybroker/tests/release.rs::state_round_trips_without_printing_keys"),
         (Negative, "test:crates/encompute-cli/tests/cli.rs::keys_and_audit"),
     ]),
+    // Trust graph.
+    inv!("INV-100", "trust", "The trust report checks every signature against keys the verifier supplies; evidence without an anchor is never reported as trusted.", [
+        (Positive, "test:crates/encompute-runtime/tests/trust.rs::a_whole_collaboration_verifies"),
+        (Negative, "test:crates/encompute-runtime/tests/trust.rs::nothing_vouches_for_itself"),
+        (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::nothing_vouches_for_itself"),
+        (EndToEnd, "test:crates/encompute-cli/tests/cli.rs::secure_aggregation_round"),
+    ]),
+    inv!("INV-101", "trust", "The graph the report reads is exactly what its evidence implies; any added, dropped or edited edge, node or attribute fails.", [
+        (Positive, "test:crates/encompute-runtime/tests/trust.rs::a_whole_collaboration_verifies"),
+        (Negative, "test:crates/encompute-runtime/tests/trust.rs::tampered_evidence_fails_the_report"),
+        (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::edges_come_from_the_evidence"),
+    ]),
+    inv!("INV-102", "trust", "Every asset a program uses is approved by each owner for that program, unexpired and unrevoked; a revocation lists everything derived from the asset.", [
+        (Positive, "test:crates/encompute-runtime/tests/trust.rs::owners_must_approve_the_program"),
+        (Negative, "test:crates/encompute-runtime/tests/trust.rs::owners_must_approve_the_program"),
+        (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::revocation_shows_its_reach_and_forbids_later_use"),
+        (EndToEnd, "test:crates/encompute-cli/tests/cli.rs::secure_aggregation_round"),
+    ]),
+    inv!("INV-103", "trust", "Recorded privacy releases stay within the budget the program declares, with finite values, signed by a trusted coordinator; absent required evidence is never satisfied.", [
+        (Positive, "test:crates/encompute-runtime/tests/trust.rs::privacy_releases_answer_to_the_declared_budget"),
+        (Negative, "test:crates/encompute-runtime/tests/trust.rs::absent_evidence_is_not_satisfied"),
+        (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::privacy_releases_answer_to_the_declared_budget"),
+    ]),
 ];

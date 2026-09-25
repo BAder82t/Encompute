@@ -192,6 +192,15 @@ impl PrivacyReceipt {
         r.signature = String::new();
         canonical_json(&r)
     }
+
+    /// Signs the receipt as `signer` (setting `signer_key`).
+    pub fn sign(mut self, signer: &SigningKey) -> Result<Self> {
+        self.signer_key = hex(&signer.verifying_key().to_bytes());
+        self.signature = hex(&signer
+            .sign(&tagged(RECEIPT, &[&self.body_bytes()?]))
+            .to_bytes());
+        Ok(self)
+    }
 }
 
 fn num(x: f64) -> String {
@@ -276,7 +285,7 @@ pub fn release(
         crate::failpoint("after-first-commit");
         let v = l.view();
         let after = v.cost()?;
-        let mut r = PrivacyReceipt {
+        let r = PrivacyReceipt {
             version: RECEIPT_VERSION,
             event_id: spec.event_id(&c.asset_id),
             asset_id: c.asset_id.clone(),
@@ -304,13 +313,10 @@ pub fn release(
             ledger_seq: v.entries.len() as u64,
             ledger_root: v.root()?,
             rng: rng.label().into(),
-            signer_key: hex(&signer.verifying_key().to_bytes()),
+            signer_key: String::new(),
             signature: String::new(),
         };
-        r.signature = hex(&signer
-            .sign(&tagged(RECEIPT, &[&r.body_bytes()?]))
-            .to_bytes());
-        receipts.push(r);
+        receipts.push(r.sign(signer)?);
     }
     Ok(Released {
         noisy,

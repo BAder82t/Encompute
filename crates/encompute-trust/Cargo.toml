@@ -1,0 +1,21 @@
+[package]
+name = "encompute-trust"
+description = "The Encompute trust graph: assets, policies, authorizations, lineage and evidence in one verifiable graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+encompute-ir.workspace = true
+encompute-verification.workspace = true
+encompute-attestation.workspace = true
+encompute-secagg.workspace = true
+encompute-privacy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+ed25519-dalek = "2.2"
+
+[lints]
+workspace = true

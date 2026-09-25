@@ -99,6 +99,8 @@ not failures:
   bound beyond the property test.
 - **INV-081:** there is no adversarial scan of logs and error output for
   key material.
+- **INV-101, INV-103:** there is no multi-process trust-bundle scenario for
+  these (the CLI round covers INV-100 and INV-102).
 
 ## Matrix
 
@@ -147,3 +149,7 @@ not failures:
 | INV-080 | No secret input appears in what an untrusted party sees (coordinator messages, artifacts). | `artifact_round_trips_and_is_reproducible` | `no_runtime_values_in_transcripts` | `secagg_coordinator_sees_no_input` | `three_hospitals_over_http` |
 | INV-081 | Key files are owner-only and keys never appear in debug output. | `state_round_trips_without_printing_keys` | `keys_and_audit` | gap | gap |
 
+| INV-100 | The trust report checks every signature against keys the verifier supplies; evidence without an anchor is never reported as trusted. | `a_whole_collaboration_verifies` | `nothing_vouches_for_itself` | `nothing_vouches_for_itself` | `secure_aggregation_round` |
+| INV-101 | The graph the report reads is exactly what its evidence implies; any added, dropped or edited edge, node or attribute fails. | `a_whole_collaboration_verifies` | `tampered_evidence_fails_the_report` | `edges_come_from_the_evidence` | gap |
+| INV-102 | Every asset a program uses is approved by each owner for that program, unexpired and unrevoked; a revocation lists everything derived from the asset. | `owners_must_approve_the_program` | `owners_must_approve_the_program` | `revocation_shows_its_reach_and_forbids_later_use` | `secure_aggregation_round` |
+| INV-103 | Recorded privacy releases stay within the budget the program declares, with finite values, signed by a trusted coordinator; absent required evidence is never satisfied. | `privacy_releases_answer_to_the_declared_budget` | `absent_evidence_is_not_satisfied` | `privacy_releases_answer_to_the_declared_budget` | gap |

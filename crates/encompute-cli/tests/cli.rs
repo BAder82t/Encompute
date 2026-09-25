@@ -575,6 +575,54 @@ fn secure_aggregation_round() {
         std::fs::write(p(&format!("{x}.json")), "[0.25, -0.5, 1.0, 0.0]").unwrap();
     }
     std::fs::write(p("parties.json"), format!("[{}]", ids.join(","))).unwrap();
+    // The coordinator's key, known to the parties out of band.
+    let coord: serde_json::Value = serde_json::from_str(&ok(&[
+        "aggregate",
+        "identity",
+        "--party",
+        "coordinator",
+        "--key",
+        &p("coord.key"),
+    ]))
+    .unwrap();
+    let coord_key = coord["public_key"].as_str().unwrap().to_owned();
+    let (bundle, parties) = (p("trust.json"), p("parties.json"));
+    let report = |extra: &[&str]| {
+        let mut a = vec![
+            "trust",
+            "report",
+            "--bundle",
+            &bundle,
+            "--parties",
+            &parties,
+            "--coordinator-key",
+            &coord_key,
+        ];
+        a.extend_from_slice(extra);
+        encompute(&a)
+    };
+    // A trust bundle: the program, the consortium, each owner's approval.
+    ok(&[
+        "trust",
+        "init",
+        &p("f.encompute"),
+        "--parties",
+        &p("parties.json"),
+        "--bundle",
+        &p("trust.json"),
+    ]);
+    for x in ["a", "b"] {
+        ok(&[
+            "trust",
+            "authorize",
+            "--party",
+            &format!("hospital-{x}"),
+            "--key",
+            &p(&format!("{x}.key")),
+            "--bundle",
+            &p("trust.json"),
+        ]);
+    }
     let port = 20000 + std::process::id() % 20000;
     let url = format!("http://127.0.0.1:{port}");
     // A coordinator for round `sequence`, ready once it accepts connections.
@@ -598,6 +646,8 @@ fn secure_aggregation_round() {
                 &p(out),
                 "--receipt",
                 &p("receipt.json"),
+                "--trust-bundle",
+                &p("trust.json"),
             ])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -665,6 +715,65 @@ fn secure_aggregation_round() {
         &p("agg.json"),
     ]);
     assert!(out.contains("AGGREGATION RECEIPT VERIFIED"), "{out}");
+    // The trust report: hospital C has not approved the program yet.
+    let (code, out, _) = report(&[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("no valid authorization from hospital-c"),
+        "{out}"
+    );
+    ok(&[
+        "trust",
+        "authorize",
+        "--party",
+        "hospital-c",
+        "--key",
+        &p("c.key"),
+        "--bundle",
+        &p("trust.json"),
+    ]);
+    let (code, out, _) = report(&["--require", "Private aggregation"]);
+    assert_eq!(code, 0, "{out}");
+    for want in [
+        "Owner authorization     AUTHORIZED",
+        "Private aggregation     VERIFIED",
+        "Lineage                 COMPLETE",
+        "TRUST REQUIREMENTS SATISFIED",
+    ] {
+        assert!(out.contains(want), "{want}\n{out}");
+    }
+    let out = ok(&[
+        "trust",
+        "lineage",
+        "gradient-a",
+        "--bundle",
+        &p("trust.json"),
+    ]);
+    assert!(out.contains("aggregate:"), "{out}");
+    assert!(ok(&["trust", "graph", "--bundle", &p("trust.json")]).starts_with("digraph trust"));
+    // A revocation reaches every aggregate derived from the asset.
+    let out = ok(&[
+        "trust",
+        "revoke",
+        "--party",
+        "hospital-a",
+        "--key",
+        &p("a.key"),
+        "--asset",
+        "gradient-a",
+        "--reason",
+        "consent withdrawn",
+        "--bundle",
+        &p("trust.json"),
+    ]);
+    assert!(out.contains("derived from it: 1"), "{out}");
+    let (code, out, _) = report(&[]);
+    assert_eq!(code, 1);
+    assert!(out.contains("retrain or unlearn"), "{out}");
+    // Without trusted keys, nothing in the bundle vouches for itself.
+    let (code, out, _) = encompute(&["trust", "report", "--bundle", &p("trust.json")]);
+    assert_eq!(code, 1);
+    assert!(out.contains("PRESENT (not checked)"), "{out}");
     // A coordinator offering round 1 again: the party's state refuses it.
     let mut replay = serve("1", "agg2.json");
     let (code, _, err) = encompute(&[

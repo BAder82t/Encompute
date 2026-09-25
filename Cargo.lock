@@ -953,6 +953,7 @@ dependencies = [
  "encompute-secagg",
  "encompute-tfhe",
  "encompute-tfhe-client",
+ "encompute-trust",
  "encompute-verification",
  "encompute-vfhe",
  "proptest",
@@ -1007,6 +1008,21 @@ dependencies = [
  "encompute-tfhe",
  "proptest",
  "tfhe",
+]
+
+[[package]]
+name = "encompute-trust"
+version = "0.2.0"
+dependencies = [
+ "ed25519-dalek",
+ "encompute-attestation",
+ "encompute-ir",
+ "encompute-privacy",
+ "encompute-secagg",
+ "encompute-verification",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
