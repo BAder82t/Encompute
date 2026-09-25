@@ -1,7 +1,24 @@
 use encompute_backend::ExactEvaluator;
 use encompute_ir::{Code, Error, Result};
 
-use crate::plan::{ExactInstr, ExactPlan};
+use crate::plan::{ExactInstr, ExactPlan, Reg};
+
+/// Watches an exact execution step by step: the hook for a future
+/// execution transcript or proof witness (0.4 V2). It sees only the plan's
+/// structure (instruction index, the instruction with its public constants,
+/// register numbers), never ciphertexts or plaintext values.
+pub trait ExecutionObserver {
+    fn begin(&mut self, _plan: &ExactPlan) {}
+    /// Instruction `index` has run, writing register `result`.
+    fn instruction(&mut self, _index: usize, _instr: &ExactInstr, _result: Reg) {}
+    /// Execution finished; `outputs` are the output registers in order.
+    fn finish(&mut self, _outputs: &[Reg]) {}
+}
+
+/// Observes nothing; execution is unchanged.
+pub struct NoopObserver;
+
+impl ExecutionObserver for NoopObserver {}
 
 /// Run the plan on encrypted inputs (plan order); one ciphertext per output.
 /// Needs no client key. The plan is validated first.
@@ -9,6 +26,19 @@ pub fn evaluate_exact<E: ExactEvaluator>(
     ev: &E,
     plan: &ExactPlan,
     inputs: Vec<E::Ciphertext>,
+) -> Result<Vec<E::Ciphertext>>
+where
+    E::Ciphertext: Clone,
+{
+    evaluate_exact_observed(ev, plan, inputs, &mut NoopObserver)
+}
+
+/// [`evaluate_exact`] reporting each step to `observer`.
+pub fn evaluate_exact_observed<E: ExactEvaluator>(
+    ev: &E,
+    plan: &ExactPlan,
+    inputs: Vec<E::Ciphertext>,
+    observer: &mut dyn ExecutionObserver,
 ) -> Result<Vec<E::Ciphertext>>
 where
     E::Ciphertext: Clone,
@@ -39,6 +69,7 @@ where
             ),
         ));
     }
+    observer.begin(plan);
     let n = plan.instrs.len();
     let mut last_use = vec![0usize; n];
     for (i, instr) in plan.instrs.iter().enumerate() {
@@ -84,12 +115,14 @@ where
             Cast(a) => ev.cast(r(*a), elem)?,
         };
         regs.push(Some(ct));
+        observer.instruction(i, instr, i as Reg);
         for op in instr.operands() {
             if last_use[op as usize] == i {
                 regs[op as usize] = None;
             }
         }
     }
+    observer.finish(&plan.outputs.iter().map(|o| o.reg).collect::<Vec<_>>());
     // Outputs may share a register; copy all but the last use.
     let mut out = Vec::with_capacity(plan.outputs.len());
     for (i, o) in plan.outputs.iter().enumerate() {

@@ -15,4 +15,7 @@ mod session;
 
 pub use compiled::{compile_program, CompiledProgram, ExactProgram, Semantics, EXACT_PLAN_VERSION};
 pub use exec::evaluate_encrypted;
-pub use session::{program_id, BackendKind, Backends, EvaluatorSession, ExecTimes, Ids};
+pub use session::{
+    execution_spec, issue_receipt, program_id, BackendKind, Backends, EvaluatorSession, ExecTimes,
+    Ids,
+};

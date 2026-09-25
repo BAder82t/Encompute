@@ -7,6 +7,6 @@ mod exec;
 mod lower;
 mod plan;
 
-pub use exec::evaluate_exact;
+pub use exec::{evaluate_exact, evaluate_exact_observed, ExecutionObserver, NoopObserver};
 pub use lower::{compile, CompiledExact};
 pub use plan::{ExactInput, ExactInstr, ExactOutput, ExactPlan, ExactProfile, Reg, MAX_TABLE};

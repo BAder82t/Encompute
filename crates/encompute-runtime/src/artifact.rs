@@ -1,7 +1,7 @@
 //! Compiled artifact: a directory `name.encompute/` with
 //! `program.eir`, `plan.json` (a CKKS or exact plan), `parameters.json`,
-//! `security.json` and `manifest.json` (SHA-256 of the others). Never
-//! contains keys.
+//! `security.json`, `verification.json` (the execution spec receipts refer
+//! to) and `manifest.json` (SHA-256 of the others). Never contains keys.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,14 +15,25 @@ use sha2::{Digest, Sha256};
 use crate::model::Model;
 
 /// Artifact format version; 1 was the unversioned 0.1 layout, 2 the
-/// CKKS-only 0.2 layout.
-pub const FORMAT: u32 = 3;
-const FILES: [&str; 4] = [
+/// CKKS-only 0.2 layout, 3 added exact plans, 4 `verification.json`.
+pub const FORMAT: u32 = 4;
+const FILES: [&str; 5] = [
     "program.eir",
     "plan.json",
     "parameters.json",
     "security.json",
+    "verification.json",
 ];
+
+/// `verification.json`: the execution spec for the artifact's target
+/// backend (OpenFHE for CKKS, TFHE-rs for exact) and its ID. Mock runs use
+/// the same spec with backend "mock".
+#[derive(Serialize)]
+struct Verification<'a> {
+    spec_id: String,
+    #[serde(flatten)]
+    spec: &'a encompute_verification::ExecutionSpec,
+}
 
 #[derive(Serialize)]
 struct Manifest<'a> {
@@ -233,12 +244,29 @@ impl Model {
                 evaluator_observes: &privacy.evaluator_observes,
             },
         };
+        let spec = self.target_spec();
         BTreeMap::from([
             ("program.eir", p.to_string()),
             ("plan.json", c.plan_json()),
             ("parameters.json", c.parameters_json()),
             ("security.json", json(&security)),
+            (
+                "verification.json",
+                json(&Verification {
+                    spec_id: spec.id().hex(),
+                    spec: &spec,
+                }),
+            ),
         ])
+    }
+
+    /// The execution spec on the artifact's target (real) backend.
+    pub fn target_spec(&self) -> encompute_verification::ExecutionSpec {
+        let kind = match self.compiled() {
+            CompiledProgram::Approx(_) => encompute_evaluator::BackendKind::OpenFhe,
+            CompiledProgram::Exact(_) => encompute_evaluator::BackendKind::TfheRs,
+        };
+        encompute_evaluator::execution_spec(&self.ids(), self.compiled(), kind)
     }
 
     /// Canonical `manifest.json` for these file contents.
@@ -356,7 +384,12 @@ impl Model {
                 "manifest names a different program than program.eir",
             ));
         }
-        for name in ["plan.json", "parameters.json", "security.json"] {
+        for name in [
+            "plan.json",
+            "parameters.json",
+            "security.json",
+            "verification.json",
+        ] {
             if fresh[name] != stored[name] {
                 return Err(Error::new(
                     Code::Artifact,

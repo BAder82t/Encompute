@@ -6,8 +6,13 @@
 //! | POST | /v1/programs | `.eir` text → `{program_id}` |
 //! | GET  | /v1/programs/{p}/keys/{k} | → 200 if registered, else 404 |
 //! | POST | /v1/programs/{p}/keys | evaluation-keys envelope → `{key_id}` |
-//! | POST | /v1/programs/{p}/jobs | inputs envelope → `{job_id, timings}` |
+//! | POST | /v1/programs/{p}/jobs | inputs envelope → `{job_id, timings, receipt}` |
 //! | GET  | /v1/jobs/{j}/result | → outputs envelope |
+//! | GET  | /v1/jobs/{j}/receipt | → signed execution receipt (canonical JSON) |
+//!
+//! Every job gets a receipt signed with the evaluator's identity key,
+//! binding the execution spec, key, and the exact request and response
+//! bytes. A receipt is a signed claim, not a proof of correct execution.
 //!
 //! Errors are `{"code": "ENC…", "message": …}`. Logs never contain payloads.
 //! No TLS: terminate TLS at a reverse proxy.
@@ -23,8 +28,10 @@ use encompute_protocol::sha256_hex;
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server};
 
+use encompute_verification::EvaluatorSigner;
+
 use crate::engine::{Engine, Local};
-use crate::session::{BackendKind, Backends};
+use crate::session::{issue_receipt, BackendKind, Backends};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -54,11 +61,15 @@ impl Default for Limits {
     }
 }
 
+/// A finished job: (job ID, outputs envelope, signed receipt bytes).
+type Job = (String, Vec<u8>, Vec<u8>);
+
 /// HTTP front end over an [`Engine`].
 pub struct Evaluator {
     engine: Arc<dyn Engine>,
     limits: Limits,
-    results: Mutex<VecDeque<(String, Vec<u8>)>>,
+    signer: EvaluatorSigner,
+    results: Mutex<VecDeque<Job>>,
     jobs: AtomicU64,
     requests: AtomicU64,
     workers: usize,
@@ -81,7 +92,7 @@ fn ok_json(v: serde_json::Value) -> Reply {
 fn error_reply(e: &Error) -> Reply {
     let status = match e.code {
         Code::Envelope | Code::BadInput | Code::Parse | Code::Type | Code::MissingRange => 400,
-        Code::WrongKey | Code::WrongParameters | Code::Incompatible => 409,
+        Code::WrongKey | Code::WrongParameters | Code::Incompatible | Code::Receipt => 409,
         Code::WrongProgram => 404,
         Code::Unsupported | Code::DepthExceeded | Code::PrecisionUnreachable => 422,
         Code::Remote => 413,
@@ -107,17 +118,28 @@ fn not_found(what: &str) -> Reply {
 }
 
 impl Evaluator {
-    /// In-process evaluator.
+    /// In-process evaluator with a fresh (ephemeral) identity.
     pub fn new(backends: Backends, limits: Limits) -> Self {
-        Self::with_engine(Arc::new(Local::new(backends)), limits, 0)
+        Self::with_engine(
+            Arc::new(Local::new(backends)),
+            limits,
+            0,
+            EvaluatorSigner::generate().expect("randomness"),
+        )
     }
 
-    /// Evaluator over any engine; `workers` is reported in `/v1/info`
-    /// (0 = in-process).
-    pub fn with_engine(engine: Arc<dyn Engine>, limits: Limits, workers: usize) -> Self {
+    /// Evaluator over any engine, signing receipts with `signer`; `workers`
+    /// is reported in `/v1/info` (0 = in-process).
+    pub fn with_engine(
+        engine: Arc<dyn Engine>,
+        limits: Limits,
+        workers: usize,
+        signer: EvaluatorSigner,
+    ) -> Self {
         Self {
             engine,
             limits,
+            signer,
             results: Mutex::new(VecDeque::new()),
             jobs: AtomicU64::new(0),
             requests: AtomicU64::new(0),
@@ -141,6 +163,10 @@ impl Evaluator {
             "encompute_version": env!("CARGO_PKG_VERSION"),
             "role": "evaluator",
             "holds_secret_keys": false,
+            "evaluator": {
+                "id": self.signer.identity().evaluator_id(),
+                "public_key": self.signer.identity().public_key_hex(),
+            },
             "backends": {
                 "approximate": label(b.approx, "CKKS"),
                 "exact": label(b.exact, "TFHE"),
@@ -169,25 +195,17 @@ impl Evaluator {
                 .engine
                 .register_keys(pid, body)
                 .map(|k| ok_json(json!({ "key_id": k }))),
-            (Method::Post, ["v1", "programs", pid, "jobs"]) => {
-                self.engine.execute(pid, body).map(|(out, times)| {
-                    let n = self.jobs.fetch_add(1, Ordering::Relaxed);
-                    let tail = &out[out.len().saturating_sub(32)..];
-                    let job = sha256_hex(&[&n.to_le_bytes()[..], tail].concat())[..32].to_owned();
-                    let mut results = self.results.lock().unwrap();
-                    results.push_back((job.clone(), out));
-                    while results.len() > self.limits.kept_results {
-                        results.pop_front();
-                    }
-                    ok_json(json!({ "job_id": job, "status": "done", "timings_ms": times }))
-                })
-            }
-            (Method::Get, ["v1", "jobs", jid, "result"]) => {
-                return match self.results.lock().unwrap().iter().find(|(j, _)| j == jid) {
-                    Some((_, b)) => Reply {
+            (Method::Post, ["v1", "programs", pid, "jobs"]) => self.job(pid, body),
+            (Method::Get, ["v1", "jobs", jid, what @ ("result" | "receipt")]) => {
+                return match self.results.lock().unwrap().iter().find(|(j, ..)| j == jid) {
+                    Some((_, out, receipt)) => Reply {
                         status: 200,
-                        body: b.clone(),
-                        json: false,
+                        body: if *what == "result" {
+                            out.clone()
+                        } else {
+                            receipt.clone()
+                        },
+                        json: *what == "receipt",
                     },
                     None => not_found("job"),
                 };
@@ -195,6 +213,36 @@ impl Evaluator {
             _ => return not_found("route"),
         };
         r.unwrap_or_else(|e| error_reply(&e))
+    }
+
+    /// Execute, then sign a receipt over the exact request and response.
+    fn job(&self, pid: &str, body: &[u8]) -> Result<Reply> {
+        let (out, times) = self.engine.execute(pid, body)?;
+        let spec = self
+            .engine
+            .programs()
+            .into_iter()
+            .find(|p| p.program_id == pid)
+            .ok_or_else(crate::engine::unknown_program)?
+            .spec;
+        let receipt = issue_receipt(&spec, body, &out, &self.signer)?;
+        let receipt_json: serde_json::Value =
+            serde_json::from_slice(&receipt.to_bytes()?).expect("canonical JSON");
+        let n = self.jobs.fetch_add(1, Ordering::Relaxed);
+        let tail = &out[out.len().saturating_sub(32)..];
+        let job = sha256_hex(&[&n.to_le_bytes()[..], tail].concat())[..32].to_owned();
+        let mut results = self.results.lock().unwrap();
+        results.push_back((job.clone(), out, receipt.to_bytes()?));
+        while results.len() > self.limits.kept_results {
+            results.pop_front();
+        }
+        Ok(ok_json(json!({
+            "job_id": job,
+            "status": "done",
+            "timings_ms": times,
+            "execution_id": receipt.receipt.execution_id,
+            "receipt": receipt_json,
+        })))
     }
 
     fn limit_for(&self, path: &str) -> usize {

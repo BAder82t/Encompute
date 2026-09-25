@@ -16,6 +16,7 @@ encompute-backend.workspace = true
 encompute-protocol.workspace = true
 encompute-analysis.workspace = true
 encompute-exact.workspace = true
+encompute-verification.workspace = true
 encompute-openfhe = { workspace = true, optional = true }
 # Evaluator half of TFHE-rs only; encompute-tfhe-client is never linked here.
 encompute-tfhe.workspace = true

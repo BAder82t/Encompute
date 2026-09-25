@@ -3,9 +3,13 @@
 //! One session type serves both semantics (CKKS and exact).
 
 use encompute_backend::{CkksClient, ExactClient, MockClient, MockConfig, PlainExactClient};
-use encompute_evaluator::{BackendKind, CompiledProgram, Ids};
+use encompute_evaluator::{execution_spec, BackendKind, CompiledProgram, Ids};
 use encompute_ir::{check_inputs, Code, Error, Inputs, Outputs, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
+use encompute_verification::{
+    output_commitment, request_commitment, verify_receipt, EvaluatorIdentity, ExecutionSpec,
+    ExpectedExecution, SignedExecutionReceipt, VerifiedReceipt,
+};
 
 /// The concrete client, so the secret key can be exported.
 enum Client {
@@ -264,7 +268,39 @@ impl ClientSession {
         Ok(Envelope::new(self.header(Kind::Inputs), items).encode())
     }
 
-    /// Check and decrypt an outputs envelope.
+    /// What this client expects the evaluator to execute: the statement
+    /// its receipts must carry.
+    pub fn spec(&self) -> ExecutionSpec {
+        execution_spec(&self.ids, &self.compiled, self.kind)
+    }
+
+    /// Verify `receipt` against this client's own spec and key, the exact
+    /// `request` it sent and `response` it received, and the evaluator it
+    /// trusts; only then decrypt. The receipt is a signed claim by that
+    /// evaluator, not a proof that it computed correctly.
+    pub fn decrypt_verified(
+        &self,
+        request: &[u8],
+        response: &[u8],
+        receipt: &SignedExecutionReceipt,
+        trusted: &EvaluatorIdentity,
+    ) -> Result<(Outputs, VerifiedReceipt)> {
+        let spec = self.spec();
+        let (rc, oc) = (request_commitment(request), output_commitment(response));
+        let verified = verify_receipt(
+            receipt,
+            &ExpectedExecution {
+                spec: &spec,
+                key_id: &self.key_id,
+                request_commitment: &rc,
+                output_commitment: &oc,
+                trusted_evaluator: trusted,
+            },
+        )?;
+        Ok((self.decrypt(response)?, verified))
+    }
+
+    /// Check and decrypt an outputs envelope, without a receipt.
     pub fn decrypt(&self, bytes: &[u8]) -> Result<Outputs> {
         let env = open(bytes, &self.expect(Kind::Outputs))?;
         let items = env.items();

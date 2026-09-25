@@ -1,0 +1,20 @@
+[package]
+name = "encompute-verification"
+description = "Execution identity and signed execution receipts for Encompute (no FHE dependency)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# No FHE backend dependency: the verification layer binds bytes and
+# identities; it never interprets ciphertexts.
+[dependencies]
+encompute-ir.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+ed25519-dalek = "2.2"
+getrandom = "0.2"
+
+[lints]
+workspace = true

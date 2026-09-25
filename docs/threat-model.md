@@ -30,6 +30,11 @@ scope.
 - Envelopes name their scheme (CKKS or TFHE), backend, parameter set,
   program and key; a mismatch is refused, so data for one scheme never
   enters a program of the other.
+- Every evaluation returns a receipt signed by the evaluator's Ed25519
+  identity, binding the execution spec, key, and exact request and response
+  bytes; clients verify it before decrypting. A receipt makes the
+  evaluator's claim attributable. It does not prove correct execution
+  (ADR-007).
 - Artifacts never contain key material.
 
 ## Deployment
@@ -75,5 +80,7 @@ itself (encrypted weights) is out of scope.
 
 ## Not covered in v0.3
 
-Side channels on the client, malicious-evaluator integrity (results are not
-verifiable), key rotation, threshold decryption, and multi-party settings.
+Side channels on the client, malicious-evaluator integrity (receipts bind
+what the evaluator claims but no execution proof exists yet: an evaluator
+can sign a fabricated result), key rotation, threshold decryption, and
+multi-party settings.

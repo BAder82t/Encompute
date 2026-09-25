@@ -24,11 +24,16 @@ fn remote_round_trip_uploads_program_and_keys_once() {
     let info = remote.info().unwrap();
     assert_eq!(info["holds_secret_keys"], false);
     assert_eq!(info["programs"].as_array().unwrap().len(), 0);
+    let trusted = remote.evaluator_identity().unwrap();
 
     let m = Model::compile(logistic(16, 1)).unwrap();
     let client = m.new_client(Mode::Mock).unwrap();
     let inputs = sample_inputs(m.program(), 4, 0);
-    let (out, stats) = remote.run(&client, m.program(), None, &inputs).unwrap();
+    let run = remote
+        .run(&client, m.program(), None, &inputs, &trusted)
+        .unwrap();
+    let (out, stats) = (run.outputs, run.stats);
+    assert!(!run.verified.has_execution_proof());
     let want = evaluate(m.program(), &inputs).unwrap();
     assert!((out["score"][0] - want["score"][0]).abs() < 1e-3);
     assert!(
@@ -37,7 +42,10 @@ fn remote_round_trip_uploads_program_and_keys_once() {
             && stats.response_bytes > 0
     );
 
-    let (_, again) = remote.run(&client, m.program(), None, &inputs).unwrap();
+    let again = remote
+        .run(&client, m.program(), None, &inputs, &trusted)
+        .unwrap()
+        .stats;
     assert_eq!(again.evaluation_key_bytes_uploaded, 0, "keys are reused");
     assert_eq!(
         remote.info().unwrap()["programs"].as_array().unwrap().len(),
@@ -51,7 +59,9 @@ fn remote_round_trip_uploads_program_and_keys_once() {
         &client.secret_key_envelope().unwrap(),
     )
     .unwrap();
-    assert!(remote.run(&restored, m.program(), None, &inputs).is_ok());
+    assert!(remote
+        .run(&restored, m.program(), None, &inputs, &trusted)
+        .is_ok());
     // …and a new client whose keys were never uploaded is refused.
     let stranger = encompute_runtime::ClientSession::restore(
         m.ids(),
@@ -65,8 +75,9 @@ fn remote_round_trip_uploads_program_and_keys_once() {
     assert_ne!(stranger.key_id(), client.key_id());
     assert_eq!(
         remote
-            .run(&stranger, m.program(), None, &inputs)
-            .unwrap_err()
+            .run(&stranger, m.program(), None, &inputs, &trusted)
+            .err()
+            .unwrap()
             .code,
         Code::WrongKey
     );

@@ -19,6 +19,13 @@ pub use diff::{
 pub use encompute_evaluator::{
     BackendKind, Backends, CompiledProgram, EvaluatorSession, ExactProgram, Ids, Semantics,
 };
+pub use encompute_verification as verification;
 pub use explain::Measurement;
 pub use model::{has_openfhe, has_tfhe, BenchDetail, BenchReport, Mode, Model};
-pub use remote::{Remote, RemoteStats};
+pub use remote::{Remote, RemoteRun, RemoteStats};
+
+/// The execution spec for `model` on backend `kind` (what its receipts
+/// must state).
+pub fn verification_spec(model: &Model, kind: BackendKind) -> verification::ExecutionSpec {
+    encompute_evaluator::execution_spec(&model.ids(), model.compiled(), kind)
+}

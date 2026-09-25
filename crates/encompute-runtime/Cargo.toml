@@ -15,6 +15,7 @@ encompute-evaluator.workspace = true
 encompute-openfhe-client = { workspace = true, optional = true }
 encompute-analysis.workspace = true
 encompute-exact.workspace = true
+encompute-verification.workspace = true
 encompute-tfhe.workspace = true
 encompute-tfhe-client = { workspace = true, optional = true }
 serde.workspace = true

@@ -164,7 +164,13 @@ def test_save_load_and_tamper(tmp_path):
     loaded = encompute.load(path)
     assert loaded([0.1, 0.2, 0.3])["out"] == pytest.approx(score([0.1, 0.2, 0.3]))
     manifest = json.loads((path / "manifest.json").read_text())
-    assert set(manifest["files"]) == {"program.eir", "plan.json", "parameters.json", "security.json"}
+    assert set(manifest["files"]) == {
+        "program.eir",
+        "plan.json",
+        "parameters.json",
+        "security.json",
+        "verification.json",
+    }
     (path / "program.eir").write_text(score.eir.replace("0.5", "0.6"))
     assert code_of(lambda: encompute.load(path)) == "ENC1401"
 

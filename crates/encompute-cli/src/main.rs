@@ -5,7 +5,10 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 use encompute_ir::{Code, Error, Inputs, Result};
-use encompute_runtime::{BenchDetail, ClientSession, Mode, Model, Remote, TestReport};
+use encompute_runtime::verification::{
+    output_commitment, request_commitment, EvaluatorIdentity, SignedExecutionReceipt,
+};
+use encompute_runtime::{BackendKind, BenchDetail, ClientSession, Mode, Model, Remote, TestReport};
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +46,39 @@ enum Cmd {
         /// Key directory from `encompute keys generate` (with --remote).
         #[arg(long)]
         keys: Option<PathBuf>,
+        /// Evaluator public key (hex) to trust for receipts. Default: the key
+        /// pinned in the key directory (evaluator.pub), pinned on first use.
+        #[arg(long)]
+        trust_evaluator: Option<String>,
+        /// Write the evaluator's signed receipt here (with --remote).
+        #[arg(long)]
+        save_receipt: Option<PathBuf>,
+        /// Write the exchanged request.bin and response.bin here, so
+        /// `encompute verify` can check the receipt's commitments later.
+        #[arg(long)]
+        save_envelopes: Option<PathBuf>,
+    },
+    /// Check a saved execution receipt: signature, evaluator, and (when
+    /// given) the artifact, request and response it binds. A receipt is a
+    /// signed claim, not a proof of correct execution.
+    Verify {
+        receipt: PathBuf,
+        /// The artifact the receipt should be for.
+        #[arg(long)]
+        model: Option<PathBuf>,
+        /// The inputs envelope sent (from --save-envelopes).
+        #[arg(long)]
+        request: Option<PathBuf>,
+        /// The outputs envelope received.
+        #[arg(long)]
+        response: Option<PathBuf>,
+        /// Evaluator public key (hex) you trust.
+        #[arg(long)]
+        trust_evaluator: Option<String>,
+        /// The backend you expected (mock, openfhe, tfhe-rs). Default: from
+        /// the request envelope, which you made; never from the receipt.
+        #[arg(long)]
+        backend: Option<String>,
     },
     /// Manage client keys.
     Keys {
@@ -145,6 +181,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             mode,
             remote,
             keys,
+            trust_evaluator,
+            save_receipt,
+            save_envelopes,
         } => {
             let m = load(&model)?;
             let inputs = parse_inputs(&inputs, inputs_file.as_deref())?;
@@ -165,12 +204,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     let client =
                         ClientSession::restore(m.ids(), m.compiled(), &read("secret.key")?)?;
                     let eval_keys = read("eval.keys").ok();
-                    let (out, stats) = Remote::new(&url).run(
+                    let remote = Remote::new(&url);
+                    let trusted = trusted_evaluator(&remote, &dir, trust_evaluator.as_deref())?;
+                    let run = remote.run(
                         &client,
                         m.program(),
                         eval_keys.as_deref(),
                         &inputs,
+                        &trusted,
                     )?;
+                    let stats = &run.stats;
                     eprintln!(
                         "remote: request {} KiB, response {} KiB, keys uploaded {} KiB, evaluator {:.1} ms, round trip {:.1} ms",
                         stats.request_bytes / 1024,
@@ -179,7 +222,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         stats.evaluator_ms,
                         stats.round_trip_ms
                     );
-                    out
+                    eprintln!("Evaluator receipt       verified");
+                    eprintln!("Execution proof         not present");
+                    eprintln!("Encrypted result        accepted");
+                    let io = |p: &Path, e: std::io::Error| {
+                        Error::new(Code::Artifact, format!("{}: {e}", p.display()))
+                    };
+                    if let Some(p) = &save_receipt {
+                        std::fs::write(p, run.receipt.to_bytes()?).map_err(|e| io(p, e))?;
+                    }
+                    if let Some(d) = &save_envelopes {
+                        std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
+                        std::fs::write(d.join("request.bin"), &run.request)
+                            .map_err(|e| io(d, e))?;
+                        std::fs::write(d.join("response.bin"), &run.response)
+                            .map_err(|e| io(d, e))?;
+                    }
+                    run.outputs
                 }
             };
             println!(
@@ -188,6 +247,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Verify {
+            receipt,
+            model,
+            request,
+            response,
+            trust_evaluator,
+            backend,
+        } => verify(
+            &receipt,
+            model.as_deref(),
+            request.as_deref(),
+            response.as_deref(),
+            trust_evaluator.as_deref(),
+            backend.as_deref(),
+        ),
         Cmd::Keys {
             cmd:
                 KeysCmd::Generate {
@@ -336,6 +410,198 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 );
             }
             Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// The evaluator identity to trust: `--trust-evaluator`, else the key
+/// pinned in the key directory, else the announced one, pinned now (trust on
+/// first use). A later change of identity fails receipt verification.
+fn trusted_evaluator(
+    remote: &Remote,
+    keys: &Path,
+    flag: Option<&str>,
+) -> Result<EvaluatorIdentity> {
+    let pin = keys.join("evaluator.pub");
+    if let Some(hex) = flag {
+        return EvaluatorIdentity::from_public_key_hex(hex.trim());
+    }
+    if let Ok(hex) = std::fs::read_to_string(&pin) {
+        return EvaluatorIdentity::from_public_key_hex(hex.trim());
+    }
+    let announced = remote.evaluator_identity()?;
+    std::fs::write(&pin, format!("{}\n", announced.public_key_hex()))
+        .map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", pin.display())))?;
+    eprintln!(
+        "trusting evaluator enc-eval:{} on first use (pinned in {})",
+        announced.evaluator_id(),
+        pin.display()
+    );
+    Ok(announced)
+}
+
+fn short(s: &str) -> &str {
+    s.char_indices().nth(16).map_or(s, |(i, _)| &s[..i])
+}
+
+fn verify(
+    receipt: &Path,
+    model: Option<&Path>,
+    request: Option<&Path>,
+    response: Option<&Path>,
+    trust: Option<&str>,
+    backend: Option<&str>,
+) -> Result<ExitCode> {
+    let read = |p: &Path| {
+        std::fs::read(p).map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", p.display())))
+    };
+    let signed = SignedExecutionReceipt::from_bytes(&read(receipt)?)?;
+    let r = &signed.receipt;
+    let own = EvaluatorIdentity::from_public_key_hex(&signed.evaluator_public_key)?;
+    let trusted = match trust {
+        Some(hex) => Some(EvaluatorIdentity::from_public_key_hex(hex.trim())?),
+        None => None,
+    };
+    let model = match model {
+        Some(p) => Some(load(p)?),
+        None => None,
+    };
+    let request_bytes = request.map(read).transpose()?;
+    let rc = request_bytes.as_deref().map(request_commitment);
+    // The key the request was made under, from its envelope header.
+    let request_header = match &request_bytes {
+        Some(b) => Some(encompute_protocol::Envelope::decode(b)?.header),
+        None => None,
+    };
+    let request_key = request_header.as_ref().and_then(|h| h.key_id.clone());
+    // The backend expected: --backend, else the request envelope (made by
+    // the verifier's own client), never the receipt's claim.
+    let expected_backend = match (backend, &request_header) {
+        (Some(b), _) => Some(b.to_owned()),
+        (None, Some(h)) => Some(h.backend.clone()),
+        (None, None) => None,
+    };
+    let kind = match &expected_backend {
+        Some(b) => Some(
+            BackendKind::parse(b)
+                .ok_or_else(|| Error::new(Code::Receipt, format!("unknown backend {b:?}")))?,
+        ),
+        None => None,
+    };
+    // The spec the receipt must state: the artifact's, on that backend.
+    let spec = match (&model, kind) {
+        (Some(m), Some(k)) => Some(encompute_runtime::verification_spec(m, k)),
+        _ => None,
+    };
+    let oc = response
+        .map(read)
+        .transpose()?
+        .map(|b| output_commitment(&b));
+
+    let section = |t: &str| println!("\n{t}\n{}", "─".repeat(40));
+    println!("Execution Receipt");
+    section("Execution");
+    println!("  {:<16}{}", "ID", r.execution_id);
+    println!("  {:<16}encspec1:{}", "Spec", short(&r.spec_id));
+    println!("  {:<16}{}", "Program", short(&r.program_id));
+    println!("  {:<16}{}", "Plan", short(&r.plan_id));
+    println!("  {:<16}{}", "Parameters", short(&r.parameter_set_id));
+    println!("  {:<16}{}", "Key", short(&r.key_id));
+    println!(
+        "  {:<16}{} {} {}",
+        "Scheme", r.scheme, r.backend, r.backend_version
+    );
+    println!("  {:<16}{}", "Request", short(&r.request_commitment));
+    println!("  {:<16}{}", "Output", short(&r.output_commitment));
+
+    // The signature against the trusted key (or, without one, the
+    // receipt's own), then each binding that can be checked here.
+    let evaluator = trusted.as_ref().unwrap_or(&own);
+    let mut result = signed.verify_signature(evaluator);
+    let mut bind = |what: &str, got: &str, want: Option<String>| {
+        if let (Ok(()), Some(w)) = (&result, want) {
+            if got != w {
+                result = Err(Error::new(
+                    Code::Receipt,
+                    format!("receipt {what} does not match"),
+                ));
+            }
+        }
+    };
+    if let Some(s) = &spec {
+        bind("spec ID", &r.spec_id, Some(s.id().hex()));
+        bind("program ID", &r.program_id, Some(s.program_id.clone()));
+        bind("plan ID", &r.plan_id, Some(s.plan_id.clone()));
+        bind(
+            "parameter-set ID",
+            &r.parameter_set_id,
+            Some(s.parameter_set_id.clone()),
+        );
+        bind("scheme", &r.scheme, Some(s.scheme.clone()));
+        bind(
+            "backend version",
+            &r.backend_version,
+            Some(s.backend_version.clone()),
+        );
+    }
+    bind("request commitment", &r.request_commitment, rc.clone());
+    if request_bytes.is_some() {
+        bind(
+            "key ID",
+            &r.key_id,
+            Some(request_key.clone().unwrap_or_default()),
+        );
+    }
+    bind("output commitment", &r.output_commitment, oc.clone());
+    section("Evaluator");
+    println!("  {:<16}enc-eval:{}", "ID", short(&r.evaluator_id));
+    println!(
+        "  {:<16}{}",
+        "Trusted",
+        if trusted.is_some() {
+            "yes (--trust-evaluator)"
+        } else {
+            "NOT CHECKED (no --trust-evaluator): signature checked against the receipt's own key"
+        }
+    );
+    println!(
+        "  {:<16}{}",
+        "Signature",
+        if result.is_ok() { "VALID" } else { "see below" }
+    );
+    section("Bindings");
+    let checked = |b: bool| if b { "checked" } else { "NOT CHECKED" };
+    println!("  {:<16}{}", "Artifact", checked(spec.is_some()));
+    println!("  {:<16}{}", "Backend", checked(expected_backend.is_some()));
+    println!("  {:<16}{}", "Request", checked(rc.is_some()));
+    println!("  {:<16}{}", "Response", checked(oc.is_some()));
+    section("Execution proof");
+    println!("  {:<16}NOT PRESENT", "Status");
+    section("Receipt");
+    match result {
+        Ok(()) => {
+            // With the trusted key, artifact, request and response, every
+            // binding of verify_receipt was checked (the key ID is inside
+            // the request envelope the commitment covers).
+            let complete = trusted.is_some() && spec.is_some() && rc.is_some() && oc.is_some();
+            if complete {
+                println!("RECEIPT VERIFIED");
+            } else {
+                println!("RECEIPT SIGNATURE VALID (some bindings not checked)");
+            }
+            println!("EXECUTION PROOF NOT PRESENT");
+            // Exit 0 only for a fully verified receipt; 3 when bindings
+            // were left unchecked.
+            Ok(if complete {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(3)
+            })
+        }
+        Err(e) => {
+            println!("INVALID: {}", e.message);
+            println!("EXECUTION PROOF NOT PRESENT");
+            Ok(ExitCode::from(1))
         }
     }
 }

@@ -3,11 +3,16 @@
 //!
 //!     encompute-evaluator serve <program.eir | model.encompute/>... [--listen ADDR]
 //!                               [--backend mock|openfhe|tfhe-rs]... [--workers N]
+//!                               [--identity FILE]
 //!     encompute-evaluator worker --backend …     (started by serve)
 //!
 //! Each program runs on the backend for its semantics: approximate programs
 //! on OpenFHE, exact ones on TFHE-rs, where built; `--backend mock` serves
 //! both on the mock.
+//!
+//! `--identity FILE` holds the evaluator's receipt-signing key (created,
+//! mode 0600, if missing). Without it the identity is ephemeral and clients
+//! that pinned it will refuse receipts after a restart.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -16,11 +21,13 @@ use encompute_evaluator::engine::{Engine, Local};
 use encompute_evaluator::pool::{run_worker, Pool};
 use encompute_evaluator::server::{Evaluator, Limits};
 use encompute_evaluator::{BackendKind, Backends};
+use encompute_verification::EvaluatorSigner;
 
 fn usage() -> ExitCode {
     eprintln!(
         "usage: encompute-evaluator serve <program.eir | model.encompute/>... \
-         [--listen 127.0.0.1:8750] [--backend mock|openfhe|tfhe-rs]... [--workers N]"
+         [--listen 127.0.0.1:8750] [--backend mock|openfhe|tfhe-rs]... [--workers N] \
+         [--identity FILE]"
     );
     ExitCode::from(2)
 }
@@ -33,6 +40,7 @@ fn main() -> ExitCode {
     let mut listen = "127.0.0.1:8750".to_owned();
     let mut backends = Backends::for_build();
     let mut workers = 0usize;
+    let mut identity: Option<String> = None;
     let mut programs = vec![];
     let mut it = args.into_iter().skip(1);
     while let Some(a) = it.next() {
@@ -46,6 +54,7 @@ fn main() -> ExitCode {
                 }
                 None => return usage(),
             },
+            "--identity" => identity = it.next(),
             "--workers" => match it.next().and_then(|n| n.parse().ok()) {
                 Some(n) => workers = n,
                 None => return usage(),
@@ -62,12 +71,68 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        "serve" => serve(backends, &listen, workers, &programs),
+        "serve" => match load_identity(identity.as_deref()) {
+            Ok(signer) => serve(backends, &listen, workers, &programs, signer),
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(2)
+            }
+        },
         _ => usage(),
     }
 }
 
-fn serve(backends: Backends, listen: &str, workers: usize, programs: &[String]) -> ExitCode {
+/// The receipt-signing key: read from `path`, created there if missing, or
+/// ephemeral without a path.
+fn load_identity(path: Option<&str>) -> Result<EvaluatorSigner, String> {
+    let Some(path) = path else {
+        eprintln!("notice: ephemeral evaluator identity; use --identity FILE to keep it");
+        return EvaluatorSigner::generate().map_err(|e| e.to_string());
+    };
+    #[cfg(unix)]
+    if let Ok(m) = std::fs::metadata(path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = m.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{path} is mode {mode:o}: the signing key must not be readable by others (chmod 600)"
+            ));
+        }
+    }
+    match std::fs::read(path) {
+        Ok(b) => {
+            let seed: [u8; 32] = b
+                .try_into()
+                .map_err(|_| format!("{path}: not an evaluator identity (32 bytes)"))?;
+            Ok(EvaluatorSigner::from_seed(&seed))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let signer = EvaluatorSigner::generate().map_err(|e| e.to_string())?;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            use std::io::Write;
+            opts.open(path)
+                .and_then(|mut f| f.write_all(&signer.seed()))
+                .map_err(|e| format!("{path}: {e}"))?;
+            eprintln!("created evaluator identity {path}");
+            Ok(signer)
+        }
+        Err(e) => Err(format!("{path}: {e}")),
+    }
+}
+
+fn serve(
+    backends: Backends,
+    listen: &str,
+    workers: usize,
+    programs: &[String],
+    signer: EvaluatorSigner,
+) -> ExitCode {
     let engine: Arc<dyn Engine> = if workers == 0 {
         Arc::new(Local::new(backends))
     } else {
@@ -80,7 +145,8 @@ fn serve(backends: Backends, listen: &str, workers: usize, programs: &[String]) 
             }
         }
     };
-    let ev = Evaluator::with_engine(engine, Limits::default(), workers);
+    let evaluator_id = signer.identity().evaluator_id();
+    let ev = Evaluator::with_engine(engine, Limits::default(), workers, signer);
     for p in programs {
         let path = std::path::Path::new(p);
         let file = if path.is_dir() {
@@ -121,6 +187,7 @@ fn serve(backends: Backends, listen: &str, workers: usize, programs: &[String]) 
         backends.approx.name(),
         backends.exact.name()
     );
+    eprintln!("evaluator identity enc-eval:{evaluator_id} (signs execution receipts)");
     if backends.exact == BackendKind::TfheRs {
         eprintln!(
             "notice: the TFHE-rs backend is for research use only; commercial use needs a \

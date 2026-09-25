@@ -41,6 +41,9 @@ pub enum Code {
     WrongProgram,
     /// An object was made under a different or unregistered key.
     WrongKey,
+    /// An execution receipt is malformed, unsigned, from an untrusted
+    /// evaluator, or does not match the execution.
+    Receipt,
     /// A network or protocol failure between client and evaluator.
     Remote,
 }
@@ -67,6 +70,7 @@ impl Code {
             Code::WrongParameters => "ENC1603",
             Code::WrongProgram => "ENC1604",
             Code::WrongKey => "ENC1605",
+            Code::Receipt => "ENC1606",
             Code::Remote => "ENC1701",
         }
     }
@@ -74,7 +78,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 20] = [
+    pub const ALL: [Code; 21] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -94,6 +98,7 @@ impl Code {
         Code::WrongParameters,
         Code::WrongProgram,
         Code::WrongKey,
+        Code::Receipt,
         Code::Remote,
     ];
 

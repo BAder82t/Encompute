@@ -4,9 +4,22 @@ use std::io::Read;
 use std::time::Duration;
 
 use encompute_ir::{Code, Error, Program, Result};
+use encompute_verification::{EvaluatorIdentity, SignedExecutionReceipt, VerifiedReceipt};
 use serde_json::Value;
 
 use crate::client::ClientSession;
+
+/// Result of a verified remote run.
+pub struct RemoteRun {
+    pub outputs: encompute_ir::Outputs,
+    pub stats: RemoteStats,
+    /// The evaluator's signed receipt, verified before decryption.
+    pub receipt: SignedExecutionReceipt,
+    pub verified: VerifiedReceipt,
+    /// The exact envelopes exchanged (for `encompute verify`).
+    pub request: Vec<u8>,
+    pub response: Vec<u8>,
+}
 
 pub struct Remote {
     base: String,
@@ -25,10 +38,27 @@ pub struct RemoteStats {
     pub round_trip_ms: f64,
 }
 
+/// Largest JSON response read from an evaluator (the evaluator is not
+/// trusted to keep them small).
+const MAX_JSON: u64 = 16 << 20;
+
+fn read_json(resp: ureq::Response) -> Result<Value> {
+    let mut body = Vec::new();
+    resp.into_reader()
+        .take(MAX_JSON + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| Error::new(Code::Remote, format!("reading response: {e}")))?;
+    if body.len() as u64 > MAX_JSON {
+        return Err(Error::new(Code::Remote, "evaluator response is too large"));
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| Error::new(Code::Remote, format!("bad response: {e}")))
+}
+
 fn remote_err(e: ureq::Error) -> Error {
     match e {
         ureq::Error::Status(status, resp) => {
-            let body: Value = resp.into_json().unwrap_or(Value::Null);
+            let body: Value = read_json(resp).unwrap_or(Value::Null);
             let code = body["code"]
                 .as_str()
                 .and_then(Code::parse)
@@ -63,9 +93,18 @@ impl Remote {
         self.agent
             .get(&self.url("/v1/info"))
             .call()
-            .map_err(remote_err)?
-            .into_json()
-            .map_err(|e| Error::new(Code::Remote, format!("bad info response: {e}")))
+            .map_err(remote_err)
+            .and_then(read_json)
+    }
+
+    /// The identity the evaluator claims (from `/v1/info`). Trust it only by
+    /// pinning (or comparing with a known ID): anyone can claim a key.
+    pub fn evaluator_identity(&self) -> Result<EvaluatorIdentity> {
+        let info = self.info()?;
+        let key = info["evaluator"]["public_key"]
+            .as_str()
+            .ok_or_else(|| Error::new(Code::Remote, "evaluator announces no identity"))?;
+        EvaluatorIdentity::from_public_key_hex(key)
     }
 
     fn post(&self, path: &str, body: &[u8]) -> Result<Value> {
@@ -73,9 +112,8 @@ impl Remote {
             .post(&self.url(path))
             .set("Content-Type", "application/octet-stream")
             .send_bytes(body)
-            .map_err(remote_err)?
-            .into_json()
-            .map_err(|e| Error::new(Code::Remote, format!("bad response: {e}")))
+            .map_err(remote_err)
+            .and_then(read_json)
     }
 
     /// Upload the program if the evaluator does not have it.
@@ -127,7 +165,8 @@ impl Remote {
         Ok(keys.len())
     }
 
-    /// Submit an inputs envelope and fetch the outputs envelope.
+    /// Submit an inputs envelope and fetch the outputs envelope; the job
+    /// JSON carries timings and the signed receipt.
     pub fn execute(&self, program_id: &str, request: &[u8]) -> Result<(Vec<u8>, Value)> {
         let job = self.post(&format!("/v1/programs/{program_id}/jobs"), request)?;
         let id = job["job_id"]
@@ -143,17 +182,21 @@ impl Remote {
             .take(1 << 30)
             .read_to_end(&mut out)
             .map_err(|e| Error::new(Code::Remote, format!("reading result: {e}")))?;
-        Ok((out, job["timings_ms"].clone()))
+        Ok((out, job))
     }
 
-    /// Full remote run: program and keys ensured, encrypted request, decrypted result.
+    /// Full remote run: program and keys ensured, encrypted request, then
+    /// the receipt verified against `trusted` before the result is
+    /// decrypted. A receipt is a signed claim by the evaluator, not a proof
+    /// of correct execution.
     pub fn run(
         &self,
         client: &ClientSession,
         program: &Program,
         eval_keys: Option<&[u8]>,
         inputs: &encompute_ir::Inputs,
-    ) -> Result<(encompute_ir::Outputs, RemoteStats)> {
+        trusted: &EvaluatorIdentity,
+    ) -> Result<RemoteRun> {
         let t = std::time::Instant::now();
         let ids = client.ids();
         self.ensure_program(program, &ids.program_id)?;
@@ -163,11 +206,20 @@ impl Remote {
             eval_keys.or(client.evaluation_keys()),
         )?;
         let request = client.encrypt(program, inputs)?;
-        let (response, timings) = self.execute(&ids.program_id, &request)?;
-        let outputs = client.decrypt(&response)?;
-        Ok((
+        let (response, job) = self.execute(&ids.program_id, &request)?;
+        let receipt: SignedExecutionReceipt = serde_json::from_value(job["receipt"].clone())
+            .map_err(|e| {
+                Error::new(
+                    Code::Receipt,
+                    format!("evaluator sent no valid receipt: {e}"),
+                )
+            })?;
+        let (outputs, verified) =
+            client.decrypt_verified(&request, &response, &receipt, trusted)?;
+        let timings = &job["timings_ms"];
+        Ok(RemoteRun {
             outputs,
-            RemoteStats {
+            stats: RemoteStats {
                 request_bytes: request.len(),
                 response_bytes: response.len(),
                 evaluation_key_bytes_uploaded: uploaded,
@@ -175,6 +227,10 @@ impl Remote {
                 evaluator_peak_rss_bytes: timings["peak_rss_bytes"].as_u64().unwrap_or(0),
                 round_trip_ms: t.elapsed().as_secs_f64() * 1e3,
             },
-        ))
+            receipt,
+            verified,
+            request,
+            response,
+        })
     }
 }

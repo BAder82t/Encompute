@@ -273,13 +273,17 @@ fn exact_remote_round_trip() {
 
     let m = Model::compile(approve()).unwrap();
     let client = m.new_client(Mode::Mock).unwrap();
+    let trusted = remote.evaluator_identity().unwrap();
     for (x, want) in [
         (inputs(31.0, 120_000.0, 21_000.0, 400.0), 1.0),
         (inputs(17.0, 120_000.0, 21_000.0, 400.0), 0.0),
     ] {
-        let (out, stats) = remote.run(&client, m.program(), None, &x).unwrap();
-        assert_eq!(out["approved"], vec![want]);
-        assert!(stats.request_bytes > 0);
+        let run = remote
+            .run(&client, m.program(), None, &x, &trusted)
+            .unwrap();
+        assert_eq!(run.outputs["approved"], vec![want]);
+        assert!(run.stats.request_bytes > 0);
+        assert_eq!(run.receipt.receipt.scheme, "TFHE");
     }
     let programs = remote.info().unwrap()["programs"].clone();
     assert_eq!(programs[0]["scheme"], "TFHE");
@@ -313,15 +317,41 @@ fn tfhe_rs_end_to_end() {
     std::thread::spawn(move || Evaluator::new(backends, Limits::default()).serve(server));
     let remote = Remote::new(&url);
     let client = m.new_client(Mode::Encrypted).unwrap();
-    let (out, stats) = remote
+    let trusted = remote.evaluator_identity().unwrap();
+    let run = remote
         .run(
             &client,
             m.program(),
             None,
             &inputs(31.0, 120_000.0, 21_000.0, 400.0),
+            &trusted,
         )
         .unwrap();
+    assert_eq!(run.receipt.receipt.backend, "tfhe-rs");
+    let (out, stats) = (run.outputs, run.stats);
     assert_eq!(out["approved"], vec![1.0]);
+
+    // Another TFHE client: its inputs are refused (keys not registered),
+    // and it cannot read this client's results.
+    let stranger = m.new_client(Mode::Encrypted).unwrap();
+    let x = inputs(31.0, 120_000.0, 21_000.0, 400.0);
+    let err = remote
+        .execute(
+            &m.ids().program_id,
+            &stranger.encrypt(m.program(), &x).unwrap(),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, Code::WrongKey, "{err}");
+    let (response, _) = remote
+        .execute(
+            &m.ids().program_id,
+            &client.encrypt(m.program(), &x).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        stranger.decrypt(&response).unwrap_err().code,
+        Code::WrongKey
+    );
     eprintln!(
         "remote tfhe-rs: server key {} MiB, request {} KiB, response {} KiB, evaluator {:.0} ms",
         stats.evaluation_key_bytes_uploaded >> 20,

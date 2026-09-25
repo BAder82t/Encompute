@@ -98,3 +98,147 @@ fn keys_and_audit() {
         assert!(out.contains("FAIL  keys.secret_permissions"));
     }
 }
+
+const ADULT: &str = "encompute 0.1
+program adult precision 0.001
+%0 = input \"age\" [0.0, 120.0] : secret u8
+%1 = const [18.0] : public u8
+%2 = ge %0, %1 : secret bool
+output \"adult\" = %2
+";
+
+fn serve() -> String {
+    use encompute_evaluator::server::{Evaluator, Limits};
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    std::thread::spawn(move || {
+        Evaluator::new(encompute_evaluator::Backends::MOCK, Limits::default()).serve(server)
+    });
+    url
+}
+
+/// `run --remote` verifies the evaluator's receipt before decrypting;
+/// `verify` checks saved receipts and never claims an execution proof.
+#[test]
+fn remote_receipts_and_verify() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-receipt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+
+    let url = serve();
+    let run = |url: &str, age: &str| {
+        encompute(&[
+            "run",
+            &p("adult.encompute"),
+            "--remote",
+            url,
+            "--keys",
+            &p("keys"),
+            "--input",
+            &format!("age={age}"),
+            "--save-receipt",
+            &p("result.receipt.json"),
+            "--save-envelopes",
+            &p("exchange"),
+        ])
+    };
+    let (code, out, err) = run(&url, "30");
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim(), "{\n  \"adult\": true\n}");
+    assert!(err.contains("Evaluator receipt       verified"), "{err}");
+    assert!(err.contains("Execution proof         not present"), "{err}");
+    assert!(err.contains("on first use"), "{err}");
+    let pinned = std::fs::read_to_string(dir.join("keys/evaluator.pub")).unwrap();
+
+    let receipt = p("result.receipt.json");
+    let verify = |extra: &[&str]| {
+        let mut args = vec!["verify", receipt.as_str()];
+        args.extend_from_slice(extra);
+        encompute(&args)
+    };
+    let full = [
+        "--model",
+        &p("adult.encompute"),
+        "--request",
+        &p("exchange/request.bin"),
+        "--response",
+        &p("exchange/response.bin"),
+        "--trust-evaluator",
+        pinned.trim(),
+    ];
+    let (code, out, _) = verify(&full);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("RECEIPT VERIFIED\nEXECUTION PROOF NOT PRESENT"),
+        "{out}"
+    );
+    assert!(!out.contains("EXECUTION VERIFIED"));
+
+    let (code, out, _) = verify(&[]);
+    assert_eq!(code, 3, "incomplete verification is not success: {out}");
+    assert!(
+        out.contains("RECEIPT SIGNATURE VALID (some bindings not checked)"),
+        "{out}"
+    );
+    assert!(out.contains("NOT CHECKED"), "{out}");
+
+    // The expected backend comes from the verifier, not the receipt.
+    let mut other_backend = full.to_vec();
+    other_backend.extend_from_slice(&["--backend", "tfhe-rs"]);
+    let (code, out, _) = verify(&other_backend);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("INVALID"), "{out}");
+
+    // A response from another execution does not match.
+    let (code, _, err) = run(&url, "10");
+    assert_eq!(code, 0, "{err}");
+    std::fs::copy(dir.join("exchange/response.bin"), dir.join("other.bin")).unwrap();
+    let (code, _, _) = run(&url, "30");
+    assert_eq!(code, 0);
+    let mut wrong = full.to_vec();
+    let other = p("other.bin");
+    wrong[5] = &other;
+    let (code, out, _) = verify(&wrong);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("INVALID") && out.contains("output commitment"),
+        "{out}"
+    );
+
+    // Another trusted key.
+    let mut untrusted = full.to_vec();
+    let zero = "11".repeat(32);
+    untrusted[7] = &zero;
+    let (code, out, _) = verify(&untrusted);
+    assert_eq!(code, 1, "{out}");
+
+    // An edited receipt.
+    let text = std::fs::read_to_string(dir.join("result.receipt.json")).unwrap();
+    std::fs::write(
+        dir.join("result.receipt.json"),
+        text.replace("\"scheme\":\"TFHE\"", "\"scheme\":\"CKKS\""),
+    )
+    .unwrap();
+    let (code, out, _) = verify(&full);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("EXECUTION PROOF NOT PRESENT"));
+
+    // A new evaluator (new identity) is refused: the pinned key differs.
+    let (code, _, err) = run(&serve(), "30");
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("ENC1606"), "{err}");
+}

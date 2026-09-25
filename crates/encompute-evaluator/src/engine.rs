@@ -18,6 +18,8 @@ pub struct ProgramInfo {
     /// "CKKS" or "TFHE".
     pub scheme: String,
     pub backend: String,
+    /// What this evaluator executes for the program; receipts state it.
+    pub spec: encompute_verification::ExecutionSpec,
 }
 
 /// Timings of one job, in milliseconds.
@@ -96,6 +98,7 @@ fn info(s: &EvaluatorSession) -> ProgramInfo {
         parameter_set_id: s.ids().parameter_set_id.clone(),
         scheme: s.compiled().scheme().to_owned(),
         backend: s.kind().name().to_owned(),
+        spec: s.spec().clone(),
     }
 }
 

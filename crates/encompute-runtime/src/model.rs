@@ -5,9 +5,10 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use encompute_evaluator::{
-    compile_program, BackendKind, CompiledProgram, EvaluatorSession, Ids, Semantics,
+    compile_program, issue_receipt, BackendKind, CompiledProgram, EvaluatorSession, Ids, Semantics,
 };
 use encompute_ir::{evaluate, parse, Code, Error, Inputs, Outputs, Program, Result};
+use encompute_verification::EvaluatorSigner;
 use serde::Serialize;
 
 use crate::client::ClientSession;
@@ -62,17 +63,24 @@ pub fn has_tfhe() -> bool {
 }
 
 /// Client and evaluator for one mode, sharing a process but talking only
-/// through envelopes: the same path a remote evaluator takes.
+/// through envelopes and signed receipts: the same path a remote evaluator
+/// takes.
 struct Session {
     client: ClientSession,
     evaluator: EvaluatorSession,
+    /// The local evaluator's (ephemeral) receipt-signing identity.
+    signer: EvaluatorSigner,
 }
 
 impl Session {
     fn run(&self, program: &Program, inputs: &Inputs) -> Result<Outputs> {
         let request = self.client.encrypt(program, inputs)?;
         let (response, _) = self.evaluator.execute(&request)?;
-        self.client.decrypt(&response)
+        let receipt = issue_receipt(self.evaluator.spec(), &request, &response, &self.signer)?;
+        let (outputs, _) =
+            self.client
+                .decrypt_verified(&request, &response, &receipt, &self.signer.identity())?;
+        Ok(outputs)
     }
 }
 
@@ -187,7 +195,11 @@ impl Model {
         let client = self.new_client(mode)?;
         let mut evaluator = EvaluatorSession::new(self.program.clone(), client.kind())?;
         evaluator.register_keys(client.evaluation_keys().expect("fresh client"))?;
-        Ok(Session { client, evaluator })
+        Ok(Session {
+            client,
+            evaluator,
+            signer: EvaluatorSigner::generate()?,
+        })
     }
 
     fn with_session<T>(&self, mode: Mode, f: impl FnOnce(&Session) -> Result<T>) -> Result<T> {

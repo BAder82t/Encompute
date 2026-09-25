@@ -2,10 +2,10 @@
 
 use encompute_backend::{ExactClient, ExactEvaluator, PlainExactClient, PlainExactEvaluator};
 use encompute_exact::{compile, evaluate_exact, ExactInstr};
-use encompute_ir::{
-    evaluate, Builder, CmpOp, Code, Elem, Inputs, LogicOp, Program, Range, ValueId,
-};
+use encompute_ir::{evaluate, Builder, CmpOp, Code, Elem, Inputs, LogicOp, Program, Range};
 use proptest::prelude::*;
+
+mod gen;
 
 pub fn approve() -> Program {
     let mut b = Builder::new("approve", 1e-3).unwrap();
@@ -119,133 +119,55 @@ fn wrong_scheme_and_overflow_are_refused() {
     );
 }
 
-const WIDTHS: [Elem; 6] = [
-    Elem::U8,
-    Elem::U16,
-    Elem::U32,
-    Elem::I8,
-    Elem::I16,
-    Elem::I32,
-];
-
-fn arb() -> impl Strategy<Value = (Program, Vec<(String, i64, i64)>)> {
-    (
-        0usize..WIDTHS.len(),
-        prop::collection::vec((0u8..17, any::<u32>(), any::<u32>(), any::<i16>()), 1..12),
-        prop::collection::vec((any::<i16>(), 0u16..300), 3),
-    )
-        .prop_map(|(w, steps, ranges)| {
-            let elem = WIDTHS[w];
-            let (min, max) = elem.bounds();
-            let clamp = |v: i128| v.clamp(min.max(-30000), max.min(30000));
-            let mut b = Builder::new("p", 1e-3).unwrap();
-            let mut decl = vec![];
-            let mut ints: Vec<ValueId> = vec![];
-            for (i, (lo, span)) in ranges.iter().enumerate() {
-                let lo = clamp(*lo as i128);
-                let hi = clamp(lo + *span as i128);
-                let name = format!("x{i}");
-                ints.push(
-                    b.input_exact(&name, elem, Some(Range::new(lo as f64, hi as f64)))
-                        .unwrap(),
+/// Random programs over every integer width (plus a bool input): the plan
+/// on the mock equals the interpreter exactly. `ENCOMPUTE_EXACT_PROGRAMS`
+/// sets the number of programs (nightly: 10 000); six input cases each.
+#[test]
+fn random_programs_match_interpreter_exactly() {
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+    use std::cell::Cell;
+    let n = gen::programs(512);
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: n,
+            failure_persistence: None,
+            ..Config::default()
+        },
+        TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+    );
+    let (compiled, refused, cases) = (Cell::new(0u32), Cell::new(0u32), Cell::new(0u64));
+    runner
+        .run(&(gen::arb_program(), any::<u64>()), |((p, decl), seed)| {
+            if compile(&p).is_err() {
+                // Possible overflow: refused at compile time (ENC1303),
+                // covered by the analysis tests.
+                refused.set(refused.get() + 1);
+                return Ok(());
+            }
+            compiled.set(compiled.get() + 1);
+            for case in 0..6 {
+                let inputs = gen::inputs_for(&decl, case, seed);
+                prop_assert_eq!(
+                    run_mock(&p, &inputs),
+                    evaluate(&p, &inputs).unwrap(),
+                    "{}",
+                    p
                 );
-                decl.push((name, lo as i64, hi as i64));
+                cases.set(cases.get() + 1);
             }
-            let mut bools: Vec<ValueId> = vec![];
-            for (kind, i, j, c) in steps {
-                let a = ints[i as usize % ints.len()];
-                let o = ints[j as usize % ints.len()];
-                let k = b
-                    .constant_exact(elem, clamp(c as i128 % 9 + 1) as f64)
-                    .unwrap();
-                let r = match kind {
-                    0 => b.add(a, o),
-                    1 => b.sub(a, k),
-                    2 => b.sub(k, a),
-                    3 => b.mul(a, k),
-                    4 => b.min(a, o),
-                    5 => b.max(k, a),
-                    6 => b.logic(LogicOp::And, a, o),
-                    7 => b.logic(LogicOp::Xor, a, k),
-                    8 => b.not(a),
-                    9 => b.shift(a, c % 2 == 0, (c.unsigned_abs() as u32) % 3),
-                    10 => {
-                        if c % 2 == 0 {
-                            b.div(a, k)
-                        } else {
-                            b.rem(a, k)
-                        }
-                    }
-                    11 => b.mul(a, o),
-                    12 | 13 => {
-                        let op = [CmpOp::Lt, CmpOp::Ge, CmpOp::Eq, CmpOp::Ne][(c as usize) % 4];
-                        let r = if kind == 12 {
-                            b.cmp(op, a, o)
-                        } else {
-                            b.cmp(op, k, a)
-                        };
-                        if let Ok(t) = r {
-                            bools.push(t);
-                        }
-                        r
-                    }
-                    14 if !bools.is_empty() => b.select(bools[i as usize % bools.len()], a, k),
-                    15 if bools.len() > 1 => {
-                        let t = b.logic(LogicOp::Or, bools[0], bools[1]);
-                        if let Ok(t) = t {
-                            bools.push(t);
-                        }
-                        t
-                    }
-                    16 => {
-                        let lo = ranges[0].0.max(0) as usize % 4;
-                        let t: Vec<f64> = (0..64)
-                            .map(|v| clamp(((v * 7 + lo) % 50) as i128) as f64)
-                            .collect();
-                        let m = b.constant_exact(elem, 64.0).ok().unwrap_or(k);
-                        let idx = b.rem(a, m).ok();
-                        match idx {
-                            Some(ix) => b.lookup(ix, t),
-                            None => b.neg(a),
-                        }
-                    }
-                    _ => b.neg(a),
-                };
-                if let Ok(id) = r {
-                    if b.ty(id).unwrap().elem == elem {
-                        ints.push(id);
-                    }
-                }
-            }
-            for (k, id) in ints.iter().enumerate().skip(3) {
-                b.output(&format!("v{k}"), *id).unwrap();
-            }
-            for (k, id) in bools.iter().enumerate() {
-                b.output(&format!("b{k}"), *id).unwrap();
-            }
-            b.output("x0", ints[0]).unwrap();
-            (b.finish().unwrap(), decl)
+            Ok(())
         })
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
-
-    #[test]
-    fn lowering_matches_interpreter_exactly((p, decl) in arb(), seed in any::<u64>()) {
-        if compile(&p).is_err() {
-            return Ok(()); // overflow refusals are covered by the analysis tests
-        }
-        let mut s = seed;
-        for case in 0..6 {
-            let inputs: Inputs = decl.iter().map(|(n, lo, hi)| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                let v = match case { 0 => *lo, 1 => *hi, _ => lo + (s >> 33) as i64 % (hi - lo + 1) };
-                (n.clone(), vec![v as f64])
-            }).collect();
-            prop_assert_eq!(run_mock(&p, &inputs), evaluate(&p, &inputs).unwrap(), "{}", p);
-        }
-    }
+        .unwrap();
+    eprintln!(
+        "random programs: {} compiled and matched exactly on {} input cases, {} refused (overflow)",
+        compiled.get(),
+        cases.get(),
+        refused.get()
+    );
+    assert!(
+        compiled.get() >= n / 3,
+        "the generator mostly makes valid programs"
+    );
 }
 
 /// Plans from outside the process are validated, never trusted.
@@ -326,5 +248,58 @@ fn malformed_plans_are_rejected_not_executed() {
     assert_eq!(
         evaluate_exact(&ev, &good, few).unwrap_err().code,
         Code::BadInput
+    );
+}
+
+/// The observer sees every instruction in order and nothing else; results
+/// are the same as without it.
+#[test]
+fn observer_sees_structure_only_and_changes_nothing() {
+    use encompute_exact::{evaluate_exact_observed, ExactPlan, ExecutionObserver, Reg};
+    #[derive(Default)]
+    struct Record {
+        began: usize,
+        steps: Vec<(usize, Reg)>,
+        outputs: Vec<Reg>,
+    }
+    impl ExecutionObserver for Record {
+        fn begin(&mut self, plan: &ExactPlan) {
+            self.began = plan.instrs.len();
+        }
+        fn instruction(&mut self, index: usize, _: &ExactInstr, result: Reg) {
+            self.steps.push((index, result));
+        }
+        fn finish(&mut self, outputs: &[Reg]) {
+            self.outputs = outputs.to_vec();
+        }
+    }
+    let p = approve();
+    let plan = compile(&p).unwrap().plan;
+    let client = PlainExactClient::new(3);
+    let ev = PlainExactEvaluator::new(&client.evaluation_keys().unwrap()).unwrap();
+    let load = |v: i128| {
+        plan.inputs
+            .iter()
+            .map(|i| {
+                ev.load(i.elem, &client.encrypt(i.elem, v).unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut rec = Record::default();
+    let a = evaluate_exact_observed(&ev, &plan, load(30), &mut rec).unwrap();
+    let b = evaluate_exact(&ev, &plan, load(30)).unwrap();
+    let dec = |v: &[_]| {
+        v.iter()
+            .map(|ct| client.decrypt(Elem::Bool, &ev.store(ct).unwrap()).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(dec(&a), dec(&b));
+    assert_eq!(rec.began, plan.instrs.len());
+    let want: Vec<(usize, Reg)> = (0..plan.instrs.len()).map(|i| (i, i as Reg)).collect();
+    assert_eq!(rec.steps, want);
+    assert_eq!(
+        rec.outputs,
+        plan.outputs.iter().map(|o| o.reg).collect::<Vec<_>>()
     );
 }

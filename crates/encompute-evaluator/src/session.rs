@@ -4,9 +4,12 @@ use std::time::{Duration, Instant};
 use encompute_backend::{
     CkksEvaluator, ExactEvaluator, MockConfig, MockEvaluator, PlainExactEvaluator,
 };
-use encompute_exact::{evaluate_exact, ExactPlan};
+use encompute_exact::{evaluate_exact_observed, ExactPlan, ExecutionObserver, NoopObserver};
 use encompute_ir::{Code, Error, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
+use encompute_verification::{
+    EvaluatorSigner, ExecutionReceiptV1, ExecutionSpec, SignedExecutionReceipt, SPEC_VERSION,
+};
 
 use crate::compiled::{compile_program, CompiledProgram, Semantics};
 use crate::exec::evaluate_encrypted;
@@ -30,6 +33,45 @@ impl Ids {
             program_id: program_id(program),
         }
     }
+}
+
+/// The execution specification of `compiled` (with `ids`) on backend
+/// `kind`: the statement every receipt refers to. The IDs are SHA-256 of
+/// the artifact's `program.eir`, `plan.json` and `parameters.json`.
+pub fn execution_spec(ids: &Ids, compiled: &CompiledProgram, kind: BackendKind) -> ExecutionSpec {
+    let (plan_kind, plan_version) = compiled.plan_format();
+    let (backend, backend_version) = kind.label();
+    ExecutionSpec {
+        version: SPEC_VERSION,
+        program_id: ids.program_id.clone(),
+        plan_id: sha256_hex(compiled.plan_json().as_bytes()),
+        parameter_set_id: ids.parameter_set_id.clone(),
+        plan_kind: plan_kind.into(),
+        plan_version,
+        semantics: match compiled.semantics() {
+            Semantics::Approximate => "approximate",
+            Semantics::Exact => "exact",
+        }
+        .into(),
+        scheme: compiled.scheme().into(),
+        backend: backend.into(),
+        backend_version: backend_version.into(),
+    }
+}
+
+/// Sign a receipt binding `spec`, the request's key ID, and the exact
+/// request and response envelope bytes.
+pub fn issue_receipt(
+    spec: &ExecutionSpec,
+    request: &[u8],
+    response: &[u8],
+    signer: &EvaluatorSigner,
+) -> Result<SignedExecutionReceipt> {
+    let key_id = Envelope::decode(request)?
+        .header
+        .key_id
+        .ok_or_else(|| Error::new(Code::WrongKey, "inputs carry no key ID"))?;
+    ExecutionReceiptV1::new(spec, &key_id, request, response, &signer.identity())?.sign(signer)
 }
 
 /// Which implementation runs a program. The mock serves both semantics;
@@ -190,6 +232,7 @@ pub struct EvaluatorSession {
     program: Program,
     compiled: CompiledProgram,
     ids: Ids,
+    spec: ExecutionSpec,
     kind: BackendKind,
     keys: HashMap<String, Keyed>,
 }
@@ -209,10 +252,12 @@ impl EvaluatorSession {
         let compiled = compile_program(&program)?;
         kind.check(compiled.semantics())?;
         let ids = Ids::of(&program, &compiled);
+        let spec = execution_spec(&ids, &compiled, kind);
         Ok(Self {
             program,
             compiled,
             ids,
+            spec,
             kind,
             keys: HashMap::new(),
         })
@@ -232,6 +277,11 @@ impl EvaluatorSession {
 
     pub fn kind(&self) -> BackendKind {
         self.kind
+    }
+
+    /// What this session executes, as receipts state it.
+    pub fn spec(&self) -> &ExecutionSpec {
+        &self.spec
     }
 
     pub fn has_key(&self, key_id: &str) -> bool {
@@ -292,6 +342,16 @@ impl EvaluatorSession {
 
     /// Execute an inputs envelope; returns the outputs envelope.
     pub fn execute(&self, bytes: &[u8]) -> Result<(Vec<u8>, ExecTimes)> {
+        self.execute_observed(bytes, &mut NoopObserver)
+    }
+
+    /// [`EvaluatorSession::execute`], reporting each step of an exact plan
+    /// to `observer` (CKKS plans are not observed yet).
+    pub fn execute_observed(
+        &self,
+        bytes: &[u8],
+        observer: &mut dyn ExecutionObserver,
+    ) -> Result<(Vec<u8>, ExecTimes)> {
         let env = Envelope::decode(bytes)?;
         let mut expect = self.expect(Kind::Inputs, None);
         expect.program_id = Some(&self.ids.program_id);
@@ -320,9 +380,13 @@ impl EvaluatorSession {
             (Keyed::Mock(ev), CompiledProgram::Approx(c)) => self.run(ev, c, &items)?,
             #[cfg(feature = "openfhe")]
             (Keyed::OpenFhe(ev), CompiledProgram::Approx(c)) => self.run(ev, c, &items)?,
-            (Keyed::ExactMock(ev), CompiledProgram::Exact(e)) => run_exact(ev, &e.plan, &items)?,
+            (Keyed::ExactMock(ev), CompiledProgram::Exact(e)) => {
+                run_exact(ev, &e.plan, &items, observer)?
+            }
             #[cfg(feature = "tfhe-rs")]
-            (Keyed::TfheRs(ev), CompiledProgram::Exact(e)) => run_exact(ev, &e.plan, &items)?,
+            (Keyed::TfheRs(ev), CompiledProgram::Exact(e)) => {
+                run_exact(ev, &e.plan, &items, observer)?
+            }
             _ => unreachable!("keys are registered for this session's program"),
         };
         let (backend, backend_version) = self.kind.label();
@@ -372,6 +436,7 @@ fn run_exact<E: ExactEvaluator>(
     ev: &E,
     plan: &ExactPlan,
     items: &[(&str, &[u8])],
+    observer: &mut dyn ExecutionObserver,
 ) -> Result<(Named, ExecTimes)>
 where
     E::Ciphertext: Clone,
@@ -386,7 +451,7 @@ where
         .collect::<Result<Vec<_>>>()?;
     times.load = t.elapsed();
     let t = Instant::now();
-    let outs = evaluate_exact(ev, plan, cts)?;
+    let outs = evaluate_exact_observed(ev, plan, cts, observer)?;
     times.evaluate = t.elapsed();
     let t = Instant::now();
     let stored = plan

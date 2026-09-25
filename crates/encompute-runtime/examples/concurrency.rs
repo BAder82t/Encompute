@@ -69,8 +69,9 @@ fn main() {
         }
         // Warm-up: registers keys in every worker.
         let inputs = sample_inputs(m.program(), 2, 0);
+        let trusted = remote.evaluator_identity().expect("identity");
         remote
-            .run(&client, m.program(), None, &inputs)
+            .run(&client, m.program(), None, &inputs, &trusted)
             .expect("warm-up");
 
         let start = Instant::now();
@@ -78,6 +79,7 @@ fn main() {
         let handles: Vec<_> = (0..clients)
             .map(|c| {
                 let (model, secret, url) = (model.clone(), secret.clone(), url.clone());
+                let trusted = trusted.clone();
                 std::thread::spawn(move || {
                     let m = Model::load(std::path::Path::new(&model)).expect("artifact");
                     let client = restore(&m, &secret);
@@ -86,9 +88,10 @@ fn main() {
                     for j in 0..per {
                         let inputs = sample_inputs(m.program(), 3 + c * per + j, 1);
                         let t = Instant::now();
-                        let (_, stats) = remote
-                            .run(&client, m.program(), None, &inputs)
-                            .expect("job");
+                        let stats = remote
+                            .run(&client, m.program(), None, &inputs, &trusted)
+                            .expect("job")
+                            .stats;
                         lat.push(t.elapsed().as_secs_f64() * 1e3);
                         rss = rss.max(stats.evaluator_peak_rss_bytes);
                     }

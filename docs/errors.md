@@ -24,4 +24,5 @@ Python raises `encompute.EncomputeError` with `.code` and `.message`.
 | ENC1603 | envelope | Made for a different parameter set | Recompile or regenerate keys |
 | ENC1604 | envelope | Made for a different program | — |
 | ENC1605 | envelope | Different or unregistered key | Upload `eval.keys` |
+| ENC1606 | client | An execution receipt is malformed, has a bad signature, comes from an untrusted evaluator key, or does not match the program, plan, parameters, key, request or response | Do not use the result; check which evaluator you trust (`--trust-evaluator`) and that request and response were not altered |
 | ENC1701 | remote | Network or protocol failure between client and evaluator | — |

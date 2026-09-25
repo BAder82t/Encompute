@@ -140,6 +140,33 @@ encompute-evaluator serve score.encompute --listen 0.0.0.0:8750   # on the evalu
 encompute run score.encompute --remote http://EVALUATOR:8750 --keys score.keys --input x=...
 ```
 
+Every remote job returns a receipt signed by the evaluator's identity key.
+`run --remote` verifies it before decrypting (the evaluator's key is pinned
+on first use, or given with `--trust-evaluator`) and can save it:
+
+```sh
+encompute run score.encompute --remote http://EVALUATOR:8750 --keys score.keys \
+  --input x=... --save-receipt result.receipt.json --save-envelopes exchange/
+encompute verify result.receipt.json --model score.encompute \
+  --request exchange/request.bin --response exchange/response.bin --trust-evaluator KEY
+```
+
+`verify` exits 0 only when every binding was checked (trusted key, artifact,
+backend, request and response), 3 when some were not, 1 when any check
+fails. The expected backend comes from the request you sent (or
+`--backend`), never from the receipt.
+
+### What an execution receipt proves
+
+It proves that a particular evaluator signed a statement binding a specific
+execution specification (program, plan, parameters, scheme, backend), key,
+request ciphertext and output ciphertext.
+
+It does **not** prove that the evaluator executed every operation honestly,
+that the output ciphertext is mathematically correct, or that the result was
+not fabricated. That needs an execution proof, which is future work (0.4 V3);
+receipts say `EXECUTION PROOF NOT PRESENT`. See ADR-007.
+
 The evaluator speaks plain HTTP; put a TLS proxy in front of it for remote
 clients. `scripts/audit-evaluator-binary.sh` checks that the evaluator binary
 contains no Encompute key-generation, encryption or decryption code.
@@ -154,6 +181,7 @@ contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-exact` | Lowering to backend-independent exact plans; plan validation and execution |
 | `crates/encompute-backend` | Client and evaluator traits; mock backend |
 | `crates/encompute-protocol` | Versioned, checksummed envelopes bound to parameters, program and key |
+| `crates/encompute-verification` | Execution specs, signed execution receipts, receipt verification (no FHE dependency) |
 | `crates/encompute-openfhe` | OpenFHE evaluator side (no keygen, encryption or decryption) |
 | `crates/encompute-openfhe-client` | OpenFHE client side: keys, encryption, decryption |
 | `crates/encompute-tfhe` | TFHE-rs evaluator side (research feature) |

@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased — 0.3 (in progress)
+## Unreleased — 0.4 V1: execution identity and receipts
+
+- **Execution specs.** `ExecutionSpec` binds program, plan, parameters,
+  plan kind and version, semantics, scheme and backend; its domain-separated
+  ID is stable across machines and compilations. Artifacts (format 4) carry
+  `verification.json`.
+- **Signed receipts.** Every evaluation (local or remote, CKKS or exact)
+  produces an `ExecutionReceiptV1` signed with the evaluator's Ed25519
+  identity, binding the spec, key, and exact request and response
+  envelopes. Clients verify it before decrypting (ENC1606 on any mismatch).
+  A receipt is a signed claim, not a proof: `evidence` is `None`.
+- **Evaluator identity.** `encompute-evaluator serve --identity FILE`;
+  clients pin the key on first use or take `--trust-evaluator`.
+- **CLI.** `run --remote` prints receipt status and can
+  `--save-receipt`/`--save-envelopes`; `encompute verify` checks saved
+  receipts and prints `RECEIPT VERIFIED` / `EXECUTION PROOF NOT PRESENT`.
+- **Proof hooks.** `ExecutionObserver` on exact plans (structure only, never
+  values) and the `VerificationBackend` interface (`NoProofBackend`).
+- Canonical JSON and domain separation: ADR-007.
+- Exact tests: 10 000+ random programs on the mock; TFHE-rs on every
+  operation at the boundaries of all eight integer widths and on random
+  programs; benchmark example `exact_ops`.
+
+## 0.3 (in progress)
 
 Exact private computation: integers and Booleans, computed exactly.
 
