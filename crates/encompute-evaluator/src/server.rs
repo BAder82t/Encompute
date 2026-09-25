@@ -10,6 +10,7 @@
 //! | GET  | /v1/jobs/{j}/result | → outputs envelope |
 //! | GET  | /v1/jobs/{j}/receipt | → signed execution receipt (canonical JSON) |
 //! | GET  | /v1/jobs/{j}/proof | → execution proof (`ENCP`), for programs requiring one |
+//! | GET  | /v1/attestation | → the attestation record receipts bind, if attested |
 //!
 //! Every job gets a receipt signed with the evaluator's identity key,
 //! binding the execution spec, key, and the exact request and response
@@ -29,7 +30,8 @@ use encompute_protocol::sha256_hex;
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server};
 
-use encompute_verification::EvaluatorSigner;
+use encompute_attestation::AttestationRecord;
+use encompute_verification::{EvaluatorSigner, WorkloadAttestationRef};
 
 use crate::engine::{Engine, Local};
 use crate::session::{execution_proof, issue_receipt, BackendKind, Backends};
@@ -75,6 +77,13 @@ pub struct Evaluator {
     jobs: AtomicU64,
     requests: AtomicU64,
     workers: usize,
+    attestation: Option<Attested>,
+}
+
+/// The attested workload session receipts bind.
+struct Attested {
+    reference: WorkloadAttestationRef,
+    record: Vec<u8>,
 }
 
 struct Reply {
@@ -146,7 +155,27 @@ impl Evaluator {
             jobs: AtomicU64::new(0),
             requests: AtomicU64::new(0),
             workers,
+            attestation: None,
         }
+    }
+
+    /// Runs as an attested workload: every receipt binds `record`, which
+    /// must bind this evaluator's signing key.
+    pub fn with_attestation(mut self, record: AttestationRecord) -> Result<Self> {
+        if record.evidence.binding.evaluator_public_key != self.signer.identity().public_key_hex() {
+            return Err(Error::new(
+                Code::Attestation,
+                "the attestation record binds another evaluator key",
+            ));
+        }
+        self.attestation = Some(Attested {
+            reference: WorkloadAttestationRef {
+                attestation_id: record.id()?,
+                workload_session_id: record.session_id()?,
+            },
+            record: record.to_bytes()?,
+        });
+        Ok(self)
     }
 
     /// Load a program at startup; returns its ID.
@@ -174,6 +203,10 @@ impl Evaluator {
                 "exact": label(b.exact, "TFHE"),
             },
             "worker_processes": self.workers,
+            "attestation": self.attestation.as_ref().map(|a| json!({
+                "attestation_id": a.reference.attestation_id,
+                "workload_session_id": a.reference.workload_session_id,
+            })),
             "programs": self.engine.programs(),
         })
     }
@@ -182,6 +215,14 @@ impl Evaluator {
         let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
         let r = match (method, parts.as_slice()) {
             (Method::Get, ["v1", "info"]) => Ok(ok_json(self.info())),
+            (Method::Get, ["v1", "attestation"]) => match &self.attestation {
+                Some(a) => Ok(Reply {
+                    status: 200,
+                    body: a.record.clone(),
+                    json: true,
+                }),
+                None => return not_found("attestation"),
+            },
             (Method::Post, ["v1", "programs"]) => std::str::from_utf8(body)
                 .map_err(|_| Error::new(Code::Parse, "program must be UTF-8 .eir text"))
                 .and_then(|t| self.engine.add_program(t))
@@ -199,7 +240,13 @@ impl Evaluator {
                 .map(|k| ok_json(json!({ "key_id": k }))),
             (Method::Post, ["v1", "programs", pid, "jobs"]) => self.job(pid, body),
             (Method::Get, ["v1", "jobs", jid, what @ ("result" | "receipt" | "proof")]) => {
-                return match self.results.lock().unwrap().iter().find(|(j, ..)| j == jid) {
+                return match self
+                    .results
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .iter()
+                    .find(|(j, ..)| j == jid)
+                {
                     Some((_, _, _, proof)) if *what == "proof" && proof.is_empty() => {
                         not_found("proof")
                     }
@@ -242,6 +289,7 @@ impl Evaluator {
             body,
             &out,
             proof.as_ref(),
+            self.attestation.as_ref().map(|a| &a.reference),
             &self.signer,
         )?;
         let proof_bytes = match &proof {
@@ -253,7 +301,7 @@ impl Evaluator {
         let n = self.jobs.fetch_add(1, Ordering::Relaxed);
         let tail = &out[out.len().saturating_sub(32)..];
         let job = sha256_hex(&[&n.to_le_bytes()[..], tail].concat())[..32].to_owned();
-        let mut results = self.results.lock().unwrap();
+        let mut results = self.results.lock().unwrap_or_else(|p| p.into_inner());
         results.push_back((job.clone(), out, receipt.to_bytes()?, proof_bytes));
         while results.len() > self.limits.kept_results {
             results.pop_front();

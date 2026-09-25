@@ -161,8 +161,35 @@ print(step.privacy())   # parties, assets, derived policies, flows, warnings
 Neither owner may learn the other's asset; the gradient may leave only as
 part of an aggregate, to the coordinator; revealing it directly is ENC1905.
 The policy's ID is part of the execution spec, so receipts and proofs bind
-it. These are requirements the compiler checks; run-time enforcement
-(key release, attestation, secure aggregation) is future work.
+it. The compiler checks these requirements; attested key release (below)
+enforces who may run the program.
+
+## Attested key release
+
+Owners release asset keys only to a workload that proves, with hardware
+attestation, that it runs the approved artifact under the approved
+execution spec and policy, in an approved TEE, for a fresh session
+(ADR-011). The key is sealed to a session key generated inside the TEE: the
+cloud operator relays it but cannot open it.
+
+```sh
+# Owner: an attestation policy for the artifact, and a protected key.
+encompute attest policy model.encompute --image sha256:… --tee intel_tdx > policy.json
+encompute keys protect --asset weights --policy policy.json --broker-id https://broker.modelco.example
+encompute keys serve --jwks google --listen 0.0.0.0:8760
+
+# Workload, inside Confidential Space: attest, receive, serve.
+encompute workload keys model.encompute --key weights@https://broker.modelco.example --identity eval.id
+encompute-evaluator serve model.encompute --identity eval.id --attestation attestation.json
+```
+
+A wrong image, spec or policy, a debug build, an outdated TCB, stale,
+replayed, tampered or expired evidence, a substituted session or evaluator
+key, or a revoked key: no key. Receipts from an attested evaluator bind the
+attestation, and `encompute verify --attestation …` checks the chain
+hardware → workload → evaluator key → receipt. Providers: Google
+Confidential Space ([deploy/confidential-space](deploy/confidential-space/))
+and a development-only mock.
 
 ## Build
 
@@ -240,6 +267,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-backend` | Client and evaluator traits; mock backends |
 | `crates/encompute-protocol` | Versioned, checksummed envelopes |
 | `crates/encompute-verification` | Execution specs, signed receipts, transcripts, proofs and proof interfaces (no FHE dependency) |
+| `crates/encompute-attestation` | Provider-neutral workload attestation, bindings, attestation policies, sealed key grants |
+| `crates/encompute-keybroker` | Policy-gated key release to attested workloads (library, HTTP server, client) |
 | `crates/encompute-vfhe` | Re-execution proof verifier on OpenFHE BGV (research) |
 | `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption) |
 | `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature) |
@@ -253,8 +282,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
-- **Next**: attested confidential compute: workload identity, attestation
-  and policy-gated key release, enforcing these policies at run time.
+- **Next**: multi-party confidential AI: secure aggregation over attested
+  workloads, using asset keys released by policy.
 
 ## License
 

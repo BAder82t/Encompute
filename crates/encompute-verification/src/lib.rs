@@ -37,7 +37,8 @@ pub use proof::{
     VerificationKeyId, VerificationRelation, VerificationState, PROOF_VERSION,
 };
 pub use receipt::{
-    ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence, RECEIPT_VERSION,
+    ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence, WorkloadAttestationRef,
+    RECEIPT_VERSION,
 };
 pub use reference::ReferenceTranscriptEvaluator;
 pub use spec::{ExecutionSpec, ExecutionSpecId, PolicyId, SPEC_VERSION};

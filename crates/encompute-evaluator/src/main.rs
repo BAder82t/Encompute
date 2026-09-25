@@ -3,7 +3,7 @@
 //!
 //!     encompute-evaluator serve <program.eir | model.encompute/>... [--listen ADDR]
 //!                               [--backend mock|openfhe|tfhe-rs]... [--workers N]
-//!                               [--identity FILE]
+//!                               [--identity FILE] [--attestation FILE]
 //!     encompute-evaluator worker --backend …     (started by serve)
 //!
 //! Each program runs on the backend for its semantics: approximate programs
@@ -12,11 +12,14 @@
 //!
 //! `--identity FILE` holds the evaluator's receipt-signing key (created,
 //! mode 0600, if missing). Without it the identity is ephemeral and clients
-//! that pinned it will refuse receipts after a restart.
+//! that pinned it will refuse receipts after a restart. `--attestation
+//! FILE` is the attestation record of the workload session this evaluator
+//! runs in (it must bind the identity's key); receipts then bind it.
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use encompute_attestation::AttestationRecord;
 use encompute_evaluator::engine::{Engine, Local};
 use encompute_evaluator::pool::{run_worker, Pool};
 use encompute_evaluator::server::{Evaluator, Limits};
@@ -27,7 +30,7 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage: encompute-evaluator serve <program.eir | model.encompute/>... \
          [--listen 127.0.0.1:8750] [--backend mock|openfhe|tfhe-rs]... [--workers N] \
-         [--identity FILE]"
+         [--identity FILE] [--attestation FILE]"
     );
     ExitCode::from(2)
 }
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
     let mut backends = Backends::for_build();
     let mut workers = 0usize;
     let mut identity: Option<String> = None;
+    let mut attestation: Option<String> = None;
     let mut programs = vec![];
     let mut it = args.into_iter().skip(1);
     while let Some(a) = it.next() {
@@ -60,6 +64,7 @@ fn main() -> ExitCode {
                 }
             }
             "--identity" => identity = it.next(),
+            "--attestation" => attestation = it.next(),
             "--workers" => match it.next().and_then(|n| n.parse().ok()) {
                 Some(n) => workers = n,
                 None => return usage(),
@@ -77,7 +82,14 @@ fn main() -> ExitCode {
             }
         },
         "serve" => match load_identity(identity.as_deref()) {
-            Ok(signer) => serve(backends, &listen, workers, &programs, signer),
+            Ok(signer) => serve(
+                backends,
+                &listen,
+                workers,
+                &programs,
+                signer,
+                attestation.as_deref(),
+            ),
             Err(e) => {
                 eprintln!("error: {e}");
                 ExitCode::from(2)
@@ -137,6 +149,7 @@ fn serve(
     workers: usize,
     programs: &[String],
     signer: EvaluatorSigner,
+    attestation: Option<&str>,
 ) -> ExitCode {
     let engine: Arc<dyn Engine> = if workers == 0 {
         Arc::new(Local::new(backends))
@@ -151,7 +164,19 @@ fn serve(
         }
     };
     let evaluator_id = signer.identity().evaluator_id();
-    let ev = Evaluator::with_engine(engine, Limits::default(), workers, signer);
+    let mut ev = Evaluator::with_engine(engine, Limits::default(), workers, signer);
+    if let Some(path) = attestation {
+        let record = std::fs::read(path)
+            .map_err(|e| format!("{path}: {e}"))
+            .and_then(|b| AttestationRecord::from_bytes(&b).map_err(|e| format!("{path}: {e}")));
+        match record.and_then(|r| ev.with_attestation(r).map_err(|e| e.to_string())) {
+            Ok(attested) => ev = attested,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     for p in programs {
         let path = std::path::Path::new(p);
         let file = if path.is_dir() {

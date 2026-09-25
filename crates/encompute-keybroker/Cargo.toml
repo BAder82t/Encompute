@@ -1,0 +1,23 @@
+[package]
+name = "encompute-keybroker"
+description = "Policy-gated key release to attested Encompute workloads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+encompute-ir.workspace = true
+encompute-attestation.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+getrandom = "0.2"
+zeroize = "1.8"
+tiny_http = "0.12"
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+
+[dev-dependencies]
+encompute-verification.workspace = true
+
+[lints]
+workspace = true

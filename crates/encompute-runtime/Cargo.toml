@@ -16,6 +16,8 @@ encompute-openfhe-client = { workspace = true, optional = true }
 encompute-analysis.workspace = true
 encompute-exact.workspace = true
 encompute-verification.workspace = true
+encompute-attestation.workspace = true
+encompute-keybroker.workspace = true
 encompute-tfhe.workspace = true
 encompute-tfhe-client = { workspace = true, optional = true }
 encompute-vfhe = { workspace = true, optional = true }

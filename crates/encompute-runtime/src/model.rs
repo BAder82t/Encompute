@@ -83,6 +83,7 @@ impl Session {
             &request,
             &response,
             proof.as_ref(),
+            None,
             &self.signer,
         )?;
         let (outputs, _) = self.client.decrypt_proven(

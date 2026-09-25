@@ -12,7 +12,7 @@ use encompute_ir::{Code, Error, Program, Result};
 use encompute_protocol::{open, sha256_hex, Envelope, Expect, Header, Kind};
 use encompute_verification::{
     EvaluatorSigner, ExecutionProof, ExecutionReceipt, ExecutionSpec, SemanticTranscript,
-    SignedExecutionReceipt, VerificationEvidence, SPEC_VERSION,
+    SignedExecutionReceipt, VerificationEvidence, WorkloadAttestationRef, SPEC_VERSION,
 };
 
 use crate::compiled::{compile_program, CompiledProgram, Semantics};
@@ -112,13 +112,15 @@ pub fn execution_proof(
 
 /// Sign a receipt binding `spec`, the transcript hash (exact programs), the
 /// request's key ID, the exact request and response envelope bytes, and
-/// `proof` (by digest) if there is one.
+/// `proof` (by digest) if there is one, and the attested workload session
+/// the evaluator runs in, if any.
 pub fn issue_receipt(
     spec: &ExecutionSpec,
     transcript_hash: Option<&str>,
     request: &[u8],
     response: &[u8],
     proof: Option<&ExecutionProof>,
+    attestation: Option<&WorkloadAttestationRef>,
     signer: &EvaluatorSigner,
 ) -> Result<SignedExecutionReceipt> {
     let evidence = match proof {
@@ -134,6 +136,7 @@ pub fn issue_receipt(
         &signer.identity(),
         evidence,
     )?
+    .attested(attestation.cloned())
     .sign(signer)
 }
 

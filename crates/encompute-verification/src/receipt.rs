@@ -6,8 +6,9 @@ use crate::hash::{hex, tagged, unhex, RECEIPT};
 use crate::identity::{EvaluatorIdentity, EvaluatorSigner};
 use crate::spec::ExecutionSpec;
 
-/// 2 adds `transcript_hash` (semantic transcripts).
-pub const RECEIPT_VERSION: u32 = 2;
+/// 2 adds `transcript_hash` (semantic transcripts); 3 adds `attestation`
+/// (attested workload sessions).
+pub const RECEIPT_VERSION: u32 = 3;
 
 /// Largest receipt accepted on parse (receipts are ~1 KiB).
 pub const MAX_RECEIPT_BYTES: usize = 16 << 10;
@@ -30,6 +31,17 @@ pub enum VerificationEvidence {
         verification_key_id: String,
         proof_digest: String,
     },
+}
+
+/// The attested workload session an evaluator ran in: the ID of the
+/// attestation record (kept beside the receipt, not in it) and the session
+/// ID it binds. The record proves that this receipt's signing key was held
+/// by the approved workload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadAttestationRef {
+    pub attestation_id: String,
+    pub workload_session_id: String,
 }
 
 /// What an evaluator states it executed. Only commitments and public
@@ -57,6 +69,9 @@ pub struct ExecutionReceipt {
     pub transcript_hash: Option<String>,
     pub evaluator_id: String,
     pub evidence: VerificationEvidence,
+    /// The attested workload session, when the evaluator runs in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<WorkloadAttestationRef>,
 }
 
 /// A receipt with the evaluator's Ed25519 signature over
@@ -137,7 +152,14 @@ impl ExecutionReceipt {
             transcript_hash: transcript_hash.map(str::to_owned),
             evaluator_id: evaluator.evaluator_id(),
             evidence,
+            attestation: None,
         })
+    }
+
+    /// Binds the attested workload session the evaluator runs in.
+    pub fn attested(mut self, attestation: Option<WorkloadAttestationRef>) -> Self {
+        self.attestation = attestation;
+        self
     }
 
     pub(crate) fn digest(&self) -> Result<[u8; 32]> {
@@ -201,6 +223,10 @@ impl SignedExecutionReceipt {
         }
         if let Some(t) = &r.transcript_hash {
             hex_of("transcript hash", t, 32)?;
+        }
+        if let Some(a) = &r.attestation {
+            hex_of("attestation ID", &a.attestation_id, 32)?;
+            hex_of("workload session ID", &a.workload_session_id, 32)?;
         }
         if let VerificationEvidence::Vfhe {
             protocol,

@@ -16,10 +16,11 @@ encompute-runtime.workspace = true
 encompute-protocol.workspace = true
 serde_json.workspace = true
 clap = { version = "~4.5", features = ["derive"] }
+tiny_http = "0.12"
+zeroize = "1.8"
 
 [dev-dependencies]
 encompute-evaluator.workspace = true
-tiny_http = "0.12"
 
 [features]
 openfhe = ["encompute-runtime/openfhe"]

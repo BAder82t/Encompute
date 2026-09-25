@@ -13,6 +13,8 @@ members = [
     "crates/encompute-tfhe-client",
     "crates/encompute-verification",
     "crates/encompute-vfhe",
+    "crates/encompute-attestation",
+    "crates/encompute-keybroker",
     "crates/encompute-evaluator",
     "crates/encompute-runtime",
     "crates/encompute-cli",
@@ -30,6 +32,8 @@ default-members = [
     "crates/encompute-tfhe",
     "crates/encompute-tfhe-client",
     "crates/encompute-verification",
+    "crates/encompute-attestation",
+    "crates/encompute-keybroker",
     "crates/encompute-evaluator",
     "crates/encompute-runtime",
     "crates/encompute-cli",
@@ -54,6 +58,8 @@ encompute-tfhe = { path = "crates/encompute-tfhe" }
 encompute-tfhe-client = { path = "crates/encompute-tfhe-client" }
 encompute-verification = { path = "crates/encompute-verification" }
 encompute-vfhe = { path = "crates/encompute-vfhe" }
+encompute-attestation = { path = "crates/encompute-attestation" }
+encompute-keybroker = { path = "crates/encompute-keybroker" }
 encompute-evaluator = { path = "crates/encompute-evaluator" }
 encompute-runtime = { path = "crates/encompute-runtime" }
 serde = { version = "1.0", features = ["derive"] }

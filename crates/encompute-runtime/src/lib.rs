@@ -3,6 +3,7 @@
 //! writes compiled artifacts.
 
 mod artifact;
+pub mod attested;
 pub mod audit;
 mod client;
 mod diff;
@@ -17,9 +18,11 @@ pub use diff::{
     diff_test, sample_inputs, DiffReport, ExactOutput, ExactReport, FailingCase, OutputError,
     TestReport,
 };
+pub use encompute_attestation as attestation;
 pub use encompute_evaluator::{
     BackendKind, Backends, CompiledProgram, EvaluatorSession, ExactProgram, Ids, Semantics,
 };
+pub use encompute_keybroker as keybroker;
 pub use encompute_verification as verification;
 pub use explain::Measurement;
 pub use model::{has_openfhe, has_tfhe, BenchDetail, BenchReport, Mode, Model};

@@ -1,0 +1,8 @@
+# Builds the workload image natively on Cloud Build (see deploy.sh).
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: [build, --build-arg, "VARIANT=${_VARIANT}", -f, deploy/confidential-space/Dockerfile, -t, "${_IMAGE}", .]
+images: ["${_IMAGE}"]
+options:
+  machineType: E2_HIGHCPU_8
+timeout: 3600s

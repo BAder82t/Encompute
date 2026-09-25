@@ -337,3 +337,186 @@ output "gradient" = %2
     assert_eq!(code, 2);
     assert!(err.contains("ENC1905"), "{err}");
 }
+
+#[test]
+fn attestation_and_key_release() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-attest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(
+        p("m.eir"),
+        "encompute 0.1\nprogram m precision 0.01\n%0 = input \"x\" [-1.0, 1.0] : secret scalar\n\
+         output \"y\" = %0\n",
+    )
+    .unwrap();
+    let ok = |args: &[&str]| {
+        let (code, out, err) = encompute(args);
+        assert_eq!(code, 0, "{args:?}: {out}{err}");
+        out
+    };
+    ok(&["compile", &p("m.eir"), "-o", &p("m.encompute")]);
+    let root = ok(&["attest", "mock-root", &p("hw.seed")])
+        .trim()
+        .to_owned();
+    let image = format!("sha256:{}", "7".repeat(64));
+    let policy = ok(&[
+        "attest",
+        "policy",
+        &p("m.encompute"),
+        "--backend",
+        "mock",
+        "--image",
+        &image,
+        "--tee",
+        "mock",
+        "--development",
+    ]);
+    std::fs::write(p("policy.json"), &policy).unwrap();
+    // Production policies cannot name the mock TEE.
+    let (code, _, err) = encompute(&[
+        "attest",
+        "policy",
+        &p("m.encompute"),
+        "--image",
+        &image,
+        "--tee",
+        "mock",
+    ]);
+    assert_ne!(code, 0);
+    assert!(err.contains("ENC2002"), "{err}");
+    let key = "k".repeat(32);
+    std::fs::write(p("asset.key"), &key).unwrap();
+    ok(&[
+        "keys",
+        "protect",
+        "--asset",
+        "weights",
+        "--policy",
+        &p("policy.json"),
+        "--key-file",
+        &p("asset.key"),
+        "--broker-id",
+        "modelco",
+        "--development",
+        "--broker",
+        &p("b.json"),
+    ]);
+    let attest = |image: &str, out: &str| {
+        let c = ok(&["keys", "challenge", "--broker", &p("b.json")]);
+        std::fs::write(p("c.json"), c).unwrap();
+        ok(&[
+            "workload",
+            "attest",
+            &p("m.encompute"),
+            "--backend",
+            "mock",
+            "--challenge",
+            &p("c.json"),
+            "--identity",
+            &p("eval.id"),
+            "--attester",
+            "mock",
+            "--mock-seed",
+            &p("hw.seed"),
+            "--mock-image",
+            image,
+            "--out",
+            &p(out),
+        ]);
+    };
+    let release = |ev: &str| {
+        encompute(&[
+            "keys",
+            "release",
+            "--asset",
+            "weights",
+            "--attestation",
+            &p(ev),
+            "--mock-root",
+            &root,
+            "--broker",
+            &p("b.json"),
+            "--out",
+            &p("grant.json"),
+        ])
+    };
+    attest(&image, "ev.json");
+    let (code, out, err) = release("ev.json");
+    assert_eq!(code, 0, "{out}{err}");
+    for line in [
+        "ATTESTATION          VERIFIED",
+        "POLICY               SATISFIED",
+        "KEY RELEASE          AUTHORIZED",
+    ] {
+        assert!(out.contains(line), "{out}");
+    }
+    let hex_key: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+    let grant = std::fs::read_to_string(p("grant.json")).unwrap();
+    assert!(!out.contains(&key) && !grant.contains(&key) && !grant.contains(&hex_key));
+    // Replay.
+    let (code, out, _) = release("ev.json");
+    assert_eq!(code, 1);
+    assert!(out.contains("ENC2003"), "{out}");
+    // Another image.
+    attest("sha256:evil", "evil.json");
+    let (code, out, _) = release("evil.json");
+    assert_eq!(code, 1);
+    assert!(out.contains("POLICY               NOT SATISFIED"), "{out}");
+    // Evidence checks offline, against a policy.
+    let out = ok(&[
+        "attest",
+        "verify",
+        &p("ev.json"),
+        "--policy",
+        &p("policy.json"),
+        "--mock-root",
+        &root,
+    ]);
+    assert!(
+        out.contains("ATTESTATION VERIFIED") && out.contains("DEVELOPMENT"),
+        "{out}"
+    );
+    let (code, out, _) = encompute(&[
+        "attest",
+        "verify",
+        &p("evil.json"),
+        "--policy",
+        &p("policy.json"),
+        "--mock-root",
+        &root,
+    ]);
+    assert_eq!(code, 1);
+    assert!(out.contains("ATTESTATION REJECTED"), "{out}");
+    // Revoked.
+    ok(&[
+        "keys",
+        "revoke",
+        "--asset",
+        "weights",
+        "--broker",
+        &p("b.json"),
+    ]);
+    attest(&image, "ev2.json");
+    let (code, out, _) = release("ev2.json");
+    assert_eq!(code, 1);
+    assert!(out.contains("revoked"), "{out}");
+    ok(&[
+        "keys",
+        "rotate",
+        "--asset",
+        "weights",
+        "--broker",
+        &p("b.json"),
+    ]);
+    attest(&image, "ev3.json");
+    assert_eq!(release("ev3.json").0, 0);
+    // The broker file is the owner's alone.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(p("b.json")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

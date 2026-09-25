@@ -89,6 +89,7 @@ fn respond(
         request,
         &response,
         proof.as_ref(),
+        None,
         &s.signer,
     )
     .unwrap();

@@ -41,6 +41,14 @@ scope.
   into the execution spec; they state which party may learn which value.
   They are not yet enforced at run time: today the client that holds the
   key decrypts every output it receives.
+- Asset keys held by a key broker (ADR-011) are released only to a workload
+  whose fresh hardware attestation binds the approved execution spec,
+  policy, artifact, evaluator key and session key, and satisfies the
+  asset's attestation policy; they are sealed (HPKE) to the attested
+  session key. This trusts the TEE and its attestation service (for
+  Confidential Space: Google's verifier and launcher), and the reviewed
+  image: the image digest is the measurement. Development (mock) evidence
+  protects nothing and production brokers refuse it.
 - Artifacts never contain key material.
 
 ## Deployment

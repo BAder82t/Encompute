@@ -216,7 +216,7 @@ fn malformed_receipts_are_refused() {
         ("empty", vec![]),
         (
             "unknown version",
-            text.replace("\"version\":2", "\"version\":3").into_bytes(),
+            text.replace("\"version\":3", "\"version\":4").into_bytes(),
         ),
         (
             "unknown field",

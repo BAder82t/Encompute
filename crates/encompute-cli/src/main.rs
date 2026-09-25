@@ -1,5 +1,7 @@
 //! `encompute` command-line tool.
 
+mod attest;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -105,8 +107,27 @@ enum Cmd {
         /// Your evaluation keys (`eval.keys`), needed to verify a proof.
         #[arg(long)]
         evaluation_keys: Option<PathBuf>,
+        /// The attestation record the receipt binds (from the evaluator's
+        /// `/v1/attestation`).
+        #[arg(long)]
+        attestation: Option<PathBuf>,
+        /// The attestation policy the workload must satisfy.
+        #[arg(long)]
+        attestation_policy: Option<PathBuf>,
+        #[command(flatten)]
+        trust: attest::TrustArgs,
     },
-    /// Manage client keys.
+    /// Verify workload attestation evidence; write attestation policies.
+    Attest {
+        #[command(subcommand)]
+        cmd: attest::AttestCmd,
+    },
+    /// Inside a TEE: attest and receive asset keys from key brokers.
+    Workload {
+        #[command(subcommand)]
+        cmd: attest::WorkloadCmd,
+    },
+    /// Manage client keys, and protect asset keys in a key broker.
     Keys {
         #[command(subcommand)]
         cmd: KeysCmd,
@@ -187,6 +208,8 @@ enum KeysCmd {
         #[arg(long, default_value = "encrypted")]
         mode: String,
     },
+    #[command(flatten)]
+    Broker(attest::BrokerCmd),
 }
 
 fn main() -> ExitCode {
@@ -389,6 +412,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             backend,
             proof,
             evaluation_keys,
+            attestation,
+            attestation_policy,
+            trust,
         } => verify(
             &receipt,
             model.as_deref(),
@@ -398,7 +424,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
             backend.as_deref(),
             proof.as_deref(),
             evaluation_keys.as_deref(),
+            Attested {
+                record: attestation.as_deref(),
+                policy: attestation_policy.as_deref(),
+                trust: &trust,
+            },
         ),
+        Cmd::Attest { cmd } => attest::attest(cmd),
+        Cmd::Workload { cmd } => attest::workload(cmd),
+        Cmd::Keys {
+            cmd: KeysCmd::Broker(cmd),
+        } => attest::broker(cmd),
         Cmd::Keys {
             cmd:
                 KeysCmd::Generate {
@@ -581,6 +617,13 @@ fn short(s: &str) -> &str {
     s.char_indices().nth(16).map_or(s, |(i, _)| &s[..i])
 }
 
+/// `verify`'s attestation flags.
+struct Attested<'a> {
+    record: Option<&'a Path>,
+    policy: Option<&'a Path>,
+    trust: &'a attest::TrustArgs,
+}
+
 // One parameter per command-line flag.
 #[allow(clippy::too_many_arguments)]
 fn verify(
@@ -592,6 +635,7 @@ fn verify(
     backend: Option<&str>,
     proof: Option<&Path>,
     evaluation_keys: Option<&Path>,
+    attested: Attested<'_>,
 ) -> Result<ExitCode> {
     let read = |p: &Path| {
         std::fs::read(p).map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", p.display())))
@@ -790,7 +834,70 @@ fn verify(
         }
         Some(Err(e)) => println!("  {:<16}INVALID: {}", "Status", e.message),
     }
+    section("Workload attestation");
+    let attestation = match (&r.attestation, attested.record, attested.policy) {
+        (None, None, _) => {
+            println!("  {:<16}NOT ATTESTED (no attested workload)", "Status");
+            None
+        }
+        (Some(a), None, _) => {
+            println!("  {:<16}{}", "Session", short(&a.workload_session_id));
+            println!(
+                "  {:<16}NOT CHECKED (needs --attestation and --attestation-policy)",
+                "Status"
+            );
+            None
+        }
+        (_, Some(_), None) => {
+            return Err(Error::new(
+                Code::WorkloadPolicy,
+                "--attestation needs --attestation-policy",
+            ))
+        }
+        (_, Some(rec), Some(pol)) => {
+            let record = encompute_runtime::attestation::AttestationRecord::from_bytes(
+                &std::fs::read(rec)
+                    .map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", rec.display())))?,
+            )?;
+            let policy: encompute_runtime::attestation::AttestationPolicy = serde_json::from_slice(
+                &std::fs::read(pol)
+                    .map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", pol.display())))?,
+            )
+            .map_err(|e| Error::new(Code::WorkloadPolicy, format!("{}: {e}", pol.display())))?;
+            let verifier = attested.trust.verifier(None)?;
+            Some(encompute_runtime::attested::verify_receipt_attestation(
+                &signed, &record, &verifier, &policy,
+            ))
+        }
+    };
+    match &attestation {
+        Some(Ok(w)) => {
+            println!("  {:<16}{}", "Provider", w.provider);
+            println!("  {:<16}{}", "TEE", w.tee_kind);
+            println!(
+                "  {:<16}{}",
+                "Image",
+                w.image_digest.as_deref().unwrap_or("(none)")
+            );
+            println!(
+                "  {:<16}{}",
+                "Session",
+                short(&encompute_runtime::attestation::WorkloadSession::session_id_of(&w.binding)?)
+            );
+            println!("  {:<16}VALID", "Status");
+        }
+        Some(Err(e)) => {
+            println!("  {:<16}INVALID: {}", "Status", e.message);
+            if result.is_ok() {
+                result = Err(e.clone());
+            }
+        }
+        None => {}
+    }
     section("Receipt");
+    if matches!(attestation, Some(Ok(_))) && result.is_ok() {
+        println!("WORKLOAD ATTESTATION VALID");
+    }
     match (result, proof_state) {
         (Ok(()), Some(Ok((VerificationState::ExecutionVerified(_), _)))) => {
             println!("RECEIPT VERIFIED");

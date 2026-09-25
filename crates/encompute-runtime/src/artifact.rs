@@ -356,6 +356,12 @@ impl Model {
         encompute_evaluator::transcript_for(self.compiled(), &self.target_spec())
     }
 
+    /// SHA-256 (hex) of the artifact's `manifest.json`, which hashes every
+    /// other file: the artifact digest an attested workload binds.
+    pub fn artifact_digest(&self) -> String {
+        sha256(self.manifest_json(&self.artifact_files()).as_bytes())
+    }
+
     /// Canonical `manifest.json` for these file contents.
     fn manifest_json(&self, files: &BTreeMap<&'static str, String>) -> String {
         let c = self.compiled();

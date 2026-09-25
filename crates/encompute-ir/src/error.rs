@@ -66,6 +66,18 @@ pub enum Code {
     AggregationRequired,
     /// Confidentiality declarations are malformed (ENC1906).
     PolicyDeclaration,
+    /// Attestation evidence is malformed, forged, tampered with, from an
+    /// unknown provider, or does not bind the claimed workload (ENC2001).
+    Attestation,
+    /// A verified workload does not satisfy the attestation policy: wrong
+    /// image, TEE, TCB, debug state, execution spec or policy (ENC2002).
+    WorkloadPolicy,
+    /// Attestation evidence or a challenge is stale, expired, unknown or
+    /// replayed (ENC2003).
+    Freshness,
+    /// A key release was refused: unknown asset or session, revoked key, or
+    /// a grant that does not belong to this session (ENC2004).
+    KeyRelease,
 }
 
 impl Code {
@@ -100,13 +112,17 @@ impl Code {
             Code::Declassification => "ENC1904",
             Code::AggregationRequired => "ENC1905",
             Code::PolicyDeclaration => "ENC1906",
+            Code::Attestation => "ENC2001",
+            Code::WorkloadPolicy => "ENC2002",
+            Code::Freshness => "ENC2003",
+            Code::KeyRelease => "ENC2004",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 29] = [
+    pub const ALL: [Code; 33] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -136,6 +152,10 @@ impl Code {
         Code::Declassification,
         Code::AggregationRequired,
         Code::PolicyDeclaration,
+        Code::Attestation,
+        Code::WorkloadPolicy,
+        Code::Freshness,
+        Code::KeyRelease,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

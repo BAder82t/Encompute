@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Attested confidential compute
+
+- **Policy-gated key release** (ADR-011). Asset keys are released only to a
+  workload whose fresh hardware attestation binds the approved execution
+  spec, `PolicyId`, artifact digest, evaluator receipt key and an ephemeral
+  session key, and satisfies the asset's `AttestationPolicy` (TEE, image
+  digest, debug, TCB, GPU). Keys travel as HPKE grants sealed to the
+  attested session; the host relaying them cannot open them.
+- **`encompute-attestation`**: provider-neutral `VerifiedWorkload` claims,
+  `WorkloadBinding`, single-use challenges, `AttestationPolicy`. Providers:
+  Google Confidential Space (OIDC tokens verified against Google's JWKS)
+  and a development-only mock that production policies and brokers refuse.
+- **`encompute-keybroker`**: challenges, attested sessions, release,
+  rotation and revocation; HTTP server and client; workload-side
+  `acquire_keys`.
+- **Receipts bind the attested session** (receipt version 3: optional
+  `attestation` with the record ID and session ID). `encompute-evaluator
+  serve --attestation FILE`, `GET /v1/attestation`, and `encompute verify
+  --attestation … --attestation-policy …` check the chain attestation →
+  evaluator key → receipt.
+- CLI: `encompute attest verify|policy|mock-root`, `encompute keys
+  protect|challenge|release|rotate|revoke|serve`, `encompute workload
+  keys|attest`. Errors ENC2001–ENC2004.
+- `deploy/confidential-space/`: image, entrypoint and deploy script for the
+  real Confidential Space run.
+
 ### Confidentiality IR
 
 - **Parties, assets and policies** in the IR (ADR-010): owners, readers,
