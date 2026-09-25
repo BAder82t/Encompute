@@ -30,7 +30,7 @@ pub use backend::{
     ExecutionStatement, NoProofBackend, PublicValue, StatementShape, VerificationBackend,
     VerificationCapabilities, STATEMENT_VERSION,
 };
-pub use hash::{output_commitment, request_commitment, Digest32};
+pub use hash::{hex, output_commitment, request_commitment, unhex, Digest32};
 pub use identity::{EvaluatorIdentity, EvaluatorSigner};
 pub use proof::{
     verify_execution, CiphertextBinding, ExecutionProof, ExecutionVerified, ProofHeader,

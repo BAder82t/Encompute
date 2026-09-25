@@ -24,11 +24,13 @@ pub(crate) fn tagged(domain: &str, bytes: &[u8]) -> Digest32 {
     h.finalize().into()
 }
 
-pub(crate) fn hex(d: &[u8]) -> String {
+/// Lowercase hex.
+pub fn hex(d: &[u8]) -> String {
     d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
+/// Strict lowercase hex; `None` for anything else.
+pub fn unhex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2)
         || !s
             .bytes()

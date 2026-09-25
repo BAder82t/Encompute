@@ -271,27 +271,22 @@ impl AggregationSpec {
         self.plan
             .codec
             .check_overflow(self.plan.participants.len())?;
-        self.params("0".repeat(64)).validate()
+        self.params("0".repeat(64))?.validate()
     }
 
-    fn params(&self, round_id: String) -> ProtocolParams {
-        ProtocolParams {
+    fn params(&self, round_id: String) -> Result<ProtocolParams> {
+        Ok(ProtocolParams {
             round_id,
             parties: self
                 .parties
                 .iter()
-                .map(|p| {
-                    (
-                        p.party.clone(),
-                        unhex32(&p.public_key, "key").unwrap_or([0; 32]),
-                    )
-                })
-                .collect(),
+                .map(|p| Ok((p.party.clone(), unhex32(&p.public_key, "party key")?)))
+                .collect::<Result<_>>()?,
             threshold: self.threshold,
             max_colluding: self.plan.colluding,
             vector_len: self.plan.vector_len,
             modulus_bits: self.plan.codec.modulus_bits,
-        }
+        })
     }
 
     /// Why `other` is not this spec, field by field (for errors).
@@ -433,7 +428,7 @@ impl RoundParticipant {
         let codec = &approved.plan.codec;
         let encoded: Vec<u64> = values.iter().map(|&x| codec.encode(x)).collect();
         let protocol = Participant::new(
-            approved.params(round.id()?),
+            approved.params(round.id()?)?,
             party.clone(),
             identity.clone(),
             encoded,
@@ -617,7 +612,7 @@ impl RoundCoordinator {
             ));
         }
         let round = AggregationRound::new(&spec, sequence, &key, now)?;
-        let protocol = Coordinator::new(spec.params(round.id()?))?;
+        let protocol = Coordinator::new(spec.params(round.id()?)?)?;
         Ok(Self {
             spec,
             round,
@@ -928,7 +923,7 @@ pub fn verify_aggregation_receipt(
     if m.codec_id != codec_id(&plan.codec)? {
         return Err(binding("the receipt's codec ID differs from the spec"));
     }
-    let params = spec.params(m.round_id.clone());
+    let params = spec.params(m.round_id.clone())?;
     let contributors: BTreeSet<&PartyId> = m.contributors.iter().collect();
     if m.contributors.len() < plan.minimum || m.contributors.len() < spec.threshold {
         return Err(Error::new(

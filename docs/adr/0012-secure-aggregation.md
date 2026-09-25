@@ -162,8 +162,14 @@ gradient, and the coordinator learns only the sum.
 | Malicious participant | Cannot learn others' inputs. It can bias the aggregate (no input validation or poisoning defence) or abort by revealing bad shares; attestation (8) limits who may contribute. |
 | Colluding participants (without the coordinator) | Learn nothing beyond the aggregate. |
 | Participant dropout | Tolerated down to t survivors at every stage; below that the round aborts and nothing is released. |
-| Replay attacker | Messages and contributions are bound to the round ID and signed; parties refuse rounds not newer than the last they joined (the CLI's required `--state`; library callers must persist it). |
+| Replay attacker | Messages and contributions are bound to the round ID and signed; parties refuse rounds not newer than the last they joined (the CLI's required `--state`; library callers must persist it). The state is recorded before contributing, so a failed round cannot be rejoined: rerunning a round with different survivors would let a coordinator subtract two aggregates and recover a party's vector. Recovery is a new round. |
 | Cloud operator | Same as the coordinator, or as the network: messages are signed, and shares are encrypted end to end between parties. |
+
+Contributing the same vector to several rounds with different participant
+sets has the same effect as a differencing attack: the difference of two
+aggregates can isolate one party's vector. Parties should not resubmit an
+unchanged vector to a new round with a different participant set. Limiting
+this is part of privacy accounting.
 
 Secure aggregation hides individual contributions. It does **not** limit
 what the aggregate reveals: with three hospitals, the sum and two gradients

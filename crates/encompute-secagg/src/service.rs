@@ -32,8 +32,6 @@ use crate::round::{
     RoundParticipant,
 };
 
-const MAX_BODY: u64 = 64 << 20;
-
 /// Protocol messages accepted per source address per minute.
 pub const POSTS_PER_MINUTE: u32 = 600;
 
@@ -81,7 +79,8 @@ impl From<&Error> for ErrorBody {
 }
 
 struct State {
-    coord: RoundCoordinator,
+    /// `None` while a stage closes: the work runs outside the lock.
+    coord: Option<RoundCoordinator>,
     stage: RoundStage,
     since: Instant,
     keys: Option<KeysBroadcast>,
@@ -99,10 +98,16 @@ pub struct CoordinatorService {
     state: Arc<Mutex<State>>,
     stage_timeout: Duration,
     offer: Arc<RoundOffer>,
+    /// Largest message accepted, from the spec: a masked vector of
+    /// `vector_len` decimal u64s, per-party shares, an attestation record.
+    max_body: u64,
 }
 
 impl CoordinatorService {
     pub fn new(coord: RoundCoordinator, stage_timeout: Duration) -> Result<Self> {
+        let plan = &coord.spec.plan;
+        let max_body =
+            256 * 1024 + plan.vector_len as u64 * 24 + plan.participants.len() as u64 * 1024;
         let offer = RoundOffer {
             spec: coord.spec.clone(),
             round: coord.round.clone(),
@@ -110,7 +115,7 @@ impl CoordinatorService {
         };
         Ok(Self {
             state: Arc::new(Mutex::new(State {
-                coord,
+                coord: Some(coord),
                 stage: RoundStage::Advertise,
                 since: Instant::now(),
                 keys: None,
@@ -123,6 +128,7 @@ impl CoordinatorService {
             })),
             stage_timeout,
             offer: Arc::new(offer),
+            max_body,
         })
     }
 
@@ -130,63 +136,86 @@ impl CoordinatorService {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Closes the current stage if everyone answered or it timed out.
+    /// Closes the current stage if everyone answered or it timed out. The
+    /// closing work (signature checks, reconstruction) runs outside the
+    /// lock; messages arriving meanwhile are late and refused.
     pub fn tick(&self) {
-        let mut s = self.lock();
-        if matches!(s.stage, RoundStage::Done | RoundStage::Aborted) {
-            return;
-        }
-        if !s.coord.awaiting().is_empty() && s.since.elapsed() < self.stage_timeout {
-            return;
-        }
-        let st = &mut *s;
-        let r: Result<RoundStage> = (|| {
-            Ok(match st.stage {
-                RoundStage::Advertise => {
-                    st.keys = Some(st.coord.close_advertise()?);
-                    RoundStage::ShareKeys
-                }
-                RoundStage::ShareKeys => {
-                    st.inboxes = Some(st.coord.close_shares()?);
-                    RoundStage::MaskedInput
-                }
-                RoundStage::MaskedInput => {
-                    st.survivors = Some(st.coord.close_masked()?);
-                    RoundStage::Consistency
-                }
-                RoundStage::Consistency => {
-                    st.unmask = Some(st.coord.close_consistency()?);
-                    RoundStage::Unmask
-                }
-                RoundStage::Unmask => {
-                    let (a, r) = st.coord.finalize()?;
-                    st.aggregate = Some(a);
-                    st.receipt = Some(r);
-                    RoundStage::Done
-                }
-                done => done,
-            })
-        })();
-        match r {
-            Ok(next) => st.stage = next,
-            Err(e) => {
-                st.error = Some(e);
-                st.stage = RoundStage::Aborted;
+        let (mut coord, stage) = {
+            let mut s = self.lock();
+            if matches!(s.stage, RoundStage::Done | RoundStage::Aborted) {
+                return;
             }
+            let Some(c) = s.coord.as_ref() else {
+                return; // another tick is closing the stage
+            };
+            if !c.awaiting().is_empty() && s.since.elapsed() < self.stage_timeout {
+                return;
+            }
+            (s.coord.take().expect("checked"), s.stage)
+        };
+        enum Out {
+            Keys(KeysBroadcast),
+            Inboxes(BTreeMap<PartyId, Inbox>),
+            Survivors(Survivors),
+            Unmask(UnmaskRequest),
+            Done(Box<(AggregateAsset, AggregationReceipt)>),
         }
-        st.since = Instant::now();
+        let r: Result<Out> = match stage {
+            RoundStage::Advertise => coord.close_advertise().map(Out::Keys),
+            RoundStage::ShareKeys => coord.close_shares().map(Out::Inboxes),
+            RoundStage::MaskedInput => coord.close_masked().map(Out::Survivors),
+            RoundStage::Consistency => coord.close_consistency().map(Out::Unmask),
+            RoundStage::Unmask => coord.finalize().map(|x| Out::Done(Box::new(x))),
+            RoundStage::Done | RoundStage::Aborted => unreachable!("checked above"),
+        };
+        let mut s = self.lock();
+        s.coord = Some(coord);
+        s.stage = match r {
+            Ok(Out::Keys(k)) => {
+                s.keys = Some(k);
+                RoundStage::ShareKeys
+            }
+            Ok(Out::Inboxes(i)) => {
+                s.inboxes = Some(i);
+                RoundStage::MaskedInput
+            }
+            Ok(Out::Survivors(v)) => {
+                s.survivors = Some(v);
+                RoundStage::Consistency
+            }
+            Ok(Out::Unmask(u)) => {
+                s.unmask = Some(u);
+                RoundStage::Unmask
+            }
+            Ok(Out::Done(d)) => {
+                let (a, r) = *d;
+                s.aggregate = Some(a);
+                s.receipt = Some(r);
+                RoundStage::Done
+            }
+            Err(e) => {
+                s.error = Some(e);
+                RoundStage::Aborted
+            }
+        };
+        s.since = Instant::now();
     }
 
     pub fn status(&self) -> Status {
         let s = self.lock();
         Status {
             stage: s.stage,
-            awaiting: s.coord.awaiting().into_iter().collect(),
+            awaiting: s
+                .coord
+                .as_ref()
+                .map(|c| c.awaiting().into_iter().collect())
+                .unwrap_or_default(),
             error: s.error.as_ref().map(ErrorBody::from),
         }
     }
 
-    /// Ticks until the round ends; returns the aggregate and receipt.
+    /// Ticks until the round ends; returns the aggregate and receipt. Pair
+    /// with [`Self::spawn`], which serves messages but never ticks.
     pub fn run_to_completion(&self) -> Result<(AggregateAsset, AggregationReceipt)> {
         loop {
             self.tick();
@@ -214,15 +243,35 @@ impl CoordinatorService {
                 format!("malformed {what} message: {e}"),
             )
         };
+        // Parse before taking the lock.
+        enum Msg {
+            Join(Box<crate::round::Join>),
+            Shares(crate::protocol::Signed<crate::protocol::SharesBody>),
+            Masked(crate::protocol::Masked),
+            Consistency(crate::protocol::Signed<crate::protocol::ConsistencyBody>),
+            Reveal(crate::protocol::Signed<crate::protocol::RevealBody>),
+        }
+        let msg = match what {
+            "join" => Msg::Join(Box::new(serde_json::from_slice(body).map_err(parse)?)),
+            "shares" => Msg::Shares(serde_json::from_slice(body).map_err(parse)?),
+            "masked" => Msg::Masked(serde_json::from_slice(body).map_err(parse)?),
+            "consistency" => Msg::Consistency(serde_json::from_slice(body).map_err(parse)?),
+            "reveal" => Msg::Reveal(serde_json::from_slice(body).map_err(parse)?),
+            _ => return Err(Error::new(Code::Remote, format!("no such message {what}"))),
+        };
         let mut s = self.lock();
-        let c = &mut s.coord;
-        match what {
-            "join" => c.receive_advertise(serde_json::from_slice(body).map_err(parse)?),
-            "shares" => c.receive_shares(serde_json::from_slice(body).map_err(parse)?),
-            "masked" => c.receive_masked(serde_json::from_slice(body).map_err(parse)?),
-            "consistency" => c.receive_consistency(serde_json::from_slice(body).map_err(parse)?),
-            "reveal" => c.receive_reveal(serde_json::from_slice(body).map_err(parse)?),
-            _ => Err(Error::new(Code::Remote, format!("no such message {what}"))),
+        let c = s.coord.as_mut().ok_or_else(|| {
+            Error::new(
+                Code::AggregationProtocol,
+                "the stage is closing: this message is late",
+            )
+        })?;
+        match msg {
+            Msg::Join(m) => c.receive_advertise(*m),
+            Msg::Shares(m) => c.receive_shares(m),
+            Msg::Masked(m) => c.receive_masked(m),
+            Msg::Consistency(m) => c.receive_consistency(m),
+            Msg::Reveal(m) => c.receive_reveal(m),
         }
     }
 
@@ -288,6 +337,9 @@ impl CoordinatorService {
     /// Serves HTTP on `server` from a background thread. Messages (POSTs)
     /// are limited to [`POSTS_PER_MINUTE`] per source address; a party
     /// sends five per round.
+    ///
+    /// Serving does not advance the round: something must call
+    /// [`Self::tick`] (or [`Self::run_to_completion`]).
     pub fn spawn(&self, server: tiny_http::Server) {
         let me = self.clone();
         std::thread::spawn(move || {
@@ -318,15 +370,15 @@ impl CoordinatorService {
                 }
                 let path = req.url().split('?').next().unwrap_or("").to_owned();
                 let mut body = Vec::new();
-                let (status, out) = match req.as_reader().take(MAX_BODY + 1).read_to_end(&mut body)
-                {
-                    Ok(_) if body.len() as u64 > MAX_BODY => (
-                        413,
-                        json!({"code": "ENC1701", "message": "body too large"}).to_string(),
-                    ),
-                    Ok(_) => me.handle(&method, &path, &body),
-                    Err(_) => (400, "{}".into()),
-                };
+                let (status, out) =
+                    match req.as_reader().take(me.max_body + 1).read_to_end(&mut body) {
+                        Ok(_) if body.len() as u64 > me.max_body => (
+                            413,
+                            json!({"code": "ENC1701", "message": "body too large"}).to_string(),
+                        ),
+                        Ok(_) => me.handle(&method, &path, &body),
+                        Err(_) => (400, "{}".into()),
+                    };
                 let h = tiny_http::Header::from_bytes("Content-Type", "application/json")
                     .expect("header");
                 let _ = req.respond(

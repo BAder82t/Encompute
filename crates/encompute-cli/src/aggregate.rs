@@ -142,7 +142,7 @@ pub enum AggregateCmd {
         /// dropped.
         #[arg(long, default_value_t = 60)]
         stage_timeout: u64,
-        #[arg(long, default_value = "aggregate.json")]
+        #[arg(short, long, default_value = "aggregate.json")]
         out: PathBuf,
         #[arg(long, default_value = "aggregation-receipt.json")]
         receipt: PathBuf,
@@ -162,8 +162,12 @@ pub enum AggregateCmd {
         /// JSON array of numbers: this party's contribution.
         #[arg(long)]
         values: PathBuf,
-        /// Records the last round joined, refusing older or repeated ones
-        /// (replay protection: keep it across runs).
+        /// Records the last round joined and refuses older or repeated
+        /// ones: keep it across runs. It is written before contributing, so
+        /// a round that fails midway cannot be rejoined; the coordinator
+        /// starts a new round (higher --sequence) instead. Rerunning a round
+        /// with different survivors would let a coordinator subtract two
+        /// aggregates and recover this party's vector.
         #[arg(long)]
         state: PathBuf,
         /// Attestation record of the workload holding the party key.

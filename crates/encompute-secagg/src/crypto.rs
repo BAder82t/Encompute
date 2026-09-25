@@ -17,26 +17,10 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use encompute_ir::{Code, Error, Result};
+pub(crate) use encompute_verification::{hex, unhex};
 
 pub(crate) fn protocol_err(m: impl Into<String>) -> Error {
     Error::new(Code::AggregationProtocol, m)
-}
-
-pub(crate) fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2)
-        || !s
-            .bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-    {
-        return None;
-    }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok())
-        .collect()
 }
 
 pub(crate) fn unhex32(s: &str, what: &str) -> Result<[u8; 32]> {

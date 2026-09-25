@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Attested key release, locally, with the development-only mock TEE
 # (ADR-011). Hospital and ModelCo each run a key broker; the approved
 # workload receives both keys and serves with attested receipts; a modified
@@ -11,6 +11,8 @@ BIN="${BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug}"
 E="$BIN/encompute"
 W="$(mktemp -d)"
 cd "$W"
+# Wait until an HTTP server answers (up to 20 s).
+ready() { for _ in $(seq 100); do curl -s -o /dev/null "$1" && return 0; sleep 0.2; done; echo "$1 did not start" >&2; exit 1; }
 trap 'kill $(jobs -p) 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$W"' EXIT
 
 cat > step.eir <<'EIR'
@@ -29,7 +31,7 @@ output "gradient" = %2
 EIR
 "$E" compile step.eir -o step.encompute > /dev/null
 ROOT=$("$E" attest mock-root hw.seed 2>/dev/null)
-IMAGE="sha256:$(printf approved | shasum -a 256 | cut -c1-64)"
+IMAGE="sha256:$(printf approved | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-64)"
 
 echo "== Owners approve this artifact, on this image, in the (mock) TEE"
 "$E" attest policy step.encompute --backend mock --image "$IMAGE" --tee mock --development > policy.json
@@ -37,7 +39,9 @@ echo "== Owners approve this artifact, on this image, in the (mock) TEE"
 "$E" keys protect --asset weights --policy policy.json --broker-id modelco --development --broker modelco.json
 "$E" keys serve --broker hospital.json --listen 127.0.0.1:18761 --mock-root "$ROOT" 2> /dev/null &
 "$E" keys serve --broker modelco.json --listen 127.0.0.1:18762 --mock-root "$ROOT" 2> /dev/null &
-sleep 1
+# Brokers answer only POST; any HTTP reply means they are up.
+ready http://127.0.0.1:18761/
+ready http://127.0.0.1:18762/
 KEYS="--key patients@http://127.0.0.1:18761 --key weights@http://127.0.0.1:18762"
 
 echo; echo "== A modified workload asks for the keys"
@@ -54,7 +58,7 @@ echo; echo "== The approved workload attests and receives both keys"
   --attester mock --mock-seed hw.seed --mock-image "$IMAGE" --record attestation.json
 "$BIN/encompute-evaluator" serve step.encompute --backend mock --listen 127.0.0.1:18763 \
   --identity eval.id --attestation attestation.json 2> /dev/null &
-sleep 1
+ready http://127.0.0.1:18763/v1/info
 
 echo; echo "== A client runs it and checks the attested receipt"
 "$E" keys generate step.encompute -o client.keys --mode mock > /dev/null

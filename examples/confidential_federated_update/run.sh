@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Secure aggregation, locally (ADR-012): Hospitals A, B and C each hold a
 # private gradient (4096 values, aggregate-only); the coordinator learns
 # only their sum. Hospital D, not in the consortium, is refused.
@@ -9,6 +9,8 @@ set -eu
 E="${BIN:-$(cd "$(dirname "$0")/../.." && pwd)/target/debug}/encompute"
 W="$(mktemp -d)"
 cd "$W"
+# Wait until an HTTP server answers (up to 20 s).
+ready() { for _ in $(seq 100); do curl -s -o /dev/null "$1" && return 0; sleep 0.2; done; echo "$1 did not start" >&2; exit 1; }
 trap 'kill $(jobs -p) 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$W"' EXIT
 
 python3 - <<'PY'
@@ -42,7 +44,8 @@ python3 -c "import json;print(json.dumps([json.loads(l) for l in open('parties.j
 
 "$E" aggregate serve fedavg.encompute --parties parties.json --key coordinator.key \
   --listen 127.0.0.1:18770 --stage-timeout 20 > coordinator.log 2>&1 &
-sleep 1
+coordinator=$!
+ready http://127.0.0.1:18770/v1/round
 echo; echo "== Hospital D (not in the consortium) tries to join"
 "$E" aggregate identity --party hospital-d --key d.key > /dev/null
 if "$E" aggregate join fedavg.encompute --parties parties.json --coordinator http://127.0.0.1:18770 \
@@ -54,10 +57,11 @@ echo; echo "== Hospitals A, B and C contribute"
 for x in a b c; do
   "$E" aggregate join fedavg.encompute --parties parties.json --coordinator http://127.0.0.1:18770 \
     --party "hospital-$x" --key "$x.key" --values "gradient-$x.json" --state "$x.round" > "$x.log" 2>&1 &
+  hospitals="${hospitals:-} $!"
 done
-wait %2 %3 %4 2>/dev/null || true
+for pid in $hospitals; do wait "$pid"; done
 sed -n 1p a.log
-wait %1 2>/dev/null || true
+wait "$coordinator"
 echo; cat coordinator.log | grep -v "^aggregation round"
 
 echo; echo "== The aggregate equals the clear sum within the declared quantization"

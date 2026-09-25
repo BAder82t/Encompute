@@ -577,29 +577,40 @@ fn secure_aggregation_round() {
     std::fs::write(p("parties.json"), format!("[{}]", ids.join(","))).unwrap();
     let port = 20000 + std::process::id() % 20000;
     let url = format!("http://127.0.0.1:{port}");
-    let serve = std::process::Command::new(env!("CARGO_BIN_EXE_encompute"))
-        .args([
-            "aggregate",
-            "serve",
-            &p("f.encompute"),
-            "--parties",
-            &p("parties.json"),
-            "--key",
-            &p("coord.key"),
-            "--listen",
-            &format!("127.0.0.1:{port}"),
-            "--stage-timeout",
-            "20",
-            "--out",
-            &p("agg.json"),
-            "--receipt",
-            &p("receipt.json"),
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // A coordinator for round `sequence`, ready once it accepts connections.
+    let serve = |sequence: &str, out: &str| {
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_encompute"))
+            .args([
+                "aggregate",
+                "serve",
+                &p("f.encompute"),
+                "--parties",
+                &p("parties.json"),
+                "--key",
+                &p("coord.key"),
+                "--listen",
+                &format!("127.0.0.1:{port}"),
+                "--stage-timeout",
+                "20",
+                "--sequence",
+                sequence,
+                "--out",
+                &p(out),
+                "--receipt",
+                &p("receipt.json"),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        while std::net::TcpStream::connect(("127.0.0.1", port as u16)).is_err() {
+            assert!(start.elapsed().as_secs() < 20, "coordinator did not start");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        child
+    };
+    let coordinator = serve("1", "agg.json");
     let joins: Vec<_> = ["a", "b", "c"]
         .iter()
         .map(|x| {
@@ -634,7 +645,7 @@ fn secure_aggregation_round() {
         assert_eq!(code, 0, "{out}{err}");
         assert!(out.contains("CONTRIBUTION ACCEPTED"), "{out}");
     }
-    let o = serve.wait_with_output().unwrap();
+    let o = coordinator.wait_with_output().unwrap();
     let out = String::from_utf8_lossy(&o.stdout);
     assert!(
         o.status.success() && out.contains("AGGREGATION COMPLETE"),
@@ -654,7 +665,8 @@ fn secure_aggregation_round() {
         &p("agg.json"),
     ]);
     assert!(out.contains("AGGREGATION RECEIPT VERIFIED"), "{out}");
-    // The same party state refuses to rejoin an old round.
+    // A coordinator offering round 1 again: the party's state refuses it.
+    let mut replay = serve("1", "agg2.json");
     let (code, _, err) = encompute(&[
         "aggregate",
         "join",
@@ -674,7 +686,9 @@ fn secure_aggregation_round() {
         "--timeout",
         "2",
     ]);
+    replay.kill().unwrap();
+    let _ = replay.wait();
     assert_ne!(code, 0);
-    assert!(err.contains("ENC1701") || err.contains("ENC2102"), "{err}");
+    assert!(err.contains("ENC2102") && err.contains("replay"), "{err}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -195,7 +195,9 @@ The protocol is Bonawitz et al.'s secure aggregation (malicious-coordinator
 variant): the coordinator sees masked vectors only, even if it colludes
 with up to the declared `colluding` parties; dropouts are tolerated down to
 the threshold; every message is signed and bound to its round.
-Quantization is explicit and checked for overflow at compile time. Secure
+Quantization is explicit and checked for overflow at compile time. `--state`
+records each round a party joins; a failed round is not rejoined, but
+replaced by a new one. Secure
 aggregation hides contributions, not what the aggregate reveals: that needs
 differential privacy.
 

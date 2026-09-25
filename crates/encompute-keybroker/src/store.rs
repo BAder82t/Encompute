@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 use encompute_ir::{Code, Error, Result};
 
 use crate::KeyMaterial;
+use encompute_verification::{hex, unhex};
 
 fn err(msg: impl Into<String>) -> Error {
     Error::new(Code::KeyRelease, msg)
@@ -181,19 +182,6 @@ impl LocalKekStore {
     fn cipher(&self) -> ChaCha20Poly1305 {
         ChaCha20Poly1305::new(&(*self.kek).into())
     }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok())
-        .collect()
 }
 
 impl SecretStore for LocalKekStore {

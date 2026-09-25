@@ -17,7 +17,7 @@ use encompute_runtime::keybroker::{
     acquire_keys, BrokerClient, BrokerMode, DevelopmentFileStore, KeyBroker, KeyMaterial,
     LocalKekStore, SecretStore,
 };
-use encompute_runtime::verification::EvaluatorSigner;
+use encompute_runtime::verification::{hex, EvaluatorSigner};
 use encompute_runtime::{BackendKind, Model};
 
 use crate::{load, short};
@@ -297,10 +297,6 @@ pub fn attest(cmd: AttestCmd) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn write_private(p: &Path, bytes: &[u8]) -> Result<()> {
