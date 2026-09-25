@@ -52,3 +52,33 @@ budget); the others are CKKS noise only.
 Caveat: the 8 benchmark clients share one process, whose client-side
 OpenFHE calls (encrypt, decrypt) are also serialized. Real clients are
 separate processes, so the evaluator scales further than shown.
+
+## Exact programs on TFHE-rs (0.3 P7, research feature)
+
+Apple M3 Max, 14 cores; TFHE-rs 1.8.1, profile
+`PARAM_MESSAGE_2_CARRY_2_KS_PBS_TUNIFORM_2M128`.
+
+Keys: generation 0.9 s; compressed server key 57.4 MiB (uploaded once per
+client), decompressed on the evaluator in 0.44 s; client key 30.7 KiB.
+
+Per operation, milliseconds, median of 3
+(`cargo run --release -p encompute-tfhe-client --features tfhe-rs --example exact_ops`):
+
+| type | ciphertext | encrypt | decrypt | add | mul | mul by const | compare | compare to const | and | select | min | div by const | shift | lookup (16) | cast (widen) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| u8 | 65 KiB | 0 | 0 | 199 | 436 | 250 | 112 | 75 | 33 | 170 | 247 | 813 | 0 | 369 | 0 |
+| u16 | 129 KiB | 1 | 0 | 242 | 1132 | 335 | 182 | 87 | 150 | 271 | 167 | 1626 | 0 | 423 | 0 |
+| u32 | 258 KiB | 2 | 0 | 481 | 3957 | 692 | 265 | 204 | 154 | 485 | 736 | 3603 | 0 | 1115 | 0 |
+| u64 | 516 KiB | 4 | 1 | 1047 | 15075 | 1171 | 597 | 346 | 312 | 1017 | 1278 | 9282 | 0 | 2076 | 0 |
+| i8 | 65 KiB | 1 | 0 | 201 | 425 | 231 | 165 | 127 | 65 | 81 | 312 | 1316 | 0 | 474 | 45 |
+| i16 | 129 KiB | 1 | 0 | 296 | 1375 | 404 | 223 | 137 | 94 | 154 | 516 | 1853 | 0 | 874 | 45 |
+| i32 | 258 KiB | 2 | 0 | 641 | 4877 | 800 | 283 | 203 | 167 | 568 | 923 | 6747 | 0 | 1286 | 45 |
+| i64 | 516 KiB | 5 | 0 | 1180 | 17313 | 1429 | 571 | 311 | 314 | 1013 | 1648 | 9609 | 0 | 2293 | 0 |
+
+Shifts by a constant and widening casts of unsigned values are free
+(block moves, no bootstrap). Multiplication and division grow roughly with
+the square of the width: choose the narrowest type range analysis allows.
+
+Eligibility example end to end (`scripts/exact-demo.sh`, separate evaluator
+process, u8/u16/u32 inputs, 11 plan instructions): request 709 KiB,
+response 16 KiB, evaluation 2.1 s.
