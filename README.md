@@ -35,7 +35,12 @@ print(score.explain())                     # plan, parameters, precision, verifi
 score.save("score.encompute")              # reproducible artifact, no keys
 ```
 
-**Status: 0.3 and 0.4 in progress** (last release: v0.2.0). See the
+Across organizations, Encompute lets parties build AI together without
+revealing what each needs to keep private: confidentiality policies are
+enforced by attested key release, secure aggregation and differential
+privacy, and every step leaves verifiable evidence.
+
+**Status: unreleased work on `main`** (last release: v0.2.0). See the
 [changelog](CHANGELOG.md), [benchmarks](docs/benchmarks.md),
 [decision records](docs/adr/), [threat model](docs/threat-model.md) and
 [error codes](docs/errors.md).
@@ -48,7 +53,10 @@ score.save("score.encompute")              # reproducible artifact, no keys
 | Signed execution receipts | working, CKKS and exact |
 | Semantic transcripts (the statement a proof must satisfy) | working, exact programs |
 | Proof of correct execution | research build: re-execution proofs on OpenFHE BGV for a small exact subset (sound, not succinct) |
-| Confidentiality policies (parties, assets, purposes, release) | checked at compile time and bound into execution identity; not yet enforced at run time |
+| Confidentiality policies (parties, assets, purposes, release) | checked at compile time, bound into execution identity, and enforced at run time by the mechanisms below |
+| Attested key release (TEE attestation, policy-gated keys) | working: Google Confidential Space and a development mock; the live Confidential Space run needs a GCP project |
+| Secure aggregation (`aggregate_only`) | working: Bonawitz et al., malicious-coordinator variant, dropouts, signed aggregation receipts |
+| Differential privacy (budgets, ledger, receipts) | working: discrete Gaussian on secure aggregates, zCDP accounting, tamper-evident ledgers, owner-side enforcement |
 
 ## What Encompute does
 

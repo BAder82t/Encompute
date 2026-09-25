@@ -516,3 +516,75 @@ fn affordable(b: &encompute_ir::confidentiality::PrivacyBudget, one: f64) -> u64
     }
     n
 }
+
+impl Model {
+    /// `privacy explain --ledger`: for each budgeted asset, the budget,
+    /// what is spent and remains, and whether the next release is
+    /// permitted.
+    pub fn privacy_status(&self, dir: &std::path::Path) -> Result<String> {
+        let mut s = String::from("PRIVACY BUDGETS\n");
+        let Some(r) = analyze(self.program())? else {
+            return Ok(s + "  (none)\n");
+        };
+        for b in &r.aggregations {
+            let plan = self.aggregation_plan(Some(&b.output))?;
+            let all: Vec<_> = plan.participants.iter().map(|p| p.party.clone()).collect();
+            let Some(spec) = plan.release_spec("", None, &all)? else {
+                continue;
+            };
+            for c in &spec.charged {
+                let p = plan
+                    .participants
+                    .iter()
+                    .find(|p| p.asset == c.asset_id)
+                    .expect("plan");
+                let view = plan.ledger_view(dir, p)?.expect("budgeted");
+                let now = view.cost()?;
+                let next = spec.rho(c)?;
+                let after = view.cost_after(next)?;
+                let ok = after.epsilon <= c.budget.epsilon;
+                let _ = write!(s, "\n{}\n{}\n", c.asset_id, "─".repeat(40));
+                let row = |s: &mut String, k: &str, v: String| {
+                    let _ = writeln!(s, "  {k:<22}{v}");
+                };
+                row(&mut s, "owner", p.party.to_string());
+                row(&mut s, "unit", c.budget.unit.to_string());
+                row(&mut s, "secure aggregation", "ACTIVE".into());
+                row(&mut s, "differential privacy", "ACTIVE".into());
+                row(
+                    &mut s,
+                    "budget",
+                    format!(
+                        "epsilon {:.3}  delta {:e}",
+                        c.budget.epsilon, c.budget.delta
+                    ),
+                );
+                row(&mut s, "consumed", format!("epsilon {:.3}", now.epsilon));
+                row(
+                    &mut s,
+                    "remaining",
+                    format!("epsilon {:.3}", (c.budget.epsilon - now.epsilon).max(0.0)),
+                );
+                row(
+                    &mut s,
+                    "next release",
+                    format!(
+                        "epsilon {:.3} (after: {:.3})",
+                        after.epsilon - now.epsilon,
+                        after.epsilon
+                    ),
+                );
+                row(
+                    &mut s,
+                    "status",
+                    if ok {
+                        "PERMITTED".into()
+                    } else {
+                        "DENIED: privacy budget exceeded".into()
+                    },
+                );
+            }
+        }
+        Ok(s)
+    }
+}

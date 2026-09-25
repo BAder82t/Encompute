@@ -275,6 +275,11 @@ impl PrivacyBudget {
     }
 }
 
+/// The privacy accountant (and its version) every budget is accounted
+/// with: part of the `PrivacyPolicyId`, so a workload cannot switch
+/// accounting while claiming the approved configuration.
+pub const PRIVACY_ACCOUNTANT: &str = "zcdp-cks2020";
+
 /// Named privacy levels: a per-asset budget and the noise that goes with
 /// it, so applications can say `privacy="strong"` and `explain` shows what
 /// that means. `(name, epsilon, delta, noise_multiplier)`; the clip norm is

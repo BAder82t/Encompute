@@ -84,9 +84,10 @@ impl PolicyId {
     }
 }
 
-/// The approved privacy configuration: each asset's budget (unit, epsilon,
-/// delta) and each aggregation's mechanism (kind, clip norm, noise
-/// multiplier, and the codec it acts on). `None` without any.
+/// The approved privacy configuration: the accountant (and version), each
+/// asset's budget (unit, epsilon, delta) and each aggregation's mechanism
+/// (kind, clip norm, noise multiplier, and the codec it acts on). `None`
+/// without any.
 /// `SHA256("encompute.privacy-policy.v1" || 0x00 || canonical JSON)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PrivacyPolicyId(pub [u8; 32]);
@@ -109,6 +110,7 @@ impl PrivacyPolicyId {
         }
         #[derive(Serialize)]
         struct Canonical<'a> {
+            accountant: &'a str,
             budgets: &'a BTreeMap<&'a str, &'a encompute_ir::confidentiality::PrivacyBudget>,
             mechanisms: &'a BTreeMap<
                 &'a str,
@@ -119,6 +121,7 @@ impl PrivacyPolicyId {
             >,
         }
         let bytes = crate::canonical::canonical_json(&Canonical {
+            accountant: encompute_ir::confidentiality::PRIVACY_ACCOUNTANT,
             budgets: &budgets,
             mechanisms: &mechanisms,
         })

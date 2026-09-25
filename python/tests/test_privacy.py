@@ -56,3 +56,11 @@ def test_invalid_levels_and_parameters():
     assert code_of(lambda: DP(0, 1e-6)) == "ENC2203"
     assert code_of(lambda: DP(1.0, 1.0)) == "ENC2203"
     assert code_of(lambda: DiscreteGaussian(1.0, 0.0)) == "ENC2203"
+
+
+def test_dp_object_carries_unit_and_mechanism():
+    dp = DP(2.0, 1e-7, unit="user", clip_norm=0.5, noise_multiplier=4.0)
+    m = encompute.compile(fedavg(grads(dp, unit="record"), privacy=dp), purpose="disease-training")
+    assert 'privacy unit "user" epsilon 2.0 delta 1e-7' in m.eir
+    assert "clip_norm 0.5 noise_multiplier 4.0" in m.eir
+    assert code_of(lambda: encompute.compile(fedavg(grads(), privacy=DP(3.0, 1e-6)), purpose="disease-training")) == "ENC2203"

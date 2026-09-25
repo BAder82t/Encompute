@@ -196,8 +196,14 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum PrivacyCmd {
-    /// Parties, assets with their derived policies, flows and warnings.
-    Explain { model: PathBuf },
+    /// Parties, assets with their derived policies, flows and warnings;
+    /// with `--ledger`, each budget's spent, remaining and next release.
+    Explain {
+        model: PathBuf,
+        /// The coordinator's privacy ledger directory.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+    },
     /// The confidentiality graph (Graphviz DOT).
     Graph {
         model: PathBuf,
@@ -360,9 +366,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Privacy { cmd } => {
             let (m, out) = match cmd {
-                PrivacyCmd::Explain { model } => {
+                PrivacyCmd::Explain { model, ledger } => {
                     let m = load(&model)?;
-                    let out = m.privacy_explain()?;
+                    let mut out = m.privacy_explain()?;
+                    if let (Some(text), Some(dir)) = (out.as_mut(), ledger) {
+                        text.push('\n');
+                        text.push_str(&m.privacy_status(&dir)?);
+                    }
                     (m, out)
                 }
                 PrivacyCmd::Graph { model, format } => {

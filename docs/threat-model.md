@@ -1,4 +1,4 @@
-# Encompute threat model (v0.3)
+# Encompute threat model
 
 Also written into every artifact's `security.json`.
 
@@ -39,8 +39,10 @@ scope.
   structure, not a proof.
 - Confidentiality policies (ADR-010) are checked at compile time and bound
   into the execution spec; they state which party may learn which value.
-  They are not yet enforced at run time: today the client that holds the
-  key decrypts every output it receives.
+  In a single-client run the client that holds the key decrypts every
+  output it receives; across parties they are enforced at run time by
+  attested key release, secure aggregation and differential privacy
+  (below).
 - Asset keys held by a key broker (ADR-011) are released only to a workload
   whose fresh hardware attestation binds the approved execution spec,
   policy, artifact, evaluator key and session key, and satisfies the
@@ -104,11 +106,13 @@ Values are never revealed, including the outcome of comparisons and
 selections: both branches of a `select` are computed. Hiding the model
 itself (encrypted weights) is out of scope.
 
-## Not covered in v0.3
+## Not covered
 
 Side channels on the client; malicious-evaluator integrity outside
 verified execution (receipts bind what the evaluator claims, and an
 evaluator can sign a fabricated result: only programs compiled with
 `verification="required"`, in the research build, carry execution proofs
-that rule this out; ADR-009); key rotation, threshold decryption, and
-multi-party settings.
+that rule this out; ADR-009); FHE key rotation and threshold decryption;
+correctness of a secure aggregate (a malicious coordinator can abort or
+report a wrong aggregate, ADR-012); noise added by a coordinator that is not
+attested (central DP, ADR-013); timing side channels of noise sampling.

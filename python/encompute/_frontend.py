@@ -160,13 +160,27 @@ class DP:
     derived from it is charged, and releases over ``(epsilon, delta)`` are
     refused. Most applications use a level instead: ``privacy="strong"``."""
 
-    def __init__(self, epsilon: float, delta: float):
+    def __init__(
+        self,
+        epsilon: float,
+        delta: float,
+        unit: Optional[str] = None,
+        clip_norm: float = 1.0,
+        noise_multiplier: Optional[float] = None,
+    ):
         if not (isinstance(epsilon, (int, float)) and math.isfinite(epsilon) and epsilon > 0):
             raise _err("ENC2203", f"epsilon must be positive, got {epsilon!r}")
         if not (isinstance(delta, (int, float)) and 0 < delta < 1):
             raise _err("ENC2203", f"delta must be in (0, 1), got {delta!r}")
         self.epsilon = float(epsilon)
         self.delta = float(delta)
+        if unit is not None and unit not in _UNITS:
+            _check_id("privacy unit", unit)
+        self.unit = unit
+        # Mechanism parameters, used when this DP object is given to
+        # secure_aggregate (validated there).
+        self.clip_norm = clip_norm
+        self.noise_multiplier = noise_multiplier
 
 
 class DiscreteGaussian:
@@ -195,6 +209,10 @@ def _budget(privacy: Any) -> Optional[DP]:
 def _mechanism(privacy: Any) -> Optional[DiscreteGaussian]:
     if privacy is None or isinstance(privacy, DiscreteGaussian):
         return privacy
+    if isinstance(privacy, DP):
+        if privacy.noise_multiplier is None:
+            raise _err("ENC2203", "DP(...) on an aggregation needs noise_multiplier (or use a privacy level)")
+        return DiscreteGaussian(privacy.clip_norm, privacy.noise_multiplier)
     levels = _privacy_levels()
     if privacy not in levels:
         raise _err("ENC2203", f"privacy must be one of {', '.join(levels)} or DiscreteGaussian(...), got {privacy!r}")
@@ -220,6 +238,8 @@ class Asset:
     ):
         self.id = _check_id("asset", id)
         self.privacy = _budget(privacy)
+        if isinstance(privacy, DP) and privacy.unit is not None:
+            unit = privacy.unit
         if unit not in _UNITS:
             _check_id("privacy unit", unit)
         self.unit = unit

@@ -399,6 +399,16 @@ fn explain_shows_budgets_and_preview() {
     for want in ["PROPOSED PRIVACY RELEASE", "gradient-a", "PERMITTED"] {
         assert!(preview.contains(want), "missing {want:?}\n{preview}");
     }
+    let status = m.privacy_status(&dir).unwrap();
+    for want in [
+        "consumed",
+        "remaining",
+        "next release",
+        "PERMITTED",
+        "differential privacy",
+    ] {
+        assert!(status.contains(want), "missing {want:?}\n{status}");
+    }
     let budget = encompute_runtime::privacy_budget_report(&dir, None).unwrap();
     for want in ["PRIVACY BUDGET", "gradient-a", "Remaining"] {
         assert!(budget.contains(want), "missing {want:?}\n{budget}");

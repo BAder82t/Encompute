@@ -34,7 +34,7 @@ fn up(x: f64, ulps: u32) -> f64 {
 
 impl PrivacyAccountant for Zcdp {
     fn name(&self) -> &'static str {
-        "zcdp-cks2020"
+        encompute_ir::confidentiality::PRIVACY_ACCOUNTANT
     }
 
     fn compose(&self, rhos: &[f64]) -> f64 {
