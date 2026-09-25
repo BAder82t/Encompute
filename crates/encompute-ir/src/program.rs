@@ -324,6 +324,12 @@ impl Builder {
             if !t.elem.is_int() {
                 return Err(type_error("neg on bool; use not"));
             }
+            if !t.elem.is_signed() {
+                return Err(type_error(format!(
+                    "neg on unsigned {}; subtract from a constant instead",
+                    t.elem
+                )));
+            }
             return Ok(self.push_typed(Op::Neg(a), Visibility::Secret, Shape::Scalar, t.elem));
         }
         self.unary_shape("neg", t.shape)?;

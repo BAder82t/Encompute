@@ -41,15 +41,40 @@ pub fn int_ranges(program: &Program) -> Result<Vec<Option<IntRange>>> {
             continue;
         }
         let g = |v: ValueId| out[v.index()].expect("exact operands have ranges");
+        // Operands fit 64 bits, but u64 × u64 (or u64 << 63) can exceed
+        // i128: fail closed instead of wrapping.
+        let c = |v: Option<i128>| {
+            v.ok_or_else(|| {
+                Error::new(
+                    Code::Overflow,
+                    format!(
+                        "possible integer overflow: {id} ({}) may exceed 128 bits; \
+                         use narrower input ranges",
+                        node.op.mnemonic()
+                    ),
+                )
+            })
+        };
         let (tmin, tmax) = elem.bounds();
         let r: IntRange = match &node.op {
             Op::Input { range, .. } => (range.lo as i128, range.hi as i128),
             Op::Const { data } => (data[0] as i128, data[0] as i128),
-            Op::Add(a, b) => (g(*a).0 + g(*b).0, g(*a).1 + g(*b).1),
-            Op::Sub(a, b) => (g(*a).0 - g(*b).1, g(*a).1 - g(*b).0),
+            Op::Add(a, b) => (
+                c(g(*a).0.checked_add(g(*b).0))?,
+                c(g(*a).1.checked_add(g(*b).1))?,
+            ),
+            Op::Sub(a, b) => (
+                c(g(*a).0.checked_sub(g(*b).1))?,
+                c(g(*a).1.checked_sub(g(*b).0))?,
+            ),
             Op::Mul(a, b) => {
                 let (a, b) = (g(*a), g(*b));
-                let p = [a.0 * b.0, a.0 * b.1, a.1 * b.0, a.1 * b.1];
+                let p = [
+                    c(a.0.checked_mul(b.0))?,
+                    c(a.0.checked_mul(b.1))?,
+                    c(a.1.checked_mul(b.0))?,
+                    c(a.1.checked_mul(b.1))?,
+                ];
                 (*p.iter().min().unwrap(), *p.iter().max().unwrap())
             }
             Op::Neg(a) => (-g(*a).1, -g(*a).0),
@@ -70,7 +95,10 @@ pub fn int_ranges(program: &Program) -> Result<Vec<Option<IntRange>>> {
             Op::Not(_) if elem == Elem::Bool => (0, 1),
             Op::Not(a) if elem.is_signed() => (-g(*a).1 - 1, -g(*a).0 - 1),
             Op::Not(a) => (tmax - g(*a).1, tmax - g(*a).0),
-            Op::Shift { x, left: true, by } => (g(*x).0 << by, g(*x).1 << by),
+            Op::Shift { x, left: true, by } => (
+                c(g(*x).0.checked_mul(1 << by))?,
+                c(g(*x).1.checked_mul(1 << by))?,
+            ),
             Op::Shift { x, left: false, by } => (g(*x).0 >> by, g(*x).1 >> by),
             Op::Min(a, b) => (g(*a).0.min(g(*b).0), g(*a).1.min(g(*b).1)),
             Op::Max(a, b) => (g(*a).0.max(g(*b).0), g(*a).1.max(g(*b).1)),

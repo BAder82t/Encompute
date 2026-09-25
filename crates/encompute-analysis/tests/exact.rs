@@ -332,3 +332,40 @@ proptest! {
         }
     }
 }
+
+/// u64 × u64 and u64 << 63 exceed i128: refused, never a panic or a wrap.
+#[test]
+fn wide_ranges_fail_closed() {
+    let top = 18446744073709549568.0; // 2^64 - 2048, largest u64 as f64
+    for op in ["mul", "shl"] {
+        let mut b = Builder::new("w", 1e-3).unwrap();
+        let x = b
+            .input_exact("x", Elem::U64, Some(Range::new(0.0, top)))
+            .unwrap();
+        let y = b
+            .input_exact("y", Elem::U64, Some(Range::new(0.0, top)))
+            .unwrap();
+        let r = if op == "mul" {
+            b.mul(x, y).unwrap()
+        } else {
+            b.shift(x, true, 63).unwrap()
+        };
+        b.output("r", r).unwrap();
+        let p = b.finish().unwrap();
+        assert_eq!(int_ranges(&p).unwrap_err().code, Code::Overflow, "{op}");
+        // The clear interpreter is checked on its own, too.
+        let inputs: Inputs = [("x".into(), vec![top]), ("y".into(), vec![top])].into();
+        assert_eq!(
+            evaluate(&p, &inputs).unwrap_err().code,
+            Code::Overflow,
+            "{op}"
+        );
+    }
+}
+
+#[test]
+fn unsigned_neg_is_a_type_error() {
+    let mut b = Builder::new("n", 1e-3).unwrap();
+    let x = b.input_exact("x", Elem::U8, None).unwrap();
+    assert_eq!(b.neg(x).unwrap_err().code, Code::Type);
+}

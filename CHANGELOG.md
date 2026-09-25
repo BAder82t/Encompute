@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 0.3 (in progress)
+
+Exact private computation (research preview).
+
+- **Exact types.** Integer (`u8`–`u64`, `i8`–`i64`) and `bool` values with
+  comparisons, logic, shifts, min/max, select, lookup tables, casts and
+  division by public constants. Integer range analysis proves no operation
+  overflows; a possible overflow is a compile error (ENC1303).
+- **Exact plans.** `encompute-exact` lowers exact programs to a
+  backend-independent `ExactPlan`, validated before it runs, for any
+  `ExactEvaluator`. A plaintext mock backend ships for tests.
+- **TFHE-rs backend** (`encompute-tfhe`, `encompute-tfhe-client`) behind the
+  off-by-default `tfhe-rs` feature: research use only; Zama requires a patent
+  license for commercial use. Encrypted results equal the clear reference on
+  1000 random inputs of the eligibility example.
+- Rust toolchain 1.98.1.
+
 ## 0.2.0 — 2026-09-25
 
 Real private execution: a client encrypts, a separate evaluator computes,

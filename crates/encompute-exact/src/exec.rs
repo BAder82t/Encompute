@@ -1,10 +1,10 @@
 use encompute_backend::ExactEvaluator;
-use encompute_ir::Result;
+use encompute_ir::{Code, Error, Result};
 
 use crate::plan::{ExactInstr, ExactPlan};
 
 /// Run the plan on encrypted inputs (plan order); one ciphertext per output.
-/// Needs no client key.
+/// Needs no client key. The plan is validated first.
 pub fn evaluate_exact<E: ExactEvaluator>(
     ev: &E,
     plan: &ExactPlan,
@@ -13,6 +13,32 @@ pub fn evaluate_exact<E: ExactEvaluator>(
 where
     E::Ciphertext: Clone,
 {
+    plan.validate()?;
+    if inputs.len() != plan.inputs.len() {
+        return Err(Error::new(
+            Code::BadInput,
+            format!(
+                "expected {} inputs, got {}",
+                plan.inputs.len(),
+                inputs.len()
+            ),
+        ));
+    }
+    if let Some((i, _)) = plan
+        .inputs
+        .iter()
+        .zip(&inputs)
+        .enumerate()
+        .find(|(_, (d, ct))| ev.elem_of(ct) != d.elem)
+    {
+        return Err(Error::new(
+            Code::BadInput,
+            format!(
+                "input {:?} is not a {}",
+                plan.inputs[i].name, plan.inputs[i].elem
+            ),
+        ));
+    }
     let n = plan.instrs.len();
     let mut last_use = vec![0usize; n];
     for (i, instr) in plan.instrs.iter().enumerate() {

@@ -25,6 +25,8 @@ pub trait ExactEvaluator {
     fn name(&self) -> &'static str;
     fn load(&self, elem: Elem, bytes: &[u8]) -> Result<Self::Ciphertext>;
     fn store(&self, ct: &Self::Ciphertext) -> Result<Vec<u8>>;
+    /// Element type a ciphertext actually holds.
+    fn elem_of(&self, ct: &Self::Ciphertext) -> Elem;
     /// A public value as a (trivially encrypted) ciphertext.
     fn trivial(&self, elem: Elem, value: i128) -> Result<Self::Ciphertext>;
 
@@ -131,7 +133,12 @@ fn load(key_id: u64, elem: Elem, bytes: &[u8]) -> Result<i128> {
     if bytes[16] != elem_code(elem) {
         return Err(err(format!("ciphertext is not a {elem}")));
     }
-    Ok(i128::from_le_bytes(bytes[17..].try_into().unwrap()))
+    let v = i128::from_le_bytes(bytes[17..].try_into().unwrap());
+    let (min, max) = elem.bounds();
+    if v < min || v > max {
+        return Err(err(format!("ciphertext value is not a {elem}")));
+    }
+    Ok(v)
 }
 
 impl ExactClient for PlainExactClient {
@@ -175,6 +182,9 @@ impl PlainExactEvaluator {
 
     fn out(&self, elem: Elem, value: i128) -> Result<PlainExactCiphertext> {
         self.ops.set(self.ops.get() + 1);
+        if !elem.is_exact() {
+            return Err(err(format!("{elem} is not an exact type")));
+        }
         let (min, max) = elem.bounds();
         if value < min || value > max {
             return Err(err(format!(
@@ -217,11 +227,14 @@ impl ExactEvaluator for PlainExactEvaluator {
             value: load(self.key_id, elem, bytes)?,
         })
     }
+    fn elem_of(&self, ct: &M) -> Elem {
+        ct.elem
+    }
     fn store(&self, ct: &M) -> Result<Vec<u8>> {
         Ok(store(self.key_id, ct.elem, ct.value))
     }
     fn trivial(&self, elem: Elem, value: i128) -> Result<M> {
-        Ok(M { elem, value })
+        self.out(elem, value)
     }
     fn add(&self, a: &M, b: &M) -> Result<M> {
         self.out(Self::same(a, b)?, a.value + b.value)
@@ -280,7 +293,15 @@ impl ExactEvaluator for PlainExactEvaluator {
         self.out(a.elem, v)
     }
     fn shift(&self, a: &M, left: bool, by: u32) -> Result<M> {
-        self.out(a.elem, if left { a.value << by } else { a.value >> by })
+        if by >= a.elem.bits() {
+            return Err(err(format!("shift by {by} on {}", a.elem)));
+        }
+        let v = if left {
+            a.value.checked_mul(1 << by)
+        } else {
+            Some(a.value >> by)
+        };
+        self.out(a.elem, v.ok_or_else(|| err("shift overflows"))?)
     }
     fn min(&self, a: &M, b: &M) -> Result<M> {
         self.out(Self::same(a, b)?, a.value.min(b.value))

@@ -9,4 +9,4 @@ mod plan;
 
 pub use exec::evaluate_exact;
 pub use lower::{compile, CompiledExact};
-pub use plan::{ExactInput, ExactInstr, ExactOutput, ExactPlan, ExactProfile, Reg};
+pub use plan::{ExactInput, ExactInstr, ExactOutput, ExactPlan, ExactProfile, Reg, MAX_TABLE};

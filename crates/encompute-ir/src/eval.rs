@@ -84,13 +84,20 @@ fn eval_exact(node: &crate::Node, inputs: &Inputs, x: &[i128]) -> Result<i128> {
             v & ((1i128 << elem.bits()) - 1)
         }
     };
-    Ok(match &node.op {
+    let overflow = || {
+        Error::new(
+            Code::Overflow,
+            format!("{} overflows {elem}", node.op.mnemonic()),
+        )
+    };
+    let c = |v: Option<i128>| v.ok_or_else(overflow);
+    let v = match &node.op {
         Op::Input { name, .. } => inputs[name][0] as i128,
         Op::Const { data } => data[0] as i128,
-        Op::Add(a, b) => g(*a) + g(*b),
-        Op::Sub(a, b) => g(*a) - g(*b),
-        Op::Mul(a, b) => g(*a) * g(*b),
-        Op::Neg(a) => -g(*a),
+        Op::Add(a, b) => c(g(*a).checked_add(g(*b)))?,
+        Op::Sub(a, b) => c(g(*a).checked_sub(g(*b)))?,
+        Op::Mul(a, b) => c(g(*a).checked_mul(g(*b)))?,
+        Op::Neg(a) => c(g(*a).checked_neg())?,
         Op::Cmp(c, a, b) => {
             let (a, b) = (g(*a), g(*b));
             i128::from(match c {
@@ -113,7 +120,7 @@ fn eval_exact(node: &crate::Node, inputs: &Inputs, x: &[i128]) -> Result<i128> {
             x: a,
             left: true,
             by,
-        } => g(*a) << by,
+        } => c(g(*a).checked_mul(1 << by))?,
         Op::Shift {
             x: a,
             left: false,
@@ -144,7 +151,13 @@ fn eval_exact(node: &crate::Node, inputs: &Inputs, x: &[i128]) -> Result<i128> {
         Op::Div(a, b) => g(*a) / g(*b),
         Op::Rem(a, b) => g(*a) % g(*b),
         op => unreachable!("{} is not an exact scalar op", op.mnemonic()),
-    })
+    };
+    // Checked semantics even when range analysis was skipped.
+    let (min, max) = elem.bounds();
+    if v < min || v > max {
+        return Err(overflow());
+    }
+    Ok(v)
 }
 
 /// Evaluate `program`: `f64` for approximate values, 128-bit integers for

@@ -1,7 +1,7 @@
 //! Lowering + mock evaluator equals the clear interpreter exactly.
 
 use encompute_backend::{ExactClient, ExactEvaluator, PlainExactClient, PlainExactEvaluator};
-use encompute_exact::{compile, evaluate_exact};
+use encompute_exact::{compile, evaluate_exact, ExactInstr};
 use encompute_ir::{
     evaluate, Builder, CmpOp, Code, Elem, Inputs, LogicOp, Program, Range, ValueId,
 };
@@ -246,4 +246,85 @@ proptest! {
             prop_assert_eq!(run_mock(&p, &inputs), evaluate(&p, &inputs).unwrap(), "{}", p);
         }
     }
+}
+
+/// Plans from outside the process are validated, never trusted.
+#[test]
+fn malformed_plans_are_rejected_not_executed() {
+    let good = compile(&approve()).unwrap().plan;
+    let client = PlainExactClient::new(7);
+    let ev = PlainExactEvaluator::new(&client.evaluation_keys().unwrap()).unwrap();
+    let inputs = |ev: &PlainExactEvaluator| {
+        good.inputs
+            .iter()
+            .map(|i| {
+                ev.load(i.elem, &client.encrypt(i.elem, 1).unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let n = good.instrs.len();
+    let mut cases = vec![];
+    let mut p = good.clone();
+    p.instrs.push(ExactInstr::Not(n as u32 + 5));
+    p.elems.push(Elem::Bool);
+    cases.push(("forward register", p));
+    let mut p = good.clone();
+    p.instrs.push(ExactInstr::Lookup {
+        x: 0,
+        table: vec![],
+    });
+    p.elems.push(Elem::U8);
+    cases.push(("empty table", p));
+    let mut p = good.clone();
+    p.instrs.push(ExactInstr::Shift {
+        x: 0,
+        left: true,
+        by: 200,
+    });
+    p.elems.push(Elem::U8);
+    cases.push(("oversized shift", p));
+    let mut p = good.clone();
+    p.instrs.push(ExactInstr::DivScalar(0, 0));
+    p.elems.push(Elem::U8);
+    cases.push(("division by zero", p));
+    let mut p = good.clone();
+    p.instrs.push(ExactInstr::Input { index: 0 });
+    p.elems.push(p.inputs[0].elem);
+    cases.push(("input read twice", p));
+    let mut p = good.clone();
+    p.elems[0] = Elem::F64;
+    cases.push(("approximate type", p));
+    let mut p = good.clone();
+    p.elems.pop();
+    cases.push(("missing type", p));
+    let mut p = good.clone();
+    p.outputs[0].reg = 10_000;
+    cases.push(("bad output register", p));
+    let mut p = good.clone();
+    p.instrs.push(ExactInstr::DivScalar(0, 256));
+    p.elems.push(p.elems[0]);
+    cases.push(("divisor outside the type", p));
+    let mut p = good.clone();
+    p.instrs.push(ExactInstr::Add(0, 1));
+    p.elems.push(Elem::U64);
+    cases.push(("mistyped register", p));
+    for (what, p) in cases {
+        let e = evaluate_exact(&ev, &p, inputs(&ev)).unwrap_err();
+        assert_eq!(e.code, Code::Artifact, "{what}: {e}");
+    }
+    let mut wrong = inputs(&ev);
+    wrong[0] = ev
+        .load(Elem::U64, &client.encrypt(Elem::U64, 1).unwrap())
+        .unwrap();
+    assert_eq!(
+        evaluate_exact(&ev, &good, wrong).unwrap_err().code,
+        Code::BadInput
+    );
+    let mut few = inputs(&ev);
+    few.pop();
+    assert_eq!(
+        evaluate_exact(&ev, &good, few).unwrap_err().code,
+        Code::BadInput
+    );
 }

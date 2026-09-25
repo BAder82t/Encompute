@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use encompute_ir::{CmpOp, Elem, LogicOp};
+use encompute_ir::{CmpOp, Code, Elem, Error, LogicOp, Result};
 
 /// Register: the result of `instrs[i]`.
 pub type Reg = u32;
@@ -119,7 +119,87 @@ pub struct ExactPlan {
     pub outputs: Vec<ExactOutput>,
 }
 
+/// Largest lookup table a plan may carry (matches the IR builder).
+pub const MAX_TABLE: usize = 1 << 16;
+
 impl ExactPlan {
+    /// Checks for a plan from outside this process: every register is
+    /// defined before use, each input is read once, every instruction is
+    /// well-typed (so each register's declared type is the type its
+    /// ciphertext really has), constants fit their types, shifts fit, tables
+    /// are non-empty and divisors non-zero. A plan that fails is rejected,
+    /// never executed.
+    pub fn validate(&self) -> Result<()> {
+        let bad = |m: String| {
+            Err(Error::new(
+                Code::Artifact,
+                format!("invalid exact plan: {m}"),
+            ))
+        };
+        if self.elems.len() != self.instrs.len() {
+            return bad("one element type per instruction".into());
+        }
+        if let Some(e) = self.elems.iter().find(|e| !e.is_exact()) {
+            return bad(format!("{e} is not an exact type"));
+        }
+        let fits = |e: Elem, v: i128| {
+            let (min, max) = e.bounds();
+            min <= v && v <= max
+        };
+        let mut read = vec![false; self.inputs.len()];
+        for (i, instr) in self.instrs.iter().enumerate() {
+            if let Some(r) = instr.operands().into_iter().find(|r| *r as usize >= i) {
+                return bad(format!(
+                    "instruction {i} uses register {r} before it is defined"
+                ));
+            }
+            let t = |r: &Reg| self.elems[*r as usize];
+            let out = self.elems[i];
+            use ExactInstr::*;
+            let ok = match instr {
+                Input { index } => match read.get_mut(*index) {
+                    Some(seen) if !*seen => {
+                        *seen = true;
+                        self.inputs[*index].elem == out
+                    }
+                    _ => return bad(format!("input {index} is missing or read twice")),
+                },
+                Trivial { value } => fits(out, *value),
+                Add(a, b) | Sub(a, b) | Mul(a, b) | Logic(_, a, b) | Min(a, b) | Max(a, b) => {
+                    t(a) == out && t(b) == out
+                }
+                Neg(a) | Not(a) => t(a) == out,
+                AddScalar(a, c) | SubScalar(a, c) | MulScalar(a, c) | ScalarSub(c, a) => {
+                    t(a) == out && fits(out, *c)
+                }
+                DivScalar(a, c) | RemScalar(a, c) => t(a) == out && *c != 0 && fits(out, *c),
+                Cmp(_, a, b) => t(a) == t(b) && out == Elem::Bool,
+                CmpScalar(_, a, c) => fits(t(a), *c) && out == Elem::Bool,
+                Shift { x, by, .. } => t(x) == out && *by < out.bits(),
+                Select(c, a, b) => t(c) == Elem::Bool && t(a) == out && t(b) == out,
+                Lookup { table, .. } => {
+                    !table.is_empty()
+                        && table.len() <= MAX_TABLE
+                        && table.iter().all(|v| fits(out, *v))
+                }
+                Cast(_) => true,
+            };
+            if !ok {
+                return bad(format!("instruction {i} ({}) is ill-typed", instr.class()));
+            }
+        }
+        if read.iter().any(|r| !r) {
+            return bad("an input is never read".into());
+        }
+        for o in &self.outputs {
+            match self.elems.get(o.reg as usize) {
+                Some(e) if *e == o.elem => {}
+                _ => return bad(format!("output {:?} has a bad register or type", o.name)),
+            }
+        }
+        Ok(())
+    }
+
     /// Operation counts by class, sorted.
     pub fn op_counts(&self) -> Vec<(&'static str, usize)> {
         let mut m = std::collections::BTreeMap::new();

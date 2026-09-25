@@ -18,8 +18,8 @@ use tfhe::{
 };
 
 /// Largest accepted server key and ciphertext, in bytes.
-pub const MAX_KEY_BYTES: u64 = 1 << 32;
-pub const MAX_CT_BYTES: u64 = 1 << 28;
+pub const MAX_KEY_BYTES: u64 = 1 << 28;
+pub const MAX_CT_BYTES: u64 = 1 << 24;
 
 fn backend(e: impl std::fmt::Display) -> Error {
     Error::new(Code::Backend, format!("TFHE-rs: {e}"))
@@ -270,6 +270,19 @@ macro_rules! load_as {
     };
 }
 
+/// A divisor must be a non-zero value of the dividend's type (so the cast
+/// to it is lossless).
+fn divisor(a: &Ct, c: i128) -> Result<()> {
+    let (min, max) = a.elem().bounds();
+    if c == 0 || c < min || c > max {
+        return Err(backend(format!(
+            "divisor {c} is not a non-zero {}",
+            a.elem()
+        )));
+    }
+    Ok(())
+}
+
 fn store_one(ct: &Ct) -> Result<Vec<u8>> {
     let mut out = vec![];
     match ct {
@@ -335,6 +348,9 @@ impl ExactEvaluator for TfheRsEvaluator {
         })
     }
 
+    fn elem_of(&self, ct: &Ct) -> Elem {
+        ct.elem()
+    }
     fn store(&self, ct: &Ct) -> Result<Vec<u8>> {
         store_one(ct)
     }
@@ -378,10 +394,12 @@ impl ExactEvaluator for TfheRsEvaluator {
     }
     fn div_scalar(&self, a: &Ct, c: i128) -> Result<Ct> {
         self.on();
+        divisor(a, c)?;
         int_unary!(a, |x, C| x / (c as C))
     }
     fn rem_scalar(&self, a: &Ct, c: i128) -> Result<Ct> {
         self.on();
+        divisor(a, c)?;
         int_unary!(a, |x, C| x % (c as C))
     }
     fn cmp(&self, op: CmpOp, a: &Ct, b: &Ct) -> Result<Ct> {
@@ -427,6 +445,9 @@ impl ExactEvaluator for TfheRsEvaluator {
     }
     fn shift(&self, a: &Ct, left: bool, by: u32) -> Result<Ct> {
         self.on();
+        if by >= a.elem().bits() {
+            return Err(backend(format!("shift by {by} on {}", a.elem())));
+        }
         if left {
             int_unary!(a, |x, C| x << (by as u8))
         } else {
@@ -458,7 +479,10 @@ impl ExactEvaluator for TfheRsEvaluator {
         // two's-complement wrap makes the result exact for signed types.
         let width = a.elem().bits();
         let idx = cast_to(a, unsigned_of(width))?;
-        let min = *table.iter().min().expect("non-empty table");
+        let min = *table
+            .iter()
+            .min()
+            .ok_or_else(|| backend("empty lookup table"))?;
         let pairs: Vec<(u64, u64)> = table
             .iter()
             .enumerate()
