@@ -6,3 +6,4 @@ __pycache__/
 /.venv/
 *.so
 docs/*-plan.md
+.claude/
