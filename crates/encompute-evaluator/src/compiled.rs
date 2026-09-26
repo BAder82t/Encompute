@@ -85,6 +85,11 @@ pub fn compile_program(program: &Program) -> Result<CompiledProgram> {
     })
 }
 
+/// Whether execution proofs cover every instruction of `plan`.
+pub fn proof_coverable(plan: &ExactPlan) -> bool {
+    check_coverage(plan).is_ok()
+}
+
 /// Fail unless the proof backend covers every instruction of `plan`.
 fn check_coverage(plan: &ExactPlan) -> Result<()> {
     let caps = encompute_exact::bgv::capabilities();

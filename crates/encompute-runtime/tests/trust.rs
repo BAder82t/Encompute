@@ -104,10 +104,7 @@ fn spec_of(m: &Model) -> AggregationSpec {
 fn dir(name: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let d = std::env::temp_dir().join(format!(
-        "encompute-trust-{name}-{}-{n}",
-        std::process::id()
-    ));
+    let d = std::env::temp_dir().join(format!("encompute-trust-{name}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -115,7 +112,16 @@ fn dir(name: &str) -> PathBuf {
 
 /// One DP round with all three hospitals.
 fn round(m: &Model, seq: u64, ledger: &Path, opened_at: u64) -> AggregationReceipt {
-    let mut c = RoundCoordinator::open(spec_of(m), seq, coordinator(), None, opened_at)
+    round_with(spec_of(m), seq, ledger, opened_at)
+}
+
+fn round_with(
+    spec: AggregationSpec,
+    seq: u64,
+    ledger: &Path,
+    opened_at: u64,
+) -> AggregationReceipt {
+    let mut c = RoundCoordinator::open(spec.clone(), seq, coordinator(), None, opened_at)
         .unwrap()
         .with_ledger(ledger)
         .unwrap();
@@ -124,7 +130,7 @@ fn round(m: &Model, seq: u64, ledger: &Path, opened_at: u64) -> AggregationRecei
         .map(|i| {
             let asset = format!("gradient-{}", (b'a' + i as u8) as char);
             RoundParticipant::join_with(
-                &spec_of(m),
+                &spec,
                 &c.spec,
                 &c.round,
                 &party(i),
@@ -624,4 +630,97 @@ fn absent_evidence_is_not_satisfied() {
             .any(|u| u.contains("Privacy budget is required")),
         "{r}"
     );
+}
+
+/// The approved plan for the collaboration (standard profile: secure
+/// aggregation with DP), and the spec bound to it.
+fn planned(
+    m: &Model,
+) -> (
+    encompute_runtime::planner::ConfidentialExecutionPlan,
+    AggregationSpec,
+) {
+    use encompute_runtime::planner::*;
+    let ctx = encompute_runtime::planning::planning_context(
+        m.program(),
+        Profile::Standard,
+        Infrastructure::default(),
+        Preferences::default(),
+        None,
+    )
+    .unwrap();
+    let plan = plan_or_fail(m.program(), &ctx).unwrap();
+    let id = plan.id().unwrap().hex();
+    let p = m.aggregation_plan(None).unwrap().with_execution_plan(&id);
+    let spec =
+        AggregationSpec::new(p, (0..3).map(|i| identity_of(&party(i), &key(i))).collect()).unwrap();
+    (plan, spec)
+}
+
+/// INV-115 end to end: planned → executed → evidence verified → the plan
+/// satisfied by observed execution; and every runtime deviation fails.
+#[test]
+fn observed_execution_matches_the_approved_plan() {
+    let text = eir();
+    let m = Model::compile(parse(&text).unwrap()).unwrap();
+    let (plan, spec) = planned(&m);
+    let build = |spec: AggregationSpec, with_plan: bool| {
+        let mut g = TrustGraph::new();
+        g.add_program(&m.program().to_string()).unwrap();
+        if with_plan {
+            g.add_plan(plan.clone()).unwrap();
+        }
+        g.add_aggregation_spec(spec.clone()).unwrap();
+        for i in 0..3 {
+            g.add_authorization(authorize(&m, i, T0 - 10)).unwrap();
+        }
+        let ledger = dir("plan-ledger");
+        g.add_aggregation(round_with(spec, 1, &ledger, T0 + 1))
+            .unwrap();
+        g
+    };
+    let g = build(spec.clone(), true);
+    let r = report(&g);
+    assert!(r.satisfied, "{r}");
+    assert_eq!(row(&r, "Plan"), Status::Satisfied, "{r}");
+    assert!(r
+        .to_string()
+        .contains("PLAN SATISFIED BY OBSERVED EXECUTION"));
+    // Planned but not yet executed: unchecked, not satisfied.
+    let mut g0 = TrustGraph::new();
+    g0.add_program(&m.program().to_string()).unwrap();
+    g0.add_plan(plan.clone()).unwrap();
+    assert_eq!(row(&report(&g0), "Plan"), Status::Unchecked);
+    // A round under another plan ID.
+    let mut other = spec.clone();
+    other.plan.execution_plan_id = Some("ab".repeat(32));
+    let r = report(&build(other, true));
+    assert!(!r.satisfied);
+    assert_eq!(row(&r, "Plan"), Status::Failed, "{r}");
+    // A round with no plan at all, while one was approved.
+    let mut none = spec.clone();
+    none.plan.execution_plan_id = None;
+    assert_eq!(row(&report(&build(none, true)), "Plan"), Status::Failed);
+    // DP removed from the round (its own spec, bound to the plan).
+    let mut no_dp = spec.clone();
+    no_dp.plan.dp = None;
+    no_dp.plan.privacy_policy_id = None;
+    for p in no_dp.plan.participants.iter_mut() {
+        p.budget = None;
+    }
+    let r = report(&build(no_dp, true));
+    assert_eq!(row(&r, "Plan"), Status::Failed, "{r}");
+    // A tampered plan (the approved one, with its threshold lowered) is
+    // refused on the way in, and by the report if forced into a bundle.
+    let mut weak = plan.clone();
+    for s in weak.steps.iter_mut() {
+        for x in s.mechanisms.iter_mut() {
+            if let encompute_runtime::planner::Mechanism::SecureAggregation { threshold, .. } = x {
+                *threshold = 2;
+            }
+        }
+    }
+    let mut g2 = TrustGraph::new();
+    g2.add_program(&m.program().to_string()).unwrap();
+    assert!(g2.add_plan(weak).is_err());
 }

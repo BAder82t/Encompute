@@ -1,5 +1,6 @@
 //! The assurance checks, by name (`check:<name>` in the catalog).
 
+pub mod planner;
 pub mod privacy;
 pub mod receipts;
 pub mod secagg;
@@ -51,6 +52,18 @@ pub const CHECKS: &[Check] = &[
     Check {
         name: "dp_crash_injection",
         run: privacy::crash_injection,
+    },
+    Check {
+        name: "planner_property",
+        run: planner::property,
+    },
+    Check {
+        name: "planner_adversarial",
+        run: planner::adversarial,
+    },
+    Check {
+        name: "planner_plan_id_binding",
+        run: planner::plan_id_binding,
     },
     Check {
         name: "dp_multi_process_double_spend",

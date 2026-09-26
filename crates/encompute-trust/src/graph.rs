@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use encompute_attestation::AttestationRecord;
 use encompute_ir::{Code, Error, Result};
+use encompute_planner::ConfidentialExecutionPlan;
 use encompute_privacy::PrivacyReceipt;
 use encompute_secagg::{AggregationReceipt, AggregationSpec};
 use encompute_verification::canonical::canonical_json;
@@ -39,6 +40,8 @@ pub enum NodeKind {
     PrivacyRelease,
     Attestation,
     Execution,
+    /// An approved confidential execution plan (ADR-015).
+    Plan,
 }
 
 impl NodeKind {
@@ -57,6 +60,7 @@ impl NodeKind {
             NodeKind::PrivacyRelease => "privacy",
             NodeKind::Attestation => "attestation",
             NodeKind::Execution => "execution",
+            NodeKind::Plan => "plan",
         }
     }
 }
@@ -79,6 +83,7 @@ pub enum Evidence {
     PrivacyReceipt(Box<PrivacyReceipt>),
     Attestation(Box<AttestationRecord>),
     ExecutionReceipt(Box<SignedExecutionReceipt>),
+    Plan(Box<ConfidentialExecutionPlan>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -119,7 +124,7 @@ pub enum EdgeKind {
     Covers,
     /// revocation → asset/authorization it revokes
     Revokes,
-    /// spec/execution → program it runs
+    /// spec/execution/plan → program it runs
     Runs,
 }
 

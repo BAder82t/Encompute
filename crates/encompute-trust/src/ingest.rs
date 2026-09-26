@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use encompute_attestation::AttestationRecord;
 use encompute_ir::{parse, Code, Error, Result};
+use encompute_planner::{verify_plan, ConfidentialExecutionPlan};
 use encompute_privacy::PrivacyReceipt;
 use encompute_secagg::{
     aggregate_asset_id, verify_aggregation_receipt, AggregationReceipt, AggregationSpec,
@@ -229,6 +230,39 @@ impl TrustGraph {
         Ok(id)
     }
 
+    /// An approved confidential execution plan, checked by the independent
+    /// validator against the program already in the graph.
+    pub fn add_plan(&mut self, plan: ConfidentialExecutionPlan) -> Result<String> {
+        let program = match self
+            .node(&node_id(NodeKind::Program, &plan.program_id))
+            .and_then(|n| n.evidence.as_ref())
+        {
+            Some(Evidence::Program(t)) => parse(t)?,
+            _ => return Err(graph_err("the plan is for a program not in the graph")),
+        };
+        verify_plan(&program, &plan)?;
+        self.link_plan(&plan)
+    }
+
+    fn link_plan(&mut self, plan: &ConfidentialExecutionPlan) -> Result<String> {
+        let id = node_id(NodeKind::Plan, &plan.id()?.hex());
+        let mut n = with(
+            node(
+                NodeKind::Plan,
+                &format!("plan ({} profile)", plan.context.profile.name()),
+            ),
+            &[("profile", plan.context.profile.name().to_owned())],
+        );
+        n.evidence = Some(Evidence::Plan(Box::new(plan.clone())));
+        self.upsert(id.clone(), n)?;
+        self.edge(
+            &id,
+            EdgeKind::Runs,
+            &node_id(NodeKind::Program, &plan.program_id),
+        );
+        Ok(id)
+    }
+
     /// An aggregation spec: the plan (program, policies, codec, mechanism)
     /// and the parties' keys.
     pub fn add_aggregation_spec(&mut self, spec: AggregationSpec) -> Result<String> {
@@ -264,6 +298,9 @@ impl TrustGraph {
             EdgeKind::Runs,
             &node_id(NodeKind::Program, &spec.plan.program_id),
         );
+        if let Some(p) = &spec.plan.execution_plan_id {
+            self.edge(&id, EdgeKind::GovernedBy, &node_id(NodeKind::Plan, p));
+        }
         Ok(id)
     }
 
@@ -489,6 +526,7 @@ impl TrustGraph {
         let mut problems = vec![];
         let order = |e: &Evidence| match e {
             Evidence::Program(_) => 0,
+            Evidence::Plan(_) => 0,
             Evidence::AggregationSpec(_) => 1,
             Evidence::Attestation(_) => 2,
             Evidence::Authorization(_) => 3,
@@ -506,6 +544,7 @@ impl TrustGraph {
         for (id, e) in items {
             let linked = match e {
                 Evidence::Program(t) => g.link_program(t),
+                Evidence::Plan(p) => g.link_plan(p),
                 Evidence::AggregationSpec(s) => g.link_aggregation_spec(s),
                 Evidence::Attestation(a) => g.link_attestation(a),
                 Evidence::Authorization(a) => g.link_authorization(a),

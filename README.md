@@ -58,7 +58,8 @@ privacy, and every step leaves verifiable evidence.
 | Secure aggregation (`aggregate_only`) | working: Bonawitz et al., malicious-coordinator variant, dropouts, signed aggregation receipts |
 | Differential privacy (budgets, ledger, receipts) | working: discrete Gaussian on secure aggregates, zCDP accounting, tamper-evident ledgers, owner-side enforcement |
 | Trust graph (authorizations, revocation, lineage, one trust report) | working: owner-signed program approvals, revocation reach, a report rebuilt from evidence and checked against verifier-supplied keys |
-| Assurance (security invariants under attack) | 46 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
+| Assurance (security invariants under attack) | 52 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## What Encompute does
 
@@ -235,6 +236,35 @@ computation confidential, secure aggregation hides contributions,
 differential privacy bounds what outputs reveal, attestation says which
 workload ran, and execution proofs say it computed correctly.
 
+## Planner
+
+Declare who owns what, who must not see it, what may be released and
+whether results must be verifiable; Encompute chooses the mechanisms, or
+refuses (ADR-015).
+
+```python
+project = encompute.Project("medical-training",
+                            parties=["hospital-a", "hospital-b", "modelco"])
+a = project.data("patients-a", owner="hospital-a")
+b = project.data("patients-b", owner="hospital-b")
+model = project.model("base-model", owner="modelco")
+run = project.train(model=model, data=[a, b], privacy="strong",
+                    infrastructure={"tees": [{"tee": "intel-tdx",
+                                              "provider": "gcp-confidential-space"}],
+                                    "key_broker": True})
+print(run.explain())   # requirement → mechanism → reason → evidence
+```
+
+```sh
+encompute plan step.encompute -o plan.json   # or PLANNING FAILED, with reasons
+encompute check step.encompute               # program, policy, privacy, plan
+encompute explain step.encompute --deep      # candidates, rejections, assumptions
+```
+
+An independent validator checks every plan; its `encplan1:` ID binds
+aggregation rounds (`--plan`) and the trust graph, whose report says
+whether observed execution matched the plan.
+
 ## Trust graph
 
 Every mechanism leaves evidence; the trust graph joins it into one bundle
@@ -361,6 +391,7 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-keybroker` | Policy-gated key release to attested workloads (library, HTTP server, client) |
 | `crates/encompute-secagg` | Secure aggregation (Bonawitz et al.) bound to policies, rounds and receipts |
 | `crates/encompute-privacy` | Differential privacy: budgets, discrete Gaussian noise, zCDP accounting, ledger, receipts |
+| `crates/encompute-planner` | Planner: trust requirements, mechanism selection, plan validator, PlanIds |
 | `crates/encompute-trust` | Trust graph: authorizations, revocations, lineage, evidence, trust report |
 | `crates/encompute-assurance` | Assurance suite: invariant catalog, adversarial checks, release-gate report (not published) |
 | `crates/encompute-vfhe` | Re-execution proof verifier on OpenFHE BGV (research) |
@@ -376,8 +407,7 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
-- **Next**: an automatic planner that chooses the protection for
-  declared parties, assets and policies, recorded in the trust graph.
+- **Next**: confidential fine-tuning (PyTorch/LoRA) behind the planner.
 
 ## License
 

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Planner
+
+- **Declare trust requirements; Encompute chooses the mechanisms**
+  (ADR-015, new crate `encompute-planner`): requirements derived from the
+  confidentiality policy (hide from parties and the compute host,
+  aggregate-only, purpose, privacy budgets, participants, correctness,
+  attestation, region), profiles `standard`/`strong`/`maximum` that only
+  add requirements, and selection among the existing mechanisms (FHE,
+  verified execution, attested confidential compute with key release,
+  secure aggregation, DP, local execution) by estimated cost. PLANNING
+  FAILED (ENC2401) when nothing satisfies the policy; nothing is weakened.
+- **Auditable, deterministic plans** with a reason and expected evidence
+  for every requirement; `encplan1:` PlanIds; an independent validator
+  (`verify_plan`, ENC2402).
+- **Plans bound to execution**: `AggregationPlan.execution_plan_id` (spec,
+  receipts, coordinator attestation), a Plan node in the trust graph, and a
+  report row that fails on evidence outside the approved plan (ENC2403)
+  and prints PLAN SATISFIED BY OBSERVED EXECUTION.
+- CLI: `encompute plan`, `encompute check`, `explain --deep`,
+  `aggregate … --plan`, `trust init --plan`. Python: `Project`, `.data`,
+  `.model`, `.train(...)`, `PlanningFailed`.
+- Assurance INV-110–INV-115: 50 000 generated planning scenarios nightly,
+  every mechanism removal and plan-field mutation, the adversarial list.
+- Fixed a flaky trust test (shared ledger directory between parallel
+  tests).
+
 ### Trust graph
 
 - **One verifiable record of a collaboration** (ADR-014, new crate
@@ -26,7 +52,7 @@
 ### Assurance
 
 - **System assurance suite** (`encompute-assurance`, `docs/assurance.md`):
-  46 security invariants, each with positive, negative, adversarial and
+  52 security invariants, each with positive, negative, adversarial and
   end-to-end evidence; adversarial checks for DP crash injection,
   multi-parent atomicity, multi-process double spend, ledger tampering,
   receipt mutation and SecAgg at scale; `assurance-report` as the release

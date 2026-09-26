@@ -63,7 +63,8 @@ pub fn reference_exists(root: &Path, checks: &[Check], reference: &str) -> Resul
             .ok_or_else(|| format!("malformed reference {reference}"))?;
         let text = std::fs::read_to_string(root.join(file))
             .map_err(|_| format!("{file} does not exist"))?;
-        if !text.contains(&format!("fn {func}(")) {
+        let def = if file.ends_with(".py") { "def" } else { "fn" };
+        if !text.contains(&format!("{def} {func}(")) {
             return Err(format!("{file} has no test {func}"));
         }
         Ok(())

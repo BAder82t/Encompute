@@ -1,0 +1,21 @@
+[package]
+name = "encompute-planner"
+description = "The Encompute planner: derives trust requirements from declared policies and selects the protection mechanisms that satisfy them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+encompute-ir.workspace = true
+encompute-analysis.workspace = true
+encompute-verification.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

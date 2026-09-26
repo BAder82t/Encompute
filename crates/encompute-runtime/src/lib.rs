@@ -10,6 +10,7 @@ mod client;
 mod diff;
 mod explain;
 mod model;
+pub mod planning;
 pub mod privacy;
 pub use privacy::privacy_budget_report;
 mod remote;
@@ -25,6 +26,7 @@ pub use encompute_evaluator::{
     BackendKind, Backends, CompiledProgram, EvaluatorSession, ExactProgram, Ids, Semantics,
 };
 pub use encompute_keybroker as keybroker;
+pub use encompute_planner as planner;
 pub use encompute_privacy as dp;
 pub use encompute_secagg as secagg;
 pub use encompute_trust as trust;

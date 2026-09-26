@@ -322,4 +322,39 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:crates/encompute-runtime/tests/trust.rs::absent_evidence_is_not_satisfied"),
         (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::privacy_releases_answer_to_the_declared_budget"),
     ]),
+    // Planner.
+    inv!("INV-110", "planner", "Every hard trust requirement of an accepted plan is satisfied by a valid, available mechanism, as the independent validator confirms.", [
+        (Positive, "test:crates/encompute-planner/tests/planner.rs::gradients_need_secure_aggregation_and_budgets_need_dp"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::the_validator_refuses_weakened_plans"),
+        (Adversarial, "check:planner_property"),
+        (EndToEnd, "test:crates/encompute-runtime/tests/trust.rs::observed_execution_matches_the_approved_plan"),
+    ]),
+    inv!("INV-111", "planner", "Removing any required mechanism from a plan makes validation fail.", [
+        (Positive, "test:crates/encompute-planner/tests/planner.rs::private_model_training_needs_attested_confidential_compute"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::the_validator_refuses_weakened_plans"),
+        (Adversarial, "check:planner_property"),
+    ]),
+    inv!("INV-112", "planner", "The planner never weakens confidentiality, release, privacy or verification requirements; profiles only add requirements.", [
+        (Positive, "test:crates/encompute-planner/tests/planner.rs::strong_profile_attests_the_coordinator_or_fails"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::the_validator_refuses_weakened_plans"),
+        (Adversarial, "check:planner_property"),
+        (EndToEnd, "test:python/tests/test_project.py::test_presets_expand_visibly"),
+    ]),
+    inv!("INV-113", "planner", "When no available mechanism combination satisfies the policy, there is no plan (PLANNING FAILED), never a weaker one.", [
+        (Positive, "test:crates/encompute-planner/tests/planner.rs::private_exact_eligibility_is_verified_fhe"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::verified_training_requires_attested_workloads"),
+        (Adversarial, "check:planner_adversarial"),
+        (EndToEnd, "test:python/tests/test_project.py::test_no_valid_mechanism_fails_closed"),
+    ]),
+    inv!("INV-114", "planner", "Plans are deterministic, and the PlanId changes with every change to the plan; the validator refuses every security-relevant change.", [
+        (Positive, "test:crates/encompute-planner/tests/planner.rs::plans_are_deterministic_and_identified"),
+        (Negative, "check:planner_plan_id_binding"),
+        (Adversarial, "check:planner_plan_id_binding"),
+    ]),
+    inv!("INV-115", "planner", "The trust report refuses execution evidence that does not match the approved plan: another PlanId, no plan, or a missing mechanism.", [
+        (Positive, "test:crates/encompute-runtime/tests/trust.rs::observed_execution_matches_the_approved_plan"),
+        (Negative, "test:crates/encompute-runtime/tests/trust.rs::observed_execution_matches_the_approved_plan"),
+        (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::observed_execution_matches_the_approved_plan"),
+        (EndToEnd, "test:crates/encompute-runtime/tests/trust.rs::observed_execution_matches_the_approved_plan"),
+    ]),
 ];

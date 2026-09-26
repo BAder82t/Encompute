@@ -70,6 +70,21 @@ fn dp_crash_injection() {
 }
 
 #[test]
+fn planner_property() {
+    check("planner_property");
+}
+
+#[test]
+fn planner_adversarial() {
+    check("planner_adversarial");
+}
+
+#[test]
+fn planner_plan_id_binding() {
+    check("planner_plan_id_binding");
+}
+
+#[test]
 fn dp_multi_process_double_spend() {
     check("dp_multi_process_double_spend");
 }

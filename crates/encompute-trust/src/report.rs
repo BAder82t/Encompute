@@ -20,6 +20,9 @@ use encompute_ir::{parse, Result};
 use encompute_secagg::verify_aggregation_receipt;
 use encompute_verification::{PolicyId, PrivacyPolicyId};
 
+use encompute_planner::{verify_plan, Mechanism, Placement, Scheme, StepKind};
+use encompute_verification::VerificationEvidence;
+
 use crate::graph::{node_id, EdgeKind, Evidence, NodeKind, TrustGraph};
 use crate::ingest::program_id;
 
@@ -53,10 +56,11 @@ impl fmt::Display for Status {
 }
 
 /// The report's rows, in order.
-pub const ROWS: [&str; 9] = [
+pub const ROWS: [&str; 10] = [
     "Evidence",
     "Program",
     "Policy",
+    "Plan",
     "Owner authorization",
     "Workload",
     "Private aggregation",
@@ -259,6 +263,7 @@ impl TrustGraph {
         }
         rows.push(prog.row("Program", Status::Verified));
         rows.push(policy.row("Policy", Status::Verified));
+        rows.push(plan_row(&g));
 
         // Revocations: asset → revoked at. An unanchored revocation is
         // still honoured (it can only withhold trust), but is unchecked.
@@ -615,6 +620,172 @@ impl TrustGraph {
     }
 }
 
+/// The approved plans, and whether what was observed matches them: every
+/// aggregation round under the plan's ID with its mechanisms, every
+/// execution of the planned program with the planned scheme (and proof),
+/// and evidence for every step. A round or execution of the planned
+/// program outside the plan fails; a step without evidence yet is
+/// unchecked.
+fn plan_row(g: &TrustGraph) -> Row {
+    let mut t = Tally::default();
+    let plans: Vec<_> = g
+        .of(NodeKind::Plan)
+        .filter_map(|(id, n)| match &n.evidence {
+            Some(Evidence::Plan(p)) => Some((id.clone(), p.as_ref())),
+            _ => None,
+        })
+        .collect();
+    for (id, plan) in &plans {
+        t.present = true;
+        let hex = id.trim_start_matches("plan:");
+        let program = match g
+            .node(&node_id(NodeKind::Program, &plan.program_id))
+            .and_then(|n| n.evidence.as_ref())
+        {
+            Some(Evidence::Program(text)) => parse(text).ok(),
+            _ => None,
+        };
+        match program {
+            None => t.fail(format!("{id}: its program is not in the bundle")),
+            Some(p) => {
+                if let Err(e) = verify_plan(&p, plan) {
+                    t.fail(format!("{id}: {}", e.message));
+                    continue;
+                }
+            }
+        }
+        for step in &plan.steps {
+            match &step.kind {
+                StepKind::Aggregate { output } => {
+                    let rounds: Vec<_> = g
+                        .of(NodeKind::AggregationRound)
+                        .filter_map(|(rid, n)| match &n.evidence {
+                            Some(Evidence::AggregationReceipt(r)) => {
+                                let spec = g.spec(&r.manifest.spec_id)?;
+                                (spec.plan.program_id == plan.program_id
+                                    && &spec.plan.output == output)
+                                    .then_some((rid, spec))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if rounds.is_empty() {
+                        t.unanchored(format!("{}: no aggregation observed yet", step.id));
+                    }
+                    for (rid, spec) in rounds {
+                        if spec.plan.execution_plan_id.as_deref() != Some(hex) {
+                            t.fail(format!("{rid} did not run under the approved plan"));
+                            continue;
+                        }
+                        for m in &step.mechanisms {
+                            let ok = match m {
+                                Mechanism::SecureAggregation {
+                                    threshold,
+                                    colluding,
+                                } => {
+                                    spec.threshold >= *threshold
+                                        && spec.plan.colluding == *colluding
+                                }
+                                Mechanism::DifferentialPrivacy {
+                                    noise_multiplier,
+                                    clip_norm,
+                                } => spec.plan.dp.as_ref().is_some_and(|d| {
+                                    format!("{:?}", d.noise_multiplier) == *noise_multiplier
+                                        && format!("{:?}", d.clip_norm) == *clip_norm
+                                }),
+                                Mechanism::Attestation { .. } => {
+                                    spec.coordinator_attestation.is_some()
+                                }
+                                _ => true,
+                            };
+                            if !ok {
+                                t.fail(format!(
+                                    "{rid}: the round's spec does not provide {}",
+                                    m.name()
+                                ));
+                            }
+                        }
+                    }
+                }
+                StepKind::Evaluate => {
+                    let execs: Vec<_> = g
+                        .of(NodeKind::Execution)
+                        .filter_map(|(eid, n)| match &n.evidence {
+                            Some(Evidence::ExecutionReceipt(r))
+                                if r.receipt.program_id == plan.program_id =>
+                            {
+                                Some((eid, r))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if execs.is_empty() {
+                        t.unanchored(format!("{}: no execution observed yet", step.id));
+                    }
+                    for (eid, r) in execs {
+                        let e = &r.receipt;
+                        for m in &step.mechanisms {
+                            let ok = match m {
+                                Mechanism::Fhe { scheme, backend } => {
+                                    e.backend == *backend
+                                        && e.scheme
+                                            == match scheme {
+                                                Scheme::Ckks => "CKKS",
+                                                Scheme::Tfhe => "TFHE",
+                                                Scheme::Bgv => "BGV",
+                                            }
+                                }
+                                Mechanism::VerifiedExecution => {
+                                    matches!(e.evidence, VerificationEvidence::Vfhe { .. })
+                                }
+                                Mechanism::Attestation { .. }
+                                | Mechanism::ConfidentialCompute { .. } => e.attestation.is_some(),
+                                _ => true,
+                            };
+                            if !ok {
+                                t.fail(format!("{eid} did not use {}", m.name()));
+                            }
+                        }
+                        if step.mechanisms.is_empty() && step.placement != Placement::UntrustedHost
+                        {
+                            t.fail(format!("{eid} ran outside the planned placement"));
+                        }
+                    }
+                }
+                StepKind::Train { .. } => {
+                    if matches!(step.placement, Placement::Tee(_))
+                        && g.of(NodeKind::Attestation)
+                            .all(|(_, n)| n.evidence.is_none())
+                    {
+                        t.unanchored(format!(
+                            "{}: no attestation of the training workload observed yet",
+                            step.id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Rounds bound to a plan the bundle does not hold.
+    for (rid, n) in g.of(NodeKind::AggregationRound) {
+        if let Some(Evidence::AggregationReceipt(r)) = &n.evidence {
+            if let Some(p) = g
+                .spec(&r.manifest.spec_id)
+                .and_then(|s| s.plan.execution_plan_id.as_ref())
+            {
+                if !plans
+                    .iter()
+                    .any(|(id, _)| id.trim_start_matches("plan:") == p)
+                {
+                    t.present = true;
+                    t.fail(format!("{rid} claims plan {p}, which is not in the bundle"));
+                }
+            }
+        }
+    }
+    t.row("Plan", Status::Satisfied)
+}
+
 impl fmt::Display for TrustReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "TRUST REPORT")?;
@@ -642,7 +813,15 @@ impl fmt::Display for TrustReport {
             }
         }
         if self.satisfied {
-            writeln!(f, "\nRESULT\nTRUST REQUIREMENTS SATISFIED")
+            writeln!(f, "\nRESULT\nTRUST REQUIREMENTS SATISFIED")?;
+            if self
+                .rows
+                .iter()
+                .any(|r| r.name == "Plan" && r.status == Status::Satisfied)
+            {
+                writeln!(f, "PLAN SATISFIED BY OBSERVED EXECUTION")?;
+            }
+            Ok(())
         } else {
             writeln!(f, "\nRESULT\nTRUST REQUIREMENTS NOT SATISFIED")?;
             for u in &self.unmet {

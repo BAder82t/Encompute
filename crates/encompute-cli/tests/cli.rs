@@ -601,13 +601,21 @@ fn secure_aggregation_round() {
         a.extend_from_slice(extra);
         encompute(&a)
     };
-    // A trust bundle: the program, the consortium, each owner's approval.
+    // The plan: Encompute chooses secure aggregation for the declared
+    // aggregate-only gradients; every side binds its ID.
+    let out = ok(&["plan", &p("f.encompute"), "-o", &p("plan.json")]);
+    assert!(out.contains("secure aggregation"), "{out}");
+    assert!(out.contains("ALL TRUST REQUIREMENTS SATISFIED"), "{out}");
+    // A trust bundle: the program, its plan, the consortium, each owner's
+    // approval.
     ok(&[
         "trust",
         "init",
         &p("f.encompute"),
         "--parties",
         &p("parties.json"),
+        "--plan",
+        &p("plan.json"),
         "--bundle",
         &p("trust.json"),
     ]);
@@ -634,6 +642,8 @@ fn secure_aggregation_round() {
                 &p("f.encompute"),
                 "--parties",
                 &p("parties.json"),
+                "--plan",
+                &p("plan.json"),
                 "--key",
                 &p("coord.key"),
                 "--listen",
@@ -670,6 +680,8 @@ fn secure_aggregation_round() {
                 &p("f.encompute"),
                 "--parties",
                 &p("parties.json"),
+                "--plan",
+                &p("plan.json"),
                 "--coordinator",
                 &url,
                 "--party",
@@ -711,6 +723,8 @@ fn secure_aggregation_round() {
         &p("f.encompute"),
         "--parties",
         &p("parties.json"),
+        "--plan",
+        &p("plan.json"),
         "--aggregate",
         &p("agg.json"),
     ]);
@@ -735,6 +749,8 @@ fn secure_aggregation_round() {
     let (code, out, _) = report(&["--require", "Private aggregation"]);
     assert_eq!(code, 0, "{out}");
     for want in [
+        "Plan                    SATISFIED",
+        "PLAN SATISFIED BY OBSERVED EXECUTION",
         "Owner authorization     AUTHORIZED",
         "Private aggregation     VERIFIED",
         "Lineage                 COMPLETE",
@@ -782,6 +798,8 @@ fn secure_aggregation_round() {
         &p("f.encompute"),
         "--parties",
         &p("parties.json"),
+        "--plan",
+        &p("plan.json"),
         "--coordinator",
         &url,
         "--party",
@@ -960,4 +978,64 @@ fn attested_coordinator_round() {
         assert!(err.contains("ENC2002"), "{err}");
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `plan`, `check` and `explain --deep` (ADR-015): with no encrypted
+/// backend or TEE available, a secret input has nowhere safe to go, so
+/// planning fails with a reason per candidate; a TEE with a key broker
+/// makes a plan.
+#[test]
+fn plan_check_and_explain_deep() {
+    let dir = std::env::temp_dir().join(format!("encompute-plan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("adult.eir");
+    std::fs::write(&src, ADULT).unwrap();
+    let s = src.to_str().unwrap();
+    let infra = dir.join("infra.json");
+    std::fs::write(
+        &infra,
+        r#"{"tees": [{"tee": "intel-tdx", "provider": "gcp-confidential-space"}],
+            "key_broker": true}"#,
+    )
+    .unwrap();
+    let i = infra.to_str().unwrap();
+    let (fhe_built, _, _) = encompute(&["plan", s]);
+    if fhe_built != 0 {
+        let (_, out, _) = encompute(&["plan", s]);
+        assert!(out.contains("PLANNING FAILED"), "{out}");
+        assert!(out.contains("no requirement was weakened"), "{out}");
+        let (code, out, _) = encompute(&["check", s]);
+        assert_eq!(code, 1);
+        assert!(out.contains("program valid   OK"), "{out}");
+        assert!(out.contains("plan exists     NO"), "{out}");
+    }
+    let plan = dir.join("plan.json");
+    let (code, out, err) = encompute(&[
+        "plan",
+        s,
+        "--infrastructure",
+        i,
+        "-o",
+        plan.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("ALL TRUST REQUIREMENTS SATISFIED"), "{out}");
+    assert!(err.contains("encplan1:"), "{err}");
+    let (code, out, _) = encompute(&["check", s, "--infrastructure", i]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out, _) = encompute(&["explain", s, "--deep"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("Candidates") && out.contains("Security assumptions"),
+        "{out}"
+    );
+    // Strong profile with only a development TEE: refused.
+    std::fs::write(
+        &infra,
+        r#"{"tees": [{"tee": "mock", "provider": "mock"}], "key_broker": true}"#,
+    )
+    .unwrap();
+    let (code, _, _) = encompute(&["plan", s, "--infrastructure", i, "--profile", "maximum"]);
+    assert_eq!(code, 1);
 }

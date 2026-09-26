@@ -48,6 +48,7 @@ Each run records its scale and how many cases every check tried:
 | `dp_multi_parent_atomicity` | 4 parents | 12 parents |
 | `dp_crash_injection` | 5 failpoints × 1 | 5 failpoints × 5 |
 | `dp_multi_process_double_spend` | 8 processes | 100 processes |
+| `planner_property` | 2 000 generated planning scenarios | 50 000 |
 
 The other checks are exhaustive at either scale: every-field receipt
 mutation, the ledger tamper list, and invalid noise.
@@ -99,6 +100,8 @@ not failures:
   bound beyond the property test.
 - **INV-081:** there is no adversarial scan of logs and error output for
   key material.
+- **INV-111, INV-114:** plan tampering is checked in memory (every
+  mechanism removal, every field mutation), not across processes.
 - **INV-101, INV-103:** there is no multi-process trust-bundle scenario for
   these (the CLI round covers INV-100 and INV-102).
 
@@ -153,3 +156,9 @@ not failures:
 | INV-101 | The graph the report reads is exactly what its evidence implies; any added, dropped or edited edge, node or attribute fails. | `a_whole_collaboration_verifies` | `tampered_evidence_fails_the_report` | `edges_come_from_the_evidence` | gap |
 | INV-102 | Every asset a program uses is approved by each owner for that program, unexpired and unrevoked; a revocation lists everything derived from the asset. | `owners_must_approve_the_program` | `owners_must_approve_the_program` | `revocation_shows_its_reach_and_forbids_later_use` | `secure_aggregation_round` |
 | INV-103 | Recorded privacy releases stay within the budget the program declares, with finite values, signed by a trusted coordinator; absent required evidence is never satisfied. | `privacy_releases_answer_to_the_declared_budget` | `absent_evidence_is_not_satisfied` | `privacy_releases_answer_to_the_declared_budget` | gap |
+| INV-110 | Every hard trust requirement of an accepted plan is satisfied by a valid, available mechanism, as the independent validator confirms. | `gradients_need_secure_aggregation_and_budgets_need_dp` | `the_validator_refuses_weakened_plans` | `planner_property` | `observed_execution_matches_the_approved_plan` |
+| INV-111 | Removing any required mechanism from a plan makes validation fail. | `private_model_training_needs_attested_confidential_compute` | `the_validator_refuses_weakened_plans` | `planner_property` | gap |
+| INV-112 | The planner never weakens confidentiality, release, privacy or verification requirements; profiles only add requirements. | `strong_profile_attests_the_coordinator_or_fails` | `the_validator_refuses_weakened_plans` | `planner_property` | `test_presets_expand_visibly` |
+| INV-113 | When no available mechanism combination satisfies the policy, there is no plan (PLANNING FAILED), never a weaker one. | `private_exact_eligibility_is_verified_fhe` | `verified_training_requires_attested_workloads` | `planner_adversarial` | `test_no_valid_mechanism_fails_closed` |
+| INV-114 | Plans are deterministic, and the PlanId changes with every change to the plan; the validator refuses every security-relevant change. | `plans_are_deterministic_and_identified` | `planner_plan_id_binding` | `planner_plan_id_binding` | gap |
+| INV-115 | The trust report refuses execution evidence that does not match the approved plan: another PlanId, no plan, or a missing mechanism. | `observed_execution_matches_the_approved_plan` | `observed_execution_matches_the_approved_plan` | `observed_execution_matches_the_approved_plan` | `observed_execution_matches_the_approved_plan` |

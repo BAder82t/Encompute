@@ -114,6 +114,14 @@ pub enum Code {
     /// The trust graph is inconsistent: a dangling edge, broken lineage,
     /// or a node that contradicts its evidence (ENC2303).
     TrustGraph,
+    /// No combination of available mechanisms satisfies every trust
+    /// requirement: PLANNING FAILED (ENC2401).
+    PlanningFailed,
+    /// A confidential execution plan does not satisfy its requirements, or
+    /// claims mechanisms that are unavailable or unsupported (ENC2402).
+    PlanInvalid,
+    /// Execution or evidence does not match the approved plan (ENC2403).
+    PlanMismatch,
 }
 
 impl Code {
@@ -165,13 +173,16 @@ impl Code {
             Code::TrustEvidence => "ENC2301",
             Code::TrustAuthorization => "ENC2302",
             Code::TrustGraph => "ENC2303",
+            Code::PlanningFailed => "ENC2401",
+            Code::PlanInvalid => "ENC2402",
+            Code::PlanMismatch => "ENC2403",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 46] = [
+    pub const ALL: [Code; 49] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -218,6 +229,9 @@ impl Code {
         Code::TrustEvidence,
         Code::TrustAuthorization,
         Code::TrustGraph,
+        Code::PlanningFailed,
+        Code::PlanInvalid,
+        Code::PlanMismatch,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

@@ -18,6 +18,7 @@ encompute-attestation.workspace = true
 encompute-keybroker.workspace = true
 encompute-secagg.workspace = true
 encompute-privacy.workspace = true
+encompute-planner.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

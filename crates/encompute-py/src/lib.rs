@@ -166,10 +166,72 @@ fn privacy_presets() -> Vec<(String, f64, f64, f64)> {
         .collect()
 }
 
+fn from_json<T: serde::de::DeserializeOwned>(what: &str, s: Option<&str>) -> PyResult<Option<T>> {
+    s.map(|t| {
+        serde_json::from_str(t).map_err(|e| {
+            err(encompute_ir::Error::new(
+                encompute_ir::Code::BadInput,
+                format!("{what}: {e}"),
+            ))
+        })
+    })
+    .transpose()
+}
+
+/// Plans `.eir` text (ADR-015). Returns `(plan_json, text, plan_id)`; on
+/// PLANNING FAILED, `plan_json` and `plan_id` are `None` and `text` says
+/// why. Every returned plan passed the independent validator.
+#[pyfunction]
+#[pyo3(signature = (eir, profile="standard", infrastructure=None, training=None, preferences=None, deep=false))]
+fn plan(
+    eir: &str,
+    profile: &str,
+    infrastructure: Option<&str>,
+    training: Option<&str>,
+    preferences: Option<&str>,
+    deep: bool,
+) -> PyResult<(Option<String>, String, Option<String>)> {
+    use encompute_runtime::planner::{render, verify_plan, Profile};
+    let program = encompute_ir::parse(eir).map_err(err)?;
+    let profile = Profile::parse(profile).ok_or_else(|| {
+        err(encompute_ir::Error::new(
+            encompute_ir::Code::BadInput,
+            "security is standard, strong or maximum",
+        ))
+    })?;
+    let ctx = encompute_runtime::planning::planning_context(
+        &program,
+        profile,
+        from_json("infrastructure", infrastructure)?.unwrap_or_default(),
+        from_json("preferences", preferences)?.unwrap_or_default(),
+        from_json("training", training)?,
+    )
+    .map_err(err)?;
+    let planned = encompute_runtime::planning::plan_program(&program, &ctx).map_err(err)?;
+    let extra = if deep {
+        format!("\n{}", render::deep(&planned))
+    } else {
+        String::new()
+    };
+    match &planned.plan {
+        None => Ok((None, render::failure(&planned) + &extra, None)),
+        Some(p) => {
+            verify_plan(&program, p).map_err(err)?;
+            let id = p.id().map_err(err)?.to_string();
+            Ok((
+                Some(String::from_utf8(p.to_bytes().map_err(err)?).expect("JSON")),
+                render::plan(p) + &extra,
+                Some(id),
+            ))
+        }
+    }
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Model>()?;
     m.add_function(wrap_pyfunction!(privacy_presets, m)?)?;
+    m.add_function(wrap_pyfunction!(plan, m)?)?;
     m.add_function(wrap_pyfunction!(has_openfhe, m)?)?;
     m.add_function(wrap_pyfunction!(has_tfhe, m)?)?;
     m.add("NativeError", m.py().get_type::<NativeError>())?;

@@ -2,6 +2,7 @@
 
 mod aggregate;
 mod attest;
+mod plan;
 mod trust;
 
 use std::path::{Path, PathBuf};
@@ -176,9 +177,36 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Choose the protection mechanisms that satisfy the program's trust
+    /// requirements (or fail: PLANNING FAILED), and explain every choice.
+    Plan {
+        model: PathBuf,
+        #[command(flatten)]
+        opts: plan::PlanOpts,
+        /// Write the plan (canonical JSON) for `aggregate --plan` and the
+        /// trust bundle.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        /// Also show every candidate considered and the assumptions.
+        #[arg(long)]
+        deep: bool,
+    },
+    /// Is the program valid, its policy and privacy valid, and does a plan
+    /// exist?
+    Check {
+        model: PathBuf,
+        #[command(flatten)]
+        opts: plan::PlanOpts,
+    },
     /// Show the execution plan, parameters and precision.
     Explain {
         model: PathBuf,
+        /// Also show the planner's candidates, rejected alternatives,
+        /// assumptions and estimated costs.
+        #[arg(long)]
+        deep: bool,
         /// Also measure the error over this many cases.
         #[arg(long)]
         measure: Option<usize>,
@@ -568,8 +596,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ExitCode::from(1)
             })
         }
+        Cmd::Plan {
+            model,
+            opts,
+            out,
+            json,
+            deep,
+        } => plan::plan(&model, &opts, out.as_deref(), json, deep),
+        Cmd::Check { model, opts } => plan::check(&model, &opts),
         Cmd::Explain {
             model,
+            deep,
             measure,
             mode,
             ledger,
@@ -582,6 +619,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
             print!("{}", m.explain(measured.as_ref()));
             if let Some(dir) = ledger {
                 print!("\n{}", m.privacy_preview(&dir)?);
+            }
+            if deep {
+                let opts = plan::PlanOpts {
+                    profile: "standard".into(),
+                    infrastructure: None,
+                    training: None,
+                    prefer: "latency".into(),
+                    local_only: false,
+                    region: None,
+                    allow_development: false,
+                };
+                print!("\n{}", plan::deep(&model, &opts)?);
             }
             Ok(ExitCode::SUCCESS)
         }

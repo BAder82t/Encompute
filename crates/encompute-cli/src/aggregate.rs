@@ -115,6 +115,10 @@ pub struct SpecArgs {
     /// provably runs the approved plan and privacy configuration.
     #[arg(long)]
     coordinator_policy: Option<PathBuf>,
+    /// The approved confidential execution plan (from `encompute plan
+    /// -o`): the round is bound to its ID and must provide its mechanisms.
+    #[arg(long)]
+    plan: Option<PathBuf>,
 }
 
 impl SpecArgs {
@@ -140,6 +144,14 @@ impl SpecArgs {
                     })?,
             );
         }
+        let approved = match &self.plan {
+            Some(p) => Some(crate::plan::approved(p, m.program(), &plan.output)?),
+            None => None,
+        };
+        let plan = match &approved {
+            Some((id, _)) => plan.with_execution_plan(id),
+            None => plan,
+        };
         let mut spec = AggregationSpec::new(plan, ordered)?;
         spec.training_execution_spec_id = self.training_spec.clone();
         if let Some(p) = &self.attestation_policy {
@@ -147,6 +159,9 @@ impl SpecArgs {
         }
         if let Some(p) = &self.coordinator_policy {
             spec.coordinator_attestation = Some(json::<AttestationPolicy>(p)?);
+        }
+        if let Some((_, step)) = &approved {
+            crate::plan::check_round(step, &spec)?;
         }
         spec.validate()?;
         Ok(spec)

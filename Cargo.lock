@@ -746,6 +746,7 @@ dependencies = [
  "encompute-evaluator",
  "encompute-ir",
  "encompute-keybroker",
+ "encompute-planner",
  "encompute-privacy",
  "encompute-protocol",
  "encompute-runtime",
@@ -891,6 +892,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "encompute-planner"
+version = "0.2.0"
+dependencies = [
+ "encompute-analysis",
+ "encompute-ir",
+ "encompute-verification",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "encompute-privacy"
 version = "0.2.0"
 dependencies = [
@@ -931,6 +945,7 @@ dependencies = [
  "encompute-runtime",
  "pyo3",
  "pyo3-build-config",
+ "serde",
  "serde_json",
 ]
 
@@ -948,6 +963,7 @@ dependencies = [
  "encompute-ir",
  "encompute-keybroker",
  "encompute-openfhe-client",
+ "encompute-planner",
  "encompute-privacy",
  "encompute-protocol",
  "encompute-secagg",
@@ -1017,6 +1033,7 @@ dependencies = [
  "ed25519-dalek",
  "encompute-attestation",
  "encompute-ir",
+ "encompute-planner",
  "encompute-privacy",
  "encompute-secagg",
  "encompute-verification",

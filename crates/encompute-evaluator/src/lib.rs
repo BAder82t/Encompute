@@ -14,7 +14,7 @@ pub mod server;
 mod session;
 
 pub use compiled::{
-    compile_program, refuse_aggregation, CompiledProgram, ExactProgram, Semantics,
+    compile_program, proof_coverable, refuse_aggregation, CompiledProgram, ExactProgram, Semantics,
     EXACT_PLAN_VERSION,
 };
 pub use exec::evaluate_encrypted;

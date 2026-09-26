@@ -48,6 +48,10 @@ pub enum TrustCmd {
         model: PathBuf,
         #[arg(long)]
         parties: Option<PathBuf>,
+        /// The approved confidential execution plan (`encompute plan -o`):
+        /// recorded, and bound into the aggregation spec.
+        #[arg(long)]
+        plan: Option<PathBuf>,
         #[command(flatten)]
         bundle: Bundle,
     },
@@ -81,7 +85,8 @@ pub enum TrustCmd {
         bundle: Bundle,
     },
     /// Add evidence: aggregation receipts, execution receipts, attestation
-    /// records, privacy receipts (detected by content).
+    /// records, privacy receipts, specs and approved plans (detected by
+    /// content).
     Add {
         evidence: Vec<PathBuf>,
         #[command(flatten)]
@@ -169,6 +174,9 @@ fn add_evidence(g: &mut TrustGraph, bytes: &[u8]) -> Result<String> {
     if let Ok(s) = serde_json::from_slice::<AggregationSpec>(bytes) {
         return g.add_aggregation_spec(s);
     }
+    if let Ok(p) = encompute_runtime::planner::ConfidentialExecutionPlan::from_bytes(bytes) {
+        return g.add_plan(p);
+    }
     Err(Error::new(
         Code::TrustEvidence,
         "not a receipt, record or spec Encompute knows",
@@ -180,16 +188,31 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
         TrustCmd::Init {
             model,
             parties,
+            plan,
             bundle,
         } => {
             let m = load(&model)?;
             let mut g = TrustGraph::new();
             let prog = g.add_program(&m.program().to_string())?;
+            let plan_id = match &plan {
+                Some(p) => {
+                    let p = encompute_runtime::planner::ConfidentialExecutionPlan::from_bytes(
+                        &read(p)?,
+                    )?;
+                    let id = p.id()?.hex();
+                    g.add_plan(p)?;
+                    Some(id)
+                }
+                None => None,
+            };
             if let Some(p) = parties {
                 let ids: Vec<PartyIdentity> = serde_json::from_slice(&read(&p)?)
                     .map_err(|e| Error::new(Code::TrustGraph, format!("{}: {e}", p.display())))?;
                 g.add_party_keys(&ids)?;
-                if let Ok(plan) = m.aggregation_plan(None) {
+                if let Ok(mut plan) = m.aggregation_plan(None) {
+                    if let Some(id) = &plan_id {
+                        plan = plan.with_execution_plan(id);
+                    }
                     let ordered: Vec<PartyIdentity> = plan
                         .participants
                         .iter()

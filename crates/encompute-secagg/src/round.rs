@@ -153,6 +153,11 @@ pub struct AggregationPlan {
     pub dp: Option<DpMechanism>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy_policy_id: Option<String>,
+    /// The approved confidential execution plan (ADR-015, hex PlanId):
+    /// bound into the spec ID, every receipt and the coordinator's
+    /// attestation. Parties join only rounds of the plan they approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_plan_id: Option<String>,
 }
 
 impl AggregationPlan {
@@ -194,7 +199,14 @@ impl AggregationPlan {
             },
             dp: b.dp.clone(),
             privacy_policy_id: privacy_policy_id.map(str::to_owned),
+            execution_plan_id: None,
         }
+    }
+
+    /// This plan, bound to the approved confidential execution plan.
+    pub fn with_execution_plan(mut self, plan_id: &str) -> Self {
+        self.execution_plan_id = Some(plan_id.to_owned());
+        self
     }
 
     pub fn participant(&self, party: &PartyId) -> Option<&PlanParticipant> {
