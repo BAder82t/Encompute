@@ -99,8 +99,15 @@ fn spec_of(m: &Model) -> AggregationSpec {
     .unwrap()
 }
 
+/// A fresh directory per call: tests run in parallel, and a ledger shared
+/// between them would mix their spend.
 fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("encompute-trust-{name}-{}", std::process::id()));
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let d = std::env::temp_dir().join(format!(
+        "encompute-trust-{name}-{}-{n}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -566,7 +573,8 @@ fn privacy_releases_answer_to_the_declared_budget() {
     let (_, g, _) = collaboration();
     // A well-formed later release still verifies.
     let ok = signed_release(&g, |r| r.cumulative_epsilon = "2.9".into(), &coordinator());
-    assert_eq!(row(&report(&ok), "Privacy budget"), Status::Satisfied);
+    let r = report(&ok);
+    assert_eq!(row(&r, "Privacy budget"), Status::Satisfied, "{r}");
     // NaN spend.
     let t = signed_release(&g, |r| r.cumulative_epsilon = "NaN".into(), &coordinator());
     assert_eq!(row(&report(&t), "Privacy budget"), Status::Failed);
