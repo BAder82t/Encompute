@@ -691,9 +691,12 @@ fn plan_row(g: &TrustGraph) -> Row {
                                 Mechanism::DifferentialPrivacy {
                                     noise_multiplier,
                                     clip_norm,
+                                    sampling_rate,
                                 } => spec.plan.dp.as_ref().is_some_and(|d| {
                                     format!("{:?}", d.noise_multiplier) == *noise_multiplier
                                         && format!("{:?}", d.clip_norm) == *clip_norm
+                                        && d.sampling_rate.map(|q| format!("{q:?}"))
+                                            == *sampling_rate
                                 }),
                                 Mechanism::Attestation { .. } => {
                                     spec.coordinator_attestation.is_some()
@@ -818,6 +821,11 @@ fn training_row(g: &TrustGraph, a: &Anchors) -> Row {
                 if agg.parties != s.participants {
                     t.fail(format!("{id}: its participants are not the aggregation's"));
                 }
+                if s.config.dp_sgd.is_some() && agg.attestation.is_none() {
+                    t.fail(format!(
+                        "{id}: DP-SGD, but its aggregation accepts unattested contributions"
+                    ));
+                }
             }
         }
         for p in &s.participants {
@@ -853,6 +861,52 @@ fn training_row(g: &TrustGraph, a: &Anchors) -> Row {
                     "{id}: {} or its gradient is not declared as {}'s",
                     d.asset_id, d.owner
                 ));
+            }
+        }
+        // The privacy the program declares must be the privacy the
+        // training enforces: patient-level needs DP-SGD, and DP-SGD's
+        // unit, sampling and noise must be the program's.
+        // The mechanism of this training's own aggregation spec.
+        let dp = g
+            .spec(&s.aggregation_spec_id)
+            .and_then(|a| a.plan.dp.as_ref());
+        for d in &s.datasets {
+            let Some(b) = c
+                .and_then(|c| c.asset(&d.gradient_asset))
+                .and_then(|x| x.policy.privacy.as_ref())
+            else {
+                continue;
+            };
+            match &s.config.dp_sgd {
+                None if b.unit.name() != "organization"
+                    || dp.is_some_and(|m| m.sampling_rate.is_some()) =>
+                {
+                    t.fail(format!(
+                        "{id}: {} claims {}-level privacy, but the training clips each \
+                         organization's whole update (no per-example clipping)",
+                        d.gradient_asset, b.unit
+                    ))
+                }
+                None => {}
+                Some(cfg) => {
+                    let same = |x: f64, y: &str| format!("{x:?}") == y;
+                    if b.unit.name() != cfg.privacy_unit
+                        || !same(b.delta, &cfg.delta)
+                        || !dp.is_some_and(|m| {
+                            m.sampling_rate.is_some_and(|q| same(q, &cfg.sampling_rate))
+                                && same(m.noise_multiplier, &cfg.noise_multiplier)
+                        })
+                    {
+                        t.fail(format!(
+                            "{id}: its DP-SGD configuration ({} unit, sampling {}, noise {}) \
+                             is not the program's privacy for {}",
+                            cfg.privacy_unit,
+                            cfg.sampling_rate,
+                            cfg.noise_multiplier,
+                            d.gradient_asset
+                        ));
+                    }
+                }
             }
         }
     }

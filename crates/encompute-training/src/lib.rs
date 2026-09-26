@@ -15,7 +15,7 @@ pub use adapter::{adapter_policy, check_export, AdapterRecord, SignedAdapterReco
 pub use checkpoint::{resume, seal_checkpoint, CheckpointHeader, ResumeExpectation};
 pub use layout::{tensor_manifest, AdapterLayout, LayoutEntry, TensorEntry, LAYOUT_VERSION};
 pub use seal::{open, open_asset, peek, seal, seal_asset, sha256_hex, AssetHeader};
-pub use spec::{DatasetCommitment, ModelCommitment, TrainingConfig, TrainingSpec};
+pub use spec::{DatasetCommitment, DpSgdConfig, ModelCommitment, TrainingConfig, TrainingSpec};
 
 use sha2::{Digest, Sha256};
 

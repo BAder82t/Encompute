@@ -7,6 +7,7 @@
 
 pub mod accountant;
 pub mod ledger;
+pub mod rdp;
 pub mod release;
 pub mod sampler;
 

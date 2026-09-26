@@ -39,7 +39,7 @@ check "Python SDK" bash -c "$(declare -f python_env); python_env && .venv/bin/py
 check "Fine-tuning E2E" .venv/bin/python -m pytest -q python/tests/test_finetune.py \
   python/tests/test_finetune_matrix.py python/tests/test_finetune_leakage.py \
   python/tests/test_finetune_crash.py python/tests/test_training_contract.py
-check "Examples" env PYTHON="$PWD/.venv/bin/python" EXAMPLES_REQUIRE="15" examples/run-all.sh standard
+check "Examples" env PYTHON="$PWD/.venv/bin/python" EXAMPLES_REQUIRE="15 16" examples/run-all.sh standard
 check "Assurance" bash -c 'cargo build -q --release -p encompute-assurance --bins --examples && target/release/assurance-report'
 
 if [ -d .deps/openfhe ]; then

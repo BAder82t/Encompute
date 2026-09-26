@@ -8,7 +8,9 @@ workload and receives the base model's key. It opens the sealed model,
 checks it is the committed version, and builds it from the bound factory
 (never a pickle). It adds LoRA and checks the parameter layout is the
 approved one. Then, per round, it trains locally on its owner's dataset and
-contributes the clipped adapter update to secure aggregation, through
+contributes the clipped adapter update to secure aggregation (or, with
+patient-level DP-SGD, one step's sum of Poisson-sampled, per-patient
+clipped gradients; see dpsgd.py), through
 `encompute aggregate join --values -`. The update goes only into that
 process's stdin: it is never written to disk or sent anywhere else.
 
@@ -27,7 +29,7 @@ import traceback
 import torch
 
 from .. import _native
-from . import lora, models, tensors
+from . import dpsgd, lora, models, tensors
 
 
 def _failpoint(name: str) -> None:
@@ -45,7 +47,7 @@ def load_dataset(cfg: dict) -> tuple:
     if _native.sha256_hex(data) != cfg["dataset_digest"]:
         raise ValueError(f"{cfg['dataset_asset']} is not the dataset the training spec commits to")
     t = tensors.loads(data)
-    return t["x"], t["y"]
+    return t["x"], t["y"], t.get("unit_ids")
 
 
 class Worker:
@@ -78,7 +80,35 @@ class Worker:
         lora.apply_lora(self.model, self.lcfg)
         if lora.layout_digest(self.model) != spec["layout_digest"]:
             raise ValueError("this worker's adapter layout is not the approved one")
-        self.x, self.y = load_dataset(cfg)
+        self.x, self.y, unit_ids = load_dataset(cfg)
+        self.dp = None
+        if spec["config"].get("dp_sgd"):
+            d = spec["config"]["dp_sgd"]
+            mine = next(x for x in spec["datasets"] if x["asset_id"] == cfg["dataset_asset"])
+            self.unit_of, n_units = dpsgd.unit_index(unit_ids, len(self.x))
+            # The grouping must be the committed one.
+            if (d["grouping"] == "unit_ids") != (unit_ids is not None):
+                raise ValueError("this dataset's grouping is not the approved one")
+            if unit_ids is not None and _native.sha256_hex(
+                    tensors.dumps({"unit_ids": unit_ids})) != mine["grouping_digest"]:
+                raise ValueError("this dataset's patient grouping is not the committed one")
+            if n_units != mine["privacy_units"]:
+                raise ValueError("this dataset's number of privacy units is not the committed one")
+            self.n_units = n_units
+            self.dp = dpsgd.DpSgd(
+                unit=d["privacy_unit"], per_example_clip=float(d["per_example_clip"]),
+                sampling_rate=float(d["sampling_rate"]),
+                noise_multiplier=float(d["noise_multiplier"]), delta=float(d["delta"]),
+                grouping=d["grouping"], expected_batch=float(d["expected_batch"]),
+                microbatch=int(cfg.get("microbatch", 64)))
+            # The coordinator accepts DP-SGD contributions only from an
+            # attested worker running this training code.
+            self.contribution_record = os.path.join(os.path.dirname(cfg["state"]),
+                                                    "contribution-attestation.json")
+            with open(self.contribution_record, "w") as f:
+                f.write(_native.attest_contribution(
+                    spec["plan_id"], None, spec["code_digest"], cfg["identity"],
+                    cfg["mock_seed"], cfg["image"]))
 
     def train(self, adapter: list, seed: int) -> torch.Tensor:
         """Local LoRA training from `adapter`; returns the update."""
@@ -99,14 +129,30 @@ class Worker:
         self.loss = float(loss)
         return lora.get_flat(self.model) - start
 
+    def dp_sgd_step(self, adapter: list) -> torch.Tensor:
+        """DP-SGD: the sum of the Poisson-sampled units' clipped gradients,
+        rescaled so each unit's is at most CODEC_CLIP. The round's seed is
+        not used: the sample comes from the operating system."""
+        lora.set_flat(self.model, torch.tensor(adapter, dtype=torch.float32))
+        sampled = dpsgd.poisson_sample(self.n_units, self.dp.sampling_rate)
+        g = dpsgd.clipped_sum(self.model, self.x, self.y, self.unit_of, sampled,
+                              self.dp.per_example_clip, self.dp.microbatch)
+        return g * (dpsgd.CODEC_CLIP / self.dp.per_example_clip)
+
     def contribute(self, msg: dict) -> dict:
-        update = self.train(msg["adapter"], msg["seed"])
-        _failpoint("after-local-training")
-        # Clip the whole update to update_clip (the sensitivity the privacy
-        # accounting assumes), scaled into the codec's [-1, 1] range.
-        c = self.lcfg.update_clip
-        norm = float(update.norm())
-        v = update * min(1.0, c / max(norm, 1e-12)) / c
+        if self.dp is not None:
+            v = self.dp_sgd_step(msg["adapter"])
+            update, norm, c, self.loss = v, 0.0, 1.0, None
+            _failpoint("after-local-training")
+        else:
+            update = self.train(msg["adapter"], msg["seed"])
+            _failpoint("after-local-training")
+            # Clip the whole update to update_clip (the sensitivity the
+            # privacy accounting assumes), scaled into the codec's [-1, 1]
+            # range.
+            c = self.lcfg.update_clip
+            norm = float(update.norm())
+            v = update * min(1.0, c / max(norm, 1e-12)) / c
         # Test-only: the leakage tests plant a known value in the
         # contribution and check it never appears outside the masked
         # secure-aggregation message.
@@ -116,6 +162,9 @@ class Worker:
         cfg = self.cfg
         attested = (["--coordinator-policy", cfg["coordinator_policy"],
                      "--mock-root", cfg["mock_root"]] if cfg["coordinator_policy"] else [])
+        if cfg.get("contribution_policy"):
+            attested += ["--attestation-policy", cfg["contribution_policy"],
+                         "--attestation", self.contribution_record]
         p = subprocess.run(
             [cfg["cli"], "aggregate", "join", cfg["artifact"], "--parties", cfg["parties"],
              "--plan", cfg["plan"], *attested, "--coordinator", msg["coordinator"],
@@ -125,6 +174,10 @@ class Worker:
         )
         del update, v
         _failpoint("after-contribution")
+        if self.dp is not None:
+            # Nothing about the local data leaves except the masked
+            # contribution: no loss, no clipping or sample statistics.
+            return {"ok": p.returncode == 0, "log": (p.stdout + p.stderr)[-2000:]}
         return {"ok": p.returncode == 0, "loss": self.loss, "clipped": norm > c,
                 "log": (p.stdout + p.stderr)[-2000:]}
 

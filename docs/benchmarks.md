@@ -122,3 +122,31 @@ For this model, the secure-aggregation round trips dominate: process start
 and four protocol stages per round, on one machine. Nothing is optimized
 yet; these numbers are a baseline. Real TEEs add hardware attestation and
 key-release latency that the mock does not show.
+
+## Patient-level DP-SGD
+
+Per-example gradients for the same tiny classifier (LoRA rank 4 on `q` and
+`v`, 256 adapter parameters), 64 records of 32 patients, CPU, Apple M3 Max,
+mean of 20 runs:
+
+| Gradient | Milliseconds |
+|---|---|
+| plain batch gradient (no per-example clipping) | 0.83 |
+| per-example, `vmap` over `grad`, microbatch 64 | 2.16 |
+| per-example, `vmap` over `grad`, microbatch 8 | 8.44 |
+| per-example, one autograd call per record (the test reference) | 18.03 |
+
+`examples/16_patient_private_lora`: two hospitals of 1,000 patients (2,000
+records each), sampling rate 0.032, the same model. Seconds per round,
+including secure aggregation and the DP release, all parties on one
+machine, debug build:
+
+| Privacy | Seconds per round | ε used (per hospital) | Held-out accuracy |
+|---|---|---|---|
+| organization (10 local steps, whole-update clip) | 2.8 | 6.34 of 8 after 2 rounds | 0.38 → 0.43 |
+| patient (DP-SGD, one step) | 2.6 | 1.75 of 3 after 20 rounds | 0.38 → 0.73 |
+
+The per-example gradients are a small part of a round; the protocol's round
+trips dominate. Accuracy regression bound (`test_dpsgd.py`): with
+strong-patient noise, simulated DP-SGD stays within 0.1 of the same training
+without noise (about 0.76).

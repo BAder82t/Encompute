@@ -258,6 +258,7 @@ fn options(
                 base.push(Mechanism::DifferentialPrivacy {
                     noise_multiplier: format!("{:?}", dp.noise_multiplier),
                     clip_norm: format!("{:?}", dp.clip_norm),
+                    sampling_rate: dp.sampling_rate.map(|q| format!("{q:?}")),
                 });
             }
             out.push(Option_ {

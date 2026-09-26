@@ -121,6 +121,28 @@ pub fn adapter_lineage(g: &TrustGraph, adapter: &str, report: &TrustReport) -> R
     }
     if !spent.is_empty() {
         let _ = writeln!(s, "\nPrivacy\n{RULE}");
+        match &spec.config.dp_sgd {
+            Some(d) => {
+                let _ = writeln!(
+                    s,
+                    "{:<24}{} (DP-SGD: per-{} clip {}, Poisson sampling {}, noise {}, {})",
+                    "privacy unit",
+                    d.privacy_unit,
+                    d.privacy_unit,
+                    d.per_example_clip,
+                    d.sampling_rate,
+                    d.noise_multiplier,
+                    d.accountant
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    s,
+                    "{:<24}organization (each participant's whole update clipped)",
+                    "privacy unit"
+                );
+            }
+        }
         for (asset, (_, eps)) in &spent {
             let a = c.and_then(|c| c.asset(asset));
             let (unit, budget) = a

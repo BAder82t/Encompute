@@ -121,7 +121,12 @@ impl PrivacyPolicyId {
             >,
         }
         let bytes = crate::canonical::canonical_json(&Canonical {
-            accountant: encompute_ir::confidentiality::PRIVACY_ACCOUNTANT,
+            // Sampled (DP-SGD) mechanisms are accounted under Rényi DP.
+            accountant: if mechanisms.values().any(|(m, _)| m.sampling_rate.is_some()) {
+                encompute_ir::confidentiality::SAMPLED_PRIVACY_ACCOUNTANT
+            } else {
+                encompute_ir::confidentiality::PRIVACY_ACCOUNTANT
+            },
             budgets: &budgets,
             mechanisms: &mechanisms,
         })

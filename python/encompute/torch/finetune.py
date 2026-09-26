@@ -24,8 +24,11 @@ and discards the rest. A released but uncommitted round stays charged: its
 privacy is spent, only its progress is lost. ``finetune(resume=workdir)``
 continues from the last accepted adapter.
 
-Privacy unit: organization. Each hospital's whole update is clipped.
-Patient-level DP requires per-example clipping (DP-SGD) and is not claimed.
+Privacy unit: organization by default (each hospital's whole update is
+clipped). With ``privacy="strong-patient"`` (or ``encompute.Privacy``), the
+unit is the patient: DP-SGD with per-patient clipping and Poisson sampling
+inside each attested worker, noise added by the coordinator, and Rényi DP
+accounting. A run that would exceed the budget is denied before training.
 
 Attestation here is DEVELOPMENT (mock): it exercises every check, but
 provides no hardware confidentiality.
@@ -44,7 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,12 +55,21 @@ import torch
 
 from .. import _native
 from .._frontend import EncomputeError
-from . import lora, models, tensors
+from . import dpsgd, lora, models, tensors
 
 IMAGE = "sha256:" + "5" * 64  # the training worker image (development)
-CODE = ["worker.py", "lora.py", "tensors.py", "models.py", "finetune.py", "infer.py"]
+CODE = ["worker.py", "lora.py", "tensors.py", "models.py", "finetune.py", "infer.py",
+        "dpsgd.py"]
 PRIVACY_UNIT = ("Privacy unit: organization. Patient-level DP requires per-example clipping "
                 "(DP-SGD) and is not claimed.")
+
+
+def _privacy_note(dp: Optional[dict]) -> str:
+    if not dp:
+        return PRIVACY_UNIT
+    return (f"Privacy unit: {dp['privacy_unit']}. Each {dp['privacy_unit']}'s gradient is "
+            f"clipped to {dp['per_example_clip']} (DP-SGD, Poisson sampling "
+            f"{dp['sampling_rate']}), accounted with Rényi DP.")
 FAILPOINTS = ("after-aggregate-release", "after-adapter-write", "before-checkpoint-write",
               "during-checkpoint-write", "before-trust-update", "after-trust-update",
               "kill-coordinator", "kill-broker")
@@ -249,6 +261,8 @@ class FineTuneResult:
     losses: List[float]
     workdir: Path
     recovery: Optional[dict] = None
+    privacy_unit: str = "organization"
+    privacy_preview: Optional[List[dict]] = None
     _ctx: Dict[str, Any] = field(repr=False, default_factory=dict)
 
     def summary(self) -> str:
@@ -269,7 +283,7 @@ class FineTuneResult:
             f"{'Adapter lineage':<24}"
             f"{'COMPLETE' if ok('Training', 'Lineage') else r.get('Lineage')}",
             "",
-            PRIVACY_UNIT,
+            _privacy_note(self._ctx.get("dp_sgd")),
             "",
             "Output",
             self.adapter_id,
@@ -350,6 +364,49 @@ class FineTuneResult:
 
 # --- setup --------------------------------------------------------------------
 
+DP_SPEC_FIELDS = ("privacy_unit", "per_example_clip", "sampling", "sampling_rate",
+                  "noise_multiplier", "delta", "grouping", "accountant", "expected_batch")
+
+
+def _exact(x: float) -> str:
+    """A float as Rust's ``{:?}`` prints it (``1e-6``, not ``1e-06``): the
+    training spec's canonical number format."""
+    m, _, e = repr(float(x)).partition("e")
+    return f"{m}e{int(e)}" if e else m
+
+
+def _dp_settings(pv, data, cfg: lora.LoRAConfig) -> dict:
+    """A DP-SGD run's settings, from ``encompute.Privacy`` and the datasets.
+    The sampling rate defaults to the batch size over the smallest
+    dataset's number of units."""
+    eps, delta, z = pv.resolve()
+    units = {}
+    grouped = [len(d.payload) == 3 for d in data]
+    if any(grouped) and not all(grouped):
+        raise EncomputeError("ENC2501", "either every dataset has unit_ids, or none does")
+    if pv.unit != "record" and not all(grouped):
+        raise EncomputeError(
+            "ENC2501", f"{pv.unit}-level privacy needs each record's {pv.unit}: pass unit_ids "
+                       "to encompute.torch.private_dataset (one ID per record), so a "
+                       f"{pv.unit}'s records are clipped together")
+    for d in data:
+        n = len(torch.unique(d.payload[2])) if grouped[0] else len(d.payload[0])
+        units[d.id] = n
+    q = pv.sampling_rate if pv.sampling_rate is not None else cfg.batch_size / min(units.values())
+    if not 0 < q < 1:
+        raise EncomputeError("ENC2501", f"sampling rate {q} is not below 1: a dataset has fewer "
+                                        f"{pv.unit}s than the batch size")
+    q = float(f"{q:.6g}")
+    return {
+        "privacy_unit": pv.unit, "per_example_clip": _exact(pv.per_example_clip),
+        "sampling": "poisson", "sampling_rate": _exact(q), "noise_multiplier": _exact(z),
+        "delta": _exact(delta), "grouping": "unit_ids" if grouped[0] else "none",
+        "accountant": "rdp-poisson-zw2019",
+        "expected_batch": _exact(float(f"{q * sum(units.values()):.6g}")),
+        "epsilon": eps, "delta_f": delta, "noise_f": z, "q": q, "units": units,
+    }
+
+
 
 def _setup(project, model, data, privacy, verification, cfg, infrastructure,
            allow_development, W: Path, cli: str, say) -> dict:
@@ -357,9 +414,16 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     state to run.json."""
     from .._project import PlanningFailed
 
+    from .._privacy import Privacy
+
     module = model.payload
     mc = W / model.owner
     mc.mkdir(parents=True, exist_ok=True)
+    pv = Privacy.of(privacy)
+    dp = None
+    if isinstance(pv, Privacy):
+        dp = _dp_settings(pv, data, cfg)
+        cfg = replace(cfg, local_steps=1)  # one accounted step per round
 
     base_state = {k: v.clone() for k, v in module.state_dict().items()}
     weights = tensors.dumps(base_state)
@@ -370,8 +434,25 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     dim = adapter0.numel()
 
     # 1. Declarations and the plan.
-    eir = project._aggregation_program(data, model.owner, model, privacy=privacy,
-                                       unit="organization", dim=dim, colluding=None)
+    eir = project._aggregation_program(
+        data, model.owner, model, privacy=privacy if dp is None else "",
+        unit="organization" if dp is None else dp["privacy_unit"], dim=dim, colluding=None,
+        dpsgd=None if dp is None else {
+            "epsilon": dp["epsilon"], "delta": dp["delta_f"],
+            "noise_multiplier": dp["noise_f"], "sampling_rate": dp["q"],
+            "clip_norm": dpsgd.CODEC_CLIP, "scale": dpsgd.CODEC_SCALE})
+    # The privacy preview: what the planned rounds cost each budget. A
+    # DP-SGD run that would exceed it is denied before anything runs.
+    rows_json, preview = _native.privacy_preview(eir, cfg.rounds)
+    rows = json.loads(rows_json)
+    if dp is not None:
+        say(preview.rstrip())
+        if not all(r["allowed"] for r in rows):
+            r = min(rows, key=lambda r: r["affordable"])
+            raise EncomputeError(
+                "ENC2201", f"PRIVACY BUDGET EXCEEDED: DENIED BEFORE TRAINING. {cfg.rounds} rounds "
+                f"would cost {r['asset']} epsilon {r['epsilon']:.3f} of {r['budget_epsilon']}; "
+                f"its budget affords {r['affordable']} rounds")
     (mc / "training.eir").write_text(eir)
     _run([cli, "compile", "training.eir", "-o", "training.encompute"], mc)
     infra = infrastructure
@@ -379,7 +460,9 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
         infra = {"tees": [{"tee": "mock", "provider": "mock", "cloud": True}], "key_broker": True}
     (mc / "infra.json").write_text(json.dumps(infra or {}))
     (mc / "training-decl.json").write_text(json.dumps(
-        {"model": model.id, "data": [d.id for d in data], "verified": verification == "required"}))
+        {"model": model.id, "data": [d.id for d in data], "verified": verification == "required",
+         "privacy_unit": "organization" if dp is None else dp["privacy_unit"],
+         "per_example_clipping": dp is not None}))
     args = [cli, "plan", "training.encompute", "--profile", project.security,
             "--infrastructure", "infra.json", "--training", "training-decl.json", "-o", "plan.json"]
     if allow_development:
@@ -415,8 +498,16 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
             [cli, "aggregate", "coordinator-policy", "training.encompute", "--image", IMAGE,
              "--tee", "mock", "--development", "--plan", "plan.json"], mc))
         coord_policy = ["--coordinator-policy", str(mc / "coord-policy.json")]
+    # DP-SGD: no party-side clip bounds a contribution (each patient is
+    # clipped inside the worker), so contributions must come from attested
+    # workers running the bound training code.
+    contrib = []
+    if dp is not None:
+        (mc / "contribution-policy.json").write_text(_native.contribution_attestation_policy(
+            plan_id.split(":", 1)[1], None, code_digest(module.encompute_factory), IMAGE, True))
+        contrib = ["--attestation-policy", str(mc / "contribution-policy.json")]
     _run([cli, "trust", "init", "training.encompute", "--parties", parties, "--plan",
-          "plan.json", *coord_policy, "--bundle", "trust.json"], mc)
+          "plan.json", *coord_policy, *contrib, "--bundle", "trust.json"], mc)
     for d in data:
         _run([cli, "trust", "authorize", "--party", d.owner, "--key", str(W / d.owner / "party.key"),
               "--bundle", str(mc / "trust.json")], mc)
@@ -428,12 +519,20 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     # digest covers every sample and label, in order.
     commitments = []
     for d in data:
-        x, y = d.payload
-        blob = tensors.dumps({"x": x, "y": y})
+        x, y = d.payload[:2]
+        t = {"x": x, "y": y}
+        if len(d.payload) == 3:
+            t["unit_ids"] = d.payload[2]
+        blob = tensors.dumps(t)
         (W / d.owner / "dataset.bin").write_bytes(blob)
-        commitments.append({"asset_id": d.id, "owner": d.owner,
-                            "gradient_asset": f"gradient-{d.id}",
-                            "digest": _native.sha256_hex(blob)})
+        c = {"asset_id": d.id, "owner": d.owner, "gradient_asset": f"gradient-{d.id}",
+             "digest": _native.sha256_hex(blob)}
+        if dp is not None:
+            c["privacy_units"] = dp["units"][d.id]
+            if "unit_ids" in t:
+                c["grouping_digest"] = _native.sha256_hex(
+                    tensors.dumps({"unit_ids": t["unit_ids"]}))
+        commitments.append(c)
     commitments.sort(key=lambda c: c["asset_id"])
 
     # 5. The training spec every worker attests to.
@@ -460,6 +559,7 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
             "update_clip": repr(float(cfg.update_clip)),
             "local_steps": cfg.local_steps, "batch_size": cfg.batch_size,
             "rounds": cfg.rounds, "adapter_parameters": dim,
+            **({} if dp is None else {"dp_sgd": {k: dp[k] for k in DP_SPEC_FIELDS}}),
         },
         "participants": agg_spec["parties"],
     }
@@ -504,7 +604,10 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
                  "optimizer": cfg.optimizer, "learning_rate": cfg.learning_rate,
                  "update_clip": cfg.update_clip, "local_steps": cfg.local_steps,
                  "batch_size": cfg.batch_size, "rounds": cfg.rounds, "seed": cfg.seed},
-        "privacy": privacy,
+        "privacy": privacy if dp is None else pv.level,
+        "dp_sgd": None if dp is None else {k: dp[k] for k in DP_SPEC_FIELDS},
+        "contribution_policy": contrib[1] if contrib else "",
+        "privacy_preview": rows,
     }
     _write_atomic(W / "run.json", json.dumps(state, indent=1).encode())
     return state
@@ -520,6 +623,9 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
              verbose: bool = True) -> FineTuneResult:
     say = print if verbose else (lambda *a, **k: None)
     t0 = time.perf_counter()
+    if not resume:
+        from .._privacy import Privacy
+        Privacy.of(privacy)  # refuse an unknown level before any work
     timings: Dict[str, float] = {}
     cli = _cli()
     env = dict(os.environ, ENCOMPUTE_CLI=cli, PYTHONDONTWRITEBYTECODE="1")
@@ -550,6 +656,7 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
         W.mkdir(parents=True, exist_ok=True)
         st = _setup(project, model, data, privacy, verification, config or lora.LoRAConfig(),
                     infrastructure, allow_development, W, cli, say)
+    dp = st.get("dp_sgd")
     c = st["lora"]
     cfg = lora.LoRAConfig(rank=c["rank"], alpha=c["alpha"],
                           target_modules=tuple(c["target_modules"]), optimizer=c["optimizer"],
@@ -569,7 +676,8 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
     broker, broker_url = _start_broker(cli, mc, mock_root)
     ctx: Dict[str, Any] = dict(cli=cli, bundle=mc / "trust.json", modelco=mc, spec=spec_json,
                                broker=broker_url, broker_proc=broker, hw_seed=W / "hw.seed",
-                               env=env, mock_root=mock_root, adapter0_digest=st["adapter0_digest"])
+                               env=env, mock_root=mock_root, adapter0_digest=st["adapter0_digest"],
+                               dp_sgd=dp)
     ctx["anchors"] = ["--parties", parties, "--coordinator-key", st["coord_key"], "--mock-root",
                       mock_root, "--execution-policy", str(mc / "training-policy.json")]
     ctx["infer"] = dict(spec=spec_json, identity=str(mc / "coord.key"),
@@ -580,7 +688,12 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
     say(f"{'Dataset protection':<24}ACTIVE (datasets never leave their owners' workers)")
     say(f"{'Attestation':<24}REQUIRED")
     say(f"{'Gradient protection':<24}SECURE AGGREGATION")
-    say(f"{'Privacy':<24}ACTIVE ({st['privacy']}, organization-level)")
+    if dp:
+        say(f"{'Privacy':<24}ACTIVE ({st['privacy']}, {dp['privacy_unit']}-level: DP-SGD, "
+            f"per-{dp['privacy_unit']} clip {dp['per_example_clip']}, Poisson sampling "
+            f"{dp['sampling_rate']}, noise {dp['noise_multiplier']})")
+    else:
+        say(f"{'Privacy':<24}ACTIVE ({st['privacy']}, organization-level)")
 
     # Plain PyTorch baseline: the same local steps, no Encompute.
     if not resume:
@@ -588,7 +701,7 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
         bl.load_state_dict(model.payload.state_dict())
         lora.apply_lora(bl, cfg)
         t = time.perf_counter()
-        x0, y0 = data[0].payload
+        x0, y0 = data[0].payload[:2]
         opt = torch.optim.SGD(list(lora.adapter_parameters(bl).values()), lr=cfg.learning_rate)
         for _ in range(cfg.local_steps):
             opt.zero_grad()
@@ -619,6 +732,7 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                 "coordinator_policy": (str(mc / "coord-policy.json")
                                        if st["attested_coord"] else ""),
                 "mock_root": mock_root, "party": d["owner"], "state": str(pd / "round.state"),
+                "contribution_policy": st.get("contribution_policy", ""),
             }
             (pd / "worker.json").write_text(json.dumps(wcfg))
             p = subprocess.Popen([sys.executable, "-m", "encompute.torch.worker",
@@ -634,6 +748,10 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                 (pd / "attestation.json").write_text(hello["record"])
                 _run([cli, "trust", "add", str(pd / "attestation.json"), "--bundle",
                       "trust.json"], mc)
+            # DP-SGD: the worker's contribution attestation (fresh each start).
+            contribution = pd / "contribution-attestation.json"
+            if st.get("contribution_policy") and contribution.exists():
+                _run([cli, "trust", "add", str(contribution), "--bundle", "trust.json"], mc)
         timings["attestation_startup_s"] = time.perf_counter() - t
         say(f"{'Workers':<24}{len(workers)} attested, model key received")
 
@@ -674,6 +792,9 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
             if st["attested_coord"]:
                 serve += [*coord_policy, "--attester", "mock", "--mock-seed",
                           str(W / "hw.seed"), "--mock-image", IMAGE]
+            if st.get("contribution_policy"):
+                serve += ["--attestation-policy", st["contribution_policy"], "--mock-root",
+                          mock_root]
             cp = subprocess.Popen(serve, cwd=mc, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True)
             try:
@@ -709,12 +830,20 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                 raise TrainingFailed(f"round {r} failed", log + "".join(x["log"] for x in replies))
             _failpoint("after-aggregate-release")
             timings["secure_aggregation_s"] += time.perf_counter() - t
-            losses.append(sum(x["loss"] for x in replies) / len(replies))
-            # The released (noised) sum of clipped, scaled updates: the mean
-            # update, rescaled.
             agg = json.loads((mc / f"update-{r}.json").read_text())
-            n = len(agg["contributors"])
-            adapter = adapter + torch.tensor(agg["values"], dtype=torch.float32) / n * cfg.update_clip
+            released = torch.tensor(agg["values"], dtype=torch.float32)
+            if dp:
+                # The released (noised) sum of every sampled patient's
+                # clipped gradient: one SGD step on the mean over the
+                # expected batch.
+                grad = released * (float(dp["per_example_clip"]) / dpsgd.CODEC_CLIP)
+                adapter = adapter - cfg.learning_rate * grad / float(dp["expected_batch"])
+            else:
+                losses.append(sum(x["loss"] for x in replies) / len(replies))
+                # The released (noised) sum of clipped, scaled updates: the
+                # mean update, rescaled.
+                n = len(agg["contributors"])
+                adapter = adapter + released / n * cfg.update_clip
             new_id = f"adapter-{r}"
             t = time.perf_counter()
             # Provisional: sealed into pending/.
@@ -752,7 +881,8 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
             timings["trust_graph_s"] += time.perf_counter() - t
             previous, adapter_id = new_id, new_id
             done += 1
-            say(f"{f'Round {r}/{cfg.rounds}':<24}COMPLETE (mean local loss {losses[-1]:.3f})")
+            say(f"{f'Round {r}/{cfg.rounds}':<24}COMPLETE"
+                + ("" if dp else f" (mean local loss {losses[-1]:.3f})"))
             r += 1
         if stopped:
             say(f"{'Stopped':<24}{stopped}")
@@ -790,6 +920,8 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
         rounds=done, stopped=stopped, report=report, rows=rows,
         satisfied="TRUST REQUIREMENTS SATISFIED" in report and done > 0,
         export=export, timings=timings, losses=losses, workdir=W, recovery=recovery, _ctx=ctx,
+        privacy_unit=dp["privacy_unit"] if dp else "organization",
+        privacy_preview=st.get("privacy_preview"),
     )
     say("")
     say(result.summary())

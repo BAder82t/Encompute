@@ -427,4 +427,44 @@ pub const INVARIANTS: &[Invariant] = &[
         (EndToEnd, "test:python/tests/test_finetune_leakage.py::test_model_weights_never_appear_in_the_clear"),
         (EndToEnd, "test:python/tests/test_finetune_leakage.py::test_keys_stay_in_the_owners_key_store"),
     ]),
+    // Patient-level differential privacy (DP-SGD).
+    inv!("INV-130", "dp-sgd", "Each privacy unit's gradient is computed per example, grouped by unit and clipped before summation, so one unit moves a worker's contribution by at most the clip, for any microbatch size.", [
+        (Positive, "test:python/tests/test_dpsgd.py::test_vectorized_gradients_match_the_reference_for_any_microbatch"),
+        (Negative, "test:python/tests/test_dpsgd.py::test_unit_index_groups_records_by_patient"),
+        (Adversarial, "test:python/tests/test_dpsgd.py::test_one_patient_moves_the_sum_by_at_most_the_clip"),
+        (Adversarial, "test:python/tests/test_dpsgd.py::test_contributions_bypassing_the_attested_worker_are_refused"),
+        (EndToEnd, "test:python/tests/test_dpsgd.py::test_patient_run_is_satisfied_and_binds_every_setting"),
+    ]),
+    inv!("INV-131", "dp-sgd", "The Poisson-subsampled Rényi DP accountant agrees with an independent reference and is never optimistic; composition and the affordable-release boundary are consistent.", [
+        (Positive, "test:crates/encompute-privacy/tests/rdp.rs::curves_match_the_reference_and_are_never_optimistic"),
+        (Positive, "test:crates/encompute-privacy/tests/rdp.rs::epsilon_matches_the_reference_and_is_never_optimistic"),
+        (Negative, "test:crates/encompute-privacy/tests/rdp.rs::ledger_costs_use_rdp_only_with_sampled_releases"),
+        (Adversarial, "check:dp_rdp_accountant_properties"),
+        (EndToEnd, "test:python/tests/test_dpsgd.py::test_the_ledgers_charge_what_the_preview_projected"),
+    ]),
+    inv!("INV-132", "dp-sgd", "Poisson sampling uses operating-system randomness inside the attested worker: no party's seed chooses the sample, and each unit is included independently.", [
+        (Positive, "test:python/tests/test_dpsgd.py::test_poisson_sampling_uses_os_randomness"),
+        (Negative, "test:python/tests/test_dpsgd.py::test_workers_report_nothing_about_their_data"),
+        (Adversarial, "test:python/tests/test_dpsgd.py::test_poisson_sampling_uses_os_randomness"),
+        (EndToEnd, "test:python/tests/test_finetune_leakage.py::test_raw_updates_never_leave_a_worker"),
+    ]),
+    inv!("INV-133", "dp-sgd", "Every DP-SGD setting (unit, clip, sampling, noise, delta, grouping, accountant, batch, unit counts) is bound in the TrainingSpecId; changing one gets no model key.", [
+        (Positive, "test:python/tests/test_dpsgd.py::test_patient_run_is_satisfied_and_binds_every_setting"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::every_dp_sgd_setting_changes_the_spec_id"),
+        (Adversarial, "test:python/tests/test_dpsgd.py::test_changed_dp_settings_get_no_model_key"),
+        (EndToEnd, "script:examples/16_patient_private_lora/attack.py"),
+    ]),
+    inv!("INV-134", "dp-sgd", "A run whose planned rounds would exceed any budget is denied before training starts; the ledgers charge exactly what the preview projected.", [
+        (Positive, "test:python/tests/test_dpsgd.py::test_the_preview_uses_the_sampled_accountant"),
+        (Negative, "test:python/tests/test_dpsgd.py::test_over_budget_runs_are_denied_before_training"),
+        (Adversarial, "script:examples/16_patient_private_lora/attack.py"),
+        (EndToEnd, "test:python/tests/test_dpsgd.py::test_the_ledgers_charge_what_the_preview_projected"),
+    ]),
+    inv!("INV-135", "dp-sgd", "Patient-level privacy is never claimed for organization-level training: the compiler, the planner and the trust report each refuse it.", [
+        (Positive, "test:python/tests/test_dpsgd.py::test_patient_run_is_satisfied_and_binds_every_setting"),
+        (Negative, "test:python/tests/test_dpsgd.py::test_the_planner_refuses_patient_claims_without_per_example_clipping"),
+        (Negative, "test:python/tests/test_dpsgd.py::test_organizations_cannot_be_sampled"),
+        (Adversarial, "test:python/tests/test_dpsgd.py::test_the_trust_report_refuses_patient_claims_from_organization_training"),
+        (EndToEnd, "script:examples/16_patient_private_lora/attack.py"),
+    ]),
 ];

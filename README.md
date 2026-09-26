@@ -59,8 +59,8 @@ privacy, and every step leaves verifiable evidence.
 | Differential privacy (budgets, ledger, receipts) | working: discrete Gaussian on secure aggregates, zCDP accounting, tamper-evident ledgers, owner-side enforcement |
 | Trust graph (authorizations, revocation, lineage, one trust report) | working: owner-signed program approvals, revocation reach, a report rebuilt from evidence and checked against verifier-supplied keys |
 | Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
-| Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control (development attestation on one machine; organization-level DP) |
-| Assurance (security invariants under attack) | 62 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control; organization-level DP or patient-level DP-SGD (development attestation on one machine) |
+| Assurance (security invariants under attack) | 68 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## Start here
 
@@ -74,6 +74,7 @@ does and does not protect ([examples/](examples/)):
 | 15 minutes | [Automatic confidential planning](examples/11_automatic_planner/) |
 | Full demo | [Confidential collaboration](examples/12_confidential_collaboration/) |
 | AI flagship | [Confidential LoRA fine-tuning](examples/15_confidential_lora/) |
+| Patient privacy | [Patient-level DP-SGD](examples/16_patient_private_lora/) |
 
 ```sh
 cargo build --bins && maturin develop -m crates/encompute-py/Cargo.toml
@@ -308,6 +309,22 @@ checkpoints are sealed; resuming can never roll back spent budget; every
 adapter's lineage is signed and checked by the trust report. PyTorch runs
 in plaintext inside the attested workload: the TEE, not PyTorch, protects
 data in use. See [examples/15_confidential_lora](examples/15_confidential_lora/).
+
+For patient-level privacy, pass each record's patient and ask for DP-SGD:
+
+```python
+a = project.data("patients-a", owner="hospital-a",
+                 dataset=et.private_dataset(xa, ya, unit_ids=patient_ids_a))
+adapter = project.finetune(model=base, data=[a, b], privacy="strong-patient")
+```
+
+Each worker clips every patient's gradient, with all of the patient's
+records grouped, and samples patients at random. The coordinator adds
+noise to the securely aggregated sum. A Rényi DP accountant, checked
+against an independent reference, charges each hospital's budget. A run
+that would exceed the budget is denied before training, and the trust
+report refuses a patient-level claim from organization-level training. See
+[examples/16_patient_private_lora](examples/16_patient_private_lora/).
 
 ## Trust graph
 

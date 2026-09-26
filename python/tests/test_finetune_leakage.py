@@ -7,7 +7,10 @@ are planted in:
 
 Then every file in the run directory, and all output, is scanned. A canary
 may appear only where it is allowed: the hospital's own dataset file, and
-the model owner's own key store. Nowhere else, in any encoding."""
+the model owner's own key store. Nowhere else, in any encoding.
+
+Every check runs twice: organization-level privacy, and patient-level
+DP-SGD (per-patient gradients, grouped by patient ID)."""
 
 import json
 import os
@@ -38,11 +41,14 @@ RUN = textwrap.dedent(f"""
     import sys, torch, encompute
     import encompute.torch as et
 
+    patient = sys.argv[2] == "patient"
+
     def dataset(seed, n=64):
         g = torch.Generator().manual_seed(seed)
         x = torch.randint(0, 64, (n, 8), generator=g)
         x[5] = torch.tensor({DATA_CANARY})
-        return et.private_dataset(x, (x[:, 0] < 32).long())
+        ids = torch.arange(n // 2).repeat_interleave(2) if patient else None
+        return et.private_dataset(x, (x[:, 0] < 32).long(), unit_ids=ids)
 
     p = encompute.Project("leak-lora", parties=["hospital-a", "hospital-b", "modelco"],
                           purpose="disease-training")
@@ -53,8 +59,9 @@ RUN = textwrap.dedent(f"""
     m = p.model("base-model", owner="modelco", module=base)
     a = p.data("patients-a", owner="hospital-a", dataset=dataset(1))
     b = p.data("patients-b", owner="hospital-b", dataset=dataset(2))
-    r = p.finetune(model=m, data=[a, b], privacy="standard", allow_development=True,
-                   config=et.LoRAConfig(rounds=2, local_steps=2), workdir=sys.argv[1])
+    r = p.finetune(model=m, data=[a, b], privacy="standard-patient" if patient else "standard",
+                   allow_development=True, workdir=sys.argv[1],
+                   config=et.LoRAConfig(rounds=2, local_steps=2, batch_size=4))
     print(r.lineage())
     r.close()
 """)
@@ -71,12 +78,12 @@ def encodings(values, fmt):
     return out
 
 
-@pytest.fixture(scope="module")
-def run(tmp_path_factory):
+@pytest.fixture(scope="module", params=["organization", "patient"])
+def run(request, tmp_path_factory):
     W = tmp_path_factory.mktemp("leak") / "run"
     env = dict(os.environ, ENCOMPUTE_CLI=CLI, ENCOMPUTE_CANARY_UPDATE=repr(UPDATE_CANARY))
-    p = subprocess.run([sys.executable, "-c", RUN, str(W)], env=env, capture_output=True,
-                       timeout=300)
+    p = subprocess.run([sys.executable, "-c", RUN, str(W), request.param], env=env,
+                       capture_output=True, timeout=300)
     assert p.returncode == 0, p.stdout.decode() + p.stderr.decode()
     return W, p.stdout + p.stderr
 

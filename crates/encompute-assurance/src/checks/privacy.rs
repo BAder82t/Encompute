@@ -32,6 +32,7 @@ pub fn spec(round: u64, assets: &[(&str, f64)]) -> ReleaseSpec {
             kind: DpKind::DiscreteGaussian,
             clip_norm: 1.0,
             noise_multiplier: 5.0,
+            sampling_rate: None,
         },
         codec: FixedPointCodec {
             clip_min: -1.0,
@@ -454,4 +455,90 @@ pub fn invalid_noise(_: Scale) -> CheckResult {
         cases += 1;
     }
     Ok(Outcome::new(cases))
+}
+
+/// INV-131: the Rényi DP accountant for Poisson-sampled releases is
+/// conservative and consistent over random parameters:
+/// - sampling never costs more than releasing to everyone, and each order's
+///   curve stays in `[0, alpha * rho]`;
+/// - more steps, a higher sampling rate or less noise never cost less;
+/// - composing `n` copies equals scaling one curve by `n`;
+/// - the affordable number of releases is exactly the budget's boundary.
+pub fn rdp_accountant_properties(scale: Scale) -> CheckResult {
+    use encompute_ir::confidentiality::{PrivacyBudget, PrivacyUnit};
+    use encompute_privacy::ledger::{affordable, cost_of};
+    use encompute_privacy::rdp::{compose, epsilon, release_curve, scaled, ORDERS};
+    let n = scale.pick(40, 400);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for _ in 0..n {
+        let z = 0.6 + 4.0 * next();
+        let rho = 1.0 / (2.0 * z * z);
+        let q = 10f64.powf(-3.0 + 2.9 * next()).min(0.9);
+        let steps = 1 + (next() * 500.0) as u64;
+        let delta = 10f64.powf(-5.0 - 3.0 * next());
+        let curve = release_curve(rho, Some(q));
+        for (i, &a) in ORDERS.iter().enumerate() {
+            ensure!(
+                curve[i] >= 0.0
+                    && curve[i] <= (a as f64 * rho).next_up().next_up().next_up().next_up(),
+                "order {a}: {} outside [0, {}] (z {z}, q {q})",
+                curve[i],
+                a as f64 * rho
+            );
+        }
+        let e = epsilon(&scaled(&curve, steps), delta);
+        let full = epsilon(&scaled(&release_curve(rho, None), steps), delta);
+        ensure!(
+            e.is_finite() && e > 0.0 && e <= full,
+            "z {z} q {q} steps {steps}: {e} > {full}"
+        );
+        ensure!(
+            epsilon(&scaled(&curve, steps + 1), delta) >= e,
+            "one more step cost less (z {z}, q {q})"
+        );
+        let q2 = (q * 1.5).min(0.95);
+        ensure!(
+            epsilon(&scaled(&release_curve(rho, Some(q2)), steps), delta) >= e,
+            "a higher sampling rate cost less (z {z}, q {q})"
+        );
+        let rho2 = 1.0 / (2.0 * (z * 1.2) * (z * 1.2));
+        ensure!(
+            epsilon(&scaled(&release_curve(rho2, Some(q)), steps), delta) <= e,
+            "more noise cost more (z {z}, q {q})"
+        );
+        let k = 1 + steps % 7;
+        let composed = compose(&vec![curve; k as usize]);
+        let s = scaled(&curve, k);
+        ensure!(
+            composed
+                .iter()
+                .zip(&s)
+                .all(|(a, b)| (a - b).abs() <= 1e-12 * a.abs().max(1e-12)),
+            "composition differs from scaling"
+        );
+    }
+    // The affordable count is the boundary.
+    for (z, q, eps) in [(1.2, 0.01, 3.0), (1.0, 0.05, 8.0), (1.5, 0.002, 1.0)] {
+        let rho = 1.0 / (2.0 * z * z);
+        let b = PrivacyBudget {
+            unit: PrivacyUnit::Patient,
+            epsilon: eps,
+            delta: 1e-6,
+        };
+        let k = affordable(rho, Some(q), &b).map_err(|e| e.to_string())? as usize;
+        let at = cost_of(&vec![(rho, Some(q)); k], &b).map_err(|e| e.to_string())?;
+        let over = cost_of(&vec![(rho, Some(q)); k + 1], &b).map_err(|e| e.to_string())?;
+        ensure!(
+            at.epsilon <= eps
+                && (over.epsilon > eps || k as u64 == encompute_privacy::ledger::MAX_AFFORDABLE),
+            "z {z} q {q}: {k} releases is not the boundary"
+        );
+    }
+    Ok(Outcome::new(n))
 }

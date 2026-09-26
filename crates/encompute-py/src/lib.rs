@@ -168,6 +168,27 @@ fn privacy_presets() -> Vec<(String, f64, f64, f64)> {
         .collect()
 }
 
+/// DP-SGD privacy levels: `(name, epsilon, delta, noise_multiplier)`.
+#[pyfunction]
+fn patient_privacy_presets() -> Vec<(String, f64, f64, f64)> {
+    encompute_ir::confidentiality::PATIENT_PRIVACY_PRESETS
+        .iter()
+        .map(|(n, e, d, z)| (n.to_string(), *e, *d, *z))
+        .collect()
+}
+
+/// What `rounds` releases would cost each budgeted asset of `.eir` text
+/// (JSON rows), and the rendered preview.
+#[pyfunction]
+fn privacy_preview(eir: &str, rounds: u64) -> PyResult<(String, String)> {
+    let m = encompute_runtime::Model::from_eir(eir).map_err(err)?;
+    let rows = m.privacy_projection(rounds).map_err(err)?;
+    Ok((
+        serde_json::to_string(&rows).expect("JSON"),
+        encompute_runtime::render_preview(&rows),
+    ))
+}
+
 fn from_json<T: serde::de::DeserializeOwned>(what: &str, s: Option<&str>) -> PyResult<Option<T>> {
     s.map(|t| {
         serde_json::from_str(t).map_err(|e| {
@@ -233,6 +254,8 @@ fn plan(
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Model>()?;
     m.add_function(wrap_pyfunction!(privacy_presets, m)?)?;
+    m.add_function(wrap_pyfunction!(patient_privacy_presets, m)?)?;
+    m.add_function(wrap_pyfunction!(privacy_preview, m)?)?;
     m.add_function(wrap_pyfunction!(plan, m)?)?;
     training::register(m)?;
     m.add_function(wrap_pyfunction!(has_openfhe, m)?)?;

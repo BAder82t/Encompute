@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Patient-level differential privacy (DP-SGD)
+
+- **DP-SGD for confidential fine-tuning**:
+  `privacy="strong-patient"` or `"standard-patient"`, or
+  `encompute.Privacy(unit="patient", ...)`, with
+  `private_dataset(x, y, unit_ids=)`.
+  - Each attested worker computes per-example LoRA gradients with
+    `torch.func` (`vmap` over `grad`, microbatched). It groups each
+    patient's records, clips each patient's gradient, and Poisson-samples
+    patients with operating-system randomness.
+  - Secure aggregation sums the clipped gradients. The attested
+    coordinator adds discrete Gaussian noise.
+  - One accounted step per round. Organization-level mode is unchanged.
+- **Rényi DP accountant for Poisson-sampled releases**
+  (`rdp-poisson-zw2019`: Zhu and Wang's general bound over the discrete
+  Gaussian's zCDP curve; CKS conversion; rounded up).
+  - Checked against 240 independent reference vectors (autodp and a
+    60-digit mpmath evaluation).
+  - `DpMechanism.sampling_rate` is in the IR text and the
+    PrivacyPolicyId.
+- **Every DP-SGD setting in the TrainingSpecId**: unit, clip, sampling,
+  noise, delta, grouping, accountant and expected batch, plus each
+  dataset's unit count and grouping digest.
+- **Privacy preview**: a DP-SGD run over budget is denied before training
+  (ENC2201). `encompute privacy explain --rounds N` prints the projection.
+- **No false patient-level claims**:
+  - the compiler refuses sampling with an organization unit;
+  - the planner requires per-example clipping for a patient unit, and the
+    plan shows the example level;
+  - the trust report's Training row checks the unit;
+  - the lineage prints it.
+- `examples/16_patient_private_lora`: organization-level and patient-level
+  privacy side by side, the preview denial, and eight attacks failing
+  closed.
+- `test_dpsgd.py`:
+  - the vectorized gradients match the per-unit reference for any
+    microbatch;
+  - canary patient sensitivity;
+  - sampling ignores seeds;
+  - the ledgers match the preview;
+  - the accuracy regression bound.
+  The leakage canaries now run in both modes. INV-130–INV-135
+  (68 invariants).
+
 ### Confidential PyTorch fine-tuning
 
 - **Real PyTorch LoRA fine-tuning, protected end to end** (ADR-016, new

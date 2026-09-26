@@ -340,6 +340,27 @@ impl AggregationSpec {
         digest(SPEC_DOMAIN, self)
     }
 
+    /// With Poisson sampling (DP-SGD) no party-side L2 clip bounds a
+    /// contribution: each privacy unit is clipped by the contributing
+    /// workload. So rounds require that workload to be attested, or the
+    /// accountant's sensitivity would be an unenforced assumption.
+    pub fn check_sampled_contributors(&self) -> Result<()> {
+        if self
+            .plan
+            .dp
+            .as_ref()
+            .is_some_and(|d| d.sampling_rate.is_some())
+            && self.attestation.is_none()
+        {
+            return Err(Error::new(
+                Code::AggregationPlan,
+                "a Poisson-sampled (DP-SGD) aggregation needs attested contributors \
+                 (--attestation-policy): the attested workload clips each privacy unit",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         let bad = |m: String| Err(Error::new(Code::AggregationPlan, m));
         if self.version != SPEC_VERSION || self.plan.version != PLAN_VERSION {
@@ -376,6 +397,7 @@ impl AggregationSpec {
         if let Some(a) = &self.attestation {
             a.validate()?;
         }
+
         self.plan
             .codec
             .check_overflow(self.plan.participants.len())?;
@@ -714,6 +736,7 @@ impl RoundParticipant {
                 approved.plan.vector_len
             )));
         }
+        approved.check_sampled_contributors()?;
         if approved.attestation.is_some() && attestation.is_none() {
             return Err(Error::new(
                 Code::AggregationUnauthorized,
@@ -755,9 +778,13 @@ impl RoundParticipant {
                     release.check(c, view)?;
                 }
             }
-            // Clip the whole contribution to L2 norm clip_norm.
+            // Clip the whole contribution to L2 norm clip_norm. With
+            // Poisson sampling (DP-SGD) clip_norm bounds each sampled
+            // privacy unit's gradient instead, and the contribution is the
+            // sum of those, clipped per unit by the attested training
+            // workload; the codec still bounds each coordinate.
             let norm = values.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm > dp.clip_norm {
+            if dp.sampling_rate.is_none() && norm > dp.clip_norm {
                 let f = dp.clip_norm / norm;
                 values.iter_mut().for_each(|x| *x *= f);
             }
@@ -951,6 +978,7 @@ impl RoundCoordinator {
         now: u64,
     ) -> Result<Self> {
         spec.validate()?;
+        spec.check_sampled_contributors()?;
         if spec.attestation.is_some() && verifier.is_none() {
             return Err(Error::new(
                 Code::AggregationPlan,

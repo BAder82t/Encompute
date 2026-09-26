@@ -66,6 +66,10 @@ pub const CHECKS: &[Check] = &[
         run: planner::plan_id_binding,
     },
     Check {
+        name: "dp_rdp_accountant_properties",
+        run: privacy::rdp_accountant_properties,
+    },
+    Check {
         name: "dp_multi_process_double_spend",
         run: privacy::multi_process_double_spend,
     },

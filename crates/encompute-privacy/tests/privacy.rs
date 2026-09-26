@@ -40,6 +40,7 @@ fn spec(round: u32, epsilon: f64) -> ReleaseSpec {
             kind: DpKind::DiscreteGaussian,
             clip_norm: 1.0,
             noise_multiplier: 5.0,
+            sampling_rate: None,
         },
         codec: FixedPointCodec {
             clip_min: -1.0,

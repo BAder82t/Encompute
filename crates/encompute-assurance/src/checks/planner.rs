@@ -144,6 +144,8 @@ pub fn scenario(seed: u64) -> Option<Scenario> {
                 model: "model".into(),
                 data: (0..n).map(|i| format!("data{i}")).collect(),
                 verified: r.coin(),
+                privacy_unit: None,
+                per_example_clipping: false,
             });
         }
         for i in 0..n {
@@ -429,6 +431,8 @@ pub fn adversarial(_: Scale) -> CheckResult {
             model: "model".into(),
             data: vec!["data0".into(), "data1".into(), "data2".into()],
             verified: false,
+            privacy_unit: None,
+            per_example_clipping: false,
         })
     };
     let exact = parse(EXACT_REQUIRED).expect("exact");
@@ -586,6 +590,8 @@ pub fn plan_id_binding(_: Scale) -> CheckResult {
         model: "model".into(),
         data: vec!["data0".into(), "data1".into(), "data2".into()],
         verified: true,
+        privacy_unit: None,
+        per_example_clipping: false,
     });
     let program = fed(true);
     let p = plan_or_fail(&program, &c).map_err(|e| e.message)?;

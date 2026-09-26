@@ -1,0 +1,29 @@
+# Organization-level run
+DEVELOPMENT ATTESTATION: NO HARDWARE CONFIDENTIALITY
+Privacy unit: organization. Patient-level DP requires per-example clipping (DP-SGD) and is not claimed.
+# Patient-level run: preview, then training
+PRIVACY PREVIEW
+Level                   example (DP-SGD, Poisson sampling 0.032)
+Accountant              rdp-poisson-zw2019
+RESULT                  WITHIN BUDGET
+Round 20/20             COMPLETE
+Privacy unit: patient. Each patient's gradient is clipped to 1.0 (DP-SGD, Poisson sampling 0.032), accounted with Rényi DP.
+TRUST REQUIREMENTS SATISFIED
+privacy unit            patient (DP-SGD: per-patient clip 1.0, Poisson sampling 0.032, noise 1.2, rdp-poisson-zw2019)
+gradient-patients-a     patient-level DP, ε used 1.75 / 3.00
+EXPORT DENIED: adapter-20 inherits release restrictions from:
+# Over budget
+PRIVACY BUDGET EXCEEDED: DENIED BEFORE TRAINING. 400 rounds would cost gradient-patients-a epsilon 4.667 of 3.0; its budget affords 131 rounds
+No worker started, no data was read, no budget was spent.
+# Comparison
+patient (DP-SGD)    patient        1.75 / 3.00
+PATIENT-LEVEL ADAPTER LEARNED
+# Attacks
+ENC2002: broker: the workload is bound to execution spec
+DP-SGD takes one gradient step per round
+patients-a is not the dataset the training spec commits to
+needs attested contributors
+ENC2401: patient-level privacy needs per-example clipping and Poisson sampling
+ENC2203: output "update" Poisson-samples asset gradient-patients-a's privacy units
+gradient-patients-a claims patient-level privacy, but the training clips
+ALL ATTACKS FAILED CLOSED

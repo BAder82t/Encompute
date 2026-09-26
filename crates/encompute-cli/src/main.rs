@@ -265,6 +265,10 @@ enum PrivacyCmd {
         /// The coordinator's privacy ledger directory.
         #[arg(long)]
         ledger: Option<PathBuf>,
+        /// Preview what this many releases (training rounds) would cost
+        /// each budget, before anything runs; exits 1 if over budget.
+        #[arg(long)]
+        rounds: Option<u64>,
     },
     /// The confidentiality graph (Graphviz DOT).
     Graph {
@@ -428,7 +432,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Privacy { cmd } => {
             let (m, out) = match cmd {
-                PrivacyCmd::Explain { model, ledger } => {
+                PrivacyCmd::Explain {
+                    model,
+                    ledger,
+                    rounds: Some(rounds),
+                } => {
+                    let m = load(&model)?;
+                    let rows = m.privacy_projection(rounds)?;
+                    let mut out = m.privacy_explain()?.unwrap_or_default();
+                    if let Some(dir) = ledger {
+                        out.push('\n');
+                        out.push_str(&m.privacy_status(&dir)?);
+                    }
+                    print!("{out}\n{}", encompute_runtime::render_preview(&rows));
+                    return Ok(if rows.iter().all(|r| r.allowed) {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    });
+                }
+                PrivacyCmd::Explain { model, ledger, .. } => {
                     let m = load(&model)?;
                     let mut out = m.privacy_explain()?;
                     if let (Some(text), Some(dir)) = (out.as_mut(), ledger) {

@@ -12,7 +12,7 @@ mod explain;
 mod model;
 pub mod planning;
 pub mod privacy;
-pub use privacy::privacy_budget_report;
+pub use privacy::{privacy_budget_report, render_preview, PrivacyPreview};
 mod remote;
 
 pub use artifact::FORMAT as ARTIFACT_FORMAT;

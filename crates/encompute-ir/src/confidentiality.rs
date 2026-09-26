@@ -292,8 +292,26 @@ pub const PRIVACY_PRESETS: [(&str, f64, f64, f64); 3] = [
     ("maximum", 1.0, 1e-7, 18.0),
 ];
 
+/// Patient-level privacy levels for DP-SGD (per-example clipping, Poisson
+/// sampling, Rényi DP accounting), `(name, epsilon, delta,
+/// noise_multiplier)`. The sampling rate comes from the run (expected batch
+/// over the smallest dataset), and the preview says how many steps the
+/// budget affords before training starts.
+pub const PATIENT_PRIVACY_PRESETS: [(&str, f64, f64, f64); 2] = [
+    ("standard-patient", 8.0, 1e-5, 1.0),
+    ("strong-patient", 3.0, 1e-6, 1.2),
+];
+
 /// The budget and mechanism of a named privacy level.
 pub fn privacy_preset(name: &str, unit: PrivacyUnit) -> Result<(PrivacyBudget, DpMechanism)> {
+    if PATIENT_PRIVACY_PRESETS.iter().any(|p| p.0 == name) {
+        return Err(Error::new(
+            Code::PrivacyPolicy,
+            format!(
+                "{name:?} is a DP-SGD level: it needs per-example clipping and a sampling rate, so only fine-tuning uses it"
+            ),
+        ));
+    }
     let (_, epsilon, delta, noise_multiplier) = PRIVACY_PRESETS
         .iter()
         .find(|p| p.0 == name)
@@ -314,14 +332,19 @@ pub fn privacy_preset(name: &str, unit: PrivacyUnit) -> Result<(PrivacyBudget, D
             kind: DpKind::DiscreteGaussian,
             clip_norm: 1.0,
             noise_multiplier,
+            sampling_rate: None,
         },
     ))
 }
 
 /// A differential-privacy mechanism on an aggregation boundary: each
 /// party's vector is clipped to L2 norm `clip_norm`, and discrete Gaussian
-/// noise with standard deviation `noise_multiplier` times the sensitivity
-/// is added to the integer aggregate before release.
+/// noise with standard deviation `noise_multiplier * clip_norm` is added to
+/// the integer aggregate before release.
+///
+/// With `sampling_rate` (DP-SGD), each party's vector is instead the sum
+/// of its Poisson-sampled privacy units' gradients, each clipped to
+/// `clip_norm` by the attested training workload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DpMechanism {
@@ -330,7 +353,20 @@ pub struct DpMechanism {
     pub clip_norm: f64,
     #[serde(with = "exact_f64")]
     pub noise_multiplier: f64,
+    /// Poisson sampling rate of the privacy units in each release (DP-SGD):
+    /// every unit is included independently with this probability, and the
+    /// accountant amplifies by it (RDP). Absent: every unit contributes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_exact_f64"
+    )]
+    pub sampling_rate: Option<f64>,
 }
+
+/// The accountant for sampled (DP-SGD) releases: Rényi DP of Poisson
+/// subsampling (Zhu and Wang 2019, Theorem 6) over the discrete Gaussian.
+pub const SAMPLED_PRIVACY_ACCOUNTANT: &str = "rdp-poisson-zw2019";
 
 impl Eq for DpMechanism {}
 
@@ -368,6 +404,13 @@ impl DpMechanism {
                 "noise_multiplier must be positive (no noise is no privacy), got {}",
                 self.noise_multiplier
             ));
+        }
+        if let Some(q) = self.sampling_rate {
+            if !(q.is_finite() && q > 0.0 && q < 1.0) {
+                return bad(format!(
+                    "sampling_rate must be in (0, 1) (Poisson sampling), got {q}"
+                ));
+            }
         }
         Ok(())
     }
@@ -478,6 +521,28 @@ pub struct FixedPointCodec {
 /// Clip bounds as exact decimal strings (Rust's shortest round-trip form):
 /// hashed identities (policy, aggregation spec) use canonical JSON, which
 /// carries no floats.
+mod opt_exact_f64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(x: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+        match x {
+            Some(x) => s.serialize_str(&format!("{x:?}")),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        let s = Option::<String>::deserialize(d)?;
+        s.map(|s| match s.parse::<f64>() {
+            Ok(x) if x.is_finite() && format!("{x:?}") == s => Ok(x),
+            _ => Err(serde::de::Error::custom(format!(
+                "{s:?} is not an exact finite number"
+            ))),
+        })
+        .transpose()
+    }
+}
+
 mod exact_f64 {
     use serde::{Deserialize, Deserializer, Serializer};
 

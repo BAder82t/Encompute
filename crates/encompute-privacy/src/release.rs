@@ -143,7 +143,8 @@ impl ReleaseSpec {
                 ),
             ));
         }
-        view.check(self.rho(c)?).map(|_| ())
+        view.check(self.rho(c)?, self.mechanism.sampling_rate)
+            .map(|_| ())
     }
 }
 

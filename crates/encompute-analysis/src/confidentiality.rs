@@ -442,7 +442,25 @@ fn privacy_release(
         )),
         (false, true, Some(m)) => {
             for (a, b) in &charged {
-                if b.unit != encompute_ir::confidentiality::PrivacyUnit::Organization {
+                let organization =
+                    b.unit == encompute_ir::confidentiality::PrivacyUnit::Organization;
+                if let Some(q) = m.sampling_rate {
+                    if organization {
+                        return Err(err(
+                            Code::PrivacyPolicy,
+                            format!(
+                                "output {output:?} Poisson-samples asset {a}'s privacy units, but its unit is organization: which parties contribute is public, so organizations cannot be sampled. Use a unit inside a party (patient, user, record) with per-example clipping"
+                            ),
+                        ));
+                    }
+                    warnings.push(format!(
+                        "asset {a}'s budget protects each {unit}: the contributing (attested) workload samples each {unit} with probability {q} and clips each sampled {unit}'s gradient to L2 norm {c} (DP-SGD); the protocol only bounds each coordinate",
+                        unit = b.unit,
+                        c = m.clip_norm
+                    ));
+                    continue;
+                }
+                if !organization {
                     warnings.push(format!(
                         "asset {a}'s budget protects each {}: Encompute clips each party's \
                          contribution to L2 norm {}; bounding one {}'s influence within it is \

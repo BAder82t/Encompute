@@ -90,6 +90,11 @@ fn dp_multi_process_double_spend() {
 }
 
 #[test]
+fn dp_rdp_accountant_properties() {
+    check("dp_rdp_accountant_properties");
+}
+
+#[test]
 fn every_check_has_a_test_here() {
     let me = include_str!("assurance.rs");
     for c in CHECKS {

@@ -162,7 +162,8 @@ fn gradients_need_secure_aggregation_and_budgets_need_dp() {
     let m = &step(&plan, "aggregate:update").mechanisms;
     assert!(m.contains(&Mechanism::DifferentialPrivacy {
         noise_multiplier: "6.0".into(),
-        clip_norm: "1.0".into()
+        clip_norm: "1.0".into(),
+        sampling_rate: None,
     }));
     assert!(plan
         .evidence_required
@@ -206,6 +207,8 @@ fn private_model_training_needs_attested_confidential_compute() {
             "patients-c".into(),
         ],
         verified: false,
+        privacy_unit: None,
+        per_example_clipping: false,
     });
     // Normal hardware only: the model cannot meet the data anywhere.
     let e = plan_or_fail(&p, &c).unwrap_err();
@@ -253,6 +256,8 @@ fn a_model_the_data_owners_may_read_trains_locally() {
         model: "base-model".into(),
         data: vec!["patients-a".into()],
         verified: false,
+        privacy_unit: None,
+        per_example_clipping: false,
     });
     let plan = planned(&p, &c);
     assert_eq!(
@@ -311,6 +316,8 @@ fn the_validator_refuses_weakened_plans() {
         model: "base-model".into(),
         data: vec!["patients-a".into()],
         verified: false,
+        privacy_unit: None,
+        per_example_clipping: false,
     });
     let plan = planned(&p, &c);
     for (s, st) in plan.steps.iter().enumerate() {
@@ -381,6 +388,8 @@ fn verified_training_requires_attested_workloads() {
         model: "base-model".into(),
         data: vec!["patients-a".into()],
         verified: true,
+        privacy_unit: None,
+        per_example_clipping: false,
     });
     assert!(
         plan_or_fail(&p, &c).is_err(),

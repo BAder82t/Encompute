@@ -228,23 +228,33 @@ impl LedgerView {
         Ok(())
     }
 
+    /// Every charged release: its zCDP cost and sampling rate.
+    fn releases(&self) -> Result<Vec<(f64, Option<f64>)>> {
+        let mut out = vec![];
+        for e in &self.entries {
+            if let PrivacyEvent::Reserve { mechanism, .. } = &e.event {
+                out.push((e.event.rho()?, mechanism.sampling_rate));
+            }
+        }
+        Ok(out)
+    }
+
     /// The accumulated cost, in ledger order.
     pub fn cost(&self) -> Result<Cost> {
-        let mut rho = 0.0;
-        for e in &self.entries {
-            rho += e.event.rho()?;
-        }
-        Cost::of(rho, &self.genesis.budget)
+        cost_of(&self.releases()?, &self.genesis.budget)
     }
 
-    /// The cost after one more release costing `rho`.
-    pub fn cost_after(&self, rho: f64) -> Result<Cost> {
-        Cost::of(self.cost()?.rho + rho, &self.genesis.budget)
+    /// The cost after one more release costing `rho`, sampled at
+    /// `sampling_rate` (DP-SGD) or not.
+    pub fn cost_after(&self, rho: f64, sampling_rate: Option<f64>) -> Result<Cost> {
+        let mut r = self.releases()?;
+        r.push((rho, sampling_rate));
+        cost_of(&r, &self.genesis.budget)
     }
 
-    /// Refuses a release of `rho` that would exceed the budget.
-    pub fn check(&self, rho: f64) -> Result<Cost> {
-        let after = self.cost_after(rho)?;
+    /// Refuses a release that would exceed the budget.
+    pub fn check(&self, rho: f64, sampling_rate: Option<f64>) -> Result<Cost> {
+        let after = self.cost_after(rho, sampling_rate)?;
         if after.epsilon > self.genesis.budget.epsilon {
             return Err(Error::new(
                 Code::PrivacyBudgetExceeded,
@@ -261,6 +271,76 @@ impl LedgerView {
         }
         Ok(after)
     }
+}
+
+/// The cost of `releases` (zCDP cost, sampling rate) against `budget`.
+///
+/// Without sampled releases, zCDP composition with the CKS conversion, as
+/// always. With any sampled release, every release is accounted under Rényi
+/// DP: Poisson-subsampled ones with the Zhu–Wang bound, the others with
+/// their full curve.
+pub fn cost_of(releases: &[(f64, Option<f64>)], budget: &PrivacyBudget) -> Result<Cost> {
+    let rho = releases.iter().fold(0.0, |a, (r, _)| a + r);
+    if releases.iter().all(|(_, q)| q.is_none()) {
+        return Cost::of(rho, budget);
+    }
+    budget.validate()?;
+    // Identical releases (the same mechanism, round after round) share one
+    // curve, scaled by their count.
+    let mut groups: Vec<((f64, Option<f64>), u64)> = vec![];
+    for r in releases {
+        match groups.iter_mut().find(|(k, _)| k == r) {
+            Some((_, n)) => *n += 1,
+            None => groups.push((*r, 1)),
+        }
+    }
+    let curves: Vec<_> = groups
+        .iter()
+        .map(|((r, q), n)| crate::rdp::scaled(&crate::rdp::release_curve(*r, *q), *n))
+        .collect();
+    Ok(Cost {
+        rho,
+        epsilon: crate::rdp::epsilon(&crate::rdp::compose(&curves), budget.delta),
+        delta: budget.delta,
+    })
+}
+
+/// The most releases [`affordable`] reports: "at least this many".
+pub const MAX_AFFORDABLE: u64 = 100_000;
+
+/// How many identical releases (zCDP cost `rho`, sampling rate `q`) the
+/// budget affords from empty, up to [`MAX_AFFORDABLE`].
+pub fn affordable(rho: f64, q: Option<f64>, budget: &PrivacyBudget) -> Result<u64> {
+    let fits = |n: u64| -> Result<bool> {
+        Ok(cost_of(&vec![(rho, q); n as usize], budget)?.epsilon <= budget.epsilon)
+    };
+    if !fits(1)? {
+        return Ok(0);
+    }
+    let (mut lo, mut hi) = (1u64, 2u64);
+    loop {
+        if hi >= MAX_AFFORDABLE {
+            if fits(MAX_AFFORDABLE)? {
+                return Ok(MAX_AFFORDABLE);
+            }
+            hi = MAX_AFFORDABLE;
+            break;
+        }
+        if !fits(hi)? {
+            break;
+        }
+        lo = hi;
+        hi *= 2;
+    }
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if fits(mid)? {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
 }
 
 /// A ledger file under an exclusive lock for the duration of a

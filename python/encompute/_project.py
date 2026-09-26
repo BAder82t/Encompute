@@ -264,16 +264,26 @@ class Project:
         unit: str,
         dim: int,
         colluding: Optional[int],
+        dpsgd: Optional[Dict[str, float]] = None,
     ) -> str:
+        """The aggregation program. With ``dpsgd`` (epsilon, delta,
+        noise_multiplier, sampling_rate, clip_norm, scale), each gradient's
+        budget protects ``unit`` and the release is Poisson-sampled DP-SGD."""
         if len(data) < 2:
             raise EncomputeError("ENC2106", "aggregation needs datasets from at least two parties")
         owners = [d.owner for d in data]
         if len(set(owners)) != len(owners):
             raise EncomputeError("ENC2106", "each dataset must belong to a different party")
-        presets = {p[0]: p for p in _native.privacy_presets()}
-        if privacy not in presets:
-            raise EncomputeError("ENC2203", f"privacy is one of {', '.join(presets)}")
-        _, eps, delta, noise = presets[privacy]
+        clip, scale, sampling = 1.0, 4096, ""
+        if dpsgd is not None:
+            eps, delta, noise = dpsgd["epsilon"], dpsgd["delta"], dpsgd["noise_multiplier"]
+            clip, scale = dpsgd["clip_norm"], dpsgd["scale"]
+            sampling = f" sampling_rate {dpsgd['sampling_rate']!r}"
+        else:
+            presets = {p[0]: p for p in _native.privacy_presets()}
+            if privacy not in presets:
+                raise EncomputeError("ENC2203", f"privacy is one of {', '.join(presets)}")
+            _, eps, delta, noise = presets[privacy]
         n = len(data)
         c = max(0, n - 2) if colluding is None else colluding
         lines = [
@@ -313,8 +323,9 @@ class Project:
             acc = n + i - 1
         lines.append(f"output \"update\" = %{acc} to {_q(recipient)}")
         lines.append(
-            f"aggregate \"update\" sum minimum {n} colluding {c} clip [-1.0, 1.0] scale 4096 "
-            f"modulus 40 dp discrete_gaussian clip_norm 1.0 noise_multiplier {noise!r}"
+            f"aggregate \"update\" sum minimum {n} colluding {c} clip [-1.0, 1.0] scale {scale} "
+            f"modulus 40 dp discrete_gaussian clip_norm {clip!r} noise_multiplier {noise!r}"
+            f"{sampling}"
         )
         return "\n".join(lines) + "\n"
 

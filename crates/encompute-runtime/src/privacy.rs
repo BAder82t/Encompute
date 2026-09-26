@@ -47,7 +47,141 @@ fn label(n: &AssetNode) -> String {
     }
 }
 
+/// What `rounds` releases would cost one budgeted asset.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct PrivacyPreview {
+    pub output: String,
+    pub asset: String,
+    pub unit: String,
+    /// `organization` (each party's whole contribution clipped) or
+    /// `example` (DP-SGD: each privacy unit clipped and Poisson-sampled).
+    pub level: String,
+    pub sampling_rate: Option<f64>,
+    pub accountant: String,
+    pub rounds: u64,
+    /// Epsilon after `rounds` releases, at the budget's delta.
+    pub epsilon: f64,
+    pub budget_epsilon: f64,
+    pub delta: f64,
+    /// How many releases the whole budget affords.
+    pub affordable: u64,
+    pub allowed: bool,
+}
+
+/// Renders previews as `encompute privacy explain --rounds` prints them.
+pub fn render_preview(rows: &[PrivacyPreview]) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "PRIVACY PREVIEW");
+    let _ = writeln!(s, "{}", "─".repeat(48));
+    for r in rows {
+        let _ = writeln!(s, "{:<24}{} ({})", "Asset", r.asset, r.output);
+        let _ = writeln!(s, "{:<24}{}", "Privacy unit", r.unit);
+        let _ = writeln!(
+            s,
+            "{:<24}{}",
+            "Level",
+            match r.sampling_rate {
+                Some(q) => format!("example (DP-SGD, Poisson sampling {q})"),
+                None => r.level.clone(),
+            }
+        );
+        let _ = writeln!(s, "{:<24}{}", "Accountant", r.accountant);
+        let _ = writeln!(s, "{:<24}{}", "Rounds", r.rounds);
+        let _ = writeln!(
+            s,
+            "{:<24}epsilon {:.3} of {} (delta {:e})",
+            "Projected", r.epsilon, r.budget_epsilon, r.delta
+        );
+        let _ = writeln!(s, "{:<24}{} rounds", "Budget affords", r.affordable);
+        let _ = writeln!(
+            s,
+            "{:<24}{}\n",
+            "RESULT",
+            if r.allowed {
+                "WITHIN BUDGET"
+            } else {
+                "DENIED BEFORE TRAINING (over budget)"
+            }
+        );
+    }
+    s
+}
+
 impl Model {
+    /// What `rounds` releases of every privacy-budgeted output would cost
+    /// each charged asset, before anything runs. Empty without budgets.
+    pub fn privacy_projection(&self, rounds: u64) -> Result<Vec<PrivacyPreview>> {
+        let p = self.program();
+        let Some(r) = analyze(p)? else {
+            return Ok(vec![]);
+        };
+        let mut out = vec![];
+        for rel in &r.privacy_releases {
+            let m = &rel.mechanism;
+            let Some(bd) = r.aggregations.iter().find(|b| b.output == rel.output) else {
+                continue;
+            };
+            for (asset, b) in &rel.charged {
+                let spec = encompute_privacy::ReleaseSpec {
+                    round_id: String::new(),
+                    output: rel.output.clone(),
+                    policy_id: None,
+                    privacy_policy_id: String::new(),
+                    execution_spec_id: None,
+                    mechanism: m.clone(),
+                    codec: bd.codec,
+                    vector_len: bd.vector_len,
+                    charged: vec![],
+                };
+                let c = encompute_privacy::Charged {
+                    asset_id: asset.clone(),
+                    budget: b.clone(),
+                };
+                let rho = spec.rho(&c)?;
+                let q = m.sampling_rate;
+                let epsilon = match (rounds, q) {
+                    (0, _) => 0.0,
+                    (n, Some(_)) => encompute_privacy::rdp::epsilon(
+                        &encompute_privacy::rdp::scaled(
+                            &encompute_privacy::rdp::release_curve(rho, q),
+                            n,
+                        ),
+                        b.delta,
+                    ),
+                    (n, None) => encompute_privacy::Cost::of(rho * n as f64, b)?.epsilon,
+                };
+                let affordable = encompute_privacy::ledger::affordable(rho, q, b)?;
+                out.push(PrivacyPreview {
+                    output: rel.output.clone(),
+                    asset: asset.clone(),
+                    unit: b.unit.to_string(),
+                    level: match (q, &b.unit) {
+                        (Some(_), _) => "example",
+                        (None, encompute_ir::confidentiality::PrivacyUnit::Organization) => {
+                            "organization"
+                        }
+                        (None, _) => "contribution (each party's whole contribution clipped)",
+                    }
+                    .into(),
+                    sampling_rate: q,
+                    accountant: if q.is_some() {
+                        encompute_ir::confidentiality::SAMPLED_PRIVACY_ACCOUNTANT
+                    } else {
+                        encompute_ir::confidentiality::PRIVACY_ACCOUNTANT
+                    }
+                    .into(),
+                    rounds,
+                    epsilon,
+                    budget_epsilon: b.epsilon,
+                    delta: b.delta,
+                    affordable,
+                    allowed: rounds <= affordable,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// `encompute privacy explain`: parties, assets with their (derived)
     /// policies, flows and warnings. `None` without declarations.
     pub fn privacy_explain(&self) -> Result<Option<String>> {
@@ -272,9 +406,11 @@ impl Model {
                         asset_id: asset.clone(),
                         budget: b.clone(),
                     };
-                    spec.rho(&c)
-                        .and_then(|rho| encompute_privacy::Cost::of(rho, b))
-                        .map(|c| c.epsilon)
+                    spec.rho(&c).and_then(|rho| {
+                        let one = encompute_privacy::ledger::cost_of(&[(rho, m.sampling_rate)], b)?;
+                        let n = encompute_privacy::ledger::affordable(rho, m.sampling_rate, b)?;
+                        Ok((one.epsilon, n))
+                    })
                 });
                 let _ = writeln!(
                     s,
@@ -284,8 +420,7 @@ impl Model {
                     b.epsilon,
                     b.delta,
                     match per {
-                        Some(Ok(e)) => {
-                            let n = affordable(b, e);
+                        Some(Ok((e, n))) => {
                             format!(
                                 ", one release costs epsilon {e:.3}; the budget affords {n} release{}",
                                 if n == 1 { "" } else { "s" }
@@ -297,8 +432,15 @@ impl Model {
             }
             let _ = writeln!(
                 s,
-                "  {:<21}zCDP, composed across releases (CKS 2020)",
-                "accounting"
+                "  {:<21}{}",
+                "accounting",
+                match m.sampling_rate {
+                    Some(q) => format!(
+                        "Rényi DP: Poisson subsampling at rate {q} (Zhu and Wang 2019), composed \
+                         across releases; privacy unit clipped per example before summation"
+                    ),
+                    None => "zCDP, composed across releases (CKS 2020)".to_owned(),
+                }
             );
             let _ = writeln!(
                 s,
@@ -389,7 +531,7 @@ impl Model {
                     .expect("plan");
                 let view = plan.ledger_view(dir, p)?.expect("budgeted");
                 let now = view.cost()?;
-                let after = view.cost_after(spec.rho(c)?)?;
+                let after = view.cost_after(spec.rho(c)?, spec.mechanism.sampling_rate)?;
                 let ok = after.epsilon <= c.budget.epsilon;
                 let _ = writeln!(
                     s,
@@ -467,12 +609,17 @@ pub fn privacy_budget_report(dir: &std::path::Path, asset: Option<&str>) -> Resu
             v.entries.len(),
             &v.root()?[..16]
         );
-        let mut rho = 0.0;
+        let mut so_far = vec![];
         for e in &v.entries {
-            if let encompute_privacy::PrivacyEvent::Reserve { round_id, .. } = &e.event {
-                let before = encompute_privacy::Cost::of(rho, &g.budget)?.epsilon;
-                rho += e.event.rho()?;
-                let after = encompute_privacy::Cost::of(rho, &g.budget)?.epsilon;
+            if let encompute_privacy::PrivacyEvent::Reserve {
+                round_id,
+                mechanism,
+                ..
+            } = &e.event
+            {
+                let before = encompute_privacy::ledger::cost_of(&so_far, &g.budget)?.epsilon;
+                so_far.push((e.event.rho()?, mechanism.sampling_rate));
+                let after = encompute_privacy::ledger::cost_of(&so_far, &g.budget)?.epsilon;
                 let committed = v.entries.iter().any(|c| matches!(&c.event,
                     encompute_privacy::PrivacyEvent::Commit { event_id, .. } if event_id == e.event.event_id()));
                 let _ = writeln!(
@@ -490,31 +637,6 @@ pub fn privacy_budget_report(dir: &std::path::Path, asset: Option<&str>) -> Resu
         }
     }
     Ok(s)
-}
-
-/// How many releases, each costing epsilon `one` alone, a budget affords
-/// under zCDP composition (at most 100000).
-fn affordable(b: &encompute_ir::confidentiality::PrivacyBudget, one: f64) -> u64 {
-    use encompute_privacy::PrivacyAccountant;
-    if one > b.epsilon {
-        return 0;
-    }
-    // One release's rho, recovered by bisection on the conversion.
-    let (mut lo, mut hi) = (0.0f64, 1e6f64);
-    for _ in 0..200 {
-        let mid = (lo + hi) / 2.0;
-        if encompute_privacy::Zcdp.epsilon(mid, b.delta) < one {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    let mut n = 1u64;
-    while n < 100_000 && encompute_privacy::Zcdp.epsilon(hi * (n + 1) as f64, b.delta) <= b.epsilon
-    {
-        n += 1;
-    }
-    n
 }
 
 impl Model {
@@ -541,7 +663,7 @@ impl Model {
                 let view = plan.ledger_view(dir, p)?.expect("budgeted");
                 let now = view.cost()?;
                 let next = spec.rho(c)?;
-                let after = view.cost_after(next)?;
+                let after = view.cost_after(next, spec.mechanism.sampling_rate)?;
                 let ok = after.epsilon <= c.budget.epsilon;
                 let _ = write!(s, "\n{}\n{}\n", c.asset_id, "─".repeat(40));
                 let row = |s: &mut String, k: &str, v: String| {

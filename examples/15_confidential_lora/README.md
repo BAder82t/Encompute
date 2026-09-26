@@ -43,8 +43,9 @@ Encompute does the rest:
 
 **Privacy unit: organization.** Each hospital's whole update is clipped,
 so the budget bounds what the adapter reveals about one hospital's
-contribution. Patient-level DP requires per-example clipping (DP-SGD) and
-is not claimed.
+contribution. This run does not claim patient-level privacy. For that, use
+DP-SGD (`privacy="strong-patient"`), shown in
+[example 16](../16_patient_private_lora/).
 
 **Crash safety.** A round is accepted only when its signed adapter record
 enters the trust bundle. After a crash, `recover(workdir)` finalizes or
@@ -159,11 +160,11 @@ tampered adapter record (the trust report fails).
 - **PyTorch is not encrypted.** It runs in plaintext inside the attested
   workload. Confidentiality of the model and the data in use rests on the
   TEE. Here the TEE is mock attestation, which protects nothing.
-- **Privacy is organization-level, not patient-level.** Each hospital's
-  whole update is clipped, so the budget bounds what the adapter reveals
-  about one hospital's contribution. Patient-level DP needs per-example
-  clipping (DP-SGD), which this release does not implement. The program
-  declares the unit as `organization` so no stronger claim is made.
+- **Privacy here is organization-level, not patient-level.** Each
+  hospital's whole update is clipped, so the budget bounds what the adapter
+  reveals about one hospital's contribution. The program declares the unit
+  as `organization`, so no stronger claim is made. Patient-level DP-SGD is
+  [example 16](../16_patient_private_lora/).
 - **Verified training means attested workloads.** No execution proof covers
   general training, so `verification="required"` requires attestation. The
   plan says so.

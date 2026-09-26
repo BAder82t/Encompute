@@ -38,12 +38,16 @@ fn spec() -> TrainingSpec {
                 owner: "hospital-a".into(),
                 gradient_asset: "gradient-patients-a".into(),
                 digest: h('1'),
+                privacy_units: None,
+                grouping_digest: None,
             },
             DatasetCommitment {
                 asset_id: "patients-b".into(),
                 owner: "hospital-b".into(),
                 gradient_asset: "gradient-patients-b".into(),
                 digest: h('2'),
+                privacy_units: None,
+                grouping_digest: None,
             },
         ],
         code_digest: h('3'),
@@ -60,6 +64,7 @@ fn spec() -> TrainingSpec {
             batch_size: 8,
             rounds: 3,
             adapter_parameters: 512,
+            dp_sgd: None,
         },
         participants: ["hospital-a", "hospital-b"]
             .iter()
@@ -129,6 +134,93 @@ fn every_field_changes_the_spec_id() {
     assert!(t.validate().is_err());
 }
 
+fn dp_spec() -> TrainingSpec {
+    let mut s = spec();
+    s.config.local_steps = 1;
+    s.config.dp_sgd = Some(DpSgdConfig {
+        privacy_unit: "patient".into(),
+        per_example_clip: "1.0".into(),
+        sampling: "poisson".into(),
+        sampling_rate: "0.05".into(),
+        noise_multiplier: "1.2".into(),
+        delta: "1e-6".into(),
+        grouping: "unit_ids".into(),
+        accountant: "rdp-poisson-zw2019".into(),
+        expected_batch: "8.0".into(),
+    });
+    for (i, d) in s.datasets.iter_mut().enumerate() {
+        d.privacy_units = Some(80 + i as u64);
+        d.grouping_digest = Some(h(if i == 0 { 'a' } else { 'b' }));
+    }
+    s
+}
+
+#[test]
+fn every_dp_sgd_setting_changes_the_spec_id() {
+    let s = dp_spec();
+    s.validate().unwrap();
+    let id = s.id().unwrap();
+    // Organization mode has no DP-SGD fields: its spec IDs are unchanged.
+    assert!(!String::from_utf8(
+        encompute_verification::canonical::canonical_json(&spec()).unwrap()
+    )
+    .unwrap()
+    .contains("dp_sgd"));
+    assert_ne!(id, spec().id().unwrap());
+    type Edit = fn(&mut DpSgdConfig);
+    let edits: Vec<(&str, Edit)> = vec![
+        ("privacy unit", |d| d.privacy_unit = "user".into()),
+        ("per-example clip", |d| d.per_example_clip = "0.5".into()),
+        ("sampling rate", |d| d.sampling_rate = "0.1".into()),
+        ("noise", |d| d.noise_multiplier = "0.8".into()),
+        ("delta", |d| d.delta = "1e-5".into()),
+        ("grouping", |d| d.grouping = "none".into()),
+        ("expected batch", |d| d.expected_batch = "16.0".into()),
+    ];
+    for (what, e) in edits {
+        let mut t = dp_spec();
+        e(t.config.dp_sgd.as_mut().unwrap());
+        assert_ne!(t.id().unwrap(), id, "{what}");
+    }
+    let mut t = dp_spec();
+    t.datasets[0].privacy_units = Some(1);
+    assert_ne!(t.id().unwrap(), id, "privacy units");
+    let mut t = dp_spec();
+    t.datasets[0].grouping_digest = Some(h('c'));
+    assert_ne!(t.id().unwrap(), id, "grouping");
+
+    // Refused: organization unit, other sampling or accountant, more than
+    // one local step, missing unit counts, units without DP-SGD.
+    type Bad = fn(&mut TrainingSpec);
+    let bad: Vec<(&str, Bad)> = vec![
+        ("organization", |s| {
+            s.config.dp_sgd.as_mut().unwrap().privacy_unit = "organization".into()
+        }),
+        ("shuffle", |s| {
+            s.config.dp_sgd.as_mut().unwrap().sampling = "shuffle".into()
+        }),
+        ("accountant", |s| {
+            s.config.dp_sgd.as_mut().unwrap().accountant = "zcdp-cks2020".into()
+        }),
+        ("q = 1", |s| {
+            s.config.dp_sgd.as_mut().unwrap().sampling_rate = "1.0".into()
+        }),
+        ("local steps", |s| s.config.local_steps = 5),
+        ("unit count", |s| s.datasets[1].privacy_units = None),
+        ("grouping digest", |s| s.datasets[1].grouping_digest = None),
+        ("units without DP-SGD", |s| s.config.dp_sgd = None),
+    ];
+    for (what, e) in bad {
+        let mut t = dp_spec();
+        e(&mut t);
+        assert_eq!(
+            t.validate().map_err(|e| e.code),
+            Err(Code::TrainingSpec),
+            "{what}"
+        );
+    }
+}
+
 #[test]
 fn attestation_policy_binds_the_spec_and_code() {
     let s = spec();
@@ -186,6 +278,7 @@ fn release_round(d: &std::path::Path, round: u64) {
             kind: DpKind::DiscreteGaussian,
             clip_norm: 1.0,
             noise_multiplier: 6.0,
+            sampling_rate: None,
         },
         codec: FixedPointCodec {
             clip_min: -1.0,

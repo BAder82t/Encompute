@@ -16,14 +16,16 @@ What protects what:
   and from the other parties.
 - Secure aggregation keeps each hospital's update from the coordinator.
 - Differential privacy bounds what the released aggregate reveals about
-  one participant (organization level, from the per-hospital update clip).
+  one hospital (organization level: each hospital's update is clipped) or,
+  with ``privacy="strong-patient"``, about one patient (DP-SGD: each
+  patient's gradient is clipped, and patients are Poisson-sampled).
 - PyTorch itself is not encrypted: it runs in plaintext inside the attested
   workload.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -53,9 +55,18 @@ def wrap_model(factory: str, **kwargs: Any) -> torch.nn.Module:
     return m
 
 
-def private_dataset(x: torch.Tensor, y: torch.Tensor) -> tuple:
-    """A participant's dataset: inputs and labels. It is written only to
-    its owner's worker directory; only its digest is shared."""
+def private_dataset(x: torch.Tensor, y: torch.Tensor,
+                    unit_ids: Optional[torch.Tensor] = None) -> tuple:
+    """A participant's dataset: inputs, labels and, for patient-level
+    privacy, each record's patient (``unit_ids``, integers): a patient's
+    records are grouped and clipped together. Without ``unit_ids`` each
+    record is its own unit. The dataset is written only to its owner's
+    worker directory; only its digest (covering the unit IDs) and its number
+    of units are shared."""
     if len(x) != len(y):
         raise ValueError("inputs and labels differ in length")
-    return (x.detach().clone(), y.detach().clone())
+    if unit_ids is None:
+        return (x.detach().clone(), y.detach().clone())
+    if len(unit_ids) != len(x) or unit_ids.dtype != torch.int64:
+        raise ValueError("unit_ids needs one int64 ID per record")
+    return (x.detach().clone(), y.detach().clone(), unit_ids.detach().clone())

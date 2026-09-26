@@ -223,9 +223,11 @@ fn check(program: &Program, plan: &ConfidentialExecutionPlan, p: &mut Vec<String
                 Mechanism::DifferentialPrivacy {
                     noise_multiplier,
                     clip_norm,
+                    sampling_rate,
                 } => boundary.and_then(|b| b.dp.as_ref()).is_some_and(|d| {
                     format!("{:?}", d.noise_multiplier) == *noise_multiplier
                         && format!("{:?}", d.clip_norm) == *clip_norm
+                        && d.sampling_rate.map(|q| format!("{q:?}")) == *sampling_rate
                 }),
                 Mechanism::LocalExecution { party } => {
                     s.placement == Placement::Party(party.clone())

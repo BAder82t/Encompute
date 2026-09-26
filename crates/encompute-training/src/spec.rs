@@ -54,6 +54,82 @@ pub struct TrainingConfig {
     pub rounds: u32,
     /// Adapter parameters (the aggregated vector's length).
     pub adapter_parameters: u64,
+    /// Patient-level (example-level) DP-SGD. Absent: organization-level
+    /// privacy, where each participant's whole update is clipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_sgd: Option<DpSgdConfig>,
+}
+
+/// DP-SGD: each worker computes per-example gradients, sums each privacy
+/// unit's (grouping its records), clips each unit's to `per_example_clip`,
+/// Poisson-samples the units with `sampling_rate`, and contributes the sum
+/// of the sampled units' clipped gradients to secure aggregation. The
+/// coordinator adds discrete Gaussian noise to the sum. One gradient step
+/// per round.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DpSgdConfig {
+    /// The privacy unit (`patient`, `user`, `record`...), never
+    /// `organization`.
+    pub privacy_unit: String,
+    /// L2 clip of each unit's gradient.
+    pub per_example_clip: String,
+    /// `poisson`.
+    pub sampling: String,
+    pub sampling_rate: String,
+    pub noise_multiplier: String,
+    pub delta: String,
+    /// `unit_ids` (records grouped by a per-record unit ID, whose digest
+    /// each dataset commitment binds) or `none` (one record is one unit).
+    pub grouping: String,
+    /// The accountant, with its version.
+    pub accountant: String,
+    /// The expected number of sampled units per round, over all datasets
+    /// (the server update's denominator).
+    pub expected_batch: String,
+}
+
+impl DpSgdConfig {
+    fn validate(&self, local_steps: u32) -> Result<()> {
+        if matches!(self.privacy_unit.as_str(), "organization" | "") {
+            return Err(bad(
+                "DP-SGD protects a unit inside a participant (patient, user, record), not an organization",
+            ));
+        }
+        if self.sampling != "poisson" {
+            return Err(bad("DP-SGD sampling is poisson"));
+        }
+        if !["unit_ids", "none"].contains(&self.grouping.as_str()) {
+            return Err(bad("DP-SGD grouping is unit_ids or none"));
+        }
+        if self.accountant != encompute_ir::confidentiality::SAMPLED_PRIVACY_ACCOUNTANT {
+            return Err(bad(format!(
+                "DP-SGD is accounted with {}",
+                encompute_ir::confidentiality::SAMPLED_PRIVACY_ACCOUNTANT
+            )));
+        }
+        if local_steps != 1 {
+            return Err(bad(
+                "DP-SGD takes one gradient step per round (local_steps 1): each step is one \
+                 accounted release",
+            ));
+        }
+        for (n, v) in [
+            ("per_example_clip", &self.per_example_clip),
+            ("sampling_rate", &self.sampling_rate),
+            ("noise_multiplier", &self.noise_multiplier),
+            ("delta", &self.delta),
+            ("expected_batch", &self.expected_batch),
+        ] {
+            positive(n, v)?;
+        }
+        let q: f64 = self.sampling_rate.parse().unwrap_or(1.0);
+        let d: f64 = self.delta.parse().unwrap_or(1.0);
+        if q >= 1.0 || d >= 1.0 {
+            return Err(bad("sampling_rate and delta must be below 1"));
+        }
+        Ok(())
+    }
 }
 
 impl TrainingConfig {
@@ -79,7 +155,11 @@ impl TrainingConfig {
             return Err(bad("the optimizer is sgd or adam"));
         }
         positive("learning_rate", &self.learning_rate)?;
-        positive("update_clip", &self.update_clip)
+        positive("update_clip", &self.update_clip)?;
+        if let Some(d) = &self.dp_sgd {
+            d.validate(self.local_steps)?;
+        }
+        Ok(())
     }
 }
 
@@ -105,6 +185,13 @@ pub struct DatasetCommitment {
     pub gradient_asset: String,
     /// SHA-256 of the dataset as its owner holds it (hex).
     pub digest: String,
+    /// DP-SGD: the number of privacy units in the dataset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_units: Option<u64>,
+    /// DP-SGD: SHA-256 of the per-record unit IDs (hex), which the
+    /// dataset digest also covers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grouping_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,8 +254,34 @@ impl TrainingSpec {
         {
             return Err(bad("datasets must be sorted and distinct"));
         }
+        let dp = self.config.dp_sgd.as_ref();
         for d in &self.datasets {
             hex64("dataset digest", &d.digest)?;
+            match (dp, d.privacy_units, &d.grouping_digest) {
+                (None, None, None) => {}
+                (Some(c), Some(n), g) if n > 0 => match (c.grouping.as_str(), g) {
+                    ("unit_ids", Some(g)) => hex64("grouping digest", g)?,
+                    ("none", None) => {}
+                    _ => {
+                        return Err(bad(format!(
+                            "{}'s grouping does not match the DP-SGD grouping {}",
+                            d.asset_id, c.grouping
+                        )))
+                    }
+                },
+                (Some(_), _, _) => {
+                    return Err(bad(format!(
+                        "DP-SGD needs {}'s number of privacy units",
+                        d.asset_id
+                    )))
+                }
+                (None, _, _) => {
+                    return Err(bad(format!(
+                        "{} declares privacy units, but the run is not DP-SGD",
+                        d.asset_id
+                    )))
+                }
+            }
             if !self
                 .participants
                 .iter()

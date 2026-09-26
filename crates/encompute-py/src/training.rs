@@ -68,6 +68,60 @@ pub fn training_attestation_policy(
     Ok(serde_json::to_string_pretty(&p).expect("JSON"))
 }
 
+/// The attestation policy DP-SGD contributions must satisfy: a workload
+/// running this training code (by digest) in an approved image, bound to
+/// the approved plan and policy, holding the contribution key. (The plan,
+/// not the training spec, because the spec binds the aggregation spec.)
+#[pyfunction]
+pub fn contribution_attestation_policy(
+    plan_id: &str,
+    policy_id: Option<&str>,
+    code_digest: &str,
+    image: &str,
+    development: bool,
+) -> PyResult<String> {
+    use encompute_runtime::attestation::{AttestationPolicy, TeeKind};
+    let mut p = AttestationPolicy::new(plan_id, policy_id);
+    p.artifact_digest = Some(code_digest.to_owned());
+    p.allowed_images = vec![image.to_owned()];
+    p.allowed_tee = if development {
+        vec![TeeKind::Mock]
+    } else {
+        vec![TeeKind::IntelTdx, TeeKind::AmdSevSnp]
+    };
+    p.allow_development = development;
+    p.validate().map_err(err)?;
+    Ok(serde_json::to_string_pretty(&p).expect("JSON"))
+}
+
+/// Inside a DP-SGD worker (development attestation): an attestation record
+/// that this workload, holding `identity` (its contribution key), runs
+/// `code_digest` for `plan_id`.
+#[pyfunction]
+pub fn attest_contribution(
+    plan_id: &str,
+    policy_id: Option<&str>,
+    code_digest: &str,
+    identity: &str,
+    mock_seed: &str,
+    image: &str,
+) -> PyResult<String> {
+    use encompute_runtime::attestation::{AttestationChallenge, AttestationRecord, Attester};
+    let attester = MockHardware::from_seed(&seed32(mock_seed)?).attester(image);
+    let signer = EvaluatorSigner::from_seed(&seed32(identity)?);
+    let now = encompute_runtime::attestation::unix_now();
+    let challenge =
+        AttestationChallenge::new("encompute.contribution", now, 24 * 3600).map_err(err)?;
+    let binding = WorkloadSession::new(&signer.identity()).binding(
+        &challenge,
+        plan_id,
+        policy_id,
+        code_digest,
+    );
+    let record = AttestationRecord::new(attester.attest(&challenge, &binding).map_err(err)?);
+    Ok(String::from_utf8(record.to_bytes().map_err(err)?).expect("JSON"))
+}
+
 /// Keys by asset, and the attestation record.
 type Acquired = (Vec<(String, Py<PyBytes>)>, String);
 
@@ -290,6 +344,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(training_spec_id, m)?)?;
     m.add_function(wrap_pyfunction!(training_run_id, m)?)?;
     m.add_function(wrap_pyfunction!(training_attestation_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(contribution_attestation_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(attest_contribution, m)?)?;
     m.add_function(wrap_pyfunction!(acquire_training_keys, m)?)?;
     m.add_function(wrap_pyfunction!(sha256_hex, m)?)?;
     m.add_function(wrap_pyfunction!(seal_asset, m)?)?;

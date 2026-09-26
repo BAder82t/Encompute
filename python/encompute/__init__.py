@@ -26,6 +26,7 @@ import json
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from . import _native
+from ._privacy import Privacy
 from ._project import PlanningFailed, Project, ProjectAsset, Training
 from ._frontend import (
     Asset,
@@ -68,6 +69,7 @@ from ._frontend import (
 )
 
 __all__ = [
+    "Privacy",
     "PlanningFailed",
     "Project",
     "ProjectAsset",

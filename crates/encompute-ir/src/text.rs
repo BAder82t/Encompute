@@ -141,6 +141,9 @@ impl fmt::Display for Program {
                     dp.clip_norm,
                     dp.noise_multiplier
                 )?;
+                if let Some(q) = dp.sampling_rate {
+                    write!(f, " sampling_rate {q:?}")?;
+                }
             }
             writeln!(f)?;
         }
@@ -276,10 +279,19 @@ pub fn parse(src: &str) -> Result<Program> {
                 c.keyword("noise_multiplier")?;
                 c.skip_ws();
                 let noise_multiplier = c.float()?;
+                c.skip_ws();
+                let sampling_rate = if c.rest.starts_with("sampling_rate") {
+                    c.keyword("sampling_rate")?;
+                    c.skip_ws();
+                    Some(c.float()?)
+                } else {
+                    None
+                };
                 Some(crate::confidentiality::DpMechanism {
                     kind,
                     clip_norm,
                     noise_multiplier,
+                    sampling_rate,
                 })
             } else {
                 None

@@ -92,6 +92,11 @@ pub enum Mechanism {
     DifferentialPrivacy {
         noise_multiplier: String,
         clip_norm: String,
+        /// DP-SGD: the Poisson sampling rate of the privacy units, each
+        /// clipped separately (example level). Absent: each party's whole
+        /// contribution is clipped (organization level).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sampling_rate: Option<String>,
     },
     /// The step runs at a party allowed to see everything it reads.
     LocalExecution { party: String },
@@ -124,9 +129,18 @@ impl Mechanism {
             Mechanism::DifferentialPrivacy {
                 noise_multiplier,
                 clip_norm,
+                sampling_rate: None,
             } => format!(
                 "differential privacy (discrete Gaussian, noise {noise_multiplier}, clip \
                  {clip_norm})"
+            ),
+            Mechanism::DifferentialPrivacy {
+                noise_multiplier,
+                clip_norm,
+                sampling_rate: Some(q),
+            } => format!(
+                "differential privacy, example level (DP-SGD: per-example clip {clip_norm}, \
+                 Poisson sampling {q}, discrete Gaussian noise {noise_multiplier})"
             ),
             Mechanism::LocalExecution { party } => format!("local execution at {party}"),
         }
@@ -341,6 +355,14 @@ pub struct TrainingDeclaration {
     /// (integrity under the TEE's hardware trust), never less.
     #[serde(default)]
     pub verified: bool,
+    /// The unit the training's privacy protects: `organization` (each
+    /// participant's whole update clipped) or a unit inside a participant
+    /// (`patient`, `user`, `record`), which needs per-example clipping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_unit: Option<String>,
+    /// The training clips each privacy unit's gradient (DP-SGD).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_example_clipping: bool,
 }
 
 /// Everything a plan was made from, carried in the plan so any verifier

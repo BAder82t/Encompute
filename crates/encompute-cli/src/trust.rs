@@ -56,6 +56,10 @@ pub enum TrustCmd {
         /// to `aggregate serve` and `join`).
         #[arg(long)]
         coordinator_policy: Option<PathBuf>,
+        /// The attestation policy contributors must satisfy (as given to
+        /// `aggregate serve` and `join`); required for DP-SGD.
+        #[arg(long)]
+        attestation_policy: Option<PathBuf>,
         #[command(flatten)]
         bundle: Bundle,
     },
@@ -319,6 +323,7 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
             parties,
             plan,
             coordinator_policy,
+            attestation_policy,
             bundle,
         } => {
             let m = load(&model)?;
@@ -351,6 +356,12 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
                     let mut spec = AggregationSpec::new(plan, ordered)?;
                     if let Some(p) = &coordinator_policy {
                         spec.coordinator_attestation =
+                            Some(serde_json::from_slice(&read(p)?).map_err(|e| {
+                                Error::new(Code::TrustGraph, format!("{}: {e}", p.display()))
+                            })?);
+                    }
+                    if let Some(p) = &attestation_policy {
+                        spec.attestation =
                             Some(serde_json::from_slice(&read(p)?).map_err(|e| {
                                 Error::new(Code::TrustGraph, format!("{}: {e}", p.display()))
                             })?);

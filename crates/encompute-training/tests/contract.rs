@@ -73,6 +73,8 @@ fn fixture_spec() -> TrainingSpec {
                 owner: format!("hospital-{x}"),
                 gradient_asset: format!("gradient-patients-{x}"),
                 digest: h((b'1' + i as u8) as char),
+                privacy_units: None,
+                grouping_digest: None,
             })
             .collect(),
         code_digest: h('3'),
@@ -89,6 +91,7 @@ fn fixture_spec() -> TrainingSpec {
             batch_size: 16,
             rounds: 2,
             adapter_parameters: 256,
+            dp_sgd: None,
         },
         participants: ["hospital-a", "hospital-b"]
             .iter()
@@ -190,6 +193,7 @@ fn checkpoint_resume() {
                 kind: DpKind::DiscreteGaussian,
                 clip_norm: 1.0,
                 noise_multiplier: 6.0,
+                sampling_rate: None,
             },
             codec: FixedPointCodec {
                 clip_min: -1.0,

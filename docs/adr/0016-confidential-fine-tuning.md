@@ -62,8 +62,8 @@ PyTorch.
    - The enforced bound is one hospital's clipped update, so the program
      declares `privacy unit "organization"`, and the accountant charges
      twice the per-contribution sensitivity.
-   - Patient-level DP would need per-example clipping (DP-SGD). It is not
-     claimed until it is implemented.
+   - Patient-level DP needs per-example clipping. DP-SGD provides it, as a
+     separate mode ([ADR-017](0017-patient-level-dp.md)).
 8. **Immutable adapters and sealed checkpoints.**
    - Each round creates `adapter-N`, sealed, with a coordinator-signed
      `AdapterRecord` naming its previous adapter, aggregation receipt, base

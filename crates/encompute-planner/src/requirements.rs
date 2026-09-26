@@ -48,6 +48,9 @@ pub fn steps(
                 ));
             }
         }
+        if let Some(unit) = &t.privacy_unit {
+            check_training_privacy(c, unit, t.per_example_clipping)?;
+        }
         for d in &t.data {
             out.push(StepShape {
                 id: format!("train:{d}"),
@@ -90,6 +93,54 @@ pub fn steps(
         });
     }
     Ok(out)
+}
+
+/// The privacy a training declares must be the privacy it enforces:
+/// - `organization`: each participant's whole update is clipped, and no
+///   unit is sampled;
+/// - any unit inside a participant (patient, user, record): per-example
+///   clipping and Poisson sampling (DP-SGD). Without them, the release
+///   bounds only what one organization's update reveals, so a patient-level
+///   claim would be false.
+fn check_training_privacy(c: &Confidentiality, unit: &str, per_example: bool) -> Result<()> {
+    let fail = |m: String| Err(Error::new(Code::PlanningFailed, m));
+    // Every privacy release must match the declared level, not just one.
+    let dps: Vec<_> = c
+        .aggregations
+        .iter()
+        .filter_map(|a| a.dp.as_ref())
+        .collect();
+    let sampled = !dps.is_empty() && dps.iter().all(|d| d.sampling_rate.is_some());
+    let any_sampled = dps.iter().any(|d| d.sampling_rate.is_some());
+    for a in &c.assets {
+        if let Some(b) = &a.policy.privacy {
+            if b.unit.name() != unit {
+                return fail(format!(
+                    "the training protects each {unit}, but asset {}'s budget protects each {}",
+                    a.id, b.unit
+                ));
+            }
+        }
+    }
+    if unit == "organization" {
+        if per_example || any_sampled {
+            return fail(
+                "organization-level privacy clips each participant's whole update; per-example \
+                 clipping and sampling need a unit inside a participant (patient, user, record)"
+                    .into(),
+            );
+        }
+        return Ok(());
+    }
+    if !per_example || !sampled {
+        return fail(format!(
+            "{unit}-level privacy needs per-example clipping and Poisson sampling (DP-SGD); \
+             clipping each organization's whole update bounds only one organization's \
+             influence. Use privacy=\"standard-patient\" or \"strong-patient\", or declare the \
+             unit organization"
+        ));
+    }
+    Ok(())
 }
 
 fn release(c: Option<&Confidentiality>, asset: &str) -> Release {
