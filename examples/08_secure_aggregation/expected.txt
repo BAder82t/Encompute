@@ -1,0 +1,21 @@
+# Lines that must appear in the output (IDs and hashes are left out).
+MECHANISM     secure aggregation (secagg-bonawitz17 v1)
+STATUS        SATISFIED
+Hospital A  CONTRIBUTION ACCEPTED (only the aggregate is released)
+Hospital B  CONTRIBUTION ACCEPTED (only the aggregate is released)
+Hospital C  CONTRIBUTION ACCEPTED (only the aggregate is released)
+AGGREGATION COMPLETE
+Contributors    hospital-a, hospital-b, hospital-c
+Clear A+B+C       +0.18 -0.03 +0.65 +0.12 -0.22 -0.30 +0.57 +0.30 +0.24 +0.61 +0.26 -0.21 -0.15 +0.67 -0.22 +0.27
+Secure aggregate  +0.18 -0.03 +0.65 +0.12 -0.22 -0.30 +0.57 +0.30 +0.24 +0.61 +0.26 -0.21 -0.15 +0.67 -0.22 +0.27
+PASS
+NO INDIVIDUAL VECTOR RELEASED
+AGGREGATION RECEIPT VERIFIED
+error[ENC2101]: party hospital-d is not authorized for aggregation spec
+error[ENC2101]: this identity key is not party hospital-a's key for the round
+error[ENC2103]: only 2 parties advertised keys; the round needs 3 (aborted: no aggregate is released)
+RELEASED nothing (no aggregate, no receipt)
+error[ENC2102]: coordinator: hospital-a already submitted this round's message
+error[ENC2102]: round 1 is not newer than round 1 already joined (replay)
+error[ENC2102]: round 1 is not newer than round 2 already joined (replay)
+error[ENC2102]: the coordinator's aggregation spec is not the approved one

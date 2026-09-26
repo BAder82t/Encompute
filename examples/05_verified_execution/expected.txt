@@ -1,0 +1,10 @@
+# Lines that must appear in the output (values that vary are left out).
+# Only lines printed in every build: the verified path (research build) was
+# not run when this file was written; run.sh itself requires
+# "VERIFIED PRIVATE EXECUTION" and "EXECUTION VERIFIED" on that path.
+  verification            required
+  proof coverage          100%
+  execution proof         REQUIRED: results are decrypted only after the proof verifies
+0003 MUL_CONST  r0 3               -> r3 : u16
+0006 AND        r1 r5              -> r6 : bool
+REFUSED  exit 2: error[ENC1801]: this program cannot be fully verified

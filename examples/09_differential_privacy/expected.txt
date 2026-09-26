@@ -1,0 +1,14 @@
+# Lines that must appear in the output (IDs and hashes are left out).
+mechanism            discrete_gaussian (clip_norm 1, noise_multiplier 6)
+one release costs epsilon 0.741; the budget affords 5 releases
+STATUS               SATISFIED
+Round 1  PERMITTED  epsilon this round 0.741, spent 0.741 of 1.8
+Round 2  PERMITTED  epsilon this round 0.333, spent 1.074 of 1.8
+Round 3  PERMITTED  epsilon this round 0.261, spent 1.335 of 1.8
+Round 4  PERMITTED  epsilon this round 0.224, spent 1.559 of 1.8
+Round 5  PERMITTED  epsilon this round 0.200, spent 1.759 of 1.8
+Round 6  DENIED     error[ENC2201]: RELEASE DENIED: asset gradient-a has spent epsilon 1.7592 of 1.8; this release would bring it to 1.9419 (delta 1e-6)
+Consumed      epsilon 1.759  (rho 0.06958)
+Round 7  DENIED     error[ENC2201]: RELEASE DENIED
+Budget after restart: unchanged (epsilon 1.759  (rho 0.06958))
+error[ENC2202]: asset gradient-a's ledger: the ledger has 0 entries but 10 were already seen: it was rolled back or reset

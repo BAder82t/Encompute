@@ -1,0 +1,15 @@
+# Lines that must appear in the output (values that vary are left out).
+Evaluator receipt       verified
+Execution proof         not present
+Encrypted result        accepted (receipt only)
+  Signature       VALID
+  Response        checked
+RECEIPT VERIFIED
+EXECUTION PROOF NOT PRESENT
+REFUSED  exit 1: INVALID: receipt output commitment does not match
+REFUSED  exit 2: error[ENC1601]: envelope checksum mismatch
+REFUSED  exit 1: INVALID: receipt signature is invalid
+REFUSED  exit 1: INVALID: receipt spec ID does not match
+REFUSED  exit 1: INVALID: receipt was signed by an untrusted evaluator key
+REFUSED  exit 3: RECEIPT SIGNATURE VALID (some bindings not checked)
+REFUSED  exit 2: error[ENC1606]: receipt was signed by an untrusted evaluator key

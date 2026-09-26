@@ -204,4 +204,4 @@ under what spec, not that the sum is right.
   - attested contributors;
   - the explain output.
 - `crates/encompute-cli/tests/cli.rs` (`secure_aggregation_round`),
-  `python/tests/test_aggregation.py`, and `examples/confidential_federated_update/`.
+  `python/tests/test_aggregation.py`, and `examples/08_secure_aggregation/`.

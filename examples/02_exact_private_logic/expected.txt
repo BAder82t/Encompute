@@ -1,0 +1,11 @@
+# Lines that must appear in the output (values that vary are left out).
+Scheme            exact (TFHE: integers and Booleans)
+age=18 income=40000 risk=650       clear=True  mock=True   MATCH
+age=17 income=52000 risk=410       clear=False mock=False  MATCH
+0 mismatches
+MATCH
+integer overflow        proven: no operation overflows for inputs in range
+eligibility.py:eligibility compiles
+REFUSED  error[ENC1102]: input "age"[0] = 130 is outside its declared range [0, 120]
+REFUSED  error[ENC1102]: input "age" = 31.5 must be an integer
+REFUSED  error[ENC1303]: possible integer overflow

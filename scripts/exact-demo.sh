@@ -33,7 +33,7 @@ trap cleanup EXIT
 step() { printf '\n== %s\n' "$*"; }
 
 step "client: compile the program (exact: integers and Booleans)"
-"$ENCOMPUTE" compile "$ROOT/examples/eligibility.py:eligibility" -o "$WORK/eligibility.encompute"
+"$ENCOMPUTE" compile "$ROOT/examples/02_exact_private_logic/eligibility.py:eligibility" -o "$WORK/eligibility.encompute"
 "$ENCOMPUTE" explain "$WORK/eligibility.encompute" | sed -n '/Plan/,/Security/p'
 
 step "client: generate TFHE keys (secret.key never leaves the client)"

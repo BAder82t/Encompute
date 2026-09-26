@@ -23,6 +23,20 @@ fn main() {
             _ => usage(&a),
         }
     }
+    // A misspelled check must not run nothing and report success.
+    for name in &only {
+        if encompute_assurance::checks::find(name).is_none() {
+            eprintln!(
+                "unknown check {name}; checks: {}",
+                encompute_assurance::checks::CHECKS
+                    .iter()
+                    .map(|c| c.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            std::process::exit(2);
+        }
+    }
     let r = report::run(scale, &root, (!only.is_empty()).then_some(&only[..]));
     if let Some(p) = json {
         std::fs::write(&p, serde_json::to_string_pretty(&r).expect("json") + "\n")

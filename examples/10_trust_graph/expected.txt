@@ -1,0 +1,39 @@
+# Lines that must appear in the output (IDs and keys vary per run and are left out).
+ALL TRUST REQUIREMENTS SATISFIED
+AGGREGATION COMPLETE
+Contributors    hospital-a, hospital-b, hospital-c
+Privacy         epsilon 0.7410674902696281 spent of 3.0
+Evidence                VERIFIED
+Program                 VERIFIED
+Policy                  VERIFIED
+Plan                    SATISFIED
+Owner authorization     AUTHORIZED
+Private aggregation     VERIFIED
+Privacy budget          SATISFIED
+Lineage                 COMPLETE
+TRUST REQUIREMENTS SATISFIED
+PLAN SATISFIED BY OBSERVED EXECUTION
+derived from: {}
+digraph trust {
+ATTACK   remove gradient-a's privacy receipt
+implied by the evidence is missing
+ATTACK   edit a privacy receipt (claim 10x the noise)
+already has different evidence
+ATTACK   use gradient-a after hospital-a revoked it
+Owner authorization     FAILED
+(retrain or unlearn)
+ATTACK   report with no trusted keys (the bundle vouches for itself)
+Owner authorization     PRESENT (not checked)
+  - no trusted key for hospital-a
+Private aggregation is not checked against trusted keys or policies
+ATTACK   receipts signed by a coordinator the verifier does not trust
+Private aggregation     FAILED
+is not a trusted coordinator
+ATTACK   approve a different plan than the round ran under
+Plan                    FAILED
+did not run under the approved plan
+TRUST REQUIREMENTS NOT SATISFIED
+  - Evidence failed
+  - Owner authorization failed
+  - Privacy budget failed
+  - Plan failed

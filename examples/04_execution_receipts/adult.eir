@@ -1,0 +1,6 @@
+encompute 0.1
+program adult precision 0.001
+%0 = input "age" [0.0, 120.0] : secret u8
+%1 = const [18.0] : public u8
+%2 = ge %0, %1 : secret bool
+output "adult" = %2

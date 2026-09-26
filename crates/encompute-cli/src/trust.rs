@@ -52,6 +52,10 @@ pub enum TrustCmd {
         /// recorded, and bound into the aggregation spec.
         #[arg(long)]
         plan: Option<PathBuf>,
+        /// The coordinator attestation policy the rounds require (as given
+        /// to `aggregate serve` and `join`).
+        #[arg(long)]
+        coordinator_policy: Option<PathBuf>,
         #[command(flatten)]
         bundle: Bundle,
     },
@@ -111,6 +115,10 @@ pub enum TrustCmd {
         /// repeatable.
         #[arg(long)]
         require: Vec<String>,
+        /// The attestation policy execution workloads must satisfy (from
+        /// `encompute attest policy`); rounds use their spec's own.
+        #[arg(long)]
+        execution_policy: Option<PathBuf>,
         #[command(flatten)]
         trust: TrustArgs,
         #[arg(long)]
@@ -189,6 +197,7 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
             model,
             parties,
             plan,
+            coordinator_policy,
             bundle,
         } => {
             let m = load(&model)?;
@@ -218,7 +227,14 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
                         .iter()
                         .filter_map(|pp| ids.iter().find(|i| i.party == pp.party).cloned())
                         .collect();
-                    g.add_aggregation_spec(AggregationSpec::new(plan, ordered)?)?;
+                    let mut spec = AggregationSpec::new(plan, ordered)?;
+                    if let Some(p) = &coordinator_policy {
+                        spec.coordinator_attestation =
+                            Some(serde_json::from_slice(&read(p)?).map_err(|e| {
+                                Error::new(Code::TrustGraph, format!("{}: {e}", p.display()))
+                            })?);
+                    }
+                    g.add_aggregation_spec(spec)?;
                 }
             }
             save(&bundle.bundle, &g)?;
@@ -310,6 +326,7 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
             coordinator_keys,
             evaluator_keys,
             require,
+            execution_policy,
             trust,
             json,
         } => {
@@ -328,9 +345,17 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
                     .map(|i| (i.party.to_string(), i.public_key))
                     .collect();
             }
+            let execution_policy: Option<encompute_runtime::attestation::AttestationPolicy> =
+                match &execution_policy {
+                    Some(p) => Some(serde_json::from_slice(&read(p)?).map_err(|e| {
+                        Error::new(Code::TrustGraph, format!("{}: {e}", p.display()))
+                    })?),
+                    None => None,
+                };
             let r = g.report(&ReportOptions {
                 anchors,
                 verifier: verifier.as_ref(),
+                execution_policy: execution_policy.as_ref(),
                 require,
                 ..ReportOptions::default()
             })?;

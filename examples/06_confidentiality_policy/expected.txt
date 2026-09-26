@@ -1,0 +1,12 @@
+# Lines that must appear in the output (the policy ID and paths are left out).
+CONFIDENTIALITY GRAPH  training_step
+purpose disease-training
+    derived from  patients + weights
+    release       aggregate_only
+    goes to       sealed (stays encrypted)
+it needs an aggregation boundary (e.g. secure aggregation) before any party learns it
+"patients" -> "derived:%2" [label="mul"];
+REFUSED  error[ENC1901]: confidential value flows to a public output: output "records" (derived from patients) has release never
+REFUSED  error[ENC1905]: output "gradient" (derived from patients, weights) may only be released as part of an aggregate
+REFUSED  error[ENC1903]: asset patients cannot be used for purpose "marketing"
+leak rejected: ENC1905

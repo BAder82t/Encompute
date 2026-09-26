@@ -1,0 +1,9 @@
+# Lines that must appear in the output (values that vary are left out).
+role evaluator | holds_secret_keys false
+Evaluator receipt       verified
+Result            MATCH (within 1e-3)
+; secret.key was never sent
+secret.key files in the evaluator's directory: 0
+PASS  keys.secret_permissions
+PASS  evaluator.no_client_crypto
+REFUSED  error[ENC1605]: stolen/secret.key

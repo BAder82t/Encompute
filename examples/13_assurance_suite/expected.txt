@@ -1,0 +1,12 @@
+# Lines that must appear in the output (timings, case counts that grow and the gap list are left out).
+ok   execution_receipt_mutation
+ok   secagg_coordinator_sees_no_input
+ok   dp_invalid_noise
+ok   dp_ledger_tampering
+ok   planner_adversarial
+ok   planner_plan_id_binding
+All tested security invariants satisfied.
+Scale            quick
+it does not prove the system secure.
+INVARIANTS VIOLATED: INV-041
+  INV-041: crates/encompute-keybroker/tests/release.rs has no test untrusted_workloads_receive_no_key

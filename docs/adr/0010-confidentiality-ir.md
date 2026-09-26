@@ -90,4 +90,4 @@ scenario, lattice properties, every error), `crates/encompute-runtime/tests/
 policy.rs` (policy IDs, spec binding, artifact round trip and tampering,
 receipts), `python/tests/test_confidentiality.py`,
 `crates/encompute-cli/tests/cli.rs` (`privacy explain`/`graph`),
-`examples/confidential_training.py`.
+`examples/06_confidentiality_policy/confidential_training.py`.

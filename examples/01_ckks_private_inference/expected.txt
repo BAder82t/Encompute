@@ -1,0 +1,5 @@
+# Lines that must appear in the output (values that vary are left out).
+Scheme            approximate (CKKS)
+Clear result
+Allowed error     0.00100
+PASS

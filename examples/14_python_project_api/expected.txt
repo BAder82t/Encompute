@@ -1,0 +1,14 @@
+# Lines that must appear in the output (plan IDs and estimates are left out).
+ENCOMPUTE PLAN
+  alice-data hidden from bob
+  gradient-alice-data revealed only inside the aggregate update
+  gradient-alice-data: record-level privacy, ε ≤ 3.0, δ ≤ 1e-6
+  across the parties, secure aggregation (threshold 2, colluding ≤ 0) + differential privacy (discrete Gaussian, noise 6.0, clip 1.0)
+ALL TRUST REQUIREMENTS SATISFIED
+  mock TEE, confidential compute (mock, mock) + attestation (mock) + attestation-gated key release
+PlanningFailed ENC2401
+  - ordinary host, FHE (CKKS, openfhe): general training is not supported under FHE
+  - at modelco, local execution at modelco: modelco would run a step reading alice-data
+PLANNING FAILED
+No execution plan satisfies the policy; no requirement was weakened.
+mock is development-only attestation

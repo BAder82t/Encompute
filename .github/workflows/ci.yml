@@ -22,6 +22,27 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # Every example that needs no cloud account or crypto build, checked
+  # against its expected output.
+  examples-smoke:
+    name: examples (standard)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: cargo build --bins
+      - name: python sdk
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin numpy
+          maturin develop
+      - run: examples/run-all.sh standard
+
   # The release gate: every documented security invariant, quick scale.
   # Fails the build when any invariant is violated (docs/assurance.md).
   assurance:
@@ -81,7 +102,11 @@ jobs:
           pip install maturin pytest numpy
           maturin develop --release --features openfhe
           pytest -q
-          python examples/semantic_search.py
+          python examples/01_ckks_private_inference/semantic_search.py
+      - name: crypto examples (OpenFHE)
+        run: |
+          cargo build --release --bins --features encompute-cli/openfhe,encompute-evaluator/openfhe -p encompute-cli -p encompute-evaluator
+          BIN=target/release examples/run-all.sh crypto
 
   two-machine-demo:
     name: two-machine demo (client ↔ evaluator container)

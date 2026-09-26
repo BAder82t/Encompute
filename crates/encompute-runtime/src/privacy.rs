@@ -317,7 +317,7 @@ impl Model {
         let _ = writeln!(
             s,
             "\nThis is the policy the program declares and Encompute checked at compile time. \
-             At run time, attested key release (ADR-011) and secure aggregation (ADR-012) \
+             At run time, attested key release and secure aggregation \
              enforce it."
         );
         Ok(Some(s))

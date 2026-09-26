@@ -1,4 +1,4 @@
-"""Projects (ADR-015): declare who owns what and what may happen to it;
+"""Projects: declare who owns what and what may happen to it;
 Encompute chooses the protection mechanisms.
 
     project = encompute.Project("medical-training",
@@ -180,6 +180,42 @@ class Project:
         return Training(eir=eir, plan=json.loads(plan_json), plan_json=plan_json,
                         plan_id=plan_id, report=report, model=native)
 
+    def plan(
+        self,
+        *,
+        data: Sequence[ProjectAsset],
+        privacy: str = "strong",
+        unit: str = "record",
+        to: Optional[str] = None,
+        dim: int = 16,
+        infrastructure: Optional[Dict[str, Any]] = None,
+        local_only: bool = False,
+        region: Optional[str] = None,
+        prefer: str = "latency",
+        allow_development: bool = False,
+    ) -> Training:
+        """Plans a private federated statistic over ``data``: each owner's
+        contribution leaves only inside a noised aggregate delivered to
+        ``to`` (default: the first party). No model is involved. Raises
+        :class:`PlanningFailed` if nothing satisfies the policy."""
+        recipient = to or self.parties[0]
+        if recipient not in self.parties:
+            raise EncomputeError("ENC1906", f"{recipient} is not a party of {self.name}")
+        eir = self._aggregation_program(data, recipient, None, privacy=privacy, unit=unit,
+                                        dim=dim, colluding=None)
+        native = _call(_native.Model.compile, eir)
+        prefs = json.dumps({"objective": prefer, "local_only": local_only,
+                            "region": region, "allow_development": allow_development})
+        plan_json, report, plan_id = _call(
+            _native.plan, eir, self.security,
+            json.dumps(infrastructure) if infrastructure is not None else None,
+            None, prefs,
+        )
+        if plan_json is None:
+            raise PlanningFailed(report)
+        return Training(eir=eir, plan=json.loads(plan_json), plan_json=plan_json,
+                        plan_id=plan_id, report=report, model=native)
+
     def training_program(
         self,
         model: ProjectAsset,
@@ -195,8 +231,22 @@ class Project:
         sum to the model's owner."""
         if model.kind != "model":
             raise EncomputeError("ENC1906", f"{model.id} is not a model")
+        return self._aggregation_program(data, model.owner, model, privacy=privacy, unit=unit,
+                                         dim=dim, colluding=colluding)
+
+    def _aggregation_program(
+        self,
+        data: Sequence[ProjectAsset],
+        recipient: str,
+        model: Optional[ProjectAsset],
+        *,
+        privacy: str,
+        unit: str,
+        dim: int,
+        colluding: Optional[int],
+    ) -> str:
         if len(data) < 2:
-            raise EncomputeError("ENC2106", "training aggregates gradients from at least two datasets")
+            raise EncomputeError("ENC2106", "aggregation needs datasets from at least two parties")
         owners = [d.owner for d in data]
         if len(set(owners)) != len(owners):
             raise EncomputeError("ENC2106", "each dataset must belong to a different party")
@@ -212,13 +262,14 @@ class Project:
             f"purpose {_q(self.purpose)}",
         ]
         lines += [f"party {_q(p)} {_q(p)}" for p in self.parties]
-        readers = "[]"
-        if model.policy == "shared-model":
-            readers = "[" + ", ".join(_q(o) for o in owners) + "]"
-        lines.append(
-            f"asset {_q(model.id)} model owners [{_q(model.owner)}] readers {readers} "
-            f"purposes [{_q(self.purpose)}] release never"
-        )
+        if model is not None:
+            readers = "[]"
+            if model.policy == "shared-model":
+                readers = "[" + ", ".join(_q(o) for o in owners) + "]"
+            lines.append(
+                f"asset {_q(model.id)} model owners [{_q(model.owner)}] readers {readers} "
+                f"purposes [{_q(self.purpose)}] release never"
+            )
         for d in data:
             lines.append(
                 f"asset {_q(d.id)} dataset owners [{_q(d.owner)}] readers [] "
@@ -227,7 +278,7 @@ class Project:
         for d in data:
             lines.append(
                 f"asset {_q('gradient-' + d.id)} gradient owners [{_q(d.owner)}] "
-                f"readers [{_q(model.owner)}] purposes [{_q(self.purpose)}] release aggregate_only "
+                f"readers [{_q(recipient)}] purposes [{_q(self.purpose)}] release aggregate_only "
                 f"privacy unit {_q(unit)} epsilon {eps!r} delta {delta!r}"
             )
         for i, d in enumerate(data):
@@ -240,7 +291,7 @@ class Project:
         for i in range(1, n):
             lines.append(f"%{n + i - 1} = add %{acc}, %{i} : secret vector<{dim}>")
             acc = n + i - 1
-        lines.append(f"output \"update\" = %{acc} to {_q(model.owner)}")
+        lines.append(f"output \"update\" = %{acc} to {_q(recipient)}")
         lines.append(
             f"aggregate \"update\" sum minimum {n} colluding {c} clip [-1.0, 1.0] scale 4096 "
             f"modulus 40 dp discrete_gaussian clip_norm 1.0 noise_multiplier {noise!r}"

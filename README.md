@@ -61,6 +61,23 @@ privacy, and every step leaves verifiable evidence.
 | Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
 | Assurance (security invariants under attack) | 52 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
+## Start here
+
+Every capability has a runnable example, with its threat model and what it
+does and does not protect ([examples/](examples/)):
+
+| Time | Example |
+|---|---|
+| 5 minutes | [Private inference](examples/01_ckks_private_inference/) |
+| 10 minutes | [Multi-party secure aggregation](examples/08_secure_aggregation/) |
+| 15 minutes | [Automatic confidential planning](examples/11_automatic_planner/) |
+| Full demo | [Confidential collaboration](examples/12_confidential_collaboration/) |
+
+```sh
+cargo build --bins && maturin develop -m crates/encompute-py/Cargo.toml
+examples/run-all.sh quick
+```
+
 ## What Encompute does
 
 **Privacy types.** `secret[float, lo:hi]` and `secret[Tensor[n], lo:hi]`
@@ -340,8 +357,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install maturin pytest numpy
 maturin develop --release --features openfhe   # omit --features for mock only
 pytest -q
-python examples/logistic_regression.py
-python examples/eligibility.py
+examples/run-all.sh quick   # or: python examples/01_ckks_private_inference/model.py
 ```
 
 ### CLI
@@ -401,7 +417,7 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-runtime` | Execution, differential testing, explain, bench, audit, artifacts |
 | `crates/encompute-cli` | `encompute` command |
 | `crates/encompute-py`, `python/encompute` | Python SDK: extension module and tracing frontend |
-| `examples/` | Logistic scoring, semantic search, two-machine search, exact eligibility |
+| `examples/` | Runnable examples for every capability, `run-all.sh` ([examples/README.md](examples/README.md)) |
 
 ## Roadmap
 

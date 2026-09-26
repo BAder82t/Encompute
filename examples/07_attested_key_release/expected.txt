@@ -1,0 +1,17 @@
+# Lines that must appear in the output (IDs, digests and keys vary and are left out).
+ATTESTATION VERIFIED
+ATTESTATION          VERIFIED (mock, mock (development only))
+POLICY               SATISFIED
+KEY RELEASE          AUTHORIZED (key version 1, sealed to the session: grant.json)
+SEALED KEY GRANT  asset weights, key version 1, one attested session
+REFUSED  KEY RELEASE          REFUSED: ENC2003: the evidence answers no open challenge
+ATTACK   same artifact, another ExecutionSpecID (openfhe backend)
+REFUSED  KEY RELEASE          REFUSED: ENC2002: the workload is bound to execution spec
+ATTACK   another artifact with a weaker policy (other PolicyID)
+REFUSED  KEY RELEASE          REFUSED: ENC2002: workload image sha256:modified is not allowed
+REFUSED  KEY RELEASE          REFUSED: ENC2001: the evidence does not commit to this workload binding
+REFUSED  error[ENC2002]: broker: workload image sha256:modified is not allowed
+Key           patients v1 from hospital: RECEIVED (32 bytes, sealed to this session)
+Key           weights v1 from modelco: RECEIVED (32 bytes, sealed to this session)
+WORKLOAD ATTESTATION VALID
+RECEIPT VERIFIED

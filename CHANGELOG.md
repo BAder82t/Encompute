@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Examples
+
+- **A runnable example for every capability** (`examples/01`–`14`): CKKS
+  and exact private computation, remote evaluation, receipts, verified
+  execution, confidentiality policies, attested key release, secure
+  aggregation, differential privacy, the trust graph, the planner, a full
+  confidential collaboration with seven fail-closed attacks, the assurance
+  suite, and the Python Project API. Each has `run.sh`, `expected.txt` and
+  a README with its threat model and what it does not protect.
+- `examples/run-all.sh quick|standard|crypto|full` with dependency
+  detection (`encompute info`), in CI on every pull request (standard), in
+  the OpenFHE job (crypto) and nightly (full).
+- CONTRIBUTING: a user-visible feature is done with tests, docs and an
+  example.
+- Fixed: `aggregate verify --aggregate` now checks the released decoded
+  values (and the asset's other fields) against the committed sum; an
+  edited aggregate previously verified.
+- `aggregate coordinator-policy --plan` and `trust init
+  --coordinator-policy`, so planned rounds with attested coordinators work;
+  `trust report --execution-policy`; `Project.plan(data=...)`; `explain`
+  shows a declared DP mechanism; `transcript` defaults to the program's
+  target backend; `assurance-report --only` refuses unknown checks.
+
 ### Planner
 
 - **Declare trust requirements; Encompute chooses the mechanisms**

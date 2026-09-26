@@ -177,6 +177,18 @@ fn three_hospitals_over_http() {
     let mut wrong = aggregate.clone();
     wrong.encoded_sum[0] += 1;
     assert!(verify_aggregation_receipt(&receipt, &spec, None, Some(&wrong)).is_err());
+    verify_aggregation_receipt(&receipt, &spec, None, Some(&aggregate)).unwrap();
+    // Edited decoded values (the committed sum untouched), or other fields
+    // of the released asset, fail too.
+    let mut wrong = aggregate.clone();
+    wrong.values[0] += 0.5;
+    assert!(verify_aggregation_receipt(&receipt, &spec, None, Some(&wrong)).is_err());
+    let mut wrong = aggregate.clone();
+    wrong.contributors.pop();
+    assert!(verify_aggregation_receipt(&receipt, &spec, None, Some(&wrong)).is_err());
+    let mut wrong = aggregate.clone();
+    wrong.asset_id = "00".repeat(32);
+    assert!(verify_aggregation_receipt(&receipt, &spec, None, Some(&wrong)).is_err());
     // No endpoint serves an individual value.
     let agent = ureq::agent();
     for path in ["raw/hospital-a", "masked/hospital-a", "inputs", "aggregate"] {

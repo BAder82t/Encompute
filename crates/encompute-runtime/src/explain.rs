@@ -228,7 +228,13 @@ impl Model {
             row(
                 s,
                 "differential privacy",
-                "none (the aggregate itself is not protected)".into(),
+                match &b.dp {
+                    Some(d) => format!(
+                        "discrete Gaussian (clip norm {}, noise multiplier {})",
+                        d.clip_norm, d.noise_multiplier
+                    ),
+                    None => "none (the aggregate itself is not protected)".into(),
+                },
             );
         }
     }

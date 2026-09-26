@@ -94,3 +94,14 @@ def test_plan_is_saved_for_the_cli(tmp_path):
     out = tmp_path / "plan.json"
     run.save_plan(str(out))
     assert json.loads(out.read_text())["program_id"] == run.plan["program_id"]
+
+
+def test_plan_without_a_model():
+    p = encompute.Project("demo", parties=["alice", "bob"])
+    a = p.data("alice-data", owner="alice")
+    b = p.data("bob-data", owner="bob")
+    run = p.plan(data=[a, b], privacy="strong")
+    assert [s["id"] for s in run.plan["steps"]] == ["aggregate:update"]
+    assert "secure_aggregation" in [m["mechanism"] for m in run.plan["steps"][0]["mechanisms"]]
+    with pytest.raises(encompute.EncomputeError):
+        p.plan(data=[a, b], to="carol")

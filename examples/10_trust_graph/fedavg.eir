@@ -1,0 +1,16 @@
+encompute 0.1
+program fedavg precision 0.001 purpose "disease-training"
+party "coordinator" "Coordinator"
+party "hospital-a" "Hospital A"
+party "hospital-b" "Hospital B"
+party "hospital-c" "Hospital C"
+asset "gradient-a" gradient owners ["hospital-a"] readers ["coordinator"] purposes ["disease-training"] release aggregate_only privacy unit "patient" epsilon 3.0 delta 1e-6
+asset "gradient-b" gradient owners ["hospital-b"] readers ["coordinator"] purposes ["disease-training"] release aggregate_only privacy unit "patient" epsilon 3.0 delta 1e-6
+asset "gradient-c" gradient owners ["hospital-c"] readers ["coordinator"] purposes ["disease-training"] release aggregate_only privacy unit "patient" epsilon 3.0 delta 1e-6
+%0 = input "ga" [-1.0, 1.0] asset "gradient-a" : secret vector<4>
+%1 = input "gb" [-1.0, 1.0] asset "gradient-b" : secret vector<4>
+%2 = input "gc" [-1.0, 1.0] asset "gradient-c" : secret vector<4>
+%3 = add %0, %1 : secret vector<4>
+%4 = add %3, %2 : secret vector<4>
+output "global_gradient" = %4 to "coordinator"
+aggregate "global_gradient" sum minimum 3 colluding 2 clip [-1.0, 1.0] scale 4096 modulus 40 dp discrete_gaussian clip_norm 1.0 noise_multiplier 6.0

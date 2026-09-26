@@ -337,7 +337,7 @@ def secure_aggregate(
     privacy: Any = None,
 ) -> _Output:
     """Output ``value``, a sum of one input per party, computed only by
-    secure aggregation (ADR-012) and released to ``to`` (default: sealed)
+    secure aggregation and released to ``to`` (default: sealed)
     only if at least ``minimum`` parties contributed. ``colluding`` is how
     many parties may collude with the coordinator without learning another
     party's contribution (it raises the protocol threshold to

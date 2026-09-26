@@ -268,7 +268,7 @@ impl Clone for BgvCiphertext {
 fn unsupported(what: &str) -> Error {
     Error::new(
         Code::Unsupported,
-        format!("the BGV backend does not support {what} (ADR-009 subset)"),
+        format!("the BGV backend does not support {what} (outside the verified subset)"),
     )
 }
 

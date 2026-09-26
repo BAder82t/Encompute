@@ -220,5 +220,5 @@ per-release latency.
   detection, sealed outputs, invalid declarations, `PrivacyPolicyId`
   sensitivity, presets.
 - **`python/tests/test_privacy.py`**, and
-  **`examples/private_federated_training/`**: 12 rounds permitted, the 13th
+  **`examples/09_differential_privacy/`**: 12 rounds permitted, the 13th
   denied.

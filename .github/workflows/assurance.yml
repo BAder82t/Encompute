@@ -29,6 +29,27 @@ jobs:
           name: assurance-report-nightly
           path: assurance-report.*
 
+  # Every example this machine can run, and every attack in the full
+  # collaboration.
+  examples-full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: cargo build --bins
+      - name: python sdk
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin numpy
+          maturin develop
+      - run: examples/run-all.sh full
+
   supply-chain:
     runs-on: ubuntu-24.04
     steps:

@@ -74,8 +74,8 @@ enum Cmd {
     /// future execution proof must follow. Never contains runtime values.
     Transcript {
         model: PathBuf,
-        /// Backend of the execution spec (default: the artifact's target,
-        /// tfhe-rs; mock runs use `--backend mock`).
+        /// Backend of the execution spec (default: the artifact's target:
+        /// openfhe for BGV, tfhe-rs otherwise; mock runs use `--backend mock`).
         #[arg(long)]
         backend: Option<String>,
         /// Canonical JSON instead of the listing.
@@ -193,6 +193,8 @@ enum Cmd {
         #[arg(long)]
         deep: bool,
     },
+    /// Which backends and research features this build includes.
+    Info,
     /// Is the program valid, its policy and privacy valid, and does a plan
     /// exist?
     Check {
@@ -424,7 +426,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 Some(text) => print!("{text}"),
                 None => println!(
                     "{} declares no parties or assets: every secret input stays with the client \
-                     that encrypts it (see ADR-010 to declare a confidentiality policy)",
+                     that encrypts it (declare parties and assets to give it a confidentiality policy)",
                     m.program().name()
                 ),
             }
@@ -437,7 +439,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             let m = load(&model)?;
             let kind = match backend.as_deref() {
-                None => BackendKind::TfheRs,
+                None => m.compiled().target_backend(),
                 Some(b) => BackendKind::parse(b)
                     .ok_or_else(|| Error::new(Code::BadInput, format!("unknown backend {b:?}")))?,
             };
@@ -604,6 +606,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
             deep,
         } => plan::plan(&model, &opts, out.as_deref(), json, deep),
         Cmd::Check { model, opts } => plan::check(&model, &opts),
+        Cmd::Info => {
+            let yes = |b: bool| if b { "yes" } else { "no" };
+            println!("encompute {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "openfhe             {}",
+                yes(encompute_runtime::has_openfhe())
+            );
+            println!("tfhe-rs             {}", yes(encompute_runtime::has_tfhe()));
+            println!(
+                "verified-execution  {}",
+                yes(encompute_runtime::planning::available_catalog().verified_execution)
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Explain {
             model,
             deep,

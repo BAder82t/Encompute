@@ -1,0 +1,20 @@
+# The plan
+train:patients-a
+aggregate:model_update
+ALL TRUST REQUIREMENTS SATISFIED
+# Key release to the attested workload
+base-model v1 from modelco: RECEIVED
+# The round
+3 CONTRIBUTION ACCEPTED
+AGGREGATION COMPLETE
+AGGREGATION RECEIPT VERIFIED
+# The trust report
+Evidence                VERIFIED
+Plan                    SATISFIED
+Owner authorization     AUTHORIZED
+Workload                ATTESTED
+Private aggregation     VERIFIED
+Privacy budget          SATISFIED
+Lineage                 COMPLETE
+TRUST REQUIREMENTS SATISFIED
+PLAN SATISFIED BY OBSERVED EXECUTION

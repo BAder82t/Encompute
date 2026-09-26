@@ -21,7 +21,7 @@ trap cleanup EXIT
 step() { printf '\n== %s\n' "$*"; }
 
 step "client: compile the model"
-"$PYTHON" "$ROOT/examples/search_model.py" "$WORK"
+"$PYTHON" "$ROOT/examples/03_remote_evaluator/search_model.py" "$WORK"
 
 step "client: generate keys (secret.key never leaves this machine)"
 "$ENCOMPUTE" keys generate "$WORK/search.encompute" -o "$WORK/client.keys"

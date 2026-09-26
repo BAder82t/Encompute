@@ -1,0 +1,28 @@
+# Lines that must appear in the output (plan IDs are left out).
+Training          -> confidential compute (mock TEE)
+Gradient sharing  -> secure aggregation
+Output release    -> differential privacy
+Key access        -> attestation (attestation-gated key release)
+mock TEE, confidential compute (mock, mock) + attestation (mock) + attestation-gated key release
+secure aggregation (threshold 3, colluding ≤ 1) + differential privacy (discrete Gaussian, noise 6.0, clip 1.0)
+ALL TRUST REQUIREMENTS SATISFIED
+error[ENC2401]
+hospital-a would run a step reading base-model
+modelco may not read everything train:patients-a reads
+ordinary host, FHE (CKKS, openfhe): general training is not supported under FHE
+PLANNING FAILED
+No execution plan satisfies the policy; no requirement was weakened.
+same plan ID as Python's (plans are deterministic)
+plan exists     OK
+plan exists     NO   PLANNING FAILED (see `encompute plan`)
+Candidates
+    SELECTED
+    rejected: general training is not supported under FHE
+Security assumptions
+ATTACK   accept mock attestation without --allow-development
+REJECTED mock is development-only attestation
+ATTACK   mock attestation under the maximum profile
+ATTACK   a TEE that only runs debug workloads
+REJECTED intel-tdx only runs debug workloads, whose memory the host can read
+ATTACK   a cloud TEE when nothing may run in the cloud
+REJECTED intel-tdx runs in the cloud; local-only was required

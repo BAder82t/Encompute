@@ -1196,17 +1196,7 @@ impl RoundCoordinator {
             coordinator_key: hex(&self.key.verifying_key().to_bytes()),
             signature,
         };
-        let codec = &plan.codec;
-        let values = released
-            .iter()
-            .map(|&s| {
-                let total = codec.decode_sum(s, n);
-                match plan.function {
-                    AggregationFunction::Sum => total,
-                    AggregationFunction::Mean => total / n as f64,
-                }
-            })
-            .collect();
+        let values = decode_values(plan, &released, n);
         let p = &plan.aggregate_policy;
         let receipt_id = receipt.id()?;
         let asset = AggregateAsset {
@@ -1361,13 +1351,39 @@ pub fn verify_aggregation_receipt(
         ));
     }
     if let Some(a) = aggregate {
+        let receipt_id = receipt.id()?;
         if aggregate_commitment(&m.round_id, &a.encoded_sum) != m.aggregate_commitment
-            || a.receipt_id != receipt.id()?
+            || a.receipt_id != receipt_id
+            || a.asset_id != aggregate_asset_id(&receipt_id, &plan.output)
+            || a.output != plan.output
+            || a.function != plan.function
+            || a.contributors != m.contributors
+            || a.privacy != m.privacy
         {
             return bad("the aggregate does not match the receipt".into());
         }
+        // The values people read are exactly the committed sum, decoded.
+        if a.values != decode_values(plan, &a.encoded_sum, m.contributors.len()) {
+            return bad(
+                "the aggregate's values are not its committed sum decoded: they were edited".into(),
+            );
+        }
     }
     Ok(())
+}
+
+/// The decoded aggregate of `n` contributions: the sum, or the mean.
+fn decode_values(plan: &AggregationPlan, encoded: &[i64], n: usize) -> Vec<f64> {
+    encoded
+        .iter()
+        .map(|&s| {
+            let total = plan.codec.decode_sum(s, n);
+            match plan.function {
+                AggregationFunction::Sum => total,
+                AggregationFunction::Mean => total / n as f64,
+            }
+        })
+        .collect()
 }
 
 /// A party's aggregation identity key.

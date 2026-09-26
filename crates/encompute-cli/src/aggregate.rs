@@ -225,6 +225,9 @@ pub enum AggregateCmd {
         tee: Vec<String>,
         #[arg(long)]
         development: bool,
+        /// The approved confidential execution plan the rounds run under.
+        #[arg(long)]
+        plan: Option<PathBuf>,
     },
     /// Contribute this party's private vector to the coordinator's round.
     Join {
@@ -383,8 +386,14 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             image,
             tee,
             development,
+            plan: approved,
         } => {
-            let plan = load(&model)?.aggregation_plan(output.as_deref())?;
+            let m = load(&model)?;
+            let mut plan = m.aggregation_plan(output.as_deref())?;
+            if let Some(p) = &approved {
+                let (id, _) = crate::plan::approved(p, m.program(), &plan.output)?;
+                plan = plan.with_execution_plan(&id);
+            }
             let mut p = AttestationPolicy::new(&plan.id()?, plan.policy_id.as_deref());
             p.privacy_policy_id = plan.privacy_policy_id.clone();
             p.artifact_digest = Some(plan.program_id.clone());

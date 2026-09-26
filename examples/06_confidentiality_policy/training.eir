@@ -1,0 +1,12 @@
+encompute 0.1
+program training_step precision 0.01 purpose "disease-training"
+party "hospital-a" "Hospital A"
+party "modelco" "ModelCo"
+party "coordinator" "Coordinator"
+asset "patients" dataset owners ["hospital-a"] readers ["hospital-a"] purposes ["disease-training"] release never derive [gradient aggregate_only to ["coordinator"]]
+asset "weights" model owners ["modelco"] readers ["modelco"] purposes ["disease-training"] release never derive [gradient aggregate_only to ["coordinator"]]
+%0 = input "x" [-1.0, 1.0] asset "patients" : secret vector<4>
+%1 = input "w" [-1.0, 1.0] asset "weights" : secret vector<4>
+%2 = mul %0, %1 : secret vector<4>
+derive %2 gradient aggregate_only
+output "gradient" = %2
