@@ -179,6 +179,14 @@ impl LocalKekStore {
         Ok(Self::from_key(*k))
     }
 
+    /// A fingerprint of the KEK (not secret).
+    pub(crate) fn kek_id(&self) -> String {
+        let mut h = Sha256::new();
+        h.update(b"encompute.kek-id.v1\0");
+        h.update(self.kek.as_ref());
+        hex(&h.finalize()[..16])
+    }
+
     fn cipher(&self) -> ChaCha20Poly1305 {
         ChaCha20Poly1305::new(&(*self.kek).into())
     }
@@ -194,13 +202,28 @@ impl SecretStore for LocalKekStore {
     }
 
     fn key_id(&self) -> Option<String> {
-        let mut h = Sha256::new();
-        h.update(b"encompute.kek-id.v1\0");
-        h.update(self.kek.as_ref());
-        Some(hex(&h.finalize()[..16]))
+        Some(self.kek_id())
     }
 
     fn wrap(&self, ctx: &KeyContext<'_>, key: &KeyMaterial) -> Result<StoredKey> {
+        self.wrap_as(self.name(), ctx, key)
+    }
+
+    fn unwrap_for_release(&self, ctx: &KeyContext<'_>, stored: &StoredKey) -> Result<KeyMaterial> {
+        self.unwrap_as(self.name(), ctx, stored)
+    }
+}
+
+impl LocalKekStore {
+    /// Wraps under this KEK, recording `store` as the wrapping store (a
+    /// store that obtains its KEK elsewhere, e.g. from a root key provider,
+    /// reuses the cipher under its own name).
+    pub(crate) fn wrap_as(
+        &self,
+        store: &str,
+        ctx: &KeyContext<'_>,
+        key: &KeyMaterial,
+    ) -> Result<StoredKey> {
         let mut n = [0u8; 12];
         getrandom::getrandom(&mut n).map_err(|e| err(format!("no randomness: {e}")))?;
         let aad = ctx.aad();
@@ -215,14 +238,19 @@ impl SecretStore for LocalKekStore {
             )
             .map_err(|_| err("wrapping the key failed"))?;
         Ok(StoredKey::Wrapped {
-            store: self.name().into(),
-            kek_id: self.key_id().unwrap_or_default(),
+            store: store.into(),
+            kek_id: self.kek_id(),
             nonce: hex(&n),
             ciphertext: hex(&ct),
         })
     }
 
-    fn unwrap_for_release(&self, ctx: &KeyContext<'_>, stored: &StoredKey) -> Result<KeyMaterial> {
+    pub(crate) fn unwrap_as(
+        &self,
+        expected: &str,
+        ctx: &KeyContext<'_>,
+        stored: &StoredKey,
+    ) -> Result<KeyMaterial> {
         let (store, kek_id, nonce, ciphertext) = match stored {
             StoredKey::Wrapped {
                 store,
@@ -233,7 +261,7 @@ impl SecretStore for LocalKekStore {
             StoredKey::Destroyed => return Err(destroyed()),
             StoredKey::Plaintext { .. } => return Err(err("a plaintext key in a wrapped store")),
         };
-        if store != self.name() || Some(kek_id) != self.key_id().as_ref() {
+        if store != expected || *kek_id != self.kek_id() {
             return Err(err("the key was wrapped under another KEK"));
         }
         let n: [u8; 12] = unhex(nonce)

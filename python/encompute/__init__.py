@@ -69,6 +69,8 @@ from ._frontend import (
 )
 
 __all__ = [
+    "Client",
+    "ControlError",
     "Privacy",
     "PlanningFailed",
     "Project",
@@ -346,3 +348,6 @@ def compile(
 def load(path: str) -> Model:
     """Load and verify a ``.encompute`` artifact."""
     return Model(_call(_native.Model.load, str(path)), "dict")
+
+# The control plane (API v1); imported last (it uses the names above).
+from .client import Client, ControlError  # noqa: E402

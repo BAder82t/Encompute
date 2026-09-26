@@ -31,6 +31,8 @@ pub struct RemoteRun {
 pub struct Remote {
     base: String,
     agent: ureq::Agent,
+    /// A control plane's job grant, sent with the job (hex of its JSON).
+    grant: Option<String>,
 }
 
 /// What one remote execution cost.
@@ -89,7 +91,15 @@ impl Remote {
         Self {
             base: base.trim_end_matches('/').to_owned(),
             agent,
+            grant: None,
         }
+    }
+
+    /// Sends `grant` with the job: evaluators managed by a control plane run
+    /// granted jobs only.
+    pub fn with_grant(mut self, grant: &encompute_verification::JobGrant) -> Self {
+        self.grant = Some(grant.to_header());
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -175,7 +185,17 @@ impl Remote {
     /// Submit an inputs envelope and fetch the outputs envelope; the job
     /// JSON carries timings and the signed receipt.
     pub fn execute(&self, program_id: &str, request: &[u8]) -> Result<(Vec<u8>, Value)> {
-        let job = self.post(&format!("/v1/programs/{program_id}/jobs"), request)?;
+        let mut r = self
+            .agent
+            .post(&self.url(&format!("/v1/programs/{program_id}/jobs")))
+            .set("Content-Type", "application/octet-stream");
+        if let Some(g) = &self.grant {
+            r = r.set(encompute_verification::service::H_JOB_GRANT, g);
+        }
+        let job = r
+            .send_bytes(request)
+            .map_err(remote_err)
+            .and_then(read_json)?;
         let id = job["job_id"]
             .as_str()
             .ok_or_else(|| Error::new(Code::Remote, "no job ID in response"))?;

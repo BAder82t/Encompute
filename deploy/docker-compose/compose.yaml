@@ -1,0 +1,119 @@
+# Encompute: the first supported deployment. One control plane, PostgreSQL,
+# an OpenFHE evaluator, a key broker whose KEK is wrapped by an OpenBao root
+# key, and (profile "secagg") a secure-aggregation coordinator.
+#
+#   ./init.sh            secrets (mode 0600) and .env (public keys, OIDC)
+#   docker compose up -d
+#
+# Production mode: OIDC identities only, secrets from files, no development
+# fallbacks. The OpenBao here runs in development mode as a stand-in: point
+# the key broker at your own OpenBao/Vault (or keep this one only for trials).
+name: encompute
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: encompute
+      POSTGRES_DB: encompute
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
+    secrets: [db-password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U encompute"]
+      interval: 5s
+      retries: 20
+
+  control:
+    image: encompute-control:${ENCOMPUTE_VERSION:-dev}
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      ENCOMPUTE_ENV: production
+      ENCOMPUTE_LISTEN: 0.0.0.0:8770
+      ENCOMPUTE_DATABASE_URL_FILE: /run/secrets/db-url
+      ENCOMPUTE_SIGNING_KEY_FILE: /run/secrets/control-key
+      ENCOMPUTE_OIDC_ISSUER: ${ENCOMPUTE_OIDC_ISSUER:?set in .env}
+      ENCOMPUTE_OIDC_AUDIENCE: ${ENCOMPUTE_OIDC_AUDIENCE:-encompute}
+      ENCOMPUTE_OIDC_JWKS_URL: ${ENCOMPUTE_OIDC_JWKS_URL:-}
+      ENCOMPUTE_OIDC_JWKS_FILE: ${ENCOMPUTE_OIDC_JWKS_FILE:-}
+      # The state anchor lives on its own volume: restoring an older
+      # database backup cannot rewind it. Back it up separately.
+      ENCOMPUTE_ANCHOR_DIR: /var/lib/encompute/anchor
+    secrets: [db-url, control-key]
+    volumes:
+      - anchor:/var/lib/encompute/anchor
+      - ./oidc:/etc/encompute/oidc:ro
+    ports: ["127.0.0.1:8770:8770"]
+
+  evaluator:
+    image: encompute-evaluator:${ENCOMPUTE_VERSION:-dev}
+    depends_on: [control]
+    environment:
+      ENCOMPUTE_CONTROL_URL: http://control:8770
+      ENCOMPUTE_CONTROL_PUBLIC_KEY: ${ENCOMPUTE_CONTROL_PUBLIC_KEY:?run init.sh}
+      ENCOMPUTE_SERVICE_ID: evaluator-1
+      ENCOMPUTE_SERVICE_KEY_FILE: /run/secrets/evaluator-key
+      # Where clients reach this evaluator.
+      ENCOMPUTE_ADVERTISE_URL: ${ENCOMPUTE_EVALUATOR_URL:-http://127.0.0.1:8750}
+      ENCOMPUTE_CAPACITY: "2"
+    secrets: [evaluator-key]
+    command: ["--workers", "2", "--identity", "/var/lib/encompute/receipt.key"]
+    volumes: [evaluator:/var/lib/encompute]
+    ports: ["127.0.0.1:8750:8750"]
+
+  openbao:
+    image: openbao/openbao:2.1.0
+    command: ["server", "-dev", "-dev-listen-address=127.0.0.1:8200"]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: ${ENCOMPUTE_DEV_BAO_TOKEN:?run init.sh}
+    cap_add: [IPC_LOCK]
+    # The key broker shares this network namespace (a sidecar): it reaches
+    # the root key provider on loopback only. Its port is published here.
+    ports: ["127.0.0.1:8760:8760"]
+
+  keybroker:
+    image: encompute-services:${ENCOMPUTE_VERSION:-dev}
+    network_mode: service:openbao
+    depends_on: [openbao, control]
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+      BAO_TOKEN_FILE: /run/secrets/bao-token
+      ENCOMPUTE_CONTROL_PUBLIC_KEY: ${ENCOMPUTE_CONTROL_PUBLIC_KEY:?run init.sh}
+      # The control plane, reached through the host's published port.
+      ENCOMPUTE_SERVICE_ID: keybroker-modelco
+    secrets: [bao-token]
+    volumes: [broker:/var/lib/encompute]
+    command: ["keys", "serve", "--listen", "0.0.0.0:8760", "--jwks", "google",
+              "--broker", "/var/lib/encompute/broker.json",
+              "--root-key", "openbao:transit/modelco", "--organization", "modelco",
+              "--wrapped-kek", "/var/lib/encompute/kek.wrapped.json"]
+
+  secagg:
+    image: encompute-services:${ENCOMPUTE_VERSION:-dev}
+    profiles: ["secagg"]
+    depends_on: [control]
+    environment:
+      ENCOMPUTE_CONTROL_URL: http://control:8770
+      ENCOMPUTE_SERVICE_ID: secagg-1
+      ENCOMPUTE_SERVICE_KEY_FILE: /run/secrets/secagg-key
+    secrets: [secagg-key]
+    volumes: [secagg:/var/lib/encompute, ./rounds:/rounds:ro]
+    # One round per run: `docker compose run secagg aggregate serve ...`
+    # (see README).
+    command: ["--help"]
+
+secrets:
+  db-password: {file: ./secrets/db-password}
+  db-url: {file: ./secrets/db-url}
+  control-key: {file: ./secrets/control.key}
+  evaluator-key: {file: ./secrets/evaluator.key}
+  secagg-key: {file: ./secrets/secagg.key}
+  bao-token: {file: ./secrets/bao-token}
+
+volumes:
+  pgdata:
+  anchor:
+  evaluator:
+  broker:
+  secagg:

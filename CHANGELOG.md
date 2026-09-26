@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+### Enterprise deployment foundation
+
+- **Control plane** (`encompute-control`, API v1). It manages:
+  - organizations, users (OpenID Connect) and service accounts (Ed25519),
+    with seven roles;
+  - projects with explicit cross-organization collaboration;
+  - an asset registry (metadata, digests and wrapped-key references only);
+  - four-eyes policies, planned jobs, evaluator registration, privacy
+    ledgers, trust reports and an audit trail.
+
+  It coordinates and holds no keys. Trust reports are rebuilt from signed
+  evidence on every request.
+- **Tenant isolation.** Other tenants' resources are "not found". Every
+  route is tested unauthenticated, with the wrong role, from the wrong
+  tenant and authorized, and a cross-tenant attack suite runs on top.
+- **Service identity.** Signed requests and messages bind the sender,
+  recipient, timestamp, a single-use nonce, the body hash and the IDs they
+  concern. Evaluators run only jobs granted by their pinned control plane,
+  and ask before starting each one.
+- **Jobs.**
+  - An explicit state machine and idempotent submission (`Idempotency-Key`).
+  - Capability-aware scheduling: backend, parameter profile, health,
+    capacity, draining.
+  - Recovery after a restart never replays a job.
+  - OpenFHE exact and OpenFHE CKKS both run through the same control plane.
+- **Customer-managed keys.** `RootKeyProvider`, with OpenBao/Vault Transit
+  as the first adapter. The key broker's KEK is wrapped by the
+  organization's root key. `encompute keys rotate-root` re-wraps only the
+  KEK. Revocation reaches the broker as a signed message. There is no
+  fallback to local or plaintext keys.
+- **Durable privacy state.**
+  - Hash-chained ledgers in PostgreSQL: race-safe and idempotent.
+  - A signed state anchor outside the database. Restoring an older database
+    is refused (PRIVACY STATE ROLLBACK).
+  - `encompute-control recover` freezes rolled-back ledgers.
+- **Audit.** A hash-chained, anchored event for every security-sensitive
+  transition. Events carry identifiers only.
+- **Operations.**
+  - `/live`, `/ready`, Prometheus metrics, JSON logs.
+  - Production mode refuses development identities, key stores and default
+    credentials.
+  - Secrets come only from files or the environment.
+- **Message transport.** HTTP (with an outbox) and in-memory
+  implementations. Signed envelopes, idempotent consumers. SecAgg
+  coordinators report privacy events and round durations.
+- **Clients.**
+  - `encompute login`, `projects`, `assets`, `jobs submit|run|status|list|cancel`,
+    `trust report JOB`, `audit list`.
+  - Python `encompute.Client` (`project.run(...)`).
+- **Deployment.** Docker Compose: control plane, PostgreSQL, OpenFHE
+  evaluator, key broker (as a sidecar to its KMS), SecAgg coordinator. It
+  comes with images, `init.sh`, `backup.sh`, `restore.sh` and `smoke.sh`.
+- **Evidence.**
+  - `scripts/enterprise-e2e.sh`, in production mode:
+    - both golden paths and the SDK;
+    - a full restart;
+    - backup and restore, where an older backup is refused;
+    - revocation;
+    - a canary scan of logs, the database, audit output and metrics.
+  - Invariants INV-156 to INV-165.
+- **Documentation.** ADR-021, docs/deployment.md, docs/api.md. Error codes
+  ENC2601–ENC2607.
+
 ### Commercial exact execution on OpenFHE
 
 - **OpenFHE exact** (`openfhe-exact`, scheme BinFHE): exact programs run

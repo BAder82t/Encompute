@@ -104,6 +104,9 @@ pub enum TrustCmd {
     /// against the keys given here (obtained out of band, never from the
     /// bundle); evidence without one is reported as unchecked.
     Report {
+        /// A control-plane job: its trust report, rebuilt by the control
+        /// plane from signed evidence (needs `encompute login`).
+        job: Option<String>,
         #[command(flatten)]
         bundle: Bundle,
         #[command(flatten)]
@@ -458,10 +461,23 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         TrustCmd::Report {
+            job: Some(job),
+            json,
+            ..
+        } => {
+            let ok = crate::control::trust_report(&job, json)?;
+            Ok(if ok {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::FAILURE
+            })
+        }
+        TrustCmd::Report {
             bundle,
             anchors,
             trust,
             json,
+            job: None,
         } => {
             let (_, r) = checked(&bundle.bundle, &anchors, &trust)?;
             if json {

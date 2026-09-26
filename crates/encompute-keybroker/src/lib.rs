@@ -12,6 +12,7 @@
 //! a replay finds none) → [`KeyBroker::release_key`] per asset.
 
 mod client;
+pub mod root;
 mod server;
 pub mod store;
 mod workload;
@@ -31,7 +32,13 @@ use encompute_attestation::{
 use encompute_ir::{Code, Error, Result};
 
 pub use client::BrokerClient;
-pub use server::{serve, serve_with_limit, REQUESTS_PER_MINUTE};
+pub use root::{
+    DevelopmentRootKey, OpenBaoTransit, RootKeyProvider, RootRotation, RootWrappedKekStore,
+    WrappedKek,
+};
+pub use server::{
+    serve, serve_with_control, serve_with_limit, ControlChannel, REQUESTS_PER_MINUTE,
+};
 pub use store::{
     DevelopmentFileStore, KeyContext, LocalKekStore, SecretStore, StoreSecurity, StoredKey,
 };
@@ -363,6 +370,25 @@ impl KeyBroker {
 
     /// Revokes a version (default: the current one). A revoked current key
     /// is never released; rotate to release again.
+    /// Revokes every version of `asset_id` (a control plane's revocation):
+    /// idempotent, returns the versions revoked now.
+    pub fn revoke_all(&mut self, asset_id: &str) -> Result<Vec<u64>> {
+        let versions: Vec<u64> = self
+            .state
+            .secrets
+            .get(asset_id)
+            .ok_or_else(|| err(Code::KeyRelease, format!("no key for asset {asset_id}")))?
+            .versions
+            .iter()
+            .filter(|(_, v)| !v.revoked)
+            .map(|(k, _)| *k)
+            .collect();
+        for v in &versions {
+            self.revoke(asset_id, Some(*v))?;
+        }
+        Ok(versions)
+    }
+
     pub fn revoke(&mut self, asset_id: &str, version: Option<u64>) -> Result<u64> {
         let broker_id = self.state.broker_id.clone();
         let s = self

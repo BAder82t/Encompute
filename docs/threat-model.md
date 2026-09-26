@@ -85,7 +85,39 @@ evaluator still share one process: anyone who compromises it sees both
 roles' data.
 
 The evaluator speaks plain HTTP: run it behind a TLS proxy. Envelopes carry
-checksums against corruption, but there is no client authentication in 0.2.
+checksums against corruption.
+
+### With a control plane
+
+When a control plane manages the deployment, the parties and what each one
+is trusted with change as follows (see docs/deployment.md):
+
+| Party | Trust | Holds |
+|---|---|---|
+| Control plane | trusted for coordination, not for trust decisions | identities, roles, metadata, digests, wrapped-key references, privacy ledgers, audit trail; no secret key, no plaintext, no ciphertext |
+| Key broker | trusted by its owner | wrapped asset keys; the KEK only while running, unwrapped by the customer's KMS |
+| Customer KMS | trusted by its owner | the organization's root key (never exported) |
+| Message transport | untrusted | signed envelopes; it may duplicate, delay, reorder, drop or replay them |
+| Other tenants | untrusted | nothing of this organization's, unless a project collaboration and the owner's asset approvals grant it |
+
+- **Authentication.** People authenticate with OpenID Connect. Services
+  authenticate with Ed25519-signed requests: sender, recipient, timestamp,
+  single-use nonce, body hash and bound IDs. Network location is never an
+  identity.
+- **Evaluators.** An evaluator runs a job only with a grant from the pinned
+  control-plane key, naming it and the job's program, and only after the
+  control plane consents to the start.
+- **Trust reports.** They are rebuilt from signed evidence and trusted keys:
+  a compromised control-plane database cannot make a job trusted. It can
+  refuse service, or hide jobs from their owners.
+- **Privacy state.** Privacy spending and the audit chain are anchored
+  outside the database. An older database cannot silently undo spending.
+- **What a compromised control plane can do.** It can schedule a job to a
+  registered evaluator, and it can deny service. It cannot:
+  - decrypt anything;
+  - release a key without attestation (the key broker decides);
+  - forge an evaluator's receipt;
+  - make a client accept a result the client did not verify.
 
 ## Conditions
 

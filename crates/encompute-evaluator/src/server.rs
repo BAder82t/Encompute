@@ -78,6 +78,7 @@ pub struct Evaluator {
     requests: AtomicU64,
     workers: usize,
     attestation: Option<Attested>,
+    control: Option<Arc<crate::control::ControlLink>>,
 }
 
 /// The attested workload session receipts bind.
@@ -156,7 +157,14 @@ impl Evaluator {
             requests: AtomicU64::new(0),
             workers,
             attestation: None,
+            control: None,
         }
+    }
+
+    /// Runs jobs only as granted by a control plane (see [`crate::control`]).
+    pub fn with_control(mut self, link: Arc<crate::control::ControlLink>) -> Self {
+        self.control = Some(link);
+        self
     }
 
     /// Runs as an attested workload: every receipt binds `record`, which
@@ -214,7 +222,7 @@ impl Evaluator {
         })
     }
 
-    fn route(&self, method: &Method, path: &str, body: &[u8]) -> Reply {
+    fn route(&self, method: &Method, path: &str, body: &[u8], grant: Option<&str>) -> Reply {
         let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
         let r = match (method, parts.as_slice()) {
             (Method::Get, ["v1", "info"]) => Ok(ok_json(self.info())),
@@ -241,7 +249,7 @@ impl Evaluator {
                 .engine
                 .register_keys(pid, body)
                 .map(|k| ok_json(json!({ "key_id": k }))),
-            (Method::Post, ["v1", "programs", pid, "jobs"]) => self.job(pid, body),
+            (Method::Post, ["v1", "programs", pid, "jobs"]) => self.job(pid, body, grant),
             (Method::Get, ["v1", "jobs", jid, what @ ("result" | "receipt" | "proof")]) => {
                 return match self
                     .results
@@ -271,7 +279,12 @@ impl Evaluator {
     }
 
     /// Execute, then sign a receipt over the exact request and response.
-    fn job(&self, pid: &str, body: &[u8]) -> Result<Reply> {
+    fn job(&self, pid: &str, body: &[u8], grant: Option<&str>) -> Result<Reply> {
+        // With a control plane: only granted jobs, started with its consent.
+        let granted = match &self.control {
+            Some(c) => Some(c.authorize(grant, pid)?),
+            None => None,
+        };
         let (out, times) = self.engine.execute(pid, body)?;
         let info = self
             .engine
@@ -301,6 +314,10 @@ impl Evaluator {
         };
         let receipt_json: serde_json::Value =
             serde_json::from_slice(&receipt.to_bytes()?).expect("canonical JSON");
+        if let (Some(c), Some(g)) = (&self.control, &granted) {
+            let ms = times.evaluate as u64;
+            c.completed(g, &receipt_json, ms);
+        }
         let n = self.jobs.fetch_add(1, Ordering::Relaxed);
         let tail = &out[out.len().saturating_sub(32)..];
         let job = sha256_hex(&[&n.to_le_bytes()[..], tail].concat())[..32].to_owned();
@@ -335,6 +352,11 @@ impl Evaluator {
         let t = Instant::now();
         let method = req.method().clone();
         let path = req.url().split('?').next().unwrap_or("").to_owned();
+        let grant = req
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv(encompute_verification::service::H_JOB_GRANT))
+            .map(|h| h.value.as_str().to_owned());
         let limit = self.limit_for(&path);
         let declared = req.body_length().unwrap_or(0);
         let mut body = Vec::new();
@@ -353,7 +375,7 @@ impl Evaluator {
                 .read_to_end(&mut body)
             {
                 Ok(_) if body.len() > limit => too_big(),
-                Ok(_) => self.route(&method, &path, &body),
+                Ok(_) => self.route(&method, &path, &body, grant.as_deref()),
                 Err(e) => error_reply(&Error::new(Code::Remote, format!("reading request: {e}"))),
             }
         };

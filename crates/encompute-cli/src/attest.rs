@@ -386,10 +386,60 @@ pub struct BrokerFile {
     /// (development only).
     #[arg(long)]
     pub kek: Option<PathBuf>,
+    /// A customer-managed root key wrapping the broker's KEK:
+    /// `openbao:MOUNT/KEY` (OpenBao or Vault Transit; BAO_ADDR and
+    /// BAO_TOKEN_FILE from the environment) or `development:FILE`.
+    #[arg(long, conflicts_with = "kek")]
+    pub root_key: Option<String>,
+    /// The organization the root key belongs to (bound into the wrap).
+    #[arg(long, requires = "root_key")]
+    pub organization: Option<String>,
+    /// Where the root-wrapped KEK is kept (not secret).
+    #[arg(long, default_value = "kek.wrapped.json")]
+    pub wrapped_kek: PathBuf,
 }
 
 impl BrokerFile {
+    fn root(&self) -> Result<Option<encompute_runtime::keybroker::RootWrappedKekStore>> {
+        use encompute_runtime::keybroker::{
+            DevelopmentRootKey, OpenBaoTransit, RootKeyProvider, RootWrappedKekStore,
+        };
+        let Some(spec) = &self.root_key else {
+            return Ok(None);
+        };
+        let org = self
+            .organization
+            .as_deref()
+            .ok_or_else(|| Error::new(Code::KeyRelease, "--root-key needs --organization"))?;
+        let provider: Box<dyn RootKeyProvider> = match spec.split_once(':') {
+            Some(("openbao", rest)) => {
+                let (mount, key) = rest
+                    .split_once('/')
+                    .ok_or_else(|| Error::new(Code::KeyRelease, "openbao:MOUNT/KEY"))?;
+                Box::new(OpenBaoTransit::from_env(mount, key)?)
+            }
+            Some(("development", file)) => {
+                eprintln!("DEVELOPMENT ONLY: a local root key protects nothing");
+                Box::new(DevelopmentRootKey::open(std::path::Path::new(file))?)
+            }
+            _ => {
+                return Err(Error::new(
+                    Code::KeyRelease,
+                    "--root-key openbao:MOUNT/KEY or development:FILE",
+                ))
+            }
+        };
+        Ok(Some(RootWrappedKekStore::open_or_create(
+            &self.wrapped_kek,
+            provider,
+            org,
+        )?))
+    }
+
     fn store(&self) -> Result<Box<dyn SecretStore>> {
+        if let Some(r) = self.root()? {
+            return Ok(Box::new(r));
+        }
         Ok(match &self.kek {
             Some(p) => Box::new(LocalKekStore::open_or_create(p)?),
             None => Box::new(DevelopmentFileStore),
@@ -465,7 +515,19 @@ pub enum BrokerCmd {
         #[command(flatten)]
         file: BrokerFile,
     },
-    /// Serve challenges, attestation and key release over HTTP.
+    /// Rotate the organization's root key and re-wrap the KEK under the new
+    /// version (asset keys are untouched).
+    RotateRoot {
+        #[command(flatten)]
+        file: BrokerFile,
+        /// Record the rotation in the control plane's audit trail (needs
+        /// `encompute login` as the organization's security admin).
+        #[arg(long)]
+        report: bool,
+    },
+    /// Serve challenges, attestation and key release over HTTP. With
+    /// ENCOMPUTE_CONTROL_PUBLIC_KEY and ENCOMPUTE_SERVICE_ID set, also accept
+    /// revocations from that control plane.
     Serve {
         #[arg(long, default_value = "127.0.0.1:8760")]
         listen: String,
@@ -639,6 +701,28 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
+        BrokerCmd::RotateRoot { file, report } => {
+            let mut s = file.root()?.ok_or_else(|| {
+                Error::new(
+                    Code::KeyRelease,
+                    "rotate-root needs --root-key and --organization",
+                )
+            })?;
+            let r = s.rotate_root()?;
+            println!(
+                "root key {} ({}) of {}: version {} -> {}; the KEK was re-wrapped, asset keys unchanged",
+                r.key_ref, r.provider, r.organization, r.old_version, r.new_version
+            );
+            if report {
+                let c = crate::control::ControlClient::from_env(None)?;
+                c.post(
+                    &format!("/v1/organizations/{}/key-rotations", r.organization),
+                    serde_json::to_value(&r).expect("serializable"),
+                )?;
+                println!("recorded in the control plane's audit trail");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         BrokerCmd::Serve {
             listen,
             requests_per_minute,
@@ -646,6 +730,32 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             file,
         } => {
             let b = open_broker(&file, Some(&trust))?;
+            let control = match std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY") {
+                Ok(key) => Some(encompute_runtime::keybroker::ControlChannel::new(
+                    &std::env::var("ENCOMPUTE_SERVICE_ID").map_err(|_| {
+                        Error::new(Code::InsecureConfiguration, "set ENCOMPUTE_SERVICE_ID")
+                    })?,
+                    &std::env::var("ENCOMPUTE_CONTROL_ID")
+                        .unwrap_or_else(|_| "control-plane".into()),
+                    &key,
+                )),
+                Err(_) => None,
+            };
+            // Report key releases to the control plane (audit trail).
+            let control = match (
+                control,
+                std::env::var("ENCOMPUTE_CONTROL_URL"),
+                std::env::var("ENCOMPUTE_SERVICE_KEY_FILE"),
+            ) {
+                (Some(c), Ok(url), Ok(key)) => {
+                    let me = c.me.clone();
+                    Some(c.with_reporter(
+                        &url,
+                        encompute_verification::ServiceSigner::from_file(&me, Path::new(&key))?,
+                    ))
+                }
+                (c, _, _) => c,
+            };
             let server = tiny_http::Server::http(&listen)
                 .map_err(|e| Error::new(Code::Remote, format!("{listen}: {e}")))?;
             eprintln!(
@@ -654,10 +764,19 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 b.mode(),
                 trust.verifier(Some(b.id()))?.providers().join(", ")
             );
-            encompute_runtime::keybroker::serve_with_limit(
+            if let Some(c) = &control {
+                eprintln!(
+                    "accepting revocations from control plane {} as {}",
+                    c.control_id, c.me
+                );
+            }
+            let path = file.broker.clone();
+            encompute_runtime::keybroker::serve_with_control(
                 &Mutex::new(b),
                 &server,
                 requests_per_minute,
+                control.as_ref(),
+                &|b| b.save(&path),
             );
             Ok(ExitCode::SUCCESS)
         }

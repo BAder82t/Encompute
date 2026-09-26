@@ -19,7 +19,9 @@ if [ "${total}" = "0" ] || [ "${ours}" = "0" ]; then
 fi
 client_syms="$(nm "$BIN" | grep -cE 'encompute_(openfhe|tfhe)_client' || true)"
 mock_client="$(nm "$BIN" | grep -E 'MockClient|PlainExactClient' | grep -c . || true)"
-tfhe_client="$(nm "$BIN" | grep -c 'ClientKey' || true)"
+# TFHE-rs client keys live in the tfhe crate's namespace (TLS libraries have
+# unrelated `ClientKey...` symbols, e.g. rustls' ClientKeyExchangeParams).
+tfhe_client="$(nm "$BIN" | grep 'ClientKey' | grep -c 'tfhe' || true)"
 # OpenFHE exact (BinFHE) client: key generation, encryption, decryption.
 exact_client="$(nm "$BIN" | grep -cE 'OpenFheExactClient|bin_(generate|restore|encrypt|decrypt|export_secret)' || true)"
 echo "encompute client-crypto symbols: ${client_syms}"

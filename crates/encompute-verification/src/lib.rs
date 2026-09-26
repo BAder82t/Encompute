@@ -22,6 +22,7 @@ mod identity;
 pub mod proof;
 mod receipt;
 mod reference;
+pub mod service;
 mod spec;
 pub mod transcript;
 mod verify;
@@ -41,6 +42,7 @@ pub use receipt::{
     RECEIPT_VERSION,
 };
 pub use reference::ReferenceTranscriptEvaluator;
+pub use service::{JobGrant, MessageEnvelope, ServiceHeaders, ServiceSigner};
 pub use spec::{ExecutionSpec, ExecutionSpecId, PolicyId, PrivacyPolicyId, SPEC_VERSION};
 pub use transcript::{SemanticTranscript, TranscriptId, TRANSCRIPT_VERSION};
 pub use verify::{verify_receipt, ExpectedExecution, VerifiedReceipt};

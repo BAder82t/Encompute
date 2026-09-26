@@ -11,7 +11,7 @@ import json
 import subprocess
 import sys
 
-PRODUCTION = ["encompute-cli", "encompute-evaluator", "encompute-py"]
+PRODUCTION = ["encompute-cli", "encompute-evaluator", "encompute-control", "encompute-py"]
 FEATURES = "encompute-cli/openfhe,encompute-evaluator/openfhe,encompute-py/openfhe"
 
 

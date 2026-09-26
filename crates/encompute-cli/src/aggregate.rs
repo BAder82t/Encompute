@@ -211,6 +211,12 @@ pub enum AggregateCmd {
         /// How the coordinator attests itself, when the spec requires it.
         #[command(flatten)]
         attester: crate::attest::AttesterArgs,
+        /// Report this round to a control plane (ENCOMPUTE_CONTROL_URL,
+        /// ENCOMPUTE_SERVICE_ID, ENCOMPUTE_SERVICE_KEY_FILE): its privacy
+        /// events for these assets (`LEDGER_ASSET=CONTROL_ASSET_ID`,
+        /// repeatable) and its duration.
+        #[arg(long = "control-asset")]
+        control_assets: Vec<String>,
     },
     /// Print the attestation policy a coordinator must satisfy: this plan,
     /// its confidentiality and privacy policies, on these images and TEEs.
@@ -328,7 +334,9 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             receipt,
             trust,
             attester,
+            control_assets,
         } => {
+            let started = std::time::Instant::now();
             let spec = spec.spec()?;
             let verifier = match &spec.attestation {
                 Some(_) => Some(trust.verifier(None)?),
@@ -376,6 +384,18 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 asset.values.len()
             );
             println!("{:<16}{}", "Receipt", receipt.display());
+            if std::env::var("ENCOMPUTE_CONTROL_URL").is_ok() {
+                let n = report_to_control(
+                    &round_id,
+                    ledger.as_deref(),
+                    &control_assets,
+                    started.elapsed().as_millis() as u64,
+                )?;
+                println!(
+                    "{:<16}{n} privacy events reported to the control plane",
+                    "Control plane"
+                );
+            }
             // Let participants collect the receipt before exiting.
             std::thread::sleep(Duration::from_secs(2));
             Ok(ExitCode::SUCCESS)
@@ -540,4 +560,95 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             }
         }
     }
+}
+
+/// Reports a finished round to the control plane as signed messages: each
+/// privacy event of this round (for the mapped assets; the control plane
+/// applies each once and enforces the budget again), and the round's
+/// duration.
+fn report_to_control(
+    round_id: &str,
+    ledger: Option<&Path>,
+    control_assets: &[String],
+    duration_ms: u64,
+) -> Result<usize> {
+    use encompute_runtime::dp::PrivacyEvent;
+    use encompute_verification::service::{seal, signed_call, Scope};
+    let env = |k: &str| {
+        std::env::var(k).map_err(|_| Error::new(Code::InsecureConfiguration, format!("set {k}")))
+    };
+    let url = env("ENCOMPUTE_CONTROL_URL")?;
+    let control = std::env::var("ENCOMPUTE_CONTROL_ID").unwrap_or_else(|_| "control-plane".into());
+    let me = encompute_verification::ServiceSigner::from_file(
+        &env("ENCOMPUTE_SERVICE_ID")?,
+        Path::new(&env("ENCOMPUTE_SERVICE_KEY_FILE")?),
+    )?;
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build();
+    let send = |kind: &str, payload: serde_json::Value| -> Result<()> {
+        let m = seal(
+            &me,
+            kind,
+            &control,
+            Scope {
+                round: Some(round_id.to_owned()),
+                ..Scope::default()
+            },
+            &payload,
+            24 * 3600,
+        )?;
+        let body = serde_json::to_value(&m).expect("serializable");
+        signed_call(
+            &agent,
+            &me,
+            &url,
+            &control,
+            "POST",
+            "/v1/messages",
+            &Default::default(),
+            &body,
+        )
+        .map(|_| ())
+    };
+    let map: std::collections::BTreeMap<&str, &str> = control_assets
+        .iter()
+        .filter_map(|m| m.split_once('='))
+        .collect();
+    let mut sent = 0;
+    if let Some(dir) = ledger {
+        for (local, remote) in &map {
+            let path = dir.join(format!("{local}.ledger"));
+            if !path.exists() {
+                continue;
+            }
+            let view = encompute_runtime::dp::ledger::read(&path)?;
+            let mine: std::collections::BTreeSet<String> = view
+                .entries
+                .iter()
+                .filter_map(|e| match &e.event {
+                    PrivacyEvent::Reserve {
+                        event_id,
+                        round_id: Some(r),
+                        ..
+                    } if r == round_id => Some(event_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            for e in &view.entries {
+                if mine.contains(e.event.event_id()) {
+                    send(
+                        "privacy.event",
+                        serde_json::json!({"asset": remote, "event": e.event}),
+                    )?;
+                    sent += 1;
+                }
+            }
+        }
+    }
+    send(
+        "secagg.round.completed",
+        serde_json::json!({"duration_ms": duration_ms}),
+    )?;
+    Ok(sent)
 }

@@ -145,6 +145,77 @@ impl Model {
     fn save(&self, path: &str) -> PyResult<()> {
         self.inner.save(Path::new(path)).map_err(err)
     }
+
+    /// Runs on a remote evaluator with a control plane's job grant (JSON),
+    /// trusting the receipt key the evaluator registered. Keys come from
+    /// `keys_dir` (`encompute keys generate`) or are generated for this run.
+    /// Returns JSON: outputs, the verified receipt, and the commitments the
+    /// control plane checks.
+    #[pyo3(signature = (url, inputs, grant_json, receipt_key, keys_dir=None))]
+    fn run_remote_json(
+        &self,
+        url: &str,
+        inputs: BTreeMap<String, Vec<f64>>,
+        grant_json: &str,
+        receipt_key: &str,
+        keys_dir: Option<&str>,
+    ) -> PyResult<String> {
+        use encompute_verification::{
+            output_commitment, request_commitment, EvaluatorIdentity, JobGrant,
+        };
+        let m = &self.inner;
+        let grant: JobGrant = serde_json::from_str(grant_json).map_err(|e| {
+            err(encompute_ir::Error::new(
+                encompute_ir::Code::BadInput,
+                format!("job grant: {e}"),
+            ))
+        })?;
+        let trusted = EvaluatorIdentity::from_public_key_hex(receipt_key).map_err(err)?;
+        let (client, eval_keys) = match keys_dir {
+            Some(d) => {
+                let d = Path::new(d);
+                let read = |f: &str| {
+                    std::fs::read(d.join(f)).map_err(|e| {
+                        encompute_ir::Error::new(
+                            encompute_ir::Code::WrongKey,
+                            format!("{}: {e}", d.join(f).display()),
+                        )
+                    })
+                };
+                let mut c = encompute_runtime::ClientSession::restore(
+                    m.ids(),
+                    m.compiled(),
+                    &read("secret.key").map_err(err)?,
+                )
+                .map_err(err)?;
+                let k = read("eval.keys").ok();
+                if let Some(k) = &k {
+                    c.attach_evaluation_keys(k).map_err(err)?;
+                }
+                (c, k)
+            }
+            None => (m.new_client(Mode::Encrypted).map_err(err)?, None),
+        };
+        let run = encompute_runtime::Remote::new(url)
+            .with_grant(&grant)
+            .run(
+                &client,
+                m.program(),
+                eval_keys.as_deref(),
+                &inputs,
+                &trusted,
+            )
+            .map_err(err)?;
+        Ok(serde_json::json!({
+            "outputs": m.outputs_json(&run.outputs),
+            "raw_outputs": run.outputs,
+            "receipt": run.receipt,
+            "request_commitment": request_commitment(&run.request),
+            "output_commitment": output_commitment(&run.response),
+            "key_id": client.key_id(),
+        })
+        .to_string())
+    }
 }
 
 /// Whether this build includes the OpenFHE backend (mode "encrypted").

@@ -7,6 +7,7 @@
 //! key, backend version), executes, and returns an output envelope.
 
 mod compiled;
+pub mod control;
 pub mod engine;
 mod exec;
 pub mod pool;
@@ -22,3 +23,7 @@ pub use session::{
     execution_proof, execution_spec, issue_receipt, program_id, transcript_for, BackendKind,
     Backends, EvaluatorSession, ExecTimes, Ids,
 };
+
+/// The parameter profile name evaluators register for CKKS programs: any
+/// parameters the compiler selects from the HE Standard 128-bit table.
+pub const CKKS_PROFILE: &str = "OPENFHE_CKKS_HE_STD128_V1";

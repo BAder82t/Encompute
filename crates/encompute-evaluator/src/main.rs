@@ -21,6 +21,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use encompute_attestation::AttestationRecord;
+use encompute_evaluator::control::ControlLink;
 use encompute_evaluator::engine::{Engine, Local};
 use encompute_evaluator::pool::{run_worker, Pool};
 use encompute_evaluator::server::{Evaluator, Limits};
@@ -151,6 +152,22 @@ fn load_identity(path: Option<&str>) -> Result<EvaluatorSigner, String> {
     }
 }
 
+/// The backends and parameter profiles this build registers. Mock and
+/// research backends are never offered to a control plane.
+fn capabilities(b: Backends) -> (Vec<&'static str>, Vec<&'static str>) {
+    let mut caps = vec![];
+    let mut profiles = vec![];
+    if b.approx == BackendKind::OpenFhe {
+        caps.push("openfhe");
+        profiles.push(encompute_evaluator::CKKS_PROFILE);
+    }
+    if b.exact == BackendKind::OpenFheExact {
+        caps.push("openfhe-exact");
+        profiles.push(encompute_exact::bits::OPENFHE_EXACT_PROFILE);
+    }
+    (caps, profiles)
+}
+
 fn serve(
     backends: Backends,
     listen: &str,
@@ -172,6 +189,7 @@ fn serve(
         }
     };
     let evaluator_id = signer.identity().evaluator_id();
+    let receipt_key = signer.identity().public_key_hex();
     let mut ev = Evaluator::with_engine(engine, Limits::default(), workers, signer);
     if let Some(path) = attestation {
         let record = std::fs::read(path)
@@ -231,6 +249,51 @@ fn serve(
             "notice: the TFHE-rs backend is for research use only; commercial use needs a \
              patent license from Zama (see THIRD_PARTY_NOTICES.md)"
         );
+    }
+    match ControlLink::from_env() {
+        Ok(None) => {}
+        Ok(Some(link)) => {
+            let link = Arc::new(link);
+            let (caps, profiles) = capabilities(backends);
+            let advertise = std::env::var("ENCOMPUTE_ADVERTISE_URL")
+                .unwrap_or_else(|_| format!("http://{addr}"));
+            let capacity = std::env::var("ENCOMPUTE_CAPACITY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(workers.max(1) as u32);
+            // The control plane may still be starting: retry for a minute.
+            let mut registered = Err(encompute_ir::Error::new(
+                encompute_ir::Code::Remote,
+                "not tried",
+            ));
+            for _ in 0..30 {
+                registered = link.register(&advertise, &receipt_key, &caps, &profiles, capacity);
+                if !matches!(&registered, Err(e) if e.code == encompute_ir::Code::Remote) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            if let Err(e) = registered {
+                eprintln!(
+                    "error[{}]: registering with the control plane: {}",
+                    e.code.as_str(),
+                    e.message
+                );
+                return ExitCode::from(2);
+            }
+            eprintln!(
+                "registered with the control plane as {} ({}; {}; capacity {capacity}); runs granted jobs only",
+                link.id(),
+                caps.join(", "),
+                profiles.join(", ")
+            );
+            link.run(std::time::Duration::from_secs(10));
+            ev = ev.with_control(link);
+        }
+        Err(e) => {
+            eprintln!("error[{}]: {}", e.code.as_str(), e.message);
+            return ExitCode::from(2);
+        }
     }
     ev.serve(server);
     ExitCode::SUCCESS

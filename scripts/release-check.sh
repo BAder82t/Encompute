@@ -62,6 +62,22 @@ else
     row "$r" "SKIPPED (scripts/install-openfhe.sh)"
   done
 fi
+# The control plane: needs PostgreSQL and OpenBao/Vault (dev servers are fine).
+if [ -n "${ENCOMPUTE_TEST_DATABASE_URL:-}" ] && [ -n "${ENCOMPUTE_TEST_BAO_ADDR:-}" ]; then
+  check "Control plane" env ENCOMPUTE_REQUIRE_SERVICES=1 cargo test -q -p encompute-control -p encompute-keybroker -p encompute-verification
+else
+  row "Control plane" "SKIPPED (set ENCOMPUTE_TEST_DATABASE_URL, ENCOMPUTE_TEST_BAO_ADDR, ENCOMPUTE_TEST_BAO_TOKEN)"
+fi
+if [ -d .deps/openfhe ] && [ -n "${ENCOMPUTE_E2E_DATABASE_URL:-}" ] && [ -n "${BAO_ADDR:-}" ]; then
+  check "Enterprise E2E" bash -c 'cargo build -q --release -p encompute-cli -p encompute-evaluator -p encompute-control --features encompute-cli/openfhe,encompute-evaluator/openfhe && SDK_PYTHON="$PWD/.venv/bin/python" scripts/enterprise-e2e.sh'
+else
+  row "Enterprise E2E" "SKIPPED (needs OpenFHE, ENCOMPUTE_E2E_DATABASE_URL, BAO_ADDR, BAO_TOKEN)"
+fi
+if command -v docker >/dev/null 2>&1 && docker image inspect encompute-evaluator:dev >/dev/null 2>&1; then
+  check "Compose deployment" env SDK_PYTHON="$PWD/.venv/bin/python" deploy/docker-compose/smoke.sh
+else
+  row "Compose deployment" "SKIPPED (build the images: deploy/docker-compose/README.md)"
+fi
 if [ -n "${ENCOMPUTE_TFHE:-}" ]; then
   check "TFHE-rs research" cargo test -q --release -p encompute-tfhe-client --features research-tfhe-rs
 else

@@ -3,7 +3,7 @@
 # (commercial use of Zama's technology needs a separate patent license) and
 # no other research-only dependency. Checks, for the production feature set:
 #   1. the Rust dependency graph (cargo tree) and a CycloneDX SBOM;
-#   2. the CLI and evaluator binaries (symbols, dynamic libraries);
+#   2. the CLI, evaluator and control-plane binaries (symbols, dynamic libraries);
 #   3. the Python extension (and a wheel, with WHEEL=path);
 #   4. the production container (with IMAGE=tag, if docker is available).
 # Documentation strings naming TFHE-rs are allowed; code is not.
@@ -22,7 +22,7 @@ fail() { row "$1" "FAIL: $2"; status=1; }
 
 # 1. Dependency graph and SBOM.
 crates="$(cargo tree -e normal --prefix none --format '{p}' \
-  -p encompute-cli -p encompute-evaluator -p encompute-py --features "$FEATURES" 2>/dev/null |
+  -p encompute-cli -p encompute-evaluator -p encompute-control -p encompute-py --features "$FEATURES" 2>/dev/null |
   awk '{print $1}' | sort -u)"
 if [ -z "$crates" ]; then fail "dependency graph" "cargo tree produced nothing"; fi
 bad="$(echo "$crates" | grep -E "$BANNED" || true)"
@@ -56,6 +56,7 @@ scan() {  # scan NAME FILE
 }
 scan "encompute (CLI)" "$BIN/encompute"
 scan "encompute-evaluator" "$BIN/encompute-evaluator"
+scan "encompute-control" "$BIN/encompute-control"
 EXT="$(python3 -c 'import encompute._native as n; print(n.__file__)' 2>/dev/null || true)"
 scan "Python extension" "${EXT:-/nonexistent}"
 

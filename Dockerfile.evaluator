@@ -22,7 +22,8 @@ RUN OPENFHE_ROOT=/opt/openfhe cargo build --release --locked -p encompute-evalua
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 evaluator
+ && useradd --system --uid 10001 evaluator \
+ && mkdir -p /var/lib/encompute && chown evaluator /var/lib/encompute
 COPY --from=build /src/target/release/encompute-evaluator /usr/local/bin/encompute-evaluator
 USER evaluator
 EXPOSE 8750

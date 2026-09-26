@@ -1,7 +1,7 @@
 # Lines that must appear in the output (values that vary are left out).
 Scheme            exact (OpenFHE exact: integers and Booleans)
-age=18 income=40000 risk=650       clear=True  mock=True   MATCH
-age=17 income=52000 risk=410       clear=False mock=False  MATCH
+age=18 income=40000 risk=650       clear=True  mock=True
+age=17 income=52000 risk=410       clear=False mock=False
 0 mismatches
 MATCH
 integer overflow        proven: no operation overflows for inputs in range

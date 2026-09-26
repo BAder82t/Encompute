@@ -171,6 +171,88 @@ jobs:
           cargo build --release --bins --features encompute-cli/openfhe,encompute-evaluator/openfhe -p encompute-cli -p encompute-evaluator
           BIN=target/release examples/run-all.sh crypto
 
+  control-plane:
+    name: control plane (PostgreSQL, OpenBao)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: encompute
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: encompute
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+      openbao:
+        image: openbao/openbao:2.1.0
+        env:
+          BAO_DEV_ROOT_TOKEN_ID: ci-root
+          BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+        options: --cap-add IPC_LOCK
+    env:
+      # A missing service fails these tests instead of skipping them.
+      ENCOMPUTE_REQUIRE_SERVICES: "1"
+      ENCOMPUTE_TEST_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
+      ENCOMPUTE_TEST_BAO_ADDR: http://127.0.0.1:8200
+      ENCOMPUTE_TEST_BAO_TOKEN: ci-root
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p encompute-control -p encompute-keybroker -p encompute-verification --all-targets -- -D warnings
+      - run: cargo test -p encompute-control -p encompute-keybroker -p encompute-verification
+
+  enterprise-e2e:
+    name: enterprise golden path (production mode, OpenFHE)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: encompute
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: encompute
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+      openbao:
+        image: openbao/openbao:2.1.0
+        env:
+          BAO_DEV_ROOT_TOKEN_ID: ci-root
+          BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+        options: --cap-add IPC_LOCK
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v6
+        with:
+          path: .deps/openfhe
+          key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
+      - run: ./scripts/install-openfhe.sh
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null
+      - run: cargo build --release -p encompute-cli -p encompute-evaluator -p encompute-control --features encompute-cli/openfhe,encompute-evaluator/openfhe
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: SDK (OpenFHE) and test tools
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin numpy cryptography
+          maturin develop --release --features openfhe
+      - name: golden path, restart, backup and restore, revocation, canaries
+        env:
+          ENCOMPUTE_E2E_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
+          BAO_ADDR: http://127.0.0.1:8200
+          BAO_TOKEN: ci-root
+          SDK_PYTHON: .venv/bin/python
+          TOOL_PYTHON: .venv/bin/python
+        run: ./scripts/enterprise-e2e.sh
+
   two-machine-demo:
     name: two-machine demo (client ↔ evaluator container)
     runs-on: ubuntu-24.04

@@ -597,4 +597,67 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-runtime/tests/cross_backend.rs::openfhe_exact_equals_tfhe_rs"),
         (EndToEnd, "script:examples/19_openfhe_exact/run.sh"),
     ]),
+    // Enterprise deployment: control plane, tenancy, keys, durable state.
+    inv!("INV-156", "deployment", "An authenticated identity cannot read or use resources owned solely by another organization (projects, assets, policies, jobs, privacy ledgers, trust reports, key references, audit records) without an explicit collaboration grant.", [
+        (Positive, "test:crates/encompute-control/tests/isolation.rs::every_route_authenticates_authorizes_and_isolates"),
+        (Negative, "test:crates/encompute-control/tests/isolation.rs::cross_tenant_attacks_fail"),
+        (Adversarial, "test:crates/encompute-control/tests/isolation.rs::credentials_are_checked"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-157", "deployment", "Production asset keys are protected by the configured customer root key provider, and never silently fall back to local or plaintext development storage: an unavailable, disabled or wrong provider, organization or key version releases nothing.", [
+        (Positive, "test:crates/encompute-keybroker/tests/root_keys.rs::openbao_wraps_unwraps_rotates_rewraps_and_revokes"),
+        (Negative, "test:crates/encompute-keybroker/tests/root_keys.rs::development_root_key_wraps_rotates_and_is_refused_in_production"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/root_keys.rs::openbao_failures_never_fall_back"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-158", "deployment", "Duplicate, reordered or replayed job submissions and transport deliveries cannot produce duplicate security-sensitive effects: one job per idempotency key, one charge per privacy event, one receipt per job.", [
+        (Positive, "test:crates/encompute-control/tests/jobs.rs::submission_is_idempotent_even_concurrently"),
+        (Negative, "test:crates/encompute-control/tests/state.rs::privacy_spending_is_race_safe_and_idempotent"),
+        (Adversarial, "test:crates/encompute-control/tests/jobs.rs::lifecycle_receipt_trust_and_duplicate_messages"),
+        (Adversarial, "test:crates/encompute-control/tests/state.rs::secagg_privacy_events_arrive_once_through_messages"),
+        (EndToEnd, "script:deploy/docker-compose/smoke.sh"),
+    ]),
+    inv!("INV-159", "deployment", "A control-plane restart cannot forget committed privacy spending, jobs or trust evidence.", [
+        (Positive, "test:crates/encompute-control/tests/state.rs::restart_keeps_spending_and_restoring_an_older_backup_is_refused"),
+        (Negative, "test:crates/encompute-control/tests/jobs.rs::restart_preserves_jobs_and_never_replays"),
+        (Adversarial, "test:crates/encompute-control/tests/state.rs::privacy_spending_is_race_safe_and_idempotent"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-160", "deployment", "Restoring an older database cannot silently roll back authoritative privacy or audit state: startup is refused until an operator's explicit recovery freezes the rolled-back ledgers (treated as exhausted).", [
+        (Positive, "test:crates/encompute-control/tests/state.rs::restart_keeps_spending_and_restoring_an_older_backup_is_refused"),
+        (Negative, "test:crates/encompute-control/tests/state.rs::truncated_audit_and_tampered_or_missing_anchor_are_refused"),
+        (Adversarial, "test:crates/encompute-control/tests/state.rs::audit_chain_is_tamper_evident_and_anchored"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-161", "deployment", "A revoked asset cannot start a new authorized job or receive a new key release: jobs not yet running fail, new submissions are refused (also when racing the revocation), and the key broker destroys the key.", [
+        (Positive, "test:crates/encompute-control/tests/jobs.rs::revocation_stops_future_use"),
+        (Negative, "test:crates/encompute-control/tests/state.rs::revocation_racing_submissions_leaves_no_usable_job"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/root_keys.rs::openbao_wraps_unwraps_rotates_rewraps_and_revokes"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-162", "deployment", "Audit records identify every security-sensitive state transition in a tamper-evident, anchored chain, without containing protected payloads (keys, data, weights, gradients, input values).", [
+        (Positive, "test:crates/encompute-control/tests/jobs.rs::lifecycle_receipt_trust_and_duplicate_messages"),
+        (Positive, "test:crates/encompute-control/tests/keys.rs::key_releases_and_rotations_are_audited"),
+        (Negative, "test:crates/encompute-control/tests/state.rs::audit_chain_is_tamper_evident_and_anchored"),
+        (Adversarial, "test:crates/encompute-control/tests/state.rs::truncated_audit_and_tampered_or_missing_anchor_are_refused"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-163", "deployment", "An evaluator executes only jobs compatible with its registered backend and parameter profile, only with an unexpired grant from the pinned control plane naming it and the job's program, and only after the control plane consents to the start.", [
+        (Positive, "test:crates/encompute-control/tests/jobs.rs::jobs_run_only_on_compatible_ready_evaluators"),
+        (Negative, "test:crates/encompute-verification/src/service.rs::job_grants_bind_issuer_evaluator_program_and_expiry"),
+        (Adversarial, "test:crates/encompute-control/tests/isolation.rs::every_route_authenticates_authorizes_and_isolates"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-164", "deployment", "Production mode rejects development identities and tokens, development key stores and root keys, missing signing keys, default database credentials and plain-HTTP identity providers.", [
+        (Positive, "test:crates/encompute-control/src/config.rs::production_refuses_insecure_fallbacks"),
+        (Negative, "test:crates/encompute-control/tests/isolation.rs::oidc_tokens_and_production_refusals"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/root_keys.rs::development_root_key_wraps_rotates_and_is_refused_in_production"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-165", "deployment", "The control plane is not a trust anchor: a job's trust report is rebuilt from signed evidence (grant, receipt, commitments, plan) and trusted keys on every request, so edited database records cannot make a job trusted.", [
+        (Positive, "test:crates/encompute-control/tests/jobs.rs::lifecycle_receipt_trust_and_duplicate_messages"),
+        (Negative, "test:crates/encompute-control/tests/jobs.rs::lifecycle_receipt_trust_and_duplicate_messages"),
+        (Adversarial, "test:crates/encompute-control/tests/isolation.rs::cross_tenant_attacks_fail"),
+        (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
 ];

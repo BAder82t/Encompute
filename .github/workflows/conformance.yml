@@ -74,3 +74,34 @@ jobs:
         run: cargo test --release -p encompute-tfhe-client --features research-tfhe-rs --test exact -- --nocapture --test-threads 1
       - name: TFHE-rs end to end (sessions, envelopes, HTTP, wrong keys)
         run: ENCOMPUTE_EXACT_CASES=100 cargo test --release -p encompute-runtime --features research-tfhe-rs --test exact -- --nocapture
+
+  compose:
+    name: Docker Compose deployment (smoke)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v6
+        with:
+          path: .deps/openfhe
+          key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
+      - run: ./scripts/install-openfhe.sh
+      - run: cargo build --release -p encompute-cli --features encompute-cli/openfhe
+      - name: images
+        run: |
+          docker build -q -f Dockerfile.control -t encompute-control:dev .
+          docker build -q -f Dockerfile.services -t encompute-services:dev .
+          docker build -q -f Dockerfile.evaluator -t encompute-evaluator:dev .
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install cryptography
+      - name: smoke (golden path, restart, backup, destroy, restore, revocation)
+        env:
+          SDK_PYTHON: python3
+        run: |
+          python -m venv .venv && . .venv/bin/activate && pip install -q maturin numpy && maturin develop --release
+          SDK_PYTHON=$PWD/.venv/bin/python deploy/docker-compose/smoke.sh
+

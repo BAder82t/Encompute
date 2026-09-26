@@ -2,6 +2,7 @@
 
 mod aggregate;
 mod attest;
+mod control;
 mod launcher_sim;
 mod plan;
 mod trust;
@@ -147,6 +148,29 @@ enum Cmd {
         #[command(subcommand)]
         cmd: KeysCmd,
     },
+    /// Log in to a control plane: saves its URL and an OIDC token (read
+    /// from --token-file or standard input, never an argument).
+    Login {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
+    /// Projects on the control plane.
+    Projects {
+        #[command(subcommand)]
+        cmd: control::ProjectsCmd,
+    },
+    /// The control plane's asset registry (metadata only).
+    Assets {
+        #[command(subcommand)]
+        cmd: control::AssetsCmd,
+    },
+    /// Jobs on the control plane: submit, run, status, cancel.
+    Jobs {
+        #[command(subcommand)]
+        cmd: control::JobsCmd,
+    },
     /// Start an evaluator for a model (runs `encompute-evaluator serve`).
     Serve {
         model: PathBuf,
@@ -156,9 +180,17 @@ enum Cmd {
         #[arg(long)]
         backend: Vec<String>,
     },
-    /// Check an artifact (and optionally keys and the evaluator binary) against the security model.
+    /// Check an artifact (and optionally keys and the evaluator binary)
+    /// against the security model. `encompute audit list` shows the control
+    /// plane's audit trail instead.
     Audit {
         model: PathBuf,
+        /// With `audit list`: the organization (default: yours).
+        #[arg(long)]
+        organization: Option<String>,
+        /// With `audit list`: events after this sequence number.
+        #[arg(long, default_value_t = 0)]
+        after: u64,
         #[arg(long)]
         keys: Option<PathBuf>,
         #[arg(long)]
@@ -581,9 +613,35 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Audit {
             model,
+            organization,
+            after,
+            ..
+        } if model.as_os_str() == "list" && !model.exists() => {
+            control::audit_list(organization.as_deref(), after)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Login { url, token_file } => {
+            control::login(&url, token_file.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Projects { cmd } => {
+            control::projects(cmd)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Assets { cmd } => {
+            control::assets(cmd)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Jobs { cmd } => {
+            control::jobs(cmd, load)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Audit {
+            model,
             keys,
             evaluator,
             json,
+            ..
         } => {
             use encompute_runtime::audit::{audit, Status};
             let m = load(&model)?;

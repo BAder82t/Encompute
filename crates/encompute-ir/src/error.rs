@@ -135,6 +135,26 @@ pub enum Code {
     /// weights, an unsupported file or architecture, or incompatible
     /// library versions (ENC2504).
     ModelPackage,
+    /// No valid credentials: missing, expired, forged or development
+    /// credentials in production (ENC2601).
+    Unauthenticated,
+    /// The identity lacks the role for this action (ENC2602).
+    Forbidden,
+    /// No such resource visible to this identity; resources of other
+    /// organizations are reported the same way (ENC2603).
+    NotFound,
+    /// The request conflicts with the resource's state: an invalid job
+    /// transition, a reused idempotency key, a revoked asset (ENC2604).
+    Conflict,
+    /// An insecure configuration was refused (production mode rejects
+    /// development identities, key stores and credentials) (ENC2605).
+    InsecureConfiguration,
+    /// No registered evaluator can run the job's backend and parameter
+    /// profile (ENC2606).
+    Scheduling,
+    /// A service request or message is unsigned, from an unknown service,
+    /// for another recipient, expired or replayed (ENC2607).
+    ServiceAuthentication,
 }
 
 impl Code {
@@ -193,13 +213,20 @@ impl Code {
             Code::Checkpoint => "ENC2502",
             Code::ExportDenied => "ENC2503",
             Code::ModelPackage => "ENC2504",
+            Code::Unauthenticated => "ENC2601",
+            Code::Forbidden => "ENC2602",
+            Code::NotFound => "ENC2603",
+            Code::Conflict => "ENC2604",
+            Code::InsecureConfiguration => "ENC2605",
+            Code::Scheduling => "ENC2606",
+            Code::ServiceAuthentication => "ENC2607",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 53] = [
+    pub const ALL: [Code; 60] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -253,6 +280,13 @@ impl Code {
         Code::Checkpoint,
         Code::ExportDenied,
         Code::ModelPackage,
+        Code::Unauthenticated,
+        Code::Forbidden,
+        Code::NotFound,
+        Code::Conflict,
+        Code::InsecureConfiguration,
+        Code::Scheduling,
+        Code::ServiceAuthentication,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

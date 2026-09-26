@@ -61,6 +61,7 @@ privacy, and every step leaves verifiable evidence.
 | Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
 | Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control; organization-level DP or patient-level DP-SGD; Hugging Face Transformers + PEFT (development attestation on one machine) |
 | Commercial dependency boundary | audited: no TFHE-rs in the dependency graph, SBOM, binaries, wheel or container of a production build (`scripts/audit-commercial-build.sh`) |
+| Enterprise deployment (control plane) | working, production mode: organizations, OIDC users and signed service identities, roles, tenant isolation, projects, asset registry, plans, idempotent jobs, capability-aware scheduling, PostgreSQL with versioned migrations, anchored privacy ledgers and audit trail, customer-managed root keys (OpenBao/Vault Transit), API v1, CLI and Python SDK over it, Docker Compose deployment with backup and restore ([docs/deployment.md](docs/deployment.md)) |
 | Assurance (security invariants under attack) | 88 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## Start here
@@ -432,6 +433,17 @@ scripts/exact-demo.sh                        # encrypted eligibility decision vi
 scripts/audit-commercial-build.sh target/release   # no TFHE-rs anywhere in the build
 ```
 
+The control plane (PostgreSQL and OpenBao for the service tests; any dev
+servers will do):
+
+```sh
+ENCOMPUTE_TEST_DATABASE_URL=postgres://USER:PASS@127.0.0.1:5432/postgres \
+ENCOMPUTE_TEST_BAO_ADDR=http://127.0.0.1:8200 ENCOMPUTE_TEST_BAO_TOKEN=root \
+  cargo test -p encompute-control -p encompute-keybroker
+scripts/enterprise-e2e.sh              # the commercial golden path in production mode
+deploy/docker-compose/smoke.sh         # the same through the Compose deployment
+```
+
 TFHE-rs (research feature; never in commercial builds):
 
 ```sh
@@ -505,6 +517,7 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption), CKKS and BinFHE |
 | `crates/encompute-openfhe-exact` | OpenFHE exact backend: envelopes, parameter profile, gate binding |
 | `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature, never in commercial builds) |
+| `crates/encompute-control` | Control plane: API v1, identities, tenancy, jobs, scheduler, privacy ledgers, state anchor, audit |
 | `crates/encompute-evaluator` | Evaluator sessions and HTTP service; never links client crypto |
 | `crates/encompute-runtime` | Execution, differential testing, explain, bench, audit, artifacts |
 | `crates/encompute-cli` | `encompute` command |
@@ -521,14 +534,18 @@ binary contains no Encompute key-generation, encryption or decryption code.
 - ✓ Confidential Space training worker: a Hugging Face workload, hardware
   attestation gating the model and dataset keys. It is rehearsed locally and
   in CI; the live GCP run needs a project.
-- ✓ Commercial exact execution on OpenFHE: exact programs run encrypted on
-  OpenFHE exact (BinFHE) by default, with a commercial build audit; TFHE-rs
-  is research-only.
-- → Faster exact execution: multi-bit (functional) bootstrapping and
-  parallel gate evaluation on OpenFHE.
-- → Production multi-machine confidential training.
-- → Enterprise deployment foundation: SSO, customer-managed keys,
-  multi-tenant projects, central audit.
+- ✓ OpenFHE CKKS (approximate programs).
+- ✓ OpenFHE exact (BinFHE): the production exact backend, with a commercial
+  build audit.
+- ✓ TFHE-rs isolated to research builds.
+- ✓ Enterprise deployment foundation: control plane, OIDC and service
+  identities, tenant isolation, customer-managed keys, durable privacy
+  state, audit, API v1, Compose deployment.
+- → OpenFHE performance and hybrid optimization: parallel gate evaluation,
+  multi-bit (functional) bootstrapping, BGV/BinFHE where worthwhile.
+- → Multi-machine orchestration.
+- → A message-broker adapter, if needed; then Kubernetes.
+- → Commercial UI.
 
 ## License
 

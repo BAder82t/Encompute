@@ -187,6 +187,25 @@ impl LedgerView {
         Ok(())
     }
 
+    /// The ledger with `event` appended: chained, verified (one reservation
+    /// per event, commits of open reservations only). Storage-independent:
+    /// the file ledger and database-backed ledgers both append through it.
+    pub fn append_event(&self, event: PrivacyEvent) -> Result<(LedgerView, Entry)> {
+        let seq = self.entries.len() as u64 + 1;
+        let prev = self.root()?;
+        let hash = entry_hash(seq, &prev, &event)?;
+        let entry = Entry {
+            seq,
+            prev,
+            event,
+            hash,
+        };
+        let mut next = self.clone();
+        next.entries.push(entry.clone());
+        next.verify()?;
+        Ok((next, entry))
+    }
+
     pub fn root(&self) -> Result<String> {
         match self.entries.last() {
             Some(e) => Ok(e.hash.clone()),
@@ -422,18 +441,7 @@ impl Ledger {
 
     /// Appends one event durably (fsync) and returns its entry.
     pub fn append(&mut self, event: PrivacyEvent) -> Result<Entry> {
-        let seq = self.view.entries.len() as u64 + 1;
-        let prev = self.view.root()?;
-        let hash = entry_hash(seq, &prev, &event)?;
-        let entry = Entry {
-            seq,
-            prev,
-            event,
-            hash,
-        };
-        let mut next = self.view.clone();
-        next.entries.push(entry.clone());
-        next.verify()?;
+        let (next, entry) = self.view.append_event(event)?;
         let io = |e: std::io::Error| ledger_err(format!("{}: {e}", self.path.display()));
         let line = String::from_utf8(canonical_json(&entry)?).expect("JSON");
         writeln!(self.file, "{line}").map_err(io)?;

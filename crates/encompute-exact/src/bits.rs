@@ -714,12 +714,14 @@ pub const OPENFHE_EXACT_VERSION: &str = "1.5.1";
 /// The vetted parameter set: OpenFHE BinFHE STD128 with GINX bootstrapping
 /// (128-bit classical security, gate failure probability 2^-135).
 pub const OPENFHE_EXACT_PARAMSET: &str = "STD128";
+/// The vetted profile's name (bound into its parameter-set ID).
+pub const OPENFHE_EXACT_PROFILE: &str = "BINFHE_STD128_GINX_BITS_V1";
 
 pub fn openfhe_exact_profile() -> crate::ExactProfile {
     crate::ExactProfile {
         backend: OPENFHE_EXACT_BACKEND.into(),
         backend_version: OPENFHE_EXACT_VERSION.into(),
-        profile: "BINFHE_STD128_GINX_BITS_V1".into(),
+        profile: OPENFHE_EXACT_PROFILE.into(),
         security: "128-bit".into(),
         failure_probability: "2^-135 per gate".into(),
         parameter_selector_version: "openfhe-exact-v1".into(),

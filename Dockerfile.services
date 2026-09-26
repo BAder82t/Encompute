@@ -1,0 +1,19 @@
+# The `encompute` CLI as a service image: the key broker (`keys serve`) and
+# the secure-aggregation coordinator (`aggregate serve`). No OpenFHE: neither
+# computes on ciphertexts.
+#
+#   docker build -f Dockerfile.services -t encompute-services .
+
+FROM rust:1.98-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked -p encompute-cli
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10003 encompute \
+ && mkdir -p /var/lib/encompute && chown encompute /var/lib/encompute
+COPY --from=build /src/target/release/encompute /usr/local/bin/encompute
+USER encompute
+WORKDIR /var/lib/encompute
+ENTRYPOINT ["encompute"]

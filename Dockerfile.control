@@ -1,0 +1,21 @@
+# Encompute control plane image: organizations, projects, assets, plans,
+# jobs, audit. Holds no keys and computes on no protected data; needs
+# PostgreSQL and its secrets as mounted files (see deploy/docker-compose).
+#
+#   docker build -f Dockerfile.control -t encompute-control .
+
+FROM rust:1.98-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked -p encompute-control
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10002 control \
+ && mkdir -p /var/lib/encompute/anchor && chown -R control /var/lib/encompute
+COPY --from=build /src/target/release/encompute-control /usr/local/bin/encompute-control
+USER control
+EXPOSE 8770
+HEALTHCHECK --interval=10s --timeout=3s CMD curl -fs http://127.0.0.1:8770/ready || exit 1
+ENTRYPOINT ["encompute-control"]
+CMD ["serve"]
