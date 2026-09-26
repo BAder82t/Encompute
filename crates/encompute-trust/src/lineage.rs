@@ -80,8 +80,30 @@ pub fn adapter_lineage(g: &TrustGraph, adapter: &str, report: &TrustReport) -> R
             }
         }
     }
+    if let Some(p) = &spec.base_model.huggingface {
+        let _ = writeln!(s, "\nHugging Face package\n{RULE}");
+        let _ = writeln!(s, "{:<17}enchf1:{}", "package", &p.id()?[..16]);
+        let _ = writeln!(s, "{:<17}{} ({})", "repository", p.repo_id, p.model_class);
+        let _ = writeln!(s, "{:<17}{}", "revision", p.revision);
+        for f in &p.files {
+            let _ = writeln!(s, "{:<17}{} {}", "file", f.path, &f.sha256[..16]);
+        }
+        let _ = writeln!(s, "{:<17}{}", "tokenizer", &p.tokenizer_digest[..16]);
+        let _ = writeln!(
+            s,
+            "{:<17}transformers {}, peft {}, torch {}",
+            "libraries", p.libraries.transformers, p.libraries.peft, p.libraries.torch
+        );
+        let _ = writeln!(
+            s,
+            "{:<17}none (Transformers-native class only)",
+            "remote code"
+        );
+    }
     let _ = writeln!(s, "\nTraining\n{RULE}");
-    let method = if spec.config.method == "lora" {
+    let method = if spec.config.method == "peft-lora" {
+        "PEFT LoRA"
+    } else if spec.config.method == "lora" {
         "LoRA"
     } else {
         spec.config.method.as_str()

@@ -7,15 +7,20 @@
 
 pub mod adapter;
 pub mod checkpoint;
+pub mod hf;
 pub mod layout;
 pub mod seal;
 pub mod spec;
 
 pub use adapter::{adapter_policy, check_export, AdapterRecord, SignedAdapterRecord};
 pub use checkpoint::{resume, seal_checkpoint, CheckpointHeader, ResumeExpectation};
+pub use hf::{HfModelPackage, LibraryVersions, PackageFile};
 pub use layout::{tensor_manifest, AdapterLayout, LayoutEntry, TensorEntry, LAYOUT_VERSION};
 pub use seal::{open, open_asset, peek, seal, seal_asset, sha256_hex, AssetHeader};
-pub use spec::{DatasetCommitment, DpSgdConfig, ModelCommitment, TrainingConfig, TrainingSpec};
+pub use spec::{
+    DatasetCommitment, DpSgdConfig, ModelCommitment, PeftConfig, TextPreprocessing, TrainingConfig,
+    TrainingSpec,
+};
 
 use sha2::{Digest, Sha256};
 

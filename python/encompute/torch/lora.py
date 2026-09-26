@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import torch
 from torch import nn
@@ -17,7 +17,9 @@ from torch import nn
 class LoRAConfig:
     rank: int = 4
     alpha: int = 8
-    target_modules: Sequence[str] = ("q", "v")
+    # None: the model's defaults (q and v for the reference model; the
+    # attention query and value projections for Hugging Face models).
+    target_modules: Optional[Sequence[str]] = None
     optimizer: str = "sgd"
     learning_rate: float = 0.05
     update_clip: float = 0.5
@@ -25,6 +27,8 @@ class LoRAConfig:
     batch_size: int = 16
     rounds: int = 2
     seed: int = 0
+    # LoRA dropout (Hugging Face PEFT only).
+    dropout: float = 0.0
 
 
 class LoRALinear(nn.Module):
@@ -51,7 +55,7 @@ def apply_lora(model: nn.Module, cfg: LoRAConfig) -> nn.Module:
     for p in model.parameters():
         p.requires_grad_(False)
     g = torch.Generator().manual_seed(cfg.seed)
-    for name in sorted(cfg.target_modules):
+    for name in sorted(cfg.target_modules or ("q", "v")):
         parent, _, leaf = name.rpartition(".")
         owner = model.get_submodule(parent) if parent else model
         base = getattr(owner, leaf)
@@ -65,9 +69,13 @@ LAYOUT_VERSION = 1
 
 
 def adapter_parameters(model: nn.Module) -> Dict[str, nn.Parameter]:
-    """The adapter's parameters in canonical order: by (module, parameter)."""
+    """The adapter's parameters in canonical order: by (module, parameter).
+    For a PEFT model, every trainable parameter (the LoRA matrices and the
+    fully trained head); otherwise the reference LoRA matrices."""
+    peft = hasattr(model, "peft_config")
     ps = [(n.rpartition(".")[0], n.rpartition(".")[2], n, p)
-          for n, p in model.named_parameters() if "lora_" in n]
+          for n, p in model.named_parameters()
+          if (p.requires_grad if peft else "lora_" in n)]
     return {n: p for _, _, n, p in sorted(ps, key=lambda t: (t[0], t[1]))}
 
 

@@ -131,6 +131,10 @@ pub enum Code {
     /// EXPORT DENIED: a derived asset inherits a release restriction
     /// (ENC2503).
     ExportDenied,
+    /// A model package is refused: a mutable revision, remote code, pickled
+    /// weights, an unsupported file or architecture, or incompatible
+    /// library versions (ENC2504).
+    ModelPackage,
 }
 
 impl Code {
@@ -188,13 +192,14 @@ impl Code {
             Code::TrainingSpec => "ENC2501",
             Code::Checkpoint => "ENC2502",
             Code::ExportDenied => "ENC2503",
+            Code::ModelPackage => "ENC2504",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 52] = [
+    pub const ALL: [Code; 53] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -247,6 +252,7 @@ impl Code {
         Code::TrainingSpec,
         Code::Checkpoint,
         Code::ExportDenied,
+        Code::ModelPackage,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

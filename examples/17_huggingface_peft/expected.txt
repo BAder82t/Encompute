@@ -1,0 +1,44 @@
+# Import
+Class                   BertForSequenceClassification
+Weights                 SAFETENSORS VERIFIED
+Remote code             DISABLED
+# Patient grouping survives tokenization and chunking
+hospital-a              4040 notes -> 4120 tokenized records -> 2000 patients
+# The run
+Level                   example (DP-SGD, Poisson sampling 0.05)
+RESULT                  WITHIN BUDGET
+Framework               Transformers
+Per-patient gradients   ACTIVE (vectorized per-example gradients)
+Round 20/20             COMPLETE
+TRUST REQUIREMENTS SATISFIED
+Privacy unit: patient. Each patient's gradient is clipped to 1.0 (DP-SGD, Poisson sampling 0.05), accounted with Rényi DP.
+# Export and interoperability
+EXPORT PERMITTED: every parent of adapter-20 allows public release
+PEFT INTEROPERABLE
+# Lineage
+Hugging Face package
+remote code      none (Transformers-native class only)
+Method           PEFT LoRA
+gradient-notes-a        patient-level DP, ε used 2.57 / 3.00
+# Summary
+Per-patient clipping    ACTIVE
+Trust report            SATISFIED
+CONFIDENTIAL HUGGING FACE FINE-TUNING VERIFIED
+# Attacks
+ENC2002: broker: the workload is bound to execution spec
+ENC2502: the sealed artifact was modified, or this is the wrong key
+was not tokenized with the model package's tokenizer
+tokenizer_digest does not cover the tokenizer files
+ENC2504: trust_remote_code is never allowed
+config.json names custom code (auto_map)
+pytorch_model.bin: pickled weights can run code when loaded
+../../../etc/passwd: packages are flat, without hidden files
+revision "main" is not immutable
+this worker's adapter layout is not the approved one
+this is adapter-20 of medical-text, not adapter-20 of another-project
+is not allowed
+notes-a is not the dataset the training spec commits to
+ENC2401: patient-level privacy needs per-example clipping
+installed transformers 9.9 is not the approved
+EXPORT DENIED: adapter-20 derives from revoked assets: notes-a
+ALL ATTACKS FAILED CLOSED

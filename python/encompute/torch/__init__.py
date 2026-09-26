@@ -32,15 +32,27 @@ import torch
 from .lora import LoRAConfig, apply_lora, get_flat, layout, layout_digest, set_flat
 from .models import TinyClassifier, build
 
+
+def __getattr__(name: str):
+    # Hugging Face support loads transformers and peft only when used.
+    if name in ("huggingface", "import_model"):
+        from . import hf
+        return getattr(hf, name)
+    raise AttributeError(name)
+
 __all__ = [
     "LoRAConfig",
+    "TextDataset",
     "TinyClassifier",
     "apply_lora",
     "build",
     "get_flat",
+    "huggingface",
+    "import_model",
     "layout",
     "layout_digest",
     "private_dataset",
+    "private_text_dataset",
     "set_flat",
     "wrap_model",
 ]
@@ -70,3 +82,55 @@ def private_dataset(x: torch.Tensor, y: torch.Tensor,
     if len(unit_ids) != len(x) or unit_ids.dtype != torch.int64:
         raise ValueError("unit_ids needs one int64 ID per record")
     return (x.detach().clone(), y.detach().clone(), unit_ids.detach().clone())
+
+
+class TextDataset:
+    """A participant's tokenized text: ``input_ids``, ``attention_mask``,
+    ``labels`` and ``unit_ids`` tensors, and how it was tokenized (bound
+    into the training spec)."""
+
+    def __init__(self, tensors: dict, preprocessing: dict):
+        self.tensors = tensors
+        self.preprocessing = preprocessing
+
+    def __len__(self) -> int:
+        return len(self.tensors["labels"])
+
+
+def private_text_dataset(texts, labels, *, tokenizer, max_length: int = 64,
+                         truncation: bool = True, stride: Optional[int] = None,
+                         unit_ids=None) -> TextDataset:
+    """Tokenizes a participant's texts with the model package's tokenizer
+    (``model.encompute_tokenizer``), padding every record to
+    ``max_length``.
+
+    ``unit_ids`` names each text's privacy unit (its patient). With
+    ``stride``, a long text is split into overlapping chunks, and every
+    chunk keeps its text's unit: tokenization never turns one patient into
+    several units. Without ``unit_ids``, each text is its own unit.
+    """
+    texts, labels = list(texts), torch.as_tensor(labels, dtype=torch.int64)
+    if len(texts) != len(labels):
+        raise ValueError("texts and labels differ in length")
+    if unit_ids is not None:
+        unit_ids = torch.as_tensor(unit_ids, dtype=torch.int64)
+        if len(unit_ids) != len(texts):
+            raise ValueError("unit_ids needs one ID per text")
+    if not hasattr(tokenizer, "digest"):
+        raise ValueError("tokenizer must be the model package's (model.encompute_tokenizer)")
+    enc = tokenizer(texts, max_length=max_length, truncation=truncation, padding="max_length",
+                    return_overflowing_tokens=stride is not None, stride=stride or 0,
+                    return_tensors="pt")
+    source = (enc["overflow_to_sample_mapping"] if stride is not None
+              else torch.arange(len(texts)))
+    t = {"input_ids": enc["input_ids"].to(torch.int64),
+         "attention_mask": enc["attention_mask"].to(torch.int64),
+         "labels": labels[source]}
+    if unit_ids is not None:
+        t["unit_ids"] = unit_ids[source]
+    elif stride is not None:
+        t["unit_ids"] = source.to(torch.int64)  # a text's chunks: one unit
+    pre = {"tokenizer_digest": tokenizer.digest, "max_length": int(max_length),
+           "truncation": bool(truncation), "padding": "max_length",
+           "stride": None if stride is None else int(stride)}
+    return TextDataset(t, pre)

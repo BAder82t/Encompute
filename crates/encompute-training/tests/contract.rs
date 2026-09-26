@@ -64,6 +64,7 @@ fn fixture_spec() -> TrainingSpec {
             owner: "modelco".into(),
             architecture: "{\"factory\":\"m:f\",\"kwargs\":{}}".into(),
             weights_digest: h('f'),
+            huggingface: None,
         },
         datasets: ["a", "b"]
             .iter()
@@ -75,6 +76,7 @@ fn fixture_spec() -> TrainingSpec {
                 digest: h((b'1' + i as u8) as char),
                 privacy_units: None,
                 grouping_digest: None,
+                preprocessing: None,
             })
             .collect(),
         code_digest: h('3'),
@@ -92,6 +94,7 @@ fn fixture_spec() -> TrainingSpec {
             rounds: 2,
             adapter_parameters: 256,
             dp_sgd: None,
+            peft: None,
         },
         participants: ["hospital-a", "hospital-b"]
             .iter()

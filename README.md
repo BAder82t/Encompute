@@ -59,8 +59,8 @@ privacy, and every step leaves verifiable evidence.
 | Differential privacy (budgets, ledger, receipts) | working: discrete Gaussian on secure aggregates, zCDP accounting, tamper-evident ledgers, owner-side enforcement |
 | Trust graph (authorizations, revocation, lineage, one trust report) | working: owner-signed program approvals, revocation reach, a report rebuilt from evidence and checked against verifier-supplied keys |
 | Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
-| Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control; organization-level DP or patient-level DP-SGD (development attestation on one machine) |
-| Assurance (security invariants under attack) | 68 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control; organization-level DP or patient-level DP-SGD; Hugging Face Transformers + PEFT (development attestation on one machine) |
+| Assurance (security invariants under attack) | 75 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## Start here
 
@@ -75,6 +75,7 @@ does and does not protect ([examples/](examples/)):
 | Full demo | [Confidential collaboration](examples/12_confidential_collaboration/) |
 | AI flagship | [Confidential LoRA fine-tuning](examples/15_confidential_lora/) |
 | Patient privacy | [Patient-level DP-SGD](examples/16_patient_private_lora/) |
+| Hugging Face | [Transformers + PEFT fine-tuning](examples/17_huggingface_peft/) |
 
 ```sh
 cargo build --bins && maturin develop -m crates/encompute-py/Cargo.toml
@@ -326,6 +327,37 @@ that would exceed the budget is denied before training, and the trust
 report refuses a patient-level claim from organization-level training. See
 [examples/16_patient_private_lora](examples/16_patient_private_lora/).
 
+### Hugging Face Transformers + PEFT
+
+```python
+base = et.huggingface("org/model", revision="<commit>")   # or a local directory
+notes = et.private_text_dataset(texts, labels, tokenizer=base.encompute_tokenizer,
+                                unit_ids=patient_ids)
+model = project.model("clinical-model", owner="modelco", module=base)
+adapter = project.finetune(model=model, data=[a, b], method="peft-lora",
+                           privacy="strong-patient")
+adapter.export_peft("adapter/")   # standard PEFT files, only if every owner permits
+```
+
+The model owner imports the model once into a content-addressed package:
+- the revision is resolved to an immutable commit;
+- only safetensors, configuration and tokenizer files are kept;
+- remote code and pickled weights are refused;
+- credentials are used for that download only.
+
+Workers never download anything. They rebuild the Transformers-native
+class, load the sealed weights, and add PEFT LoRA.
+
+The training spec binds:
+- the package (every file's digest);
+- the tokenizer and each dataset's tokenization;
+- the PEFT configuration and the adapter layout.
+
+A patient's records keep their patient through tokenization and chunking.
+Transformers supplies the architecture, PEFT the adapters and PyTorch the
+training; Encompute supplies the confidentiality, privacy and evidence. See
+[examples/17_huggingface_peft](examples/17_huggingface_peft/).
+
 ## Trust graph
 
 Every mechanism leaves evidence; the trust graph joins it into one bundle
@@ -469,8 +501,13 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
-- **Next**: patient-level DP (per-example clipping), larger Hugging Face
-  models, and real Confidential Space training workers.
+- ✓ Patient-level DP-SGD (per-patient clipping, Poisson sampling, Rényi DP
+  accounting).
+- ✓ Hugging Face Transformers + PEFT LoRA (sequence classification).
+- → Real Confidential Space training worker, with a Hugging Face workload.
+- → Production multi-machine confidential training.
+- → Enterprise deployment foundation: SSO, customer-managed keys,
+  multi-tenant projects, central audit.
 
 ## License
 

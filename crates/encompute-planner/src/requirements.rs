@@ -48,6 +48,17 @@ pub fn steps(
                 ));
             }
         }
+        if let Some(f) = &t.framework {
+            if !crate::model::TRAINING_FRAMEWORKS.contains(&f.as_str()) {
+                return Err(Error::new(
+                    Code::PlanningFailed,
+                    format!(
+                        "training framework {f:?} is not supported ({})",
+                        crate::model::TRAINING_FRAMEWORKS.join(", ")
+                    ),
+                ));
+            }
+        }
         if let Some(unit) = &t.privacy_unit {
             check_training_privacy(c, unit, t.per_example_clipping)?;
         }

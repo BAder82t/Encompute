@@ -58,6 +58,81 @@ pub struct TrainingConfig {
     /// privacy, where each participant's whole update is clipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_sgd: Option<DpSgdConfig>,
+    /// Hugging Face PEFT LoRA (`method` `peft-lora`). Absent: the
+    /// reference LoRA implementation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peft: Option<PeftConfig>,
+}
+
+/// The PEFT adapter configuration: every field that changes what trains
+/// or how.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeftConfig {
+    /// `LORA`.
+    pub peft_type: String,
+    pub r: u32,
+    pub lora_alpha: u32,
+    pub lora_dropout: String,
+    /// Sorted, distinct.
+    pub target_modules: Vec<String>,
+    /// `none`, `all` or `lora_only`.
+    pub bias: String,
+    /// Fully trained modules (the classification head), sorted, distinct.
+    pub modules_to_save: Vec<String>,
+    /// `SEQ_CLS`.
+    pub task_type: String,
+    /// `true` or `gaussian`.
+    pub init_lora_weights: String,
+    pub adapter_name: String,
+    /// The installed PEFT library (major.minor), as the package binds.
+    pub library: String,
+}
+
+impl PeftConfig {
+    fn validate(&self, c: &TrainingConfig) -> Result<()> {
+        let sorted = |v: &Vec<String>| {
+            let mut t = v.clone();
+            t.sort();
+            t.dedup();
+            t == *v
+        };
+        if self.peft_type != "LORA" || self.task_type != "SEQ_CLS" {
+            return Err(bad("PEFT support is LoRA for sequence classification"));
+        }
+        if self.r == 0 || self.lora_alpha == 0 || self.target_modules.is_empty() {
+            return Err(bad("PEFT LoRA needs a rank, an alpha and target modules"));
+        }
+        if !sorted(&self.target_modules) || !sorted(&self.modules_to_save) {
+            return Err(bad(
+                "PEFT target modules and modules to save must be sorted, distinct",
+            ));
+        }
+        if !["none", "all", "lora_only"].contains(&self.bias.as_str()) {
+            return Err(bad("PEFT bias is none, all or lora_only"));
+        }
+        if !["true", "gaussian"].contains(&self.init_lora_weights.as_str()) {
+            return Err(bad("PEFT init_lora_weights is true or gaussian"));
+        }
+        if self.adapter_name.is_empty() {
+            return Err(bad("PEFT needs an adapter name"));
+        }
+        match self.lora_dropout.parse::<f64>() {
+            Ok(d) if (0.0..1.0).contains(&d) && format!("{d:?}") == self.lora_dropout => {}
+            _ => {
+                return Err(bad(
+                    "PEFT lora_dropout must be in [0, 1), written as Rust prints it",
+                ))
+            }
+        }
+        if c.rank != self.r || c.alpha != self.lora_alpha || c.target_modules != self.target_modules
+        {
+            return Err(bad(
+                "the LoRA rank, alpha and target modules must be PEFT's",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// DP-SGD: each worker computes per-example gradients, sums each privacy
@@ -134,8 +209,8 @@ impl DpSgdConfig {
 
 impl TrainingConfig {
     pub fn validate(&self) -> Result<()> {
-        if self.method != "lora" {
-            return Err(bad("only LoRA fine-tuning is supported"));
+        if !["lora", "peft-lora"].contains(&self.method.as_str()) {
+            return Err(bad("only LoRA fine-tuning is supported (lora, peft-lora)"));
         }
         if self.rank == 0 || self.alpha == 0 || self.local_steps == 0 || self.batch_size == 0 {
             return Err(bad(
@@ -159,6 +234,15 @@ impl TrainingConfig {
         if let Some(d) = &self.dp_sgd {
             d.validate(self.local_steps)?;
         }
+        match (&self.peft, self.method.as_str()) {
+            (Some(p), "peft-lora") => p.validate(self)?,
+            (None, "lora") => {}
+            _ => {
+                return Err(bad(
+                    "method is lora (reference) or peft-lora (with a PEFT config)",
+                ))
+            }
+        }
         Ok(())
     }
 }
@@ -173,6 +257,11 @@ pub struct ModelCommitment {
     pub architecture: String,
     /// SHA-256 of the serialized weights (hex).
     pub weights_digest: String,
+    /// The Hugging Face package the model was imported from: its
+    /// resolved revision, every file's digest, the tokenizer and library
+    /// versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huggingface: Option<crate::hf::HfModelPackage>,
 }
 
 /// A commitment to a dataset: never the samples.
@@ -192,6 +281,26 @@ pub struct DatasetCommitment {
     /// dataset digest also covers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grouping_digest: Option<String>,
+    /// Text datasets: how the owner tokenized it. Tokenization changes the
+    /// effective training data, so it is bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preprocessing: Option<TextPreprocessing>,
+}
+
+/// How a text dataset was tokenized (and chunked): each chunk keeps its
+/// record's privacy unit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextPreprocessing {
+    /// The model package's tokenizer digest.
+    pub tokenizer_digest: String,
+    pub max_length: u32,
+    pub truncation: bool,
+    /// `max_length`.
+    pub padding: String,
+    /// Chunk overlap in tokens when long records are split into several
+    /// (each chunk keeps its record's unit); absent: truncated to one.
+    pub stride: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,8 +364,46 @@ impl TrainingSpec {
             return Err(bad("datasets must be sorted and distinct"));
         }
         let dp = self.config.dp_sgd.as_ref();
+        let hf = self.base_model.huggingface.as_ref();
+        if let Some(p) = hf {
+            p.validate()?;
+        }
+        if hf.is_some() != self.config.peft.is_some() {
+            return Err(bad(
+                "a Hugging Face model trains with PEFT, and PEFT needs a Hugging Face model",
+            ));
+        }
+        if let (Some(p), Some(c)) = (hf, &self.config.peft) {
+            if p.libraries.peft != c.library {
+                return Err(bad("the PEFT library version is not the package's"));
+            }
+        }
         for d in &self.datasets {
             hex64("dataset digest", &d.digest)?;
+            match (hf, &d.preprocessing) {
+                (None, None) => {}
+                (Some(p), Some(t))
+                    if t.tokenizer_digest == p.tokenizer_digest
+                        && t.max_length > 0
+                        && t.padding == "max_length"
+                        && (t.truncation || t.stride.is_none()) => {}
+                (Some(_), Some(_)) => {
+                    return Err(bad(format!(
+                        "{} was not tokenized with the model package's tokenizer, or its \
+                         preprocessing is malformed",
+                        d.asset_id
+                    )))
+                }
+                (Some(_), None) => {
+                    return Err(bad(format!("{} needs its text preprocessing", d.asset_id)))
+                }
+                (None, Some(_)) => {
+                    return Err(bad(format!(
+                        "{} declares text preprocessing without a Hugging Face model",
+                        d.asset_id
+                    )))
+                }
+            }
             match (dp, d.privacy_units, &d.grouping_digest) {
                 (None, None, None) => {}
                 (Some(c), Some(n), g) if n > 0 => match (c.grouping.as_str(), g) {

@@ -363,7 +363,16 @@ pub struct TrainingDeclaration {
     /// The training clips each privacy unit's gradient (DP-SGD).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub per_example_clipping: bool,
+    /// The workload: `pytorch-reference` or
+    /// `huggingface-sequence-classification`. Workload metadata, not a
+    /// security mechanism: the mechanisms still follow from the policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
 }
+
+/// The training workloads Encompute supports.
+pub const TRAINING_FRAMEWORKS: &[&str] =
+    &["pytorch-reference", "huggingface-sequence-classification"];
 
 /// Everything a plan was made from, carried in the plan so any verifier
 /// can re-derive and check it.

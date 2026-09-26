@@ -73,6 +73,9 @@ class ProjectAsset:
     # The PyTorch module or dataset, for fine-tuning (never serialized into
     # declarations, plans or the trust graph).
     payload: Any = field(default=None, compare=False, repr=False)
+    # Whether adapters trained on this asset may be exported publicly
+    # ("public"): the owner's explicit choice, part of its policy.
+    adapters: str = "private"
 
 
 @dataclass
@@ -120,31 +123,36 @@ class Project:
         self.security = security
         self._assets: Dict[str, ProjectAsset] = {}
 
-    def _add(self, id: str, owner: str, kind: str, policy: str, payload: Any = None) -> ProjectAsset:
+    def _add(self, id: str, owner: str, kind: str, policy: str, payload: Any = None,
+             adapters: str = "private") -> ProjectAsset:
         _id(id, "asset")
         if owner not in self.parties:
             raise EncomputeError("ENC1906", f"{owner} is not a party of {self.name}")
         if id in self._assets:
             raise EncomputeError("ENC1906", f"asset {id} is declared twice")
-        a = ProjectAsset(id, owner, kind, policy, payload)
+        if adapters not in ("private", "public"):
+            raise EncomputeError("ENC1906", 'adapters is "private" or "public"')
+        a = ProjectAsset(id, owner, kind, policy, payload, adapters)
         self._assets[id] = a
         return a
 
     def data(self, id: str, *, owner: str, policy: str = "private-training",
-             dataset: Any = None) -> ProjectAsset:
+             dataset: Any = None, adapters: str = "private") -> ProjectAsset:
         """A dataset owned by ``owner`` (for fine-tuning, pass
         ``dataset=encompute.torch.private_dataset(x, y)``)."""
         if policy not in DATA_POLICIES:
             raise EncomputeError("ENC1906", f"data policy is one of {', '.join(DATA_POLICIES)}")
-        return self._add(id, owner, "dataset", policy, dataset)
+        return self._add(id, owner, "dataset", policy, dataset, adapters)
 
     def model(self, id: str, *, owner: str, policy: str = "private-model",
-              module: Any = None) -> ProjectAsset:
+              module: Any = None, adapters: str = "private") -> ProjectAsset:
         """A model owned by ``owner`` (for fine-tuning, pass
-        ``module=encompute.torch.wrap_model(...)``)."""
+        ``module=encompute.torch.wrap_model(...)`` or
+        ``encompute.torch.huggingface(...)``). ``adapters="public"`` lets
+        adapters trained from it be exported, if every other parent agrees."""
         if policy not in MODEL_POLICIES:
             raise EncomputeError("ENC1906", f"model policy is one of {', '.join(MODEL_POLICIES)}")
-        return self._add(id, owner, "model", policy, module)
+        return self._add(id, owner, "model", policy, module, adapters)
 
     def finetune(self, *, model: Optional[ProjectAsset] = None,
                  data: Optional[Sequence[ProjectAsset]] = None,
@@ -298,18 +306,18 @@ class Project:
                 readers = "[" + ", ".join(_q(o) for o in owners) + "]"
             lines.append(
                 f"asset {_q(model.id)} model owners [{_q(model.owner)}] readers {readers} "
-                f"purposes [{_q(self.purpose)}] release never"
+                f"purposes [{_q(self.purpose)}] release never{_derive(model)}"
             )
         for d in data:
             lines.append(
                 f"asset {_q(d.id)} dataset owners [{_q(d.owner)}] readers [] "
-                f"purposes [{_q(self.purpose)}] release never"
+                f"purposes [{_q(self.purpose)}] release never{_derive(d)}"
             )
         for d in data:
             lines.append(
                 f"asset {_q('gradient-' + d.id)} gradient owners [{_q(d.owner)}] "
-                f"readers [{_q(recipient)}] purposes [{_q(self.purpose)}] release aggregate_only "
-                f"privacy unit {_q(unit)} epsilon {eps!r} delta {delta!r}"
+                f"readers [{_q(recipient)}] purposes [{_q(self.purpose)}] release aggregate_only"
+                f"{_derive(d)} privacy unit {_q(unit)} epsilon {eps!r} delta {delta!r}"
             )
         for i, d in enumerate(data):
             lines.append(
@@ -328,6 +336,11 @@ class Project:
             f"{sampling}"
         )
         return "\n".join(lines) + "\n"
+
+
+def _derive(a: ProjectAsset) -> str:
+    """The owner's permission for public adapters, if given."""
+    return " derive [adapter public to []]" if a.adapters == "public" else ""
 
 
 def _call(f: Any, *args: Any) -> Any:

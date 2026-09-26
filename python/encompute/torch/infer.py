@@ -16,7 +16,9 @@ import json
 import sys
 
 from .. import _native
-from . import lora, models, tensors
+import torch
+
+from . import lora, tasks, tensors
 
 
 def main() -> None:
@@ -30,21 +32,14 @@ def main() -> None:
         keys = dict(keys)
         weights = _native.open_asset(keys[base["asset_id"]], open(cfg["model_sealed"], "rb").read(),
                                      spec["project"], base["asset_id"], base["weights_digest"])
-        arch = json.loads(base["architecture"])
-        model = models.build(arch["factory"], arch["kwargs"])
-        model.load_state_dict(tensors.loads(bytes(weights)))
-        c = cfg["lora"]
-        lora.apply_lora(model, lora.LoRAConfig(rank=c["rank"], alpha=c["alpha"],
-                                               target_modules=tuple(c["target_modules"]),
-                                               seed=c["seed"]))
-        if lora.layout_digest(model) != spec["layout_digest"]:
-            raise ValueError("the adapter layout is not the approved one")
+        model = tasks.build(spec, weights, cfg["lora"]["seed"])
         adapter = _native.open_asset(keys["adapters"], open(cfg["adapter_sealed"], "rb").read(),
                                      spec["project"], cfg["adapter"], cfg["adapter_digest"])
         lora.set_flat(model, tensors.loads(bytes(adapter))["adapter"])
         model.eval()
-        x = tensors.loads(bytes.fromhex(cfg["inputs"]))["tokens"]
-        logits = model(x).detach()
+        batch = tensors.loads(bytes.fromhex(cfg["inputs"]))
+        with torch.no_grad():
+            logits = tasks.of_spec(spec).model_logits(model, batch).detach()
         print(json.dumps({"ok": True, "logits": tensors.dumps({"logits": logits}).hex()}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}))

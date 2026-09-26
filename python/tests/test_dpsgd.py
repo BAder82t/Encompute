@@ -24,7 +24,9 @@ torch = pytest.importorskip("torch")
 import encompute  # noqa: E402
 import encompute.torch as et  # noqa: E402
 from encompute import _native  # noqa: E402
-from encompute.torch import dpsgd, finetune as ft, lora, models  # noqa: E402
+from encompute.torch import dpsgd, finetune as ft, lora, models, tasks  # noqa: E402
+
+CL = tasks.CLASSIFIER
 
 
 def model(seed=0):
@@ -50,9 +52,9 @@ def test_vectorized_gradients_match_the_reference_for_any_microbatch():
     ids = torch.randint(500, 515, (40,), generator=torch.Generator().manual_seed(2))
     unit_of, n = dpsgd.unit_index(ids, len(x))
     sampled = dpsgd.poisson_sample(n, 0.6, torch.Generator().manual_seed(3))
-    ref = dpsgd.reference_clipped_sum(m, x, y, unit_of, sampled, 0.05)
+    ref = dpsgd.reference_clipped_sum(m, CL, {"x": x, "y": y}, unit_of, sampled, 0.05)
     for mb in (1, 3, 7, 1000):
-        got = dpsgd.clipped_sum(m, x, y, unit_of, sampled, 0.05, microbatch=mb)
+        got = dpsgd.clipped_sum(m, CL, {"x": x, "y": y}, unit_of, sampled, 0.05, microbatch=mb)
         assert torch.allclose(got, ref, atol=1e-6), mb
     # Only the adapter's parameters: the gradient has the layout's length.
     assert ref.numel() == sum(e["length"] for e in lora.layout(m))
@@ -81,14 +83,14 @@ def test_one_patient_moves_the_sum_by_at_most_the_clip():
     u1, n1 = dpsgd.unit_index(idc, len(xc))
     assert n1 == n0 + 1
     others = dpsgd.poisson_sample(n0, 0.5, torch.Generator().manual_seed(4))
-    without = dpsgd.clipped_sum(m, x, y, u0, others, clip)
-    with_canary = dpsgd.clipped_sum(m, xc, yc, u1, torch.cat([others, torch.tensor([n0])]),
+    without = dpsgd.clipped_sum(m, CL, {"x": x, "y": y}, u0, others, clip)
+    with_canary = dpsgd.clipped_sum(m, CL, {"x": xc, "y": yc}, u1, torch.cat([others, torch.tensor([n0])]),
                                     clip)
     moved = float((with_canary - without).norm())
     assert 0 < moved <= clip * (1 + 1e-5)
     # Ungrouped, the same records would count 30 times over.
     u2, _ = dpsgd.unit_index(None, len(xc))
-    ungrouped = dpsgd.clipped_sum(m, xc, yc, u2, torch.arange(len(x), len(xc)), clip)
+    ungrouped = dpsgd.clipped_sum(m, CL, {"x": xc, "y": yc}, u2, torch.arange(len(x), len(xc)), clip)
     assert float(ungrouped.norm()) > 5 * clip
 
 
@@ -174,7 +176,7 @@ def _train(noise: float, steps: int = 40, q: float = 0.032, clip: float = 1.0,
     xt, yt = records(500, 9)
     g = torch.Generator().manual_seed(5)
     for _ in range(steps):
-        total = sum(dpsgd.clipped_sum(m, x, y, u, dpsgd.poisson_sample(n, q, g), clip)
+        total = sum(dpsgd.clipped_sum(m, CL, {"x": x, "y": y}, u, dpsgd.poisson_sample(n, q, g), clip)
                     for x, y, u, n in sets)
         total = total + torch.randn(total.shape, generator=g) * noise * clip
         lora.set_flat(m, lora.get_flat(m) - lr * total / (q * 2000))

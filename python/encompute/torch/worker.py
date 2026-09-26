@@ -29,7 +29,7 @@ import traceback
 import torch
 
 from .. import _native
-from . import dpsgd, lora, models, tensors
+from . import dpsgd, lora, tasks, tensors
 
 
 def _failpoint(name: str) -> None:
@@ -43,11 +43,13 @@ def reply(**kw) -> None:
 
 
 def load_dataset(cfg: dict) -> tuple:
+    """The committed dataset's named tensors and its unit IDs (if any)."""
     data = open(cfg["dataset"], "rb").read()
     if _native.sha256_hex(data) != cfg["dataset_digest"]:
         raise ValueError(f"{cfg['dataset_asset']} is not the dataset the training spec commits to")
     t = tensors.loads(data)
-    return t["x"], t["y"], t.get("unit_ids")
+    unit_ids = t.pop("unit_ids", None)
+    return t, unit_ids
 
 
 class Worker:
@@ -67,9 +69,6 @@ class Worker:
             spec["base_model"]["weights_digest"],
         )
         del key
-        arch = json.loads(spec["base_model"]["architecture"])
-        self.model = models.build(arch["factory"], arch["kwargs"])
-        self.model.load_state_dict(tensors.loads(bytes(weights)))
         c = cfg["lora"]
         self.lcfg = lora.LoRAConfig(
             rank=c["rank"], alpha=c["alpha"], target_modules=tuple(c["target_modules"]),
@@ -77,15 +76,22 @@ class Worker:
             update_clip=c["update_clip"], local_steps=c["local_steps"],
             batch_size=c["batch_size"], rounds=c["rounds"], seed=c["seed"],
         )
-        lora.apply_lora(self.model, self.lcfg)
-        if lora.layout_digest(self.model) != spec["layout_digest"]:
-            raise ValueError("this worker's adapter layout is not the approved one")
-        self.x, self.y, unit_ids = load_dataset(cfg)
+        # The bound base model (Hugging Face: the package's library versions
+        # are checked first), the bound adapter, the approved layout.
+        self.model = tasks.build(spec, weights, c["seed"])
+        self.task = tasks.of_spec(spec)
+        self.data, unit_ids = load_dataset(cfg)
+        self.n = tasks.records(self.data)
+        self.versions = None
+        if spec["base_model"].get("huggingface"):
+            from . import hf
+            self.versions = hf.exact_versions()
+        self.grad_path = None
         self.dp = None
         if spec["config"].get("dp_sgd"):
             d = spec["config"]["dp_sgd"]
             mine = next(x for x in spec["datasets"] if x["asset_id"] == cfg["dataset_asset"])
-            self.unit_of, n_units = dpsgd.unit_index(unit_ids, len(self.x))
+            self.unit_of, n_units = dpsgd.unit_index(unit_ids, self.n)
             # The grouping must be the committed one.
             if (d["grouping"] == "unit_ids") != (unit_ids is not None):
                 raise ValueError("this dataset's grouping is not the approved one")
@@ -101,6 +107,9 @@ class Worker:
                 noise_multiplier=float(d["noise_multiplier"]), delta=float(d["delta"]),
                 grouping=d["grouping"], expected_batch=float(d["expected_batch"]),
                 microbatch=int(cfg.get("microbatch", 64)))
+            # Per-unit gradients, on the fast path if this model supports
+            # it; never ordinary clipping (fails closed otherwise).
+            self.grad_path = dpsgd.select_path(self.model, self.task, self.data)
             # The coordinator accepts DP-SGD contributions only from an
             # attested worker running this training code.
             self.contribution_record = os.path.join(os.path.dirname(cfg["state"]),
@@ -120,10 +129,11 @@ class Worker:
         )
         g = torch.Generator().manual_seed(seed)
         loss = torch.tensor(0.0)
+        self.model.train()
         for _ in range(self.lcfg.local_steps):
-            idx = torch.randint(0, len(self.x), (self.lcfg.batch_size,), generator=g)
+            idx = torch.randint(0, self.n, (self.lcfg.batch_size,), generator=g)
             opt.zero_grad()
-            loss = torch.nn.functional.cross_entropy(self.model(self.x[idx]), self.y[idx])
+            loss = self.task.losses(self.model, tasks.select(self.data, idx)).mean()
             loss.backward()
             opt.step()
         self.loss = float(loss)
@@ -135,8 +145,9 @@ class Worker:
         not used: the sample comes from the operating system."""
         lora.set_flat(self.model, torch.tensor(adapter, dtype=torch.float32))
         sampled = dpsgd.poisson_sample(self.n_units, self.dp.sampling_rate)
-        g = dpsgd.clipped_sum(self.model, self.x, self.y, self.unit_of, sampled,
-                              self.dp.per_example_clip, self.dp.microbatch)
+        self.model.train()
+        g = dpsgd.clipped_sum(self.model, self.task, self.data, self.unit_of, sampled,
+                              self.dp.per_example_clip, self.dp.microbatch, self.grad_path)
         return g * (dpsgd.CODEC_CLIP / self.dp.per_example_clip)
 
     def contribute(self, msg: dict) -> dict:
@@ -189,7 +200,7 @@ def main() -> None:
     except Exception as e:  # reported to the orchestrator, then exit
         reply(ready=False, error=f"{type(e).__name__}: {e}")
         return
-    reply(ready=True, record=w.record)
+    reply(ready=True, record=w.record, grad_path=w.grad_path, versions=w.versions)
     for line in sys.stdin:
         msg = json.loads(line)
         if msg.get("cmd") == "exit":

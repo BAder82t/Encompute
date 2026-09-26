@@ -122,6 +122,57 @@ pub fn attest_contribution(
     Ok(String::from_utf8(record.to_bytes().map_err(err)?).expect("JSON"))
 }
 
+/// Validates a Hugging Face model package manifest (JSON) and returns its
+/// ID (hex; shown as `enchf1:`).
+#[pyfunction]
+pub fn hf_package_id(manifest_json: &str) -> PyResult<String> {
+    let p: training::HfModelPackage = serde_json::from_str(manifest_json).map_err(|e| {
+        err(Error::new(
+            Code::ModelPackage,
+            format!("model package: {e}"),
+        ))
+    })?;
+    p.id().map_err(err)
+}
+
+/// Refuses a `model.safetensors.index.json` naming anything but the
+/// package's own safetensors files (`files`: a JSON list of names).
+#[pyfunction]
+pub fn hf_check_index(index_json: &str, files_json: &str) -> PyResult<()> {
+    let bad = |e: serde_json::Error| err(Error::new(Code::ModelPackage, format!("index: {e}")));
+    let index: serde_json::Value = serde_json::from_str(index_json).map_err(bad)?;
+    let files: Vec<String> = serde_json::from_str(files_json).map_err(bad)?;
+    training::hf::check_index(&index, &files).map_err(err)
+}
+
+/// The tokenizer digest a manifest's files imply (before validation).
+#[pyfunction]
+pub fn hf_tokenizer_digest(manifest_json: &str) -> PyResult<String> {
+    let p: training::HfModelPackage = serde_json::from_str(manifest_json).map_err(|e| {
+        err(Error::new(
+            Code::ModelPackage,
+            format!("model package: {e}"),
+        ))
+    })?;
+    Ok(p.expected_tokenizer_digest())
+}
+
+/// Refuses a file that may not enter a model package (remote code,
+/// pickled weights, anything unknown).
+#[pyfunction]
+pub fn hf_check_file(path: &str) -> PyResult<()> {
+    training::hf::check_file(path).map_err(err)
+}
+
+/// Refuses a `config.json` naming custom code or an unsupported
+/// architecture; returns its model type.
+#[pyfunction]
+pub fn hf_check_config(config_json: &str) -> PyResult<String> {
+    let v: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|e| err(Error::new(Code::ModelPackage, format!("config.json: {e}"))))?;
+    training::hf::check_config(&v).map_err(err)
+}
+
 /// Keys by asset, and the attestation record.
 type Acquired = (Vec<(String, Py<PyBytes>)>, String);
 
@@ -346,6 +397,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(training_attestation_policy, m)?)?;
     m.add_function(wrap_pyfunction!(contribution_attestation_policy, m)?)?;
     m.add_function(wrap_pyfunction!(attest_contribution, m)?)?;
+    m.add_function(wrap_pyfunction!(hf_package_id, m)?)?;
+    m.add_function(wrap_pyfunction!(hf_check_file, m)?)?;
+    m.add_function(wrap_pyfunction!(hf_tokenizer_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(hf_check_index, m)?)?;
+    m.add_function(wrap_pyfunction!(hf_check_config, m)?)?;
     m.add_function(wrap_pyfunction!(acquire_training_keys, m)?)?;
     m.add_function(wrap_pyfunction!(sha256_hex, m)?)?;
     m.add_function(wrap_pyfunction!(seal_asset, m)?)?;

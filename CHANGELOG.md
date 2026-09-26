@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Hugging Face Transformers + PEFT
+
+- **Hugging Face models**:
+  - `encompute.torch.huggingface(source, revision=)` imports a local or
+    Hub model into a content-addressed package (`enchf1:`). The revision is
+    resolved to an immutable commit; only safetensors, configuration and
+    tokenizer files are kept, each hashed.
+  - Refused (ENC2504): remote code (`*.py`, `auto_map`,
+    `trust_remote_code`), pickled weights, unknown files, a shard index
+    naming anything but the package's safetensors, unsupported
+    architectures, and other library versions than the package binds.
+  - Credentials are used for the download only.
+- **Workers never download.** They rebuild the Transformers-native class
+  from its configuration and load the sealed weights. The training spec
+  binds the whole package, which the lineage prints.
+- **PEFT LoRA** (`method="peft-lora"`):
+  - The official `peft` library adds the adapters. `PeftConfig` in the
+    training spec binds every setting.
+  - The adapter layout (the LoRA matrices and the head) is canonical.
+  - The reference LoRA stays for `method="lora"`.
+- **Text datasets**: `private_text_dataset(texts, labels, tokenizer=,
+  max_length=, stride=, unit_ids=)`.
+  - Every chunk keeps its patient.
+  - The tokenization is bound per dataset, and must use the package's
+    tokenizer.
+- **Per-patient gradients for Transformers**:
+  - a vectorized fast path and a one-patient-at-a-time reference path,
+    with identical semantics, chosen per model by a probe;
+  - training fails closed if neither works;
+  - task adapters read structured outputs.
+- **PEFT export**: `FineTuneResult.export_peft(dir)` writes standard PEFT
+  files and `encompute-adapter.json`. It does so only when every owner
+  permits (`adapters="public"`), no parent is revoked and the trust report
+  is satisfied. The files load with `PeftModel.from_pretrained`.
+- **Planner**: the training declaration names the framework (workload
+  metadata).
+- **Packaging**: the `encompute[huggingface]` extra.
+- **CI**:
+  - The fine-tuning gate now also runs `test_dpsgd.py`, which it
+    previously missed, and `test_huggingface.py`.
+  - Examples 15–17 are required.
+  - `examples/17_huggingface_peft` runs with 22 attacks failing closed.
+- ADR-018; INV-136–INV-142 (75 invariants).
+
 ### Patient-level differential privacy (DP-SGD)
 
 - **DP-SGD for confidential fine-tuning**:

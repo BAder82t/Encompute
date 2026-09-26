@@ -146,6 +146,7 @@ pub fn scenario(seed: u64) -> Option<Scenario> {
                 verified: r.coin(),
                 privacy_unit: None,
                 per_example_clipping: false,
+                framework: None,
             });
         }
         for i in 0..n {
@@ -433,6 +434,7 @@ pub fn adversarial(_: Scale) -> CheckResult {
             verified: false,
             privacy_unit: None,
             per_example_clipping: false,
+            framework: None,
         })
     };
     let exact = parse(EXACT_REQUIRED).expect("exact");
@@ -592,6 +594,7 @@ pub fn plan_id_binding(_: Scale) -> CheckResult {
         verified: true,
         privacy_unit: None,
         per_example_clipping: false,
+        framework: None,
     });
     let program = fed(true);
     let p = plan_or_fail(&program, &c).map_err(|e| e.message)?;

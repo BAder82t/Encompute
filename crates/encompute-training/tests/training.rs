@@ -31,6 +31,7 @@ fn spec() -> TrainingSpec {
             owner: "modelco".into(),
             architecture: "TinyTransformer(d=32)".into(),
             weights_digest: h('f'),
+            huggingface: None,
         },
         datasets: vec![
             DatasetCommitment {
@@ -40,6 +41,7 @@ fn spec() -> TrainingSpec {
                 digest: h('1'),
                 privacy_units: None,
                 grouping_digest: None,
+                preprocessing: None,
             },
             DatasetCommitment {
                 asset_id: "patients-b".into(),
@@ -48,6 +50,7 @@ fn spec() -> TrainingSpec {
                 digest: h('2'),
                 privacy_units: None,
                 grouping_digest: None,
+                preprocessing: None,
             },
         ],
         code_digest: h('3'),
@@ -65,6 +68,7 @@ fn spec() -> TrainingSpec {
             rounds: 3,
             adapter_parameters: 512,
             dp_sgd: None,
+            peft: None,
         },
         participants: ["hospital-a", "hospital-b"]
             .iter()
@@ -508,4 +512,235 @@ fn adapter_records_are_signed() {
     let mut t = r.clone();
     t.record.adapter_digest = h('c');
     assert!(t.verify(None).is_err());
+}
+
+fn hf_package() -> HfModelPackage {
+    let files: Vec<PackageFile> = [
+        ("config.json", 'a'),
+        ("model.safetensors", 'b'),
+        ("tokenizer.json", 'c'),
+        ("vocab.txt", 'd'),
+    ]
+    .iter()
+    .map(|(p, c)| PackageFile {
+        path: p.to_string(),
+        sha256: h(*c),
+        size: 10,
+    })
+    .collect();
+    let mut p = HfModelPackage {
+        version: 1,
+        repo_id: "org/tiny-bert".into(),
+        revision: "0123456789abcdef0123456789abcdef01234567".into(),
+        model_type: "bert".into(),
+        model_class: "BertForSequenceClassification".into(),
+        task: "sequence-classification".into(),
+        num_labels: 2,
+        config_digest: h('a'),
+        tokenizer_digest: String::new(),
+        files,
+        libraries: LibraryVersions {
+            transformers: "4.46".into(),
+            peft: "0.12".into(),
+            torch: "2.3".into(),
+        },
+        license: Some("apache-2.0".into()),
+    };
+    p.tokenizer_digest = p.expected_tokenizer_digest();
+    p
+}
+
+fn hf_spec() -> TrainingSpec {
+    let mut s = spec();
+    s.base_model.huggingface = Some(hf_package());
+    s.config.method = "peft-lora".into();
+    s.config.target_modules = vec!["query".into(), "value".into()];
+    s.config.peft = Some(PeftConfig {
+        peft_type: "LORA".into(),
+        r: s.config.rank,
+        lora_alpha: s.config.alpha,
+        lora_dropout: "0.0".into(),
+        target_modules: vec!["query".into(), "value".into()],
+        bias: "none".into(),
+        modules_to_save: vec!["classifier".into()],
+        task_type: "SEQ_CLS".into(),
+        init_lora_weights: "true".into(),
+        adapter_name: "default".into(),
+        library: "0.12".into(),
+    });
+    let tok = hf_package().tokenizer_digest;
+    for d in &mut s.datasets {
+        d.preprocessing = Some(TextPreprocessing {
+            tokenizer_digest: tok.clone(),
+            max_length: 64,
+            truncation: true,
+            padding: "max_length".into(),
+            stride: None,
+        });
+    }
+    s
+}
+
+#[test]
+fn hugging_face_packages_and_peft_are_bound_and_checked() {
+    let s = hf_spec();
+    s.validate().unwrap();
+    let id = s.id().unwrap();
+    type Edit = fn(&mut TrainingSpec);
+    let changes: Vec<(&str, Edit)> = vec![
+        ("revision", |s| {
+            s.base_model.huggingface.as_mut().unwrap().revision = "f".repeat(40)
+        }),
+        ("weight shard", |s| {
+            s.base_model.huggingface.as_mut().unwrap().files[1].sha256 = h('e')
+        }),
+        ("transformers", |s| {
+            s.base_model
+                .huggingface
+                .as_mut()
+                .unwrap()
+                .libraries
+                .transformers = "4.47".into()
+        }),
+        ("lora dropout", |s| {
+            s.config.peft.as_mut().unwrap().lora_dropout = "0.1".into()
+        }),
+        ("bias", |s| {
+            s.config.peft.as_mut().unwrap().bias = "all".into()
+        }),
+        ("modules to save", |s| {
+            s.config.peft.as_mut().unwrap().modules_to_save = vec![]
+        }),
+        ("init", |s| {
+            s.config.peft.as_mut().unwrap().init_lora_weights = "gaussian".into()
+        }),
+        ("adapter name", |s| {
+            s.config.peft.as_mut().unwrap().adapter_name = "other".into()
+        }),
+        ("max length", |s| {
+            s.datasets[0].preprocessing.as_mut().unwrap().max_length = 32
+        }),
+        ("stride", |s| {
+            s.datasets[0].preprocessing.as_mut().unwrap().stride = Some(8)
+        }),
+    ];
+    for (what, e) in changes {
+        let mut t = hf_spec();
+        e(&mut t);
+        assert_ne!(t.id().unwrap(), id, "{what}");
+    }
+    let refused: Vec<(&str, Edit)> = vec![
+        ("mutable revision", |s| {
+            s.base_model.huggingface.as_mut().unwrap().revision = "main".into()
+        }),
+        ("pickle", |s| {
+            let p = s.base_model.huggingface.as_mut().unwrap();
+            p.files.push(PackageFile {
+                path: "pytorch_model.bin".into(),
+                sha256: h('f'),
+                size: 1,
+            });
+        }),
+        ("remote code", |s| {
+            let p = s.base_model.huggingface.as_mut().unwrap();
+            p.files.push(PackageFile {
+                path: "zz_modeling.py".into(),
+                sha256: h('f'),
+                size: 1,
+            });
+        }),
+        ("no safetensors", |s| {
+            s.base_model
+                .huggingface
+                .as_mut()
+                .unwrap()
+                .files
+                .retain(|f| f.path != "model.safetensors")
+        }),
+        ("unsupported architecture", |s| {
+            s.base_model.huggingface.as_mut().unwrap().model_type = "llama".into()
+        }),
+        ("tokenizer digest", |s| {
+            s.base_model.huggingface.as_mut().unwrap().tokenizer_digest = h('9')
+        }),
+        ("another tokenizer", |s| {
+            s.datasets[0]
+                .preprocessing
+                .as_mut()
+                .unwrap()
+                .tokenizer_digest = h('9')
+        }),
+        ("no preprocessing", |s| s.datasets[0].preprocessing = None),
+        ("PEFT without HF", |s| s.base_model.huggingface = None),
+        ("HF without PEFT", |s| {
+            s.config.peft = None;
+            s.config.method = "lora".into();
+        }),
+        ("rank mismatch", |s| s.config.peft.as_mut().unwrap().r = 16),
+        ("PEFT library", |s| {
+            s.config.peft.as_mut().unwrap().library = "0.13".into()
+        }),
+        ("PEFT task", |s| {
+            s.config.peft.as_mut().unwrap().task_type = "CAUSAL_LM".into()
+        }),
+    ];
+    for (what, e) in refused {
+        let mut t = hf_spec();
+        e(&mut t);
+        let err = t.validate().unwrap_err();
+        assert!(
+            matches!(err.code, Code::TrainingSpec | Code::ModelPackage),
+            "{what}: {err:?}"
+        );
+    }
+    // The package's own checks.
+    use encompute_training::hf::{check_config, check_file};
+    for f in [
+        "pytorch_model.bin",
+        "model.pt",
+        "modeling_x.py",
+        "weights.pkl",
+        "notes.txt",
+        "sub/model.safetensors",
+    ] {
+        assert_eq!(check_file(f).unwrap_err().code, Code::ModelPackage, "{f}");
+    }
+    for f in [
+        "model.safetensors",
+        "model-00001-of-00002.safetensors",
+        "config.json",
+        "vocab.txt",
+    ] {
+        check_file(f).unwrap();
+    }
+    for c in [
+        r#"{"model_type": "bert", "auto_map": {"AutoModel": "x.Y"}}"#,
+        r#"{"model_type": "bert", "trust_remote_code": true}"#,
+        r#"{"model_type": "llama"}"#,
+        r#"{}"#,
+    ] {
+        assert!(
+            check_config(&serde_json::from_str(c).unwrap()).is_err(),
+            "{c}"
+        );
+    }
+    assert_eq!(
+        check_config(&serde_json::json!({"model_type": "roberta"})).unwrap(),
+        "roberta"
+    );
+    let files = vec!["model-1.safetensors".to_string(), "config.json".to_string()];
+    let index = |f: &str| serde_json::json!({"weight_map": {"a.weight": "model-1.safetensors", "b.weight": f}});
+    encompute_training::hf::check_index(&index("model-1.safetensors"), &files).unwrap();
+    for f in [
+        "../../etc/passwd",
+        "/etc/passwd",
+        "config.json",
+        "model-2.safetensors",
+        "pytorch_model.bin",
+    ] {
+        assert!(
+            encompute_training::hf::check_index(&index(f), &files).is_err(),
+            "{f}"
+        );
+    }
 }

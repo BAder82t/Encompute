@@ -467,4 +467,50 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:python/tests/test_dpsgd.py::test_the_trust_report_refuses_patient_claims_from_organization_training"),
         (EndToEnd, "script:examples/16_patient_private_lora/attack.py"),
     ]),
+    // Hugging Face Transformers + PEFT.
+    inv!("INV-136", "huggingface", "A Hugging Face training run is bound to an immutable model package: its resolved revision, every file's digest, the tokenizer and the library versions; changing any of them gets no model key.", [
+        (Positive, "test:python/tests/test_huggingface.py::test_packages_are_content_addressed"),
+        (Positive, "test:python/tests/test_huggingface.py::test_hub_revisions_resolve_and_credentials_are_never_stored"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::hugging_face_packages_and_peft_are_bound_and_checked"),
+        (Adversarial, "test:python/tests/test_huggingface.py::test_changed_settings_get_no_model_key"),
+        (EndToEnd, "test:python/tests/test_huggingface.py::test_the_run_is_trusted_and_binds_the_package"),
+    ]),
+    inv!("INV-137", "huggingface", "Confidential workers never execute repository code: remote code, custom-code configurations and trust_remote_code are refused, and models are rebuilt from Transformers-native classes only.", [
+        (Positive, "test:python/tests/test_huggingface.py::test_the_run_is_trusted_and_binds_the_package"),
+        (Negative, "test:python/tests/test_huggingface.py::test_unsafe_repositories_are_refused"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::hugging_face_packages_and_peft_are_bound_and_checked"),
+        (Adversarial, "script:examples/17_huggingface_peft/attack.py"),
+        (EndToEnd, "script:examples/17_huggingface_peft/attack.py"),
+    ]),
+    inv!("INV-138", "huggingface", "Only safetensors, configuration and tokenizer files enter a model package; pickled or unknown files are refused before any loading.", [
+        (Positive, "test:python/tests/test_huggingface.py::test_packages_are_content_addressed"),
+        (Negative, "test:python/tests/test_huggingface.py::test_unsafe_repositories_are_refused"),
+        (Adversarial, "test:crates/encompute-training/tests/training.rs::hugging_face_packages_and_peft_are_bound_and_checked"),
+        (EndToEnd, "script:examples/17_huggingface_peft/attack.py"),
+    ]),
+    inv!("INV-139", "huggingface", "The PEFT adapter layout is canonical and identical for every participant; every PEFT setting is bound in the TrainingSpecId.", [
+        (Positive, "test:python/tests/test_huggingface.py::test_the_peft_layout_is_canonical"),
+        (Negative, "test:python/tests/test_huggingface.py::test_changed_settings_get_no_model_key"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::hugging_face_packages_and_peft_are_bound_and_checked"),
+        (Adversarial, "script:examples/17_huggingface_peft/attack.py"),
+        (EndToEnd, "test:python/tests/test_huggingface.py::test_exported_adapters_load_with_standard_peft"),
+    ]),
+    inv!("INV-140", "huggingface", "Tokenization and chunking cannot change the declared privacy grouping: every chunk keeps its record's unit, and a regrouped or ungrouped dataset is refused.", [
+        (Positive, "test:python/tests/test_huggingface.py::test_tokenization_keeps_each_patients_records_together"),
+        (Negative, "test:python/tests/test_huggingface.py::test_workers_refuse_regrouped_or_ungrouped_text"),
+        (Adversarial, "script:examples/17_huggingface_peft/attack.py"),
+        (EndToEnd, "test:python/tests/test_huggingface.py::test_the_run_is_trusted_and_binds_the_package"),
+    ]),
+    inv!("INV-141", "huggingface", "A model without valid per-unit gradients cannot satisfy patient-level privacy: the fast and reference gradient paths agree with a per-record reference, and training fails closed when neither works.", [
+        (Positive, "test:python/tests/test_huggingface.py::test_both_gradient_paths_match_the_reference"),
+        (Negative, "test:python/tests/test_huggingface.py::test_no_per_unit_gradients_fails_closed"),
+        (Adversarial, "test:python/tests/test_huggingface.py::test_both_gradient_paths_match_the_reference"),
+        (EndToEnd, "test:python/tests/test_huggingface.py::test_the_run_is_trusted_and_binds_the_package"),
+    ]),
+    inv!("INV-142", "huggingface", "An adapter is exported as PEFT files only when every parent permits it, no parent is revoked and the trust report is satisfied; otherwise nothing is written.", [
+        (Positive, "test:python/tests/test_huggingface.py::test_exported_adapters_load_with_standard_peft"),
+        (Negative, "test:python/tests/test_huggingface.py::test_private_adapters_are_never_exported"),
+        (Adversarial, "test:python/tests/test_huggingface.py::test_export_after_revocation_writes_nothing"),
+        (EndToEnd, "script:examples/17_huggingface_peft/attack.py"),
+    ]),
 ];

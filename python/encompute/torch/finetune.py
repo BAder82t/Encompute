@@ -55,11 +55,11 @@ import torch
 
 from .. import _native
 from .._frontend import EncomputeError
-from . import dpsgd, lora, models, tensors
+from . import dpsgd, lora, models, tasks, tensors
 
 IMAGE = "sha256:" + "5" * 64  # the training worker image (development)
 CODE = ["worker.py", "lora.py", "tensors.py", "models.py", "finetune.py", "infer.py",
-        "dpsgd.py"]
+        "dpsgd.py", "tasks.py", "hf.py"]
 PRIVACY_UNIT = ("Privacy unit: organization. Patient-level DP requires per-example clipping "
                 "(DP-SGD) and is not claimed.")
 
@@ -312,9 +312,11 @@ class FineTuneResult:
             c["broker_proc"], c["broker"] = _start_broker(c["cli"], c["modelco"], c["mock_root"])
         return c["broker"]
 
-    def infer(self, tokens: torch.Tensor, adapter: Optional[str] = None) -> torch.Tensor:
+    def infer(self, inputs, adapter: Optional[str] = None) -> torch.Tensor:
         """Runs the base model with an adapter (default: the final one) in
-        an attested inference workload; returns the logits."""
+        an attested inference workload; returns the logits. ``inputs`` is a
+        token tensor (reference models), or a ``private_text_dataset`` or
+        a dict of named tensors (Hugging Face models)."""
         c = self._ctx
         which = adapter or self.adapter_id
         rec = c["modelco"] / f"{which}.record.json"
@@ -322,7 +324,7 @@ class FineTuneResult:
                   else c["adapter0_digest"])
         cfg = dict(c["infer"], broker=self._broker(), adapter=which, adapter_digest=digest,
                    adapter_sealed=str(c["modelco"] / f"{which}.enc"),
-                   inputs=tensors.dumps({"tokens": tokens}).hex())
+                   inputs=tensors.dumps(_inputs(inputs)).hex())
         path = c["modelco"] / f"infer-{which}.json"
         path.write_text(json.dumps(cfg))
         p = subprocess.run([sys.executable, "-m", "encompute.torch.infer", str(path)],
@@ -355,11 +357,54 @@ class FineTuneResult:
             raise EncomputeError(code, message) from None
         return json.loads(header)
 
+    def export_peft(self, path: str) -> str:
+        """Exports the adapter as standard PEFT files
+        (``adapter_config.json``, ``adapter_model.safetensors``), usable with
+        ``PeftModel.from_pretrained``, plus ``encompute-adapter.json`` (its
+        Encompute identity and lineage). Only if the export is permitted:
+        every parent's policy allows a public adapter, no parent is revoked,
+        and the trust report is satisfied. Otherwise nothing is written and
+        the refusal is returned."""
+        decision = self.export_adapter()
+        if "EXPORT PERMITTED" not in decision:
+            return decision.strip()
+        c = self._ctx
+        spec = json.loads(c["spec"])
+        if spec["config"]["method"] != "peft-lora":
+            raise TrainingFailed("PEFT export needs a Hugging Face (peft-lora) run")
+        if c.get("base_module") is None or c.get("adapter") is None:
+            raise TrainingFailed("export the adapter from the run that trained it")
+        from . import hf
+        import copy
+        model = hf.apply_peft(copy.deepcopy(c["base_module"]), spec["config"]["peft"],
+                              c["seed"])
+        lora.set_flat(model, c["adapter"])
+        out = Path(path)
+        out.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(str(out), safe_serialization=True)
+        hfp = spec["base_model"]["huggingface"]
+        (out / "encompute-adapter.json").write_text(json.dumps({
+            "adapter_id": self.adapter_id, "training_spec_id": self.training_spec_id,
+            "run_id": self.run_id, "model_package_id": f"enchf1:{c['package_id']}",
+            "base_model": {"repo_id": hfp["repo_id"], "revision": hfp["revision"],
+                           "asset_id": spec["base_model"]["asset_id"]},
+            "plan_id": self.plan_id}, indent=1))
+        return decision.strip()
+
     def close(self) -> None:
         b = self._ctx.get("broker_proc")
         if b and b.poll() is None:
             b.terminate()
             b.wait()
+
+
+def _inputs(inputs) -> Dict[str, torch.Tensor]:
+    if isinstance(inputs, torch.Tensor):
+        return {"x": inputs}
+    t = dict(inputs.tensors) if hasattr(inputs, "tensors") else dict(inputs)
+    for k in ("labels", "unit_ids", "y"):
+        t.pop(k, None)
+    return t
 
 
 # --- setup --------------------------------------------------------------------
@@ -375,23 +420,35 @@ def _exact(x: float) -> str:
     return f"{m}e{int(e)}" if e else m
 
 
+def _dataset(payload) -> Tuple[Dict[str, torch.Tensor], Optional[dict]]:
+    """A dataset's named tensors and, for text, its preprocessing."""
+    if hasattr(payload, "preprocessing"):
+        return dict(payload.tensors), payload.preprocessing
+    t = {"x": payload[0], "y": payload[1]}
+    if len(payload) == 3:
+        t["unit_ids"] = payload[2]
+    return t, None
+
+
 def _dp_settings(pv, data, cfg: lora.LoRAConfig) -> dict:
     """A DP-SGD run's settings, from ``encompute.Privacy`` and the datasets.
     The sampling rate defaults to the batch size over the smallest
     dataset's number of units."""
     eps, delta, z = pv.resolve()
     units = {}
-    grouped = [len(d.payload) == 3 for d in data]
+    sets = [_dataset(d.payload)[0] for d in data]
+    grouped = ["unit_ids" in t for t in sets]
     if any(grouped) and not all(grouped):
         raise EncomputeError("ENC2501", "either every dataset has unit_ids, or none does")
     if pv.unit != "record" and not all(grouped):
         raise EncomputeError(
             "ENC2501", f"{pv.unit}-level privacy needs each record's {pv.unit}: pass unit_ids "
-                       "to encompute.torch.private_dataset (one ID per record), so a "
+                       "to encompute.torch.private_dataset or private_text_dataset (one ID per "
+                       "record), so a "
                        f"{pv.unit}'s records are clipped together")
-    for d in data:
-        n = len(torch.unique(d.payload[2])) if grouped[0] else len(d.payload[0])
-        units[d.id] = n
+    for d, t in zip(data, sets):
+        units[d.id] = (len(torch.unique(t["unit_ids"])) if grouped[0]
+                       else len(next(iter(t.values()))))
     q = pv.sampling_rate if pv.sampling_rate is not None else cfg.batch_size / min(units.values())
     if not 0 < q < 1:
         raise EncomputeError("ENC2501", f"sampling rate {q} is not below 1: a dataset has fewer "
@@ -425,11 +482,24 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
         dp = _dp_settings(pv, data, cfg)
         cfg = replace(cfg, local_steps=1)  # one accounted step per round
 
-    base_state = {k: v.clone() for k, v in module.state_dict().items()}
+    pkg = getattr(module, "encompute_hf", None)
+    method = "peft-lora" if pkg is not None else "lora"
+    peft = None
+    if pkg is not None:
+        from . import hf
+        cfg = replace(cfg, target_modules=tuple(cfg.target_modules or hf.TARGETS[pkg.model_type]))
+        peft = hf.peft_config(pkg.model_type, cfg.rank, cfg.alpha, cfg.target_modules,
+                              dropout=cfg.dropout)
+    else:
+        cfg = replace(cfg, target_modules=tuple(cfg.target_modules or ("q", "v")))
+    base_state = {k: v.detach().clone() for k, v in module.state_dict().items()}
     weights = tensors.dumps(base_state)
     ref = models.build(module.encompute_factory, module.encompute_kwargs)
     ref.load_state_dict(base_state)
-    lora.apply_lora(ref, cfg)
+    if peft is not None:
+        ref = hf.apply_peft(ref, peft, cfg.seed)
+    else:
+        lora.apply_lora(ref, cfg)
     adapter0 = lora.get_flat(ref).clone()
     dim = adapter0.numel()
 
@@ -462,7 +532,9 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     (mc / "training-decl.json").write_text(json.dumps(
         {"model": model.id, "data": [d.id for d in data], "verified": verification == "required",
          "privacy_unit": "organization" if dp is None else dp["privacy_unit"],
-         "per_example_clipping": dp is not None}))
+         "per_example_clipping": dp is not None,
+         "framework": ("huggingface-sequence-classification" if pkg is not None
+                       else "pytorch-reference")}))
     args = [cli, "plan", "training.encompute", "--profile", project.security,
             "--infrastructure", "infra.json", "--training", "training-decl.json", "-o", "plan.json"]
     if allow_development:
@@ -519,14 +591,13 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     # digest covers every sample and label, in order.
     commitments = []
     for d in data:
-        x, y = d.payload[:2]
-        t = {"x": x, "y": y}
-        if len(d.payload) == 3:
-            t["unit_ids"] = d.payload[2]
+        t, pre = _dataset(d.payload)
         blob = tensors.dumps(t)
         (W / d.owner / "dataset.bin").write_bytes(blob)
         c = {"asset_id": d.id, "owner": d.owner, "gradient_asset": f"gradient-{d.id}",
              "digest": _native.sha256_hex(blob)}
+        if pre is not None:
+            c["preprocessing"] = pre
         if dp is not None:
             c["privacy_units"] = dp["units"][d.id]
             if "unit_ids" in t:
@@ -548,18 +619,20 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
             "architecture": json.dumps({"factory": module.encompute_factory,
                                         "kwargs": module.encompute_kwargs}, sort_keys=True),
             "weights_digest": _native.sha256_hex(weights),
+            **({} if pkg is None else {"huggingface": pkg.manifest}),
         },
         "datasets": commitments,
         "code_digest": code_digest(module.encompute_factory),
         "layout_digest": lora.layout_digest(ref),
         "config": {
-            "method": "lora", "rank": cfg.rank, "alpha": cfg.alpha,
+            "method": method, "rank": cfg.rank, "alpha": cfg.alpha,
             "target_modules": sorted(cfg.target_modules), "optimizer": cfg.optimizer,
             "learning_rate": repr(float(cfg.learning_rate)),
             "update_clip": repr(float(cfg.update_clip)),
             "local_steps": cfg.local_steps, "batch_size": cfg.batch_size,
             "rounds": cfg.rounds, "adapter_parameters": dim,
             **({} if dp is None else {"dp_sgd": {k: dp[k] for k in DP_SPEC_FIELDS}}),
+            **({} if peft is None else {"peft": peft}),
         },
         "participants": agg_spec["parties"],
     }
@@ -603,11 +676,13 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
         "lora": {"rank": cfg.rank, "alpha": cfg.alpha, "target_modules": list(cfg.target_modules),
                  "optimizer": cfg.optimizer, "learning_rate": cfg.learning_rate,
                  "update_clip": cfg.update_clip, "local_steps": cfg.local_steps,
-                 "batch_size": cfg.batch_size, "rounds": cfg.rounds, "seed": cfg.seed},
+                 "batch_size": cfg.batch_size, "rounds": cfg.rounds, "seed": cfg.seed,
+                 "dropout": cfg.dropout},
         "privacy": privacy if dp is None else pv.level,
         "dp_sgd": None if dp is None else {k: dp[k] for k in DP_SPEC_FIELDS},
         "contribution_policy": contrib[1] if contrib else "",
         "privacy_preview": rows,
+        "package_id": None if pkg is None else pkg.id,
     }
     _write_atomic(W / "run.json", json.dumps(state, indent=1).encode())
     return state
@@ -628,7 +703,8 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
         Privacy.of(privacy)  # refuse an unknown level before any work
     timings: Dict[str, float] = {}
     cli = _cli()
-    env = dict(os.environ, ENCOMPUTE_CLI=cli, PYTHONDONTWRITEBYTECODE="1")
+    env = dict(os.environ, ENCOMPUTE_CLI=cli, PYTHONDONTWRITEBYTECODE="1",
+               TOKENIZERS_PARALLELISM="false")
     recovery = None
     if resume:
         W = Path(resume)
@@ -640,8 +716,13 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
         say(f"{'Resuming':<24}accepted rounds {recovery['accepted'] or 'none'}; "
             f"lost rounds {recovery['lost'] or 'none'} (their privacy stays spent)")
     else:
-        if method != "lora":
-            raise EncomputeError("ENC2501", "only method='lora' is supported")
+        hf_model = getattr(getattr(model, "payload", None), "encompute_hf", None) is not None
+        if method not in ("lora", "peft-lora"):
+            raise EncomputeError("ENC2501", "method is 'lora' or 'peft-lora'")
+        if (method == "peft-lora") != hf_model:
+            raise EncomputeError(
+                "ENC2501", "method='peft-lora' fine-tunes a Hugging Face model "
+                           "(encompute.torch.huggingface); method='lora' a reference model")
         if verification not in ("receipt", "required"):
             raise EncomputeError("ENC1906", 'verification is "receipt" or "required"')
         module = model.payload
@@ -662,7 +743,7 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                           target_modules=tuple(c["target_modules"]), optimizer=c["optimizer"],
                           learning_rate=c["learning_rate"], update_clip=c["update_clip"],
                           local_steps=c["local_steps"], batch_size=c["batch_size"],
-                          rounds=c["rounds"], seed=c["seed"])
+                          rounds=c["rounds"], seed=c["seed"], dropout=c.get("dropout", 0.0))
     mc = W / st["model_owner"]
     spec_json, spec_id, run_id = st["spec"], st["training_spec_id"], st["run_id"]
     spec = json.loads(spec_json)
@@ -670,6 +751,16 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
     mock_root = st["mock_root"]
     coord_policy = (["--coordinator-policy", str(mc / "coord-policy.json")]
                     if st["attested_coord"] else [])
+    hfp = spec["base_model"].get("huggingface")
+    if hfp:
+        say(f"{'Framework':<24}Transformers {hfp['libraries']['transformers']}, "
+            f"PEFT {hfp['libraries']['peft']} (LoRA)")
+        say(f"{'Base model':<24}{hfp['repo_id']} ({hfp['model_class']})")
+        say(f"{'Resolved revision':<24}{hfp['revision']}")
+        say(f"{'Model package':<24}enchf1:{st['package_id'][:16]}...")
+        say(f"{'Weights':<24}SAFETENSORS VERIFIED "
+            f"({sum(f['path'].endswith('.safetensors') for f in hfp['files'])} file(s))")
+        say(f"{'Remote code':<24}DISABLED")
     say(f"{'Training':<24}LoRA (rank {cfg.rank}, {st['dim']} adapter parameters)")
     say(f"{'Participants':<24}{len(st['data'])}")
 
@@ -680,6 +771,8 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                                dp_sgd=dp)
     ctx["anchors"] = ["--parties", parties, "--coordinator-key", st["coord_key"], "--mock-root",
                       mock_root, "--execution-policy", str(mc / "training-policy.json")]
+    ctx.update(base_module=None if resume else model.payload, seed=cfg.seed,
+               package_id=st.get("package_id"))
     ctx["infer"] = dict(spec=spec_json, identity=str(mc / "coord.key"),
                         mock_seed=str(W / "hw.seed"), image=IMAGE,
                         model_sealed=str(mc / f"{st['model_id']}.enc"),
@@ -699,19 +792,27 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
     if not resume:
         bl = models.build(model.payload.encompute_factory, model.payload.encompute_kwargs)
         bl.load_state_dict(model.payload.state_dict())
-        lora.apply_lora(bl, cfg)
+        if spec["config"]["method"] == "peft-lora":
+            from . import hf
+            bl = hf.apply_peft(bl, spec["config"]["peft"], cfg.seed)
+        else:
+            lora.apply_lora(bl, cfg)
+        task = tasks.of_spec(spec)
         t = time.perf_counter()
-        x0, y0 = data[0].payload[:2]
+        b0 = tasks.select(_dataset(data[0].payload)[0], torch.arange(cfg.batch_size))
+        b0.pop("unit_ids", None)
         opt = torch.optim.SGD(list(lora.adapter_parameters(bl).values()), lr=cfg.learning_rate)
         for _ in range(cfg.local_steps):
             opt.zero_grad()
-            torch.nn.functional.cross_entropy(bl(x0[:cfg.batch_size]),
-                                              y0[:cfg.batch_size]).backward()
+            task.losses(bl, b0).mean().backward()
             opt.step()
         timings["plain_pytorch_local_training_s"] = time.perf_counter() - t
 
     # Training workers: attest, receive the model key, build the model.
     workers = []
+    grad_paths: Dict[str, str] = {}
+    provenance: Dict[str, Any] = {}
+    ctx["provenance"] = provenance
     losses: List[float] = []
     stopped = None
     done = 0
@@ -744,6 +845,10 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                 raise TrainingFailed(f"{d['owner']}'s training worker refused: {hello.get('error')}",
                                      p.stderr.read())
             workers.append((d, p))
+            if hello.get("grad_path"):
+                grad_paths[d["owner"]] = hello["grad_path"]
+            if hello.get("versions"):
+                provenance["libraries"] = hello["versions"]
             if not (pd / "attestation.json").exists():
                 (pd / "attestation.json").write_text(hello["record"])
                 _run([cli, "trust", "add", str(pd / "attestation.json"), "--bundle",
@@ -754,6 +859,11 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                 _run([cli, "trust", "add", str(contribution), "--bundle", "trust.json"], mc)
         timings["attestation_startup_s"] = time.perf_counter() - t
         say(f"{'Workers':<24}{len(workers)} attested, model key received")
+        if grad_paths:
+            paths = sorted(set(grad_paths.values()))
+            say(f"{'Per-patient gradients':<24}ACTIVE ("
+                + ", ".join({"vmap": "vectorized per-example gradients",
+                             "reference": "one patient at a time"}[x] for x in paths) + ")")
 
         keys = dict(_native.acquire_training_keys(
             spec_json, broker_url, ["checkpoints", "adapters"], str(mc / "coord.key"),
@@ -915,6 +1025,13 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
     except _native.NativeError as e:
         export = e.args[1]
     timings["total_s"] = time.perf_counter() - t0
+    ctx["adapter"] = adapter if done else None
+    if provenance:
+        provenance["gradient_paths"] = grad_paths
+        st_path = W / "run.json"
+        state = json.loads(st_path.read_text())
+        state.setdefault("provenance", []).append(provenance)
+        _write_atomic(st_path, json.dumps(state, indent=1).encode())
     result = FineTuneResult(
         adapter_id=adapter_id, plan_id=st["plan_id"], training_spec_id=spec_id, run_id=run_id,
         rounds=done, stopped=stopped, report=report, rows=rows,

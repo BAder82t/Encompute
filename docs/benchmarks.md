@@ -150,3 +150,31 @@ The per-example gradients are a small part of a round; the protocol's round
 trips dominate. Accuracy regression bound (`test_dpsgd.py`): with
 strong-patient noise, simulated DP-SGD stays within 0.1 of the same training
 without noise (about 0.76).
+
+## Hugging Face + PEFT
+
+`examples/17_huggingface_peft`:
+- the model: a tiny BERT (2 layers, width 32), PEFT LoRA rank 4 on
+  `query` and `value` plus the trained head (1,090 adapter parameters);
+- the data: two hospitals of 2,000 patients (4,120 tokenized records
+  each);
+- privacy: patient-level DP-SGD at sampling rate 0.05, 20 rounds;
+- setup: development attestation, all parties on one Apple M3 Max, debug
+  build.
+
+| Stage | Seconds |
+|---|---|
+| plain PyTorch + PEFT, one local step (the baseline) | 0.02 |
+| workers attest, load Transformers, pick the gradient path | 2.6 |
+| 20 rounds: per-patient gradients, secure aggregation, DP release | 57.5 |
+| sealed checkpoints and adapters | 0.24 |
+| adapter records into the trust graph | 0.71 |
+| total | 62.6 |
+
+Results:
+- Held-out accuracy goes from 0.77 (the base model) to 0.96, at ε 2.57 of
+  3 (δ 1e-6).
+- The exported PEFT adapter, loaded with plain Transformers and PEFT,
+  matches Encompute's attested inference to 1e-6.
+- About 2.9 s per round, as for the reference model: the protocol's round
+  trips dominate, not the per-patient gradients.

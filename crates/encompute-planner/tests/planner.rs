@@ -209,6 +209,7 @@ fn private_model_training_needs_attested_confidential_compute() {
         verified: false,
         privacy_unit: None,
         per_example_clipping: false,
+        framework: None,
     });
     // Normal hardware only: the model cannot meet the data anywhere.
     let e = plan_or_fail(&p, &c).unwrap_err();
@@ -258,6 +259,7 @@ fn a_model_the_data_owners_may_read_trains_locally() {
         verified: false,
         privacy_unit: None,
         per_example_clipping: false,
+        framework: None,
     });
     let plan = planned(&p, &c);
     assert_eq!(
@@ -318,6 +320,7 @@ fn the_validator_refuses_weakened_plans() {
         verified: false,
         privacy_unit: None,
         per_example_clipping: false,
+        framework: None,
     });
     let plan = planned(&p, &c);
     for (s, st) in plan.steps.iter().enumerate() {
@@ -390,6 +393,7 @@ fn verified_training_requires_attested_workloads() {
         verified: true,
         privacy_unit: None,
         per_example_clipping: false,
+        framework: None,
     });
     assert!(
         plan_or_fail(&p, &c).is_err(),

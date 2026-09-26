@@ -20,6 +20,11 @@ classifiers = [
 test = ["pytest>=7", "numpy"]
 # Confidential fine-tuning (encompute.torch); CPU wheels suffice.
 torch = ["torch>=2.2"]
+# Hugging Face Transformers + PEFT fine-tuning (encompute.torch.huggingface).
+# A model package binds the major.minor versions it was imported with;
+# CI tests transformers 4.46 and peft 0.12.
+huggingface = ["torch>=2.2", "transformers>=4.46,<5", "peft>=0.12,<1", "safetensors>=0.4",
+               "tokenizers>=0.20"]
 
 [tool.maturin]
 manifest-path = "crates/encompute-py/Cargo.toml"
