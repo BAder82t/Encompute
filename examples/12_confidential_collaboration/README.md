@@ -129,8 +129,8 @@ boundary that refuses it and why:
 - **Mock attestation protects nothing.** With real TEEs the same checks
   apply to hardware-signed evidence.
 - **Local training is not part of this example.** The hospitals' updates
-  are fixed vectors. The confidential fine-tuning example will run real
-  PyTorch training inside attested workloads.
+  are fixed vectors. Example 15 runs real PyTorch LoRA training inside
+  attested workloads.
 - **The coordinator sees the aggregate before noise** (central DP). Its
   attestation is what limits what it can do with it.
 - **DP bounds what the released aggregate reveals about one patient at the

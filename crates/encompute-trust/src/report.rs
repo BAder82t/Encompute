@@ -56,7 +56,7 @@ impl fmt::Display for Status {
 }
 
 /// The report's rows, in order.
-pub const ROWS: [&str; 10] = [
+pub const ROWS: [&str; 11] = [
     "Evidence",
     "Program",
     "Policy",
@@ -66,6 +66,7 @@ pub const ROWS: [&str; 10] = [
     "Private aggregation",
     "Privacy budget",
     "Execution",
+    "Training",
     "Lineage",
 ];
 
@@ -547,6 +548,7 @@ impl TrustGraph {
             }
         }
         rows.push(ex.row("Execution", Status::Verified));
+        rows.push(training_row(&g, a));
 
         // Lineage: aggregates derive from owned assets that their
         // contributors own; nothing revoked was used in a round opened (per
@@ -784,6 +786,145 @@ fn plan_row(g: &TrustGraph) -> Row {
         }
     }
     t.row("Plan", Status::Satisfied)
+}
+
+/// Training runs: each spec belongs to an approved plan and its
+/// aggregation spec is bound to that plan; each adapter is signed by a
+/// trusted coordinator, comes from a round of its spec's aggregation, and
+/// extends an earlier adapter of the same run.
+fn training_row(g: &TrustGraph, a: &Anchors) -> Row {
+    let mut t = Tally::default();
+    let spec_of = |id: &str| match g
+        .node(&node_id(NodeKind::Training, id))
+        .and_then(|n| n.evidence.as_ref())
+    {
+        Some(Evidence::TrainingSpec(s)) => Some(s.as_ref()),
+        _ => None,
+    };
+    for (id, n) in g.of(NodeKind::Training) {
+        t.present = true;
+        let Some(Evidence::TrainingSpec(s)) = &n.evidence else {
+            continue;
+        };
+        match g.spec(&s.aggregation_spec_id) {
+            None => t.fail(format!("{id}: its aggregation spec is not in the bundle")),
+            Some(agg) => {
+                if agg.plan.execution_plan_id.as_deref() != Some(s.plan_id.as_str()) {
+                    t.fail(format!("{id}: its aggregation is not bound to its plan"));
+                }
+                if agg.plan.program_id != s.program_id {
+                    t.fail(format!("{id}: its aggregation runs another program"));
+                }
+                if agg.parties != s.participants {
+                    t.fail(format!("{id}: its participants are not the aggregation's"));
+                }
+            }
+        }
+        for p in &s.participants {
+            match a.parties.get(p.party.as_str()) {
+                Some(k) if *k != p.public_key => t.fail(format!(
+                    "{id}: {} is bound to a key that is not the party's",
+                    p.party
+                )),
+                Some(_) => {}
+                None => t.unanchored(format!("no trusted key for {}", p.party)),
+            }
+        }
+        let program = match g
+            .node(&node_id(NodeKind::Program, &s.program_id))
+            .and_then(|n| n.evidence.as_ref())
+        {
+            Some(Evidence::Program(text)) => parse(text).ok(),
+            _ => None,
+        };
+        let c = program.as_ref().and_then(|p| p.confidentiality());
+        let owned_by = |asset: &str, owner: &str| {
+            c.and_then(|c| c.asset(asset))
+                .is_some_and(|x| x.policy.owners.iter().any(|o| o.as_str() == owner))
+        };
+        if !owned_by(&s.base_model.asset_id, &s.base_model.owner) {
+            t.fail(format!(
+                "{id}: the base model is not declared as its owner's"
+            ));
+        }
+        for d in &s.datasets {
+            if !owned_by(&d.asset_id, &d.owner) || !owned_by(&d.gradient_asset, &d.owner) {
+                t.fail(format!(
+                    "{id}: {} or its gradient is not declared as {}'s",
+                    d.asset_id, d.owner
+                ));
+            }
+        }
+    }
+    for (id, n) in g.of(NodeKind::Adapter) {
+        t.present = true;
+        let Some(Evidence::Adapter(r)) = &n.evidence else {
+            continue;
+        };
+        let rec = &r.record;
+        if let Err(e) = r.verify(None) {
+            t.fail(format!("{id}: {}", e.message));
+        }
+        if !a.coordinators.contains(&r.signer_key) {
+            let m = format!(
+                "{id}: signed by {}, not a trusted coordinator",
+                r.signer_key
+            );
+            if a.coordinators.is_empty() {
+                t.unanchored(m);
+            } else {
+                t.fail(m);
+            }
+        }
+        let Some(s) = spec_of(&rec.training_spec_id) else {
+            t.fail(format!("{id}: its training spec is not in the bundle"));
+            continue;
+        };
+        if rec.project != s.project
+            || rec.base_model != s.base_model.asset_id
+            || rec.datasets
+                != s.datasets
+                    .iter()
+                    .map(|d| d.asset_id.clone())
+                    .collect::<Vec<_>>()
+        {
+            t.fail(format!("{id}: its parents are not its training spec's"));
+        }
+        let round = g
+            .of(NodeKind::AggregationRound)
+            .find_map(|(_, n)| match &n.evidence {
+                Some(Evidence::AggregationReceipt(rr))
+                    if rr.id().ok().as_deref() == Some(rec.aggregation_receipt_id.as_str()) =>
+                {
+                    Some(rr)
+                }
+                _ => None,
+            });
+        match round {
+            None => t.fail(format!("{id}: its aggregation round is not in the bundle")),
+            Some(rr) => {
+                if rr.manifest.spec_id != s.aggregation_spec_id {
+                    t.fail(format!("{id}: its round ran outside its training spec"));
+                }
+                if rr.coordinator_key != r.signer_key {
+                    t.fail(format!("{id}: not recorded by its round's coordinator"));
+                }
+            }
+        }
+        if let Some(p) = &rec.previous {
+            match g
+                .node(&node_id(NodeKind::Adapter, p))
+                .and_then(|n| n.evidence.as_ref())
+            {
+                Some(Evidence::Adapter(prev))
+                    if prev.record.run_id == rec.run_id && prev.record.round < rec.round => {}
+                _ => t.fail(format!(
+                    "{id}: it does not extend an earlier adapter of its run"
+                )),
+            }
+        }
+    }
+    t.row("Training", Status::Verified)
 }
 
 impl fmt::Display for TrustReport {

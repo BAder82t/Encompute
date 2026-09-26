@@ -59,7 +59,8 @@ privacy, and every step leaves verifiable evidence.
 | Differential privacy (budgets, ledger, receipts) | working: discrete Gaussian on secure aggregates, zCDP accounting, tamper-evident ledgers, owner-side enforcement |
 | Trust graph (authorizations, revocation, lineage, one trust report) | working: owner-signed program approvals, revocation reach, a report rebuilt from evidence and checked against verifier-supplied keys |
 | Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
-| Assurance (security invariants under attack) | 52 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control (development attestation on one machine; organization-level DP) |
+| Assurance (security invariants under attack) | 60 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## Start here
 
@@ -72,6 +73,7 @@ does and does not protect ([examples/](examples/)):
 | 10 minutes | [Multi-party secure aggregation](examples/08_secure_aggregation/) |
 | 15 minutes | [Automatic confidential planning](examples/11_automatic_planner/) |
 | Full demo | [Confidential collaboration](examples/12_confidential_collaboration/) |
+| AI flagship | [Confidential LoRA fine-tuning](examples/15_confidential_lora/) |
 
 ```sh
 cargo build --bins && maturin develop -m crates/encompute-py/Cargo.toml
@@ -282,6 +284,31 @@ An independent validator checks every plan; its `encplan1:` ID binds
 aggregation rounds (`--plan`) and the trust graph, whose report says
 whether observed execution matched the plan.
 
+## Confidential fine-tuning
+
+PyTorch does the computation; Encompute decides who may hold what, and
+proves it. One call fine-tunes a private model on several
+parties' private data:
+
+```python
+import encompute.torch as et
+base = project.model("base-model", owner="modelco",
+                     module=et.wrap_model("encompute.torch.models:tiny_classifier"))
+a = project.data("patients-a", owner="hospital-a", dataset=et.private_dataset(xa, ya))
+b = project.data("patients-b", owner="hospital-b", dataset=et.private_dataset(xb, yb))
+adapter = project.finetune(model=base, data=[a, b], method="lora",
+                           privacy="standard", verification="required")
+adapter.infer(x); adapter.lineage(); adapter.export_adapter()   # EXPORT DENIED
+```
+
+Each hospital's training worker attests before it receives the model key.
+LoRA updates leave it only through secure aggregation with differential
+privacy (organization-level: each hospital's clipped update). Adapters and
+checkpoints are sealed; resuming can never roll back spent budget; every
+adapter's lineage is signed and checked by the trust report. PyTorch runs
+in plaintext inside the attested workload: the TEE, not PyTorch, protects
+data in use. See [examples/15_confidential_lora](examples/15_confidential_lora/).
+
 ## Trust graph
 
 Every mechanism leaves evidence; the trust graph joins it into one bundle
@@ -407,6 +434,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-keybroker` | Policy-gated key release to attested workloads (library, HTTP server, client) |
 | `crates/encompute-secagg` | Secure aggregation (Bonawitz et al.) bound to policies, rounds and receipts |
 | `crates/encompute-privacy` | Differential privacy: budgets, discrete Gaussian noise, zCDP accounting, ledger, receipts |
+| `crates/encompute-training` | Confidential fine-tuning: training specs, sealed assets and checkpoints, adapter records, export control |
+| `python/encompute/torch` | PyTorch integration: LoRA, attested training and inference workers, `Project.finetune` |
 | `crates/encompute-planner` | Planner: trust requirements, mechanism selection, plan validator, PlanIds |
 | `crates/encompute-trust` | Trust graph: authorizations, revocations, lineage, evidence, trust report |
 | `crates/encompute-assurance` | Assurance suite: invariant catalog, adversarial checks, release-gate report (not published) |
@@ -423,7 +452,8 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
-- **Next**: confidential fine-tuning (PyTorch/LoRA) behind the planner.
+- **Next**: patient-level DP (per-example clipping), larger Hugging Face
+  models, and real Confidential Space training workers.
 
 ## License
 

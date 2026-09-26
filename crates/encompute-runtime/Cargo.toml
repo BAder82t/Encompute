@@ -22,6 +22,7 @@ encompute-secagg.workspace = true
 encompute-privacy.workspace = true
 encompute-trust.workspace = true
 encompute-planner.workspace = true
+encompute-training.workspace = true
 encompute-tfhe.workspace = true
 encompute-tfhe-client = { workspace = true, optional = true }
 encompute-vfhe = { workspace = true, optional = true }

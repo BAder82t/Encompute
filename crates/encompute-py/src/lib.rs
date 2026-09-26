@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+mod training;
+
 use encompute_runtime::Mode;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -232,6 +234,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Model>()?;
     m.add_function(wrap_pyfunction!(privacy_presets, m)?)?;
     m.add_function(wrap_pyfunction!(plan, m)?)?;
+    training::register(m)?;
     m.add_function(wrap_pyfunction!(has_openfhe, m)?)?;
     m.add_function(wrap_pyfunction!(has_tfhe, m)?)?;
     m.add("NativeError", m.py().get_type::<NativeError>())?;

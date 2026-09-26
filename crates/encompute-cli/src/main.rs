@@ -195,6 +195,27 @@ enum Cmd {
     },
     /// Which backends and research features this build includes.
     Info,
+    /// An adapter's lineage: base model, training data, configuration,
+    /// aggregation, privacy spend, history and the evidence verdicts.
+    Lineage {
+        adapter: String,
+        #[command(flatten)]
+        bundle: trust::Bundle,
+        #[command(flatten)]
+        anchors: trust::AnchorArgs,
+        #[command(flatten)]
+        trust: attest::TrustArgs,
+    },
+    /// Export an adapter publicly: EXPORT DENIED unless every parent (base
+    /// model, datasets, updates) permits it.
+    Export {
+        adapter: String,
+        #[command(flatten)]
+        bundle: trust::Bundle,
+    },
+    /// Run a confidential training project (a Python file calling
+    /// `project.finetune`).
+    Train { project: PathBuf },
     /// Is the program valid, its policy and privacy valid, and does a plan
     /// exist?
     Check {
@@ -606,6 +627,28 @@ fn run(cli: Cli) -> Result<ExitCode> {
             deep,
         } => plan::plan(&model, &opts, out.as_deref(), json, deep),
         Cmd::Check { model, opts } => plan::check(&model, &opts),
+        Cmd::Lineage {
+            adapter,
+            bundle,
+            anchors,
+            trust,
+        } => trust::lineage(&adapter, &bundle.bundle, &anchors, &trust),
+        Cmd::Export { adapter, bundle } => trust::export(&adapter, &bundle.bundle),
+        Cmd::Train { project } => {
+            let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
+            let me =
+                std::env::current_exe().map_err(|e| Error::new(Code::BadInput, format!("{e}")))?;
+            let status = Command::new(&python)
+                .arg(&project)
+                .env("ENCOMPUTE_CLI", me)
+                .status()
+                .map_err(|e| Error::new(Code::BadInput, format!("{python}: {e}")))?;
+            Ok(if status.success() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
         Cmd::Info => {
             let yes = |b: bool| if b { "yes" } else { "no" };
             println!("encompute {}", env!("CARGO_PKG_VERSION"));

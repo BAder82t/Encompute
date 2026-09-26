@@ -39,8 +39,10 @@ jobs:
         run: |
           python -m venv .venv
           . .venv/bin/activate
-          pip install maturin numpy
+          pip install maturin numpy pytest
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           maturin develop
+          pytest -q python/tests/test_finetune.py
       - run: examples/run-all.sh standard
 
   # The release gate: every documented security invariant, quick scale.

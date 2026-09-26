@@ -1,0 +1,35 @@
+# The run
+DEVELOPMENT ATTESTATION: NO HARDWARE CONFIDENTIALITY
+Training                LoRA (rank 4, 256 adapter parameters)
+Workers                 2 attested, model key received
+Round 1/2               COMPLETE
+Round 2/2               COMPLETE
+Model protection        SATISFIED
+Dataset protection      SATISFIED
+Gradient protection     SATISFIED
+Privacy budget          SATISFIED
+Workload identity       VERIFIED
+Aggregation             VERIFIED
+Checkpoint lineage      COMPLETE
+Adapter lineage         COMPLETE
+TRUST REQUIREMENTS SATISFIED
+# Lineage
+base-model (modelco)
+patients-a (hospital-a)
+adapter-2 ← round 2
+attestation      ATTESTED
+# The adapter is usable, and stays private
+ADAPTER USABLE
+EXPORT DENIED: adapter-2 inherits release restrictions from:
+# Attacks
+ENC2002: broker: the workload is bound to execution spec
+base-model is not the version the training spec commits to
+this worker's adapter layout is not the approved one
+patients-a is not the dataset the training spec commits to
+RELEASE DENIED
+the coordinator's aggregation spec is not the approved one
+minimum must be at least 2
+the checkpoint is stale
+this checkpoint was made under another confidentiality or privacy policy
+it was rolled back or reset
+ALL ATTACKS FAILED CLOSED

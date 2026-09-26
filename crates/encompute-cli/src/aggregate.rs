@@ -239,7 +239,7 @@ pub enum AggregateCmd {
         party: String,
         #[arg(long)]
         key: PathBuf,
-        /// JSON array of numbers: this party's contribution.
+        /// JSON array of numbers: this party's contribution (`-`: stdin).
         #[arg(long)]
         values: PathBuf,
         /// Records the last round joined and refuses older or repeated
@@ -424,7 +424,17 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 None => None,
             };
             let party = PartyId::new(&party)?;
-            let values: Vec<f64> = json(&values)?;
+            // `-`: read from stdin, so a training worker's update never
+            // touches the disk.
+            let values: Vec<f64> = if values.as_os_str() == "-" {
+                let mut s = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
+                    .map_err(|e| Error::new(Code::BadInput, format!("stdin: {e}")))?;
+                serde_json::from_str(&s)
+                    .map_err(|e| Error::new(Code::BadInput, format!("stdin: {e}")))?
+            } else {
+                json(&values)?
+            };
             let mut st: PartyStateFile = if state.exists() {
                 PartyStateFile::read(&state)?
             } else {

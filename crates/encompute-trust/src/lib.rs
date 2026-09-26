@@ -6,6 +6,7 @@
 pub mod authz;
 pub mod graph;
 mod ingest;
+pub mod lineage;
 pub mod report;
 
 pub use authz::{

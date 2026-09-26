@@ -102,23 +102,8 @@ pub enum TrustCmd {
     Report {
         #[command(flatten)]
         bundle: Bundle,
-        /// The consortium's party identities (`parties.json`).
-        #[arg(long)]
-        parties: Option<PathBuf>,
-        /// A trusted aggregation coordinator's key (hex); repeatable.
-        #[arg(long = "coordinator-key")]
-        coordinator_keys: Vec<String>,
-        /// A trusted evaluator's receipt key (hex); repeatable.
-        #[arg(long = "evaluator-key")]
-        evaluator_keys: Vec<String>,
-        /// A report row that must be present, e.g. "Privacy budget";
-        /// repeatable.
-        #[arg(long)]
-        require: Vec<String>,
-        /// The attestation policy execution workloads must satisfy (from
-        /// `encompute attest policy`); rounds use their spec's own.
-        #[arg(long)]
-        execution_policy: Option<PathBuf>,
+        #[command(flatten)]
+        anchors: AnchorArgs,
         #[command(flatten)]
         trust: TrustArgs,
         #[arg(long)]
@@ -135,6 +120,105 @@ pub enum TrustCmd {
         #[command(flatten)]
         bundle: Bundle,
     },
+}
+
+/// What the verifier trusts, obtained out of band (never from the bundle).
+#[derive(Args, Clone, Default)]
+pub struct AnchorArgs {
+    /// The consortium's party identities (`parties.json`).
+    #[arg(long)]
+    pub parties: Option<PathBuf>,
+    /// A trusted aggregation coordinator's key (hex); repeatable.
+    #[arg(long = "coordinator-key")]
+    pub coordinator_keys: Vec<String>,
+    /// A trusted evaluator's receipt key (hex); repeatable.
+    #[arg(long = "evaluator-key")]
+    pub evaluator_keys: Vec<String>,
+    /// A report row that must be present, e.g. "Privacy budget";
+    /// repeatable.
+    #[arg(long)]
+    pub require: Vec<String>,
+    /// The attestation policy execution and training workloads must
+    /// satisfy (from `encompute attest policy`); rounds use their spec's
+    /// own.
+    #[arg(long)]
+    pub execution_policy: Option<PathBuf>,
+}
+
+/// The bundle and its trust report under `anchors`.
+pub(crate) fn checked(
+    bundle: &Path,
+    a: &AnchorArgs,
+    trust: &TrustArgs,
+) -> Result<(TrustGraph, encompute_runtime::trust::TrustReport)> {
+    let g = open(bundle)?;
+    let verifier = trust.verifier(None).ok();
+    let mut anchors = Anchors {
+        coordinators: a.coordinator_keys.iter().cloned().collect(),
+        evaluators: a.evaluator_keys.iter().cloned().collect(),
+        ..Anchors::default()
+    };
+    if let Some(p) = &a.parties {
+        let ids: Vec<PartyIdentity> = serde_json::from_slice(&read(p)?)
+            .map_err(|e| Error::new(Code::TrustGraph, format!("{}: {e}", p.display())))?;
+        anchors.parties = ids
+            .into_iter()
+            .map(|i| (i.party.to_string(), i.public_key))
+            .collect();
+    }
+    let execution_policy: Option<encompute_runtime::attestation::AttestationPolicy> =
+        match &a.execution_policy {
+            Some(p) => Some(
+                serde_json::from_slice(&read(p)?)
+                    .map_err(|e| Error::new(Code::TrustGraph, format!("{}: {e}", p.display())))?,
+            ),
+            None => None,
+        };
+    let r = g.report(&ReportOptions {
+        anchors,
+        verifier: verifier.as_ref(),
+        execution_policy: execution_policy.as_ref(),
+        require: a.require.clone(),
+        ..ReportOptions::default()
+    })?;
+    Ok((g, r))
+}
+
+/// `encompute lineage`: an adapter's full lineage and evidence verdicts.
+pub fn lineage(
+    adapter: &str,
+    bundle: &Path,
+    a: &AnchorArgs,
+    trust: &TrustArgs,
+) -> Result<ExitCode> {
+    let (g, r) = checked(bundle, a, trust)?;
+    print!(
+        "{}",
+        encompute_runtime::trust::lineage::adapter_lineage(&g, adapter, &r)?
+    );
+    Ok(if r.satisfied {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// `encompute export`: permitted only if every parent's policy allows it.
+pub fn export(adapter: &str, bundle: &Path) -> Result<ExitCode> {
+    let g = open(bundle)?;
+    let (spec, program) = encompute_runtime::trust::lineage::adapter_context(&g, adapter)?;
+    let p = encompute_ir::parse(&program)?;
+    match encompute_runtime::training::check_export(&p, &spec, adapter) {
+        Ok(()) => {
+            println!("EXPORT PERMITTED: every parent of {adapter} allows public release");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) if e.code == Code::ExportDenied => {
+            println!("{}", e.message);
+            Ok(ExitCode::from(1))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
@@ -184,6 +268,13 @@ fn add_evidence(g: &mut TrustGraph, bytes: &[u8]) -> Result<String> {
     }
     if let Ok(p) = encompute_runtime::planner::ConfidentialExecutionPlan::from_bytes(bytes) {
         return g.add_plan(p);
+    }
+    if let Ok(s) = serde_json::from_slice::<encompute_runtime::training::TrainingSpec>(bytes) {
+        return g.add_training_spec(s);
+    }
+    if let Ok(r) = serde_json::from_slice::<encompute_runtime::training::SignedAdapterRecord>(bytes)
+    {
+        return g.add_adapter(r);
     }
     Err(Error::new(
         Code::TrustEvidence,
@@ -322,43 +413,11 @@ pub fn trust(cmd: TrustCmd) -> Result<ExitCode> {
         }
         TrustCmd::Report {
             bundle,
-            parties,
-            coordinator_keys,
-            evaluator_keys,
-            require,
-            execution_policy,
+            anchors,
             trust,
             json,
         } => {
-            let g = open(&bundle.bundle)?;
-            let verifier = trust.verifier(None).ok();
-            let mut anchors = Anchors {
-                coordinators: coordinator_keys.into_iter().collect(),
-                evaluators: evaluator_keys.into_iter().collect(),
-                ..Anchors::default()
-            };
-            if let Some(p) = parties {
-                let ids: Vec<PartyIdentity> = serde_json::from_slice(&read(&p)?)
-                    .map_err(|e| Error::new(Code::TrustGraph, format!("{}: {e}", p.display())))?;
-                anchors.parties = ids
-                    .into_iter()
-                    .map(|i| (i.party.to_string(), i.public_key))
-                    .collect();
-            }
-            let execution_policy: Option<encompute_runtime::attestation::AttestationPolicy> =
-                match &execution_policy {
-                    Some(p) => Some(serde_json::from_slice(&read(p)?).map_err(|e| {
-                        Error::new(Code::TrustGraph, format!("{}: {e}", p.display()))
-                    })?),
-                    None => None,
-                };
-            let r = g.report(&ReportOptions {
-                anchors,
-                verifier: verifier.as_ref(),
-                execution_policy: execution_policy.as_ref(),
-                require,
-                ..ReportOptions::default()
-            })?;
+            let (_, r) = checked(&bundle.bundle, &anchors, &trust)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&r).expect("JSON"));
             } else {

@@ -17,6 +17,7 @@ use encompute_secagg::{
     aggregate_asset_id, verify_aggregation_receipt, AggregationReceipt, AggregationSpec,
     PartyIdentity,
 };
+use encompute_training::{SignedAdapterRecord, TrainingSpec};
 use encompute_verification::{PolicyId, PrivacyPolicyId, SignedExecutionReceipt};
 
 use crate::authz::{SignedAuthorization, SignedRevocation};
@@ -260,6 +261,100 @@ impl TrustGraph {
             EdgeKind::Runs,
             &node_id(NodeKind::Program, &plan.program_id),
         );
+        Ok(id)
+    }
+
+    /// A training specification (validated; the report checks it against
+    /// the plan and the rounds).
+    pub fn add_training_spec(&mut self, spec: TrainingSpec) -> Result<String> {
+        spec.validate()?;
+        if !self
+            .nodes
+            .contains_key(&node_id(NodeKind::Program, &spec.program_id))
+        {
+            return Err(graph_err("the training spec's program is not in the graph"));
+        }
+        self.link_training_spec(&spec)
+    }
+
+    fn link_training_spec(&mut self, spec: &TrainingSpec) -> Result<String> {
+        let id = node_id(NodeKind::Training, &spec.id()?);
+        let mut n = with(
+            node(
+                NodeKind::Training,
+                &format!(
+                    "{} fine-tuning of {}",
+                    spec.config.method, spec.base_model.asset_id
+                ),
+            ),
+            &[("project", spec.project.clone())],
+        );
+        n.evidence = Some(Evidence::TrainingSpec(Box::new(spec.clone())));
+        self.upsert(id.clone(), n)?;
+        self.edge(
+            &id,
+            EdgeKind::Runs,
+            &node_id(NodeKind::Program, &spec.program_id),
+        );
+        self.edge(
+            &id,
+            EdgeKind::GovernedBy,
+            &node_id(NodeKind::Plan, &spec.plan_id),
+        );
+        self.edge(
+            &id,
+            EdgeKind::Uses,
+            &node_id(NodeKind::Asset, &spec.base_model.asset_id),
+        );
+        for d in &spec.datasets {
+            self.edge(&id, EdgeKind::Uses, &node_id(NodeKind::Asset, &d.asset_id));
+        }
+        Ok(id)
+    }
+
+    /// An adapter produced by a training round, signed by the coordinator
+    /// (the report requires a trusted coordinator key).
+    pub fn add_adapter(&mut self, r: SignedAdapterRecord) -> Result<String> {
+        r.verify(None)?;
+        self.link_adapter(&r)
+    }
+
+    fn link_adapter(&mut self, r: &SignedAdapterRecord) -> Result<String> {
+        let a = &r.record;
+        let id = node_id(NodeKind::Adapter, &a.adapter_id);
+        let mut n = with(
+            node(
+                NodeKind::Adapter,
+                &format!("{} (round {})", a.adapter_id, a.round),
+            ),
+            &[("adapter_digest", a.adapter_digest.clone())],
+        );
+        n.evidence = Some(Evidence::Adapter(Box::new(r.clone())));
+        self.upsert(id.clone(), n)?;
+        self.edge(
+            &id,
+            EdgeKind::GovernedBy,
+            &node_id(NodeKind::Training, &a.training_spec_id),
+        );
+        self.edge(
+            &id,
+            EdgeKind::DerivedFrom,
+            &node_id(
+                NodeKind::Aggregate,
+                &aggregate_asset_id(&a.aggregation_receipt_id, &a.aggregation_output),
+            ),
+        );
+        self.edge(
+            &id,
+            EdgeKind::DerivedFrom,
+            &node_id(NodeKind::Asset, &a.base_model),
+        );
+        for d in &a.datasets {
+            self.edge(&id, EdgeKind::DerivedFrom, &node_id(NodeKind::Asset, d));
+        }
+        if let Some(p) = &a.previous {
+            self.edge(&id, EdgeKind::DerivedFrom, &node_id(NodeKind::Adapter, p));
+        }
         Ok(id)
     }
 
@@ -527,6 +622,8 @@ impl TrustGraph {
         let order = |e: &Evidence| match e {
             Evidence::Program(_) => 0,
             Evidence::Plan(_) => 0,
+            Evidence::TrainingSpec(_) => 1,
+            Evidence::Adapter(_) => 8,
             Evidence::AggregationSpec(_) => 1,
             Evidence::Attestation(_) => 2,
             Evidence::Authorization(_) => 3,
@@ -545,6 +642,8 @@ impl TrustGraph {
             let linked = match e {
                 Evidence::Program(t) => g.link_program(t),
                 Evidence::Plan(p) => g.link_plan(p),
+                Evidence::TrainingSpec(s) => g.link_training_spec(s),
+                Evidence::Adapter(r) => g.link_adapter(r),
                 Evidence::AggregationSpec(s) => g.link_aggregation_spec(s),
                 Evidence::Attestation(a) => g.link_attestation(a),
                 Evidence::Authorization(a) => g.link_authorization(a),

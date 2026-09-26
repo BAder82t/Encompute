@@ -122,6 +122,15 @@ pub enum Code {
     PlanInvalid,
     /// Execution or evidence does not match the approved plan (ENC2403).
     PlanMismatch,
+    /// A training run, worker or artifact does not match the approved
+    /// training specification (ENC2501).
+    TrainingSpec,
+    /// A checkpoint or sealed artifact is corrupted, from another project
+    /// or run, or behind the authoritative privacy ledger (ENC2502).
+    Checkpoint,
+    /// EXPORT DENIED: a derived asset inherits a release restriction
+    /// (ENC2503).
+    ExportDenied,
 }
 
 impl Code {
@@ -176,13 +185,16 @@ impl Code {
             Code::PlanningFailed => "ENC2401",
             Code::PlanInvalid => "ENC2402",
             Code::PlanMismatch => "ENC2403",
+            Code::TrainingSpec => "ENC2501",
+            Code::Checkpoint => "ENC2502",
+            Code::ExportDenied => "ENC2503",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 49] = [
+    pub const ALL: [Code; 52] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -232,6 +244,9 @@ impl Code {
         Code::PlanningFailed,
         Code::PlanInvalid,
         Code::PlanMismatch,
+        Code::TrainingSpec,
+        Code::Checkpoint,
+        Code::ExportDenied,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Confidential fine-tuning
+
+- **Real PyTorch LoRA fine-tuning, protected end to end** (ADR-016, new
+  crate `encompute-training`, `encompute.torch`):
+  `Project.finetune(model=, data=, method="lora", privacy=,
+  verification=)` plans the run, attests each participant's training
+  worker, releases the model key only to it, trains LoRA locally with
+  PyTorch, securely aggregates the clipped updates with differential
+  privacy (organization-level), writes immutable sealed adapters and
+  checkpoints, records signed adapter lineage, and verifies the whole run
+  with one trust report.
+- **Training spec** (`enctrain1:`) binding the plan, model and dataset
+  digests, training code, LoRA configuration and tensor layout; workers
+  rebuild models from bound factories (never pickles).
+- **Checkpoint resume** refuses stale, foreign, tampered or rolled-back
+  state against the authoritative privacy ledgers.
+- `encompute lineage`, `encompute export` (EXPORT DENIED unless every
+  parent permits), `encompute train`, `aggregate join --values -`; trust
+  graph Training and Adapter nodes and a Training report row; attested
+  inference with the adapter. Errors ENC2501–ENC2503.
+- `examples/15_confidential_lora` with every attack failing closed;
+  INV-120–INV-127 (60 invariants).
+
 ### Examples
 
 - **A runnable example for every capability** (`examples/01`–`14`): CKKS
@@ -75,7 +98,7 @@
 ### Assurance
 
 - **System assurance suite** (`encompute-assurance`, `docs/assurance.md`):
-  52 security invariants, each with positive, negative, adversarial and
+  60 security invariants, each with positive, negative, adversarial and
   end-to-end evidence; adversarial checks for DP crash injection,
   multi-parent atomicity, multi-process double spend, ledger tampering,
   receipt mutation and SecAgg at scale; `assurance-report` as the release

@@ -28,7 +28,7 @@ requirement.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import _native
@@ -70,6 +70,9 @@ class ProjectAsset:
     owner: str
     kind: str
     policy: str
+    # The PyTorch module or dataset, for fine-tuning (never serialized into
+    # declarations, plans or the trust graph).
+    payload: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -117,27 +120,43 @@ class Project:
         self.security = security
         self._assets: Dict[str, ProjectAsset] = {}
 
-    def _add(self, id: str, owner: str, kind: str, policy: str) -> ProjectAsset:
+    def _add(self, id: str, owner: str, kind: str, policy: str, payload: Any = None) -> ProjectAsset:
         _id(id, "asset")
         if owner not in self.parties:
             raise EncomputeError("ENC1906", f"{owner} is not a party of {self.name}")
         if id in self._assets:
             raise EncomputeError("ENC1906", f"asset {id} is declared twice")
-        a = ProjectAsset(id, owner, kind, policy)
+        a = ProjectAsset(id, owner, kind, policy, payload)
         self._assets[id] = a
         return a
 
-    def data(self, id: str, *, owner: str, policy: str = "private-training") -> ProjectAsset:
-        """A dataset owned by ``owner``."""
+    def data(self, id: str, *, owner: str, policy: str = "private-training",
+             dataset: Any = None) -> ProjectAsset:
+        """A dataset owned by ``owner`` (for fine-tuning, pass
+        ``dataset=encompute.torch.private_dataset(x, y)``)."""
         if policy not in DATA_POLICIES:
             raise EncomputeError("ENC1906", f"data policy is one of {', '.join(DATA_POLICIES)}")
-        return self._add(id, owner, "dataset", policy)
+        return self._add(id, owner, "dataset", policy, dataset)
 
-    def model(self, id: str, *, owner: str, policy: str = "private-model") -> ProjectAsset:
-        """A model owned by ``owner``."""
+    def model(self, id: str, *, owner: str, policy: str = "private-model",
+              module: Any = None) -> ProjectAsset:
+        """A model owned by ``owner`` (for fine-tuning, pass
+        ``module=encompute.torch.wrap_model(...)``)."""
         if policy not in MODEL_POLICIES:
             raise EncomputeError("ENC1906", f"model policy is one of {', '.join(MODEL_POLICIES)}")
-        return self._add(id, owner, "model", policy)
+        return self._add(id, owner, "model", policy, module)
+
+    def finetune(self, *, model: ProjectAsset, data: Sequence[ProjectAsset],
+                 method: str = "lora", privacy: str = "strong",
+                 verification: str = "required", **kwargs: Any):
+        """Confidential LoRA fine-tuning of ``model`` on ``data``: planned,
+        attested, securely aggregated, differentially private, checkpointed
+        and verified. Returns an ``encompute.torch.finetune.FineTuneResult``.
+        Raises :class:`PlanningFailed` if no available mechanism satisfies
+        the policy. Needs PyTorch."""
+        from .torch.finetune import finetune
+        return finetune(self, model=model, data=data, method=method, privacy=privacy,
+                        verification=verification, **kwargs)
 
     def train(
         self,

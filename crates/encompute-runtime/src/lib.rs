@@ -29,6 +29,7 @@ pub use encompute_keybroker as keybroker;
 pub use encompute_planner as planner;
 pub use encompute_privacy as dp;
 pub use encompute_secagg as secagg;
+pub use encompute_training as training;
 pub use encompute_trust as trust;
 pub use encompute_verification as verification;
 pub use explain::Measurement;

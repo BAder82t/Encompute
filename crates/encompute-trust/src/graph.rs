@@ -15,6 +15,7 @@ use encompute_ir::{Code, Error, Result};
 use encompute_planner::ConfidentialExecutionPlan;
 use encompute_privacy::PrivacyReceipt;
 use encompute_secagg::{AggregationReceipt, AggregationSpec};
+use encompute_training::{SignedAdapterRecord, TrainingSpec};
 use encompute_verification::canonical::canonical_json;
 use encompute_verification::SignedExecutionReceipt;
 
@@ -42,6 +43,10 @@ pub enum NodeKind {
     Execution,
     /// An approved confidential execution plan (ADR-015).
     Plan,
+    /// A training specification (ADR-016).
+    Training,
+    /// A LoRA adapter produced by a training round (ADR-016).
+    Adapter,
 }
 
 impl NodeKind {
@@ -61,6 +66,8 @@ impl NodeKind {
             NodeKind::Attestation => "attestation",
             NodeKind::Execution => "execution",
             NodeKind::Plan => "plan",
+            NodeKind::Training => "training",
+            NodeKind::Adapter => "adapter",
         }
     }
 }
@@ -84,6 +91,8 @@ pub enum Evidence {
     Attestation(Box<AttestationRecord>),
     ExecutionReceipt(Box<SignedExecutionReceipt>),
     Plan(Box<ConfidentialExecutionPlan>),
+    TrainingSpec(Box<TrainingSpec>),
+    Adapter(Box<SignedAdapterRecord>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

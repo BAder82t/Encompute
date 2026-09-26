@@ -939,6 +939,7 @@ dependencies = [
 name = "encompute-py"
 version = "0.2.0"
 dependencies = [
+ "ed25519-dalek",
  "encompute-backend",
  "encompute-ckks",
  "encompute-ir",
@@ -969,6 +970,7 @@ dependencies = [
  "encompute-secagg",
  "encompute-tfhe",
  "encompute-tfhe-client",
+ "encompute-training",
  "encompute-trust",
  "encompute-verification",
  "encompute-vfhe",
@@ -1027,6 +1029,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "encompute-training"
+version = "0.2.0"
+dependencies = [
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "encompute-attestation",
+ "encompute-ir",
+ "encompute-privacy",
+ "encompute-secagg",
+ "encompute-verification",
+ "getrandom 0.2.17",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "encompute-trust"
 version = "0.2.0"
 dependencies = [
@@ -1036,6 +1056,7 @@ dependencies = [
  "encompute-planner",
  "encompute-privacy",
  "encompute-secagg",
+ "encompute-training",
  "encompute-verification",
  "serde",
  "serde_json",

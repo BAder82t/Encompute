@@ -47,6 +47,7 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           pip install maturin numpy
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           maturin develop
       - run: examples/run-all.sh full
 

@@ -357,4 +357,53 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::observed_execution_matches_the_approved_plan"),
         (EndToEnd, "test:crates/encompute-runtime/tests/trust.rs::observed_execution_matches_the_approved_plan"),
     ]),
+    // Confidential fine-tuning.
+    inv!("INV-120", "training", "Private base-model keys are released only to workloads attesting to the approved training spec (image, code, configuration, plan).", [
+        (Positive, "test:python/tests/test_finetune.py::test_training_run_is_trusted_end_to_end"),
+        (Negative, "test:python/tests/test_finetune.py::test_keys_only_for_the_approved_workload"),
+        (Adversarial, "script:examples/15_confidential_lora/attack.py"),
+        (EndToEnd, "test:python/tests/test_finetune.py::test_adapter_is_usable_and_changed"),
+    ]),
+    inv!("INV-121", "training", "Raw LoRA updates never cross the aggregate-only boundary: they leave a worker only as masked secure-aggregation contributions.", [
+        (Positive, "test:python/tests/test_finetune.py::test_training_run_is_trusted_end_to_end"),
+        (Negative, "test:python/tests/test_finetune.py::test_no_raw_update_is_ever_written"),
+        (Adversarial, "check:secagg_coordinator_sees_no_input"),
+        (EndToEnd, "script:examples/15_confidential_lora/attack.py"),
+    ]),
+    inv!("INV-122", "training", "Every released training aggregate is charged to each contributing dataset's budget; training stops when the next release would exceed it.", [
+        (Positive, "test:python/tests/test_finetune.py::test_every_release_is_charged"),
+        (Negative, "test:python/tests/test_finetune.py::test_budget_exhaustion_stops_training"),
+        (Adversarial, "script:examples/15_confidential_lora/attack.py"),
+        (EndToEnd, "test:python/tests/test_finetune.py::test_training_run_is_trusted_end_to_end"),
+    ]),
+    inv!("INV-123", "training", "Checkpoint resume cannot roll privacy state back, and refuses another project, spec or policy.", [
+        (Positive, "test:crates/encompute-training/tests/training.rs::checkpoint_resume_never_rolls_back_privacy"),
+        (Negative, "test:python/tests/test_finetune.py::test_checkpoint_rollback_and_swap_are_refused"),
+        (Adversarial, "script:examples/15_confidential_lora/attack.py"),
+        (EndToEnd, "test:python/tests/test_finetune.py::test_checkpoint_rollback_and_swap_are_refused"),
+    ]),
+    inv!("INV-124", "training", "Every adapter is linked, by signed records, to its base model, datasets, training spec and aggregation round; tampering fails the report.", [
+        (Positive, "test:python/tests/test_finetune.py::test_lineage_links_model_data_and_evidence"),
+        (Negative, "test:python/tests/test_finetune.py::test_tampered_adapter_evidence_fails_the_report"),
+        (Adversarial, "test:crates/encompute-training/tests/training.rs::adapter_records_are_signed"),
+        (EndToEnd, "test:python/tests/test_finetune.py::test_training_run_is_trusted_end_to_end"),
+    ]),
+    inv!("INV-125", "training", "A derived adapter cannot be exported when any parent's policy forbids it.", [
+        (Positive, "test:crates/encompute-training/tests/training.rs::export_follows_every_parent"),
+        (Negative, "test:python/tests/test_finetune.py::test_export_is_denied_by_inherited_policy"),
+        (Adversarial, "script:examples/15_confidential_lora/attack.py"),
+        (EndToEnd, "test:python/tests/test_finetune.py::test_export_is_denied_by_inherited_policy"),
+    ]),
+    inv!("INV-126", "training", "Changing any security-relevant training setting (model, code, layout, LoRA, optimizer, privacy, aggregation, participants, plan) changes the TrainingSpecId.", [
+        (Positive, "test:crates/encompute-training/tests/training.rs::attestation_policy_binds_the_spec_and_code"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::every_field_changes_the_spec_id"),
+        (Adversarial, "test:python/tests/test_finetune.py::test_keys_only_for_the_approved_workload"),
+        (EndToEnd, "script:examples/15_confidential_lora/attack.py"),
+    ]),
+    inv!("INV-127", "training", "Training fails closed when the approved plan cannot be satisfied: no trusted environment means no training, never ordinary training.", [
+        (Positive, "test:python/tests/test_finetune.py::test_training_run_is_trusted_end_to_end"),
+        (Negative, "test:python/tests/test_finetune.py::test_no_trusted_environment_fails_closed"),
+        (Adversarial, "check:planner_adversarial"),
+        (EndToEnd, "test:python/tests/test_finetune.py::test_wrong_model_layout_or_dataset_is_refused"),
+    ]),
 ];

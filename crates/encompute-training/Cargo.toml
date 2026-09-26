@@ -1,6 +1,6 @@
 [package]
-name = "encompute-trust"
-description = "The Encompute trust graph: assets, policies, authorizations, lineage and evidence in one verifiable graph"
+name = "encompute-training"
+description = "Confidential fine-tuning: training specifications, sealed models, datasets and checkpoints, adapter lineage and export control"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,14 +10,15 @@ license.workspace = true
 encompute-ir.workspace = true
 encompute-verification.workspace = true
 encompute-attestation.workspace = true
-encompute-secagg.workspace = true
 encompute-privacy.workspace = true
-encompute-planner.workspace = true
-encompute-training.workspace = true
+encompute-secagg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 ed25519-dalek = "2.2"
+chacha20poly1305 = "0.11"
+getrandom = "0.2"
+zeroize = "1"
 
 [lints]
 workspace = true

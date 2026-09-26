@@ -21,6 +21,7 @@ Each example does three things:
 | 10 minutes | [08 multi-party secure aggregation](08_secure_aggregation/) |
 | 15 minutes | [11 automatic confidential planning](11_automatic_planner/) |
 | Full demo | [12 confidential collaboration](12_confidential_collaboration/) |
+| AI flagship | [15 confidential LoRA fine-tuning](15_confidential_lora/) |
 
 If you only run four, run **01 → 02 → 06 → 11**.
 
@@ -42,6 +43,7 @@ If you only run four, run **01 → 02 → 06 → 11**.
 | 12 | [Full confidential collaboration](12_confidential_collaboration/) | advanced | several processes |
 | 13 | [Assurance suite](13_assurance_suite/) | intermediate | `cargo build -p encompute-assurance --bins --examples` |
 | 14 | [Python Project API](14_python_project_api/) | beginner | Python SDK |
+| 15 | [Confidential LoRA fine-tuning](15_confidential_lora/) | advanced | Python SDK, PyTorch (CPU) |
 
 ## Learning paths
 
@@ -49,6 +51,7 @@ If you only run four, run **01 → 02 → 06 → 11**.
 - **Privacy engineer:** 06, 07, 08, 09, 10.
 - **Cryptography engineer:** 01, 02, 04, 05.
 - **Platform or security engineer:** 03, 07, 10, 12, 13.
+- **AI engineer:** 11, 14, 15.
 
 ## Running them
 
@@ -60,13 +63,15 @@ examples/run-all.sh quick
 
 | Mode | Runs | Time |
 |---|---|---|
-| `quick` | 01 02 04 06 08 09 10 11 13 14 (mock and default-build examples) | about a minute |
+| `quick` | 01 02 04 06 08 09 10 11 13 14 15 (mock and default-build examples) | about a minute |
 | `standard` | quick, plus 03 07 12 (everything without a cloud account or crypto build) | about 1–2 minutes |
 | `crypto` | 01 03 05 with OpenFHE and verified execution | needs `--features openfhe` / `vfhe-research` |
 | `full` | everything this machine can run, and every attack in 12 | a few minutes |
 
 An example that needs something this machine lacks (OpenFHE, TFHE-rs,
-verified execution) prints `SKIPPED` and the reason instead of failing.
+verified execution, PyTorch) prints `SKIPPED` and the reason instead of
+failing. Example 15 needs PyTorch:
+`pip install torch --index-url https://download.pytorch.org/whl/cpu`.
 
 ## Every example has
 

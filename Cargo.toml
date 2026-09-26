@@ -19,6 +19,7 @@ members = [
     "crates/encompute-privacy",
     "crates/encompute-trust",
     "crates/encompute-planner",
+    "crates/encompute-training",
     "crates/encompute-assurance",
     "crates/encompute-evaluator",
     "crates/encompute-runtime",
@@ -43,6 +44,7 @@ default-members = [
     "crates/encompute-privacy",
     "crates/encompute-trust",
     "crates/encompute-planner",
+    "crates/encompute-training",
     "crates/encompute-assurance",
     "crates/encompute-evaluator",
     "crates/encompute-runtime",
@@ -74,6 +76,7 @@ encompute-secagg = { path = "crates/encompute-secagg" }
 encompute-privacy = { path = "crates/encompute-privacy" }
 encompute-trust = { path = "crates/encompute-trust" }
 encompute-planner = { path = "crates/encompute-planner" }
+encompute-training = { path = "crates/encompute-training" }
 encompute-evaluator = { path = "crates/encompute-evaluator" }
 encompute-runtime = { path = "crates/encompute-runtime" }
 serde = { version = "1.0", features = ["derive"] }
