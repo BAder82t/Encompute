@@ -154,7 +154,7 @@ fn exact_program_in_workers() {
     let payload = client.evaluation_keys().unwrap();
     let key_id = sha256_hex(&payload);
     let keys = Envelope::new(
-        scheme_header("TFHE", Kind::EvaluationKeys, &ids, &key_id),
+        scheme_header("BinFHE", Kind::EvaluationKeys, &ids, &key_id),
         vec![("keys".into(), payload)],
     )
     .encode();
@@ -162,18 +162,18 @@ fn exact_program_in_workers() {
     let info = pool.add_program(&p.to_string()).unwrap();
     assert_eq!(
         (info.scheme.as_str(), info.backend.as_str()),
-        ("TFHE", "mock")
+        ("BinFHE", "mock")
     );
     pool.register_keys(&ids.program_id, &keys).unwrap();
     for (age, want) in [(17, 0), (18, 1), (120, 1), (0, 0)] {
         let ct = client.encrypt(Elem::U8, age).unwrap();
         let req = Envelope::new(
-            scheme_header("TFHE", Kind::Inputs, &ids, &key_id),
+            scheme_header("BinFHE", Kind::Inputs, &ids, &key_id),
             vec![("age".into(), ct)],
         )
         .encode();
         let out = Envelope::decode(&pool.execute(&ids.program_id, &req).unwrap().0).unwrap();
-        assert_eq!(out.header.scheme, "TFHE");
+        assert_eq!(out.header.scheme, "BinFHE");
         assert_eq!(client.decrypt(Elem::Bool, out.items()[0].1).unwrap(), want);
     }
     // A CKKS-labelled envelope is refused by the exact program.

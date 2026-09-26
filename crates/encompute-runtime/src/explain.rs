@@ -320,18 +320,49 @@ impl Model {
         section(&mut s, "Execution");
         let pr = &e.profile;
         let _ = writeln!(s, "  {:<24}{}", "scheme", self.compiled().scheme());
-        let note = match (e.proof_required, has_tfhe(), crate::model::has_openfhe()) {
-            (true, _, true) => " (proof-capable: re-execution)",
-            (true, _, false) => " (not in this build: mock only)",
-            (false, true, _) => " (research use only)",
-            (false, false, _) => " (not in this build: mock only)",
+        let openfhe = crate::model::has_openfhe();
+        let note = if e.proof_required {
+            if openfhe {
+                " (proof-capable: re-execution)"
+            } else {
+                " (not in this build: mock only)"
+            }
+        } else if pr.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND {
+            if openfhe {
+                ""
+            } else {
+                " (not in this build: mock only)"
+            }
+        } else if has_tfhe() {
+            " (research use only)"
+        } else {
+            " (research backend: not available in this build)"
         };
         let _ = writeln!(
             s,
             "  {:<24}{} {}{note}",
             "backend", pr.backend, pr.backend_version
         );
+        let _ = writeln!(
+            s,
+            "  {:<24}{}",
+            "reason",
+            if e.proof_required {
+                "verified execution requires re-execution proofs on OpenFHE BGV"
+            } else {
+                "exact integer/Boolean semantics required; approximation is not permitted"
+            }
+        );
         let _ = writeln!(s, "  {:<24}{}", "parameter profile", pr.profile);
+        if pr.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND {
+            if let Ok(g) = encompute_exact::bits::gate_count(&e.plan) {
+                let _ = writeln!(
+                    s,
+                    "  {:<24}{g} (the same for every input; ~60 ms each on one core)",
+                    "bootstrapped gates"
+                );
+            }
+        }
         let _ = writeln!(
             s,
             "  {:<24}exact (no approximation error)",

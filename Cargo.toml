@@ -8,6 +8,7 @@ members = [
     "crates/encompute-protocol",
     "crates/encompute-openfhe",
     "crates/encompute-openfhe-client",
+    "crates/encompute-openfhe-exact",
     "crates/encompute-exact",
     "crates/encompute-tfhe",
     "crates/encompute-tfhe-client",
@@ -65,6 +66,7 @@ encompute-backend = { path = "crates/encompute-backend" }
 encompute-protocol = { path = "crates/encompute-protocol" }
 encompute-openfhe = { path = "crates/encompute-openfhe" }
 encompute-openfhe-client = { path = "crates/encompute-openfhe-client" }
+encompute-openfhe-exact = { path = "crates/encompute-openfhe-exact" }
 encompute-exact = { path = "crates/encompute-exact" }
 encompute-tfhe = { path = "crates/encompute-tfhe" }
 encompute-tfhe-client = { path = "crates/encompute-tfhe-client" }

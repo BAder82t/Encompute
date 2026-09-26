@@ -38,7 +38,7 @@ security failure.
 
    | Mechanism | Hides from the host | Other properties | Prerequisites |
    |---|---|---|---|
-   | FHE (CKKS, TFHE, BGV) | Yes | — | The program compiles to an encrypted plan, and the backend is built |
+   | FHE (CKKS, BinFHE, BGV; TFHE in research builds) | Yes | — | The program compiles to an encrypted plan, and the backend is built |
    | Verified execution | — | Correctness | BGV, and full proof coverage |
    | Confidential compute | Yes (memory) | — | Attestation, attested key release, a usable TEE |
    | Secure aggregation | Individual contributions | — | An aggregation boundary; the threshold from the collusion bound |

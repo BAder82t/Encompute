@@ -24,7 +24,7 @@ pub struct ExecutionSpec {
     pub plan_version: u32,
     /// "approximate" or "exact".
     pub semantics: String,
-    /// "CKKS" or "TFHE".
+    /// "CKKS", "BinFHE", "BGV" or "TFHE" (research).
     pub scheme: String,
     pub backend: String,
     pub backend_version: String,

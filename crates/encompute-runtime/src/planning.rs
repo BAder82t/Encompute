@@ -36,6 +36,7 @@ pub fn available_catalog() -> BackendCatalog {
     BackendCatalog {
         ckks: crate::has_openfhe(),
         tfhe: crate::has_tfhe(),
+        openfhe_exact: crate::has_openfhe(),
         bgv: crate::has_openfhe(),
         verified_execution: cfg!(feature = "vfhe-research"),
     }

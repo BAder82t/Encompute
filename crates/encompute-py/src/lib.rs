@@ -153,6 +153,12 @@ fn has_openfhe() -> bool {
     encompute_runtime::has_openfhe()
 }
 
+/// Whether this build runs exact programs encrypted (OpenFHE exact).
+#[pyfunction]
+fn has_exact() -> bool {
+    encompute_runtime::has_openfhe_exact()
+}
+
 /// Whether this build includes the TFHE-rs backend (research use only).
 #[pyfunction]
 fn has_tfhe() -> bool {
@@ -259,6 +265,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(plan, m)?)?;
     training::register(m)?;
     m.add_function(wrap_pyfunction!(has_openfhe, m)?)?;
+    m.add_function(wrap_pyfunction!(has_exact, m)?)?;
     m.add_function(wrap_pyfunction!(has_tfhe, m)?)?;
     m.add("NativeError", m.py().get_type::<NativeError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

@@ -78,8 +78,8 @@ EXECUTION PROOF NOT PRESENT
 |---|---|
 | flip one bit of `response.bin` | exit 1, `INVALID: receipt output commitment does not match` |
 | flip one bit of `request.bin` | exit 2, ENC1601 (envelope checksum mismatch) |
-| edit a receipt field (`scheme` TFHE → CKKS) | exit 1, `INVALID: receipt signature is invalid` |
-| verify expecting another backend (`--backend tfhe-rs`) | exit 1, `INVALID: receipt spec ID does not match` |
+| edit a receipt field (`scheme` BinFHE → CKKS) | exit 1, `INVALID: receipt signature is invalid` |
+| verify expecting another backend (`--backend openfhe-exact`) | exit 1, `INVALID: receipt spec ID does not match` |
 | trust a different evaluator key | exit 1, `INVALID: receipt was signed by an untrusted evaluator key` |
 | `encompute verify receipt.json` alone | exit 3, `RECEIPT SIGNATURE VALID (some bindings not checked)`: a partial check is not success |
 | run against a new evaluator (new identity) | exit 2, ENC1606: the pinned key does not match |

@@ -50,11 +50,12 @@ cp exchange/request.bin request.bin
 "$PYTHON" -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[len(b)//2]^=1; open(p,"wb").write(b)' request.bin
 reject "flip one bit of the request" \
   verify receipt.json --request request.bin --response exchange/response.bin
-sed 's/"scheme":"TFHE"/"scheme":"CKKS"/' receipt.json >edited.json
-reject "edit a receipt field (scheme TFHE -> CKKS)" \
+sed 's/"scheme":"BinFHE"/"scheme":"CKKS"/' receipt.json >edited.json
+cmp -s receipt.json edited.json && { echo "the edit changed nothing" >&2; exit 1; }
+reject "edit a receipt field (scheme BinFHE -> CKKS)" \
   verify edited.json --request exchange/request.bin --response exchange/response.bin
 reject "claim a different backend than the one requested" \
-  verify receipt.json --request exchange/request.bin --response exchange/response.bin --backend tfhe-rs
+  verify receipt.json --request exchange/request.bin --response exchange/response.bin --backend openfhe-exact
 reject "trust a different evaluator key" \
   "$E" verify receipt.json --model adult.encompute --request exchange/request.bin \
   --response exchange/response.bin --trust-evaluator "$(printf '11%.0s' $(seq 32))"

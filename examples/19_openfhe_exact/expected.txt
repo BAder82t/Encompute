@@ -1,0 +1,23 @@
+# Lines that must appear in the output (values that vary are left out).
+  scheme                  BinFHE
+  backend                 openfhe-exact 1.5.1
+  parameter profile       BINFHE_STD128_GINX_BITS_V1
+  failure probability     2^-135 per gate
+screen(member, consent, not flagged)     clear=True  mock=True  encrypted=True  MATCH
+tier(score=200)                          clear=2     mock=2     encrypted=2     MATCH
+exact backend openfhe-exact 1.5.1 BinFHE
+alice (age 31): encrypted=True clear=True MATCH
+bob   (age 17): encrypted=False clear=False MATCH
+RECEIPT VERIFIED
+secret.key files in the evaluator's directory: 0
+REFUSED  HTTP 409: {"code":"ENC1605","message":"a ciphertext under another key"}
+REFUSED  HTTP 409: {"code":"ENC1603","message":"a ciphertext for another parameter set"}
+REFUSED  HTTP 409: {"code":"ENC1602","message":"made for TFHE on tfhe-rs 1.5.1, this side runs BinFHE on openfhe-exact 1.5.1"}
+REFUSED  HTTP 400: {"code":"ENC1601","message":"OpenFHE exact: the envelope's checksum does not match (corrupted)"}
+REFUSED  HTTP 404: {"code":"ENC1604","message":"made for a different program"}
+REFUSED  error[ENC1401]: program.eir does not match its manifest hash; the artifact was modified
+REFUSED  INVALID: receipt output commitment does not match
+REFUSED  error[ENC1303]: possible integer overflow
+REFUSED  error[ENC1501]: instruction 1: a lookup table of 1001 entries; the OpenFHE exact backend supports up to 256 entries
+REFUSED  error[ENC1501]: BACKEND UNAVAILABLE: TFHE-rs is available only in research builds
+REFUSED  error: BACKEND UNAVAILABLE: TFHE-rs is available only in research builds

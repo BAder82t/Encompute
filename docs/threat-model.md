@@ -7,7 +7,7 @@ Also written into every artifact's `security.json`.
 | Party | Trust | Holds |
 |---|---|---|
 | Client | trusted | secret key; encrypts inputs, decrypts outputs |
-| Evaluator | honest-but-curious | CKKS: public key, relinearization key, rotation keys for the plan's rotations. Exact (TFHE): the compressed server key |
+| Evaluator | honest-but-curious | CKKS: public key, relinearization key, rotation keys for the plan's rotations. Exact (OpenFHE exact): the BinFHE bootstrapping and key-switching keys |
 | Network | untrusted | ciphertexts in transit |
 | Storage | untrusted | ciphertexts and artifacts at rest |
 
@@ -22,12 +22,17 @@ scope.
   128-bit classical security, parameters checked against the HE Standard
   ternary-secret table (`encompute-ckks/src/params.rs`), and re-checked by OpenFHE
   when the context is created.
-- Exact programs (TFHE-rs 1.8.1, research feature): the vetted profile
-  `PARAM_MESSAGE_2_CARRY_2_KS_PBS_TUNIFORM_2M128`, 128-bit security, failure
-  probability 2^-128 per bootstrap. The evaluator checks every incoming key
-  and ciphertext against the profile (TFHE-rs conformance) before use.
-  Results are exact: range analysis proves no operation overflows.
-- Envelopes name their scheme (CKKS or TFHE), backend, parameter set,
+- Exact programs (OpenFHE exact: OpenFHE v1.5.1 BinFHE): the vetted
+  profile `BINFHE_STD128_GINX_BITS_V1` (parameter set STD128, GINX
+  bootstrapping), 128-bit security, failure probability 2^-135 per gate.
+  Every key and ciphertext carries the profile's parameter-set ID, the
+  client's key ID and its type; the evaluator refuses any mismatch, and
+  OpenFHE re-checks the LWE dimension and modulus when loading. Results are
+  exact: range analysis proves no operation overflows. Research builds may
+  also run TFHE-rs 1.8.1 (profile
+  `PARAM_MESSAGE_2_CARRY_2_KS_PBS_TUNIFORM_2M128`, 2^-128 per bootstrap)
+  when explicitly selected; production builds cannot.
+- Envelopes name their scheme (CKKS, BinFHE, BGV, or TFHE in research builds), backend, parameter set,
   program and key; a mismatch is refused, so data for one scheme never
   enters a program of the other.
 - Every evaluation returns a receipt signed by the evaluator's Ed25519

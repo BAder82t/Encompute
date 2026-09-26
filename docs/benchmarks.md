@@ -53,7 +53,57 @@ Caveat: the 8 benchmark clients share one process, whose client-side
 OpenFHE calls (encrypt, decrypt) are also serialized. Real clients are
 separate processes, so the evaluator scales further than shown.
 
-## Exact programs on TFHE-rs (research feature)
+## Exact programs on OpenFHE exact (production)
+
+Apple M3 Max, 14 cores; OpenFHE 1.5.1 BinFHE, parameter set STD128 with
+GINX bootstrapping (profile `BINFHE_STD128_GINX_BITS_V1`: 128-bit, failure
+probability 2^-135 per gate). One ciphertext per bit; every AND, OR and XOR
+is a bootstrapped gate, NOT and constants are free.
+
+| | |
+|---|---|
+| secret key generation | 0.42 s |
+| evaluation keys (bootstrapping 109 MB + key switching 440 MB) | 524 MiB, generated and written in ~7 s, uploaded once per client |
+| secret key on disk | 4.8 KiB |
+| ciphertext | 4.4 KiB per bit (u8 35 KiB, u32 141 KiB) |
+| bootstrapped gate | 62 ms (one core; OpenFHE calls are serialized) |
+| encrypt, decrypt | < 1 ms per bit |
+
+Bootstrapped gates per operation, after constant folding
+(`cargo run --release -p encompute-exact --example gate_counts`). They do
+not depend on the inputs; time ≈ gates × 62 ms. `explain` prints a
+program's total.
+
+| operation | u8 | u16 | u32 | i32 | u64 |
+|---|---:|---:|---:|---:|---:|
+| add | 34 | 74 | 154 | 154 | 314 |
+| sub | 35 | 75 | 155 | 155 | 315 |
+| mul | 136 | 648 | 2824 | 2824 | 11784 |
+| mul by constant 100 | 13 | 93 | 253 | 253 | 573 |
+| div by constant 7 | 124 | 292 | 628 | 981 | 1300 |
+| compare to constant (lt) | 12 | 28 | 60 | 59 | 124 |
+| eq | 15 | 31 | 63 | 63 | 127 |
+| lt | 31 | 63 | 127 | 127 | 255 |
+| min | 55 | 111 | 223 | 223 | 447 |
+| select (after its condition) | 24 | 48 | 96 | 96 | 192 |
+| and (bitwise) | 8 | 16 | 32 | 32 | 64 |
+| shift by a constant, cast | 0 | 0 | 0 | 0 | 0 |
+
+Lookups are multiplexer trees over the index bits (tables up to 256
+entries); their cost depends on the table and folds heavily for structured
+tables.
+
+Eligibility example end to end (`scripts/exact-demo.sh`, separate evaluator
+process, u8/u16/u32 inputs, 533 gates): request 387 KiB, response 4 KiB,
+evaluation 30 s, key upload 524 MiB once.
+
+OpenFHE exact is roughly 10–15× slower than TFHE-rs's multi-bit integer
+operations below, and its evaluation keys are about 9× larger. It is the
+production backend because it carries no patent-license restriction on
+commercial use. Parallel gate evaluation and multi-bit (functional)
+bootstrapping are the planned speed-ups.
+
+## Exact programs on TFHE-rs (research feature, never in commercial builds)
 
 Apple M3 Max, 14 cores; TFHE-rs 1.8.1, profile
 `PARAM_MESSAGE_2_CARRY_2_KS_PBS_TUNIFORM_2M128`.
@@ -62,7 +112,7 @@ Keys: generation 0.9 s; compressed server key 57.4 MiB (uploaded once per
 client), decompressed on the evaluator in 0.44 s; client key 30.7 KiB.
 
 Per operation, milliseconds, median of 3
-(`cargo run --release -p encompute-tfhe-client --features tfhe-rs --example exact_ops`):
+(`cargo run --release -p encompute-tfhe-client --features research-tfhe-rs --example exact_ops`):
 
 | type | ciphertext | encrypt | decrypt | add | mul | mul by const | compare | compare to const | and | select | min | div by const | shift | lookup (16) | cast (widen) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -79,7 +129,7 @@ Shifts by a constant and widening casts of unsigned values are free
 (block moves, no bootstrap). Multiplication and division grow roughly with
 the square of the width: choose the narrowest type range analysis allows.
 
-Eligibility example end to end (`scripts/exact-demo.sh`, separate evaluator
+Eligibility example end to end (research build, separate evaluator
 process, u8/u16/u32 inputs, 11 plan instructions): request 709 KiB,
 response 16 KiB, evaluation 2.1 s.
 

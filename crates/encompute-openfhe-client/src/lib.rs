@@ -2,6 +2,10 @@
 //! and export of evaluation keys. The only crate that touches the secret key.
 //! The evaluator binary does not depend on it.
 
+pub mod exact;
+
+pub use exact::OpenFheExactClient;
+
 use encompute_backend::{CkksClient, ExactClient};
 use encompute_ckks::CkksParams;
 use encompute_ir::{Code, Elem, Error, Result};
@@ -42,6 +46,63 @@ mod ffi {
         fn export_secret_key(c: &Client) -> Result<Vec<u8>>;
         fn encrypt(c: &Client, values: &[f64]) -> Result<Vec<u8>>;
         fn decrypt(c: &Client, ciphertext: &[u8]) -> Result<Vec<f64>>;
+
+        type BinClient;
+        fn bin_generate(paramset: &str) -> Result<UniquePtr<BinClient>>;
+        fn bin_restore(paramset: &str, secret: &[u8]) -> Result<UniquePtr<BinClient>>;
+        fn bin_export_secret(c: &BinClient) -> Result<Vec<u8>>;
+        fn bin_export_refresh_key(c: &BinClient) -> Result<Vec<u8>>;
+        fn bin_export_switching_key(c: &BinClient) -> Result<Vec<u8>>;
+        fn bin_encrypt(c: &BinClient, bit: bool) -> Result<Vec<u8>>;
+        fn bin_decrypt(c: &BinClient, ciphertext: &[u8]) -> Result<bool>;
+    }
+}
+
+/// OpenFHE BinFHE client: the LWE secret key, bit encryption and
+/// decryption, and the bootstrapping keys for the evaluator. Integer
+/// encoding lives in `encompute-openfhe-exact`.
+pub struct BinClient {
+    inner: cxx::UniquePtr<ffi::BinClient>,
+}
+
+// SAFETY: every shim function, including the destructor, holds the global
+// OpenFHE mutex.
+#[allow(unsafe_code)]
+unsafe impl Send for BinClient {}
+#[allow(unsafe_code)]
+unsafe impl Sync for BinClient {}
+
+impl BinClient {
+    pub fn generate(paramset: &str) -> Result<Self> {
+        Ok(Self {
+            inner: ffi::bin_generate(paramset).map_err(backend_err)?,
+        })
+    }
+
+    pub fn restore(paramset: &str, secret: &[u8]) -> Result<Self> {
+        Ok(Self {
+            inner: ffi::bin_restore(paramset, secret).map_err(backend_err)?,
+        })
+    }
+
+    pub fn secret_key(&self) -> Result<Vec<u8>> {
+        ffi::bin_export_secret(&self.inner).map_err(backend_err)
+    }
+
+    /// `(refresh key, switching key)`.
+    pub fn bootstrapping_keys(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        Ok((
+            ffi::bin_export_refresh_key(&self.inner).map_err(backend_err)?,
+            ffi::bin_export_switching_key(&self.inner).map_err(backend_err)?,
+        ))
+    }
+
+    pub fn encrypt_bit(&self, bit: bool) -> Result<Vec<u8>> {
+        ffi::bin_encrypt(&self.inner, bit).map_err(backend_err)
+    }
+
+    pub fn decrypt_bit(&self, ciphertext: &[u8]) -> Result<bool> {
+        ffi::bin_decrypt(&self.inner, ciphertext).map_err(backend_err)
     }
 }
 

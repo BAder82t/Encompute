@@ -4,9 +4,11 @@
 //! implementation (`encompute-tfhe`); others can follow.
 
 pub mod bgv;
+pub mod bits;
 mod exec;
 mod lower;
 mod plan;
+pub mod research;
 mod transcript;
 
 pub use exec::{

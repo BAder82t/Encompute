@@ -200,7 +200,10 @@ impl Evaluator {
             },
             "backends": {
                 "approximate": label(b.approx, "CKKS"),
-                "exact": label(b.exact, "TFHE"),
+                "exact": label(
+                    b.exact,
+                    if b.exact == BackendKind::TfheRs { "TFHE" } else { "BinFHE" },
+                ),
             },
             "worker_processes": self.workers,
             "attestation": self.attestation.as_ref().map(|a| json!({

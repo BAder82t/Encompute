@@ -31,24 +31,25 @@ CASES = [
 
 
 def main():
-    tfhe = encompute.has_tfhe()
-    print(f"Scheme            {eligible.semantics} (TFHE: integers and Booleans)")
-    if not tfhe:
-        print("Encrypted mode    not run: TFHE-rs is not in this build")
+    enc = encompute.has_exact()
+    print(f"Scheme            {eligible.semantics} (OpenFHE exact: integers and Booleans)")
+    if not enc:
+        print("Encrypted mode    not run: OpenFHE is not in this build")
     ok = True
     for inputs, want in CASES:
         clear = eligible(**inputs)
         mock = eligible(**inputs, mode="mock")
         results = [clear, mock]
-        if tfhe:
+        if enc:
             results.append(eligible(**inputs, mode="encrypted"))
         same = all(r == want for r in results)
         ok &= same
         args = " ".join(f"{k}={v}" for k, v in inputs.items())
         print(f"{args:<34} clear={clear!s:<5} mock={mock!s:<5}"
-              + (f" encrypted={results[2]!s:<5}" if tfhe else "")
+              + (f" encrypted={results[2]!s:<5}" if enc else "")
               + ("  MATCH" if same else "  MISMATCH"))
-    rep = eligible.test(cases=500, mode="encrypted" if tfhe else "mock")
+    # Sampled inputs on the mock: encrypted, every case costs seconds.
+    rep = eligible.test(cases=500, mode="mock")
     print(f"Sampled inputs    {rep.cases} cases, {rep.mismatches} mismatches")
     ok &= rep.passed
     print("MATCH" if ok else "MISMATCH")

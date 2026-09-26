@@ -758,6 +758,7 @@ fn plan_row(g: &TrustGraph) -> Row {
                                                 Scheme::Ckks => "CKKS",
                                                 Scheme::Tfhe => "TFHE",
                                                 Scheme::Bgv => "BGV",
+                                                Scheme::BinFhe => "BinFHE",
                                             }
                                 }
                                 Mechanism::VerifiedExecution => {

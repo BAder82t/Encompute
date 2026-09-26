@@ -16,7 +16,7 @@ encompute-exact.workspace = true
 tfhe = { version = "=1.8.1", default-features = false, features = ["integer"], optional = true }
 
 [features]
-tfhe-rs = ["dep:tfhe"]
+research-tfhe-rs = ["dep:tfhe"]
 
 [lints]
 workspace = true

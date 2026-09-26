@@ -43,3 +43,28 @@ rust::Vec<uint8_t> encrypt(const Client& c, rust::Slice<const double> values);
 rust::Vec<double> decrypt(const Client& c, rust::Slice<const uint8_t> ciphertext);
 
 }  // namespace encompute_openfhe_client
+
+// --- BinFHE (exact programs): the only code that holds the LWE secret key.
+namespace encompute_openfhe_client {
+
+struct BinClientImpl;
+
+class BinClient {
+ public:
+  explicit BinClient(std::unique_ptr<BinClientImpl> impl);
+  ~BinClient();
+  std::unique_ptr<BinClientImpl> impl;
+};
+
+// A fresh secret key and bootstrapping keys for a vetted parameter set.
+std::unique_ptr<BinClient> bin_generate(rust::Str paramset);
+// Restore from `bin_export_secret` (bootstrapping keys are not regenerated).
+std::unique_ptr<BinClient> bin_restore(rust::Str paramset, rust::Slice<const uint8_t> secret);
+rust::Vec<uint8_t> bin_export_secret(const BinClient& c);
+// The bootstrapping keys the evaluator needs: refresh key, switching key.
+rust::Vec<uint8_t> bin_export_refresh_key(const BinClient& c);
+rust::Vec<uint8_t> bin_export_switching_key(const BinClient& c);
+rust::Vec<uint8_t> bin_encrypt(const BinClient& c, bool bit);
+bool bin_decrypt(const BinClient& c, rust::Slice<const uint8_t> ciphertext);
+
+}  // namespace encompute_openfhe_client

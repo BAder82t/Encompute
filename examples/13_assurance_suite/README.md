@@ -106,8 +106,8 @@ every cited file is then missing and every invariant is reported violated.
   mathematically prove the system secure. A passing report means the
   invariants held for the tested cases, modes and boundaries.
 - The report confirms cited tests exist; it does not run them. They run in
-  `cargo test` and the CI jobs that build their features (OpenFHE, TFHE,
-  verified execution).
+  `cargo test` and the CI jobs that build their features (OpenFHE,
+  verified execution; TFHE-rs in research CI).
 - Nothing here establishes the security of the cryptography itself or of
   TEE hardware, or covers properties no invariant states.
 - This example runs six of the fourteen checks, at quick scale.

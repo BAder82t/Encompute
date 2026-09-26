@@ -7,6 +7,8 @@
 //! decryption; those live in `encompute-openfhe-client`, which the evaluator
 //! binary does not link.
 
+pub mod binfhe;
+
 use encompute_backend::{CkksEvaluator, ExactEvaluator};
 use encompute_ckks::CkksParams;
 use encompute_ir::{CmpOp, Elem, LogicOp};

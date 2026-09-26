@@ -553,4 +553,48 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:python/tests/test_confidential_job.py::test_no_plaintext_leaves_the_workload"),
         (EndToEnd, "script:examples/18_confidential_space_hf/job.py"),
     ]),
+    // Commercial exact execution on OpenFHE.
+    inv!("INV-149", "openfhe-exact", "Exact programs run encrypted on OpenFHE exact give exactly the clear reference's and the mock's results, for every supported operation and width: no tolerance.", [
+        (Positive, "test:crates/encompute-openfhe-client/tests/exact.rs::openfhe_exact_equals_clear_reference_and_mock"),
+        (Negative, "test:crates/encompute-exact/tests/bits.rs::eight_bit_operations_are_exhaustively_exact"),
+        (Adversarial, "test:crates/encompute-openfhe-client/tests/exact.rs::random_programs_on_openfhe_exact"),
+        (EndToEnd, "test:crates/encompute-runtime/tests/openfhe_exact.rs::openfhe_exact_end_to_end"),
+        (EndToEnd, "script:examples/19_openfhe_exact/run.sh"),
+    ]),
+    inv!("INV-150", "openfhe-exact", "Production builds run exact programs on OpenFHE exact and never on TFHE-rs: the compiler, the evaluator and the planner select OpenFHE exact, and a request for TFHE-rs is BACKEND UNAVAILABLE, not a fallback.", [
+        (Positive, "test:crates/encompute-evaluator/tests/exact_backend.rs::production_builds_select_openfhe_exact_and_refuse_tfhe_rs"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::exact_programs_plan_openfhe_exact_never_tfhe_rs_by_default"),
+        (Adversarial, "script:examples/19_openfhe_exact/run.sh"),
+        (EndToEnd, "script:scripts/exact-demo.sh"),
+    ]),
+    inv!("INV-151", "openfhe-exact", "Production artifacts contain no TFHE-rs: the dependency graph, SBOM, CLI, evaluator, Python extension, wheel and container are audited, and the audit rejects a research build.", [
+        (Positive, "script:scripts/audit-commercial-build.sh"),
+        (Negative, "script:scripts/sbom.py"),
+        (Adversarial, "script:.github/workflows/ci.yml"),
+        (EndToEnd, "script:scripts/release-check.sh"),
+    ]),
+    inv!("INV-152", "openfhe-exact", "OpenFHE exact ciphertexts and keys are bound to their backend, parameter set, client key and type: objects under another key, parameter set or backend, and corrupted objects, are refused before any gate runs.", [
+        (Positive, "test:crates/encompute-runtime/tests/openfhe_exact.rs::openfhe_exact_end_to_end"),
+        (Negative, "test:crates/encompute-openfhe-client/tests/exact.rs::wrong_keys_parameters_backends_and_corruption_fail_closed"),
+        (Adversarial, "script:examples/19_openfhe_exact/forge.py"),
+        (EndToEnd, "script:examples/19_openfhe_exact/run.sh"),
+    ]),
+    inv!("INV-153", "openfhe-exact", "OpenFHE exact runs only the vetted parameter profile (STD128 with GINX bootstrapping, 128-bit, 2^-135 per gate), and every field of it is bound into the parameter-set ID that artifacts, keys and ciphertexts carry.", [
+        (Positive, "test:crates/encompute-openfhe-exact/src/lib.rs::the_profile_is_vetted_and_bound_into_the_parameter_id"),
+        (Negative, "test:crates/encompute-openfhe-client/tests/exact.rs::wrong_keys_parameters_backends_and_corruption_fail_closed"),
+        (Adversarial, "script:examples/19_openfhe_exact/forge.py"),
+        (EndToEnd, "script:examples/19_openfhe_exact/run.sh"),
+    ]),
+    inv!("INV-154", "openfhe-exact", "Programs outside OpenFHE exact's capability matrix are refused at compile time, never partway through an encrypted run.", [
+        (Positive, "test:crates/encompute-exact/tests/bits.rs::unary_operations_shifts_casts_select_and_lookup"),
+        (Negative, "test:crates/encompute-evaluator/tests/exact_backend.rs::production_builds_select_openfhe_exact_and_refuse_tfhe_rs"),
+        (Adversarial, "script:examples/19_openfhe_exact/wide.py"),
+        (EndToEnd, "script:examples/19_openfhe_exact/run.sh"),
+    ]),
+    inv!("INV-155", "openfhe-exact", "Semantic transcripts do not depend on the exact backend, and OpenFHE exact agrees with TFHE-rs on the same programs in research CI; receipts bind the backend that actually ran.", [
+        (Positive, "test:crates/encompute-openfhe-client/tests/exact.rs::transcripts_are_backend_independent"),
+        (Negative, "test:crates/encompute-runtime/tests/openfhe_exact.rs::openfhe_exact_end_to_end"),
+        (Adversarial, "test:crates/encompute-runtime/tests/cross_backend.rs::openfhe_exact_equals_tfhe_rs"),
+        (EndToEnd, "script:examples/19_openfhe_exact/run.sh"),
+    ]),
 ];

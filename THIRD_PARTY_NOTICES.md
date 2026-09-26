@@ -1,7 +1,10 @@
 # Third-party notices
 
-Encompute links OpenFHE statically. Builds with the off-by-default research
-feature `tfhe-rs` also link TFHE-rs. Their licenses:
+Encompute links OpenFHE statically; production builds, including exact
+programs (OpenFHE exact, BinFHE), use OpenFHE only. Builds with the
+off-by-default research feature `research-tfhe-rs` also link TFHE-rs; they
+are for research and differential testing, never shipped commercially
+(`scripts/audit-commercial-build.sh` enforces this). Their licenses:
 
 ## OpenFHE v1.5.1 (https://github.com/openfheorg/openfhe-development)
 

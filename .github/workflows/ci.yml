@@ -146,6 +146,15 @@ jobs:
         run: |
           cargo build --release -p encompute-evaluator --features openfhe
           ./scripts/audit-evaluator-binary.sh
+      - name: exact demo on OpenFHE exact (separate evaluator process)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/openfhe,encompute-evaluator/openfhe
+          ./scripts/exact-demo.sh
+      - name: commercial build audit (no TFHE-rs in production artifacts)
+        run: |
+          cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/openfhe,encompute-evaluator/openfhe
+          ./scripts/audit-commercial-build.sh target/release
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -196,10 +205,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p encompute-tfhe -p encompute-tfhe-client -p encompute-runtime -p encompute-evaluator -p encompute-cli --all-targets --features encompute-tfhe-client/tfhe-rs,encompute-runtime/tfhe-rs,encompute-evaluator/tfhe-rs,encompute-cli/tfhe-rs -- -D warnings
-      - run: cargo test --release -p encompute-tfhe -p encompute-tfhe-client --features encompute-tfhe-client/tfhe-rs
-      - run: cargo test --release -p encompute-runtime --features tfhe-rs --test exact
-      - name: exact demo through a separate evaluator process
+      - run: cargo clippy -p encompute-tfhe -p encompute-tfhe-client -p encompute-runtime -p encompute-evaluator -p encompute-cli --all-targets --features encompute-tfhe-client/research-tfhe-rs,encompute-runtime/research-tfhe-rs,encompute-evaluator/research-tfhe-rs,encompute-cli/research-tfhe-rs -- -D warnings
+      - run: cargo test --release -p encompute-tfhe -p encompute-tfhe-client --features encompute-tfhe-client/research-tfhe-rs
+      - run: cargo test --release -p encompute-runtime --features research-tfhe-rs --test exact
+      - name: research evaluator links no client crypto
         run: |
-          cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/tfhe-rs,encompute-evaluator/tfhe-rs
+          cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/research-tfhe-rs,encompute-evaluator/research-tfhe-rs
           ./scripts/audit-evaluator-binary.sh target/release/encompute-evaluator
+      - name: negative control (the commercial audit must reject research binaries)
+        run: |
+          if ./scripts/audit-commercial-build.sh target/release; then
+            echo "commercial audit passed on a research build"; exit 1
+          fi

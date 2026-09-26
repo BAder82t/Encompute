@@ -48,7 +48,7 @@ privacy, and every step leaves verifiable evidence.
 | Area | State |
 |---|---|
 | Approximate programs (CKKS, OpenFHE) | working, end to end, local and remote |
-| Exact programs (integers, Booleans) | working on the mock; on TFHE-rs in the research build |
+| Exact programs (integers, Booleans) | working end to end, local and remote, on OpenFHE exact (BinFHE), the production exact backend; TFHE-rs only in research builds |
 | Client/evaluator split over HTTP, worker processes | working |
 | Signed execution receipts | working, CKKS and exact |
 | Semantic transcripts (the statement a proof must satisfy) | working, exact programs |
@@ -60,7 +60,8 @@ privacy, and every step leaves verifiable evidence.
 | Trust graph (authorizations, revocation, lineage, one trust report) | working: owner-signed program approvals, revocation reach, a report rebuilt from evidence and checked against verifier-supplied keys |
 | Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
 | Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control; organization-level DP or patient-level DP-SGD; Hugging Face Transformers + PEFT (development attestation on one machine) |
-| Assurance (security invariants under attack) | 81 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Commercial dependency boundary | audited: no TFHE-rs in the dependency graph, SBOM, binaries, wheel or container of a production build (`scripts/audit-commercial-build.sh`) |
+| Assurance (security invariants under attack) | 88 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## Start here
 
@@ -117,11 +118,15 @@ results: within the precision for approximate programs, exactly (matches
 and mismatches, boundary values first) for exact ones.
 
 **Backends.**
-- OpenFHE v1.5.1 (CKKS; BGV for verified exact programs), statically linked.
+- OpenFHE v1.5.1, statically linked: CKKS for approximate programs;
+  **OpenFHE exact** (BinFHE, STD128, one ciphertext per bit, bootstrapped
+  gates) for exact programs; BGV for verified exact programs.
 - A plaintext mock for both kinds, for development and tests.
-- TFHE-rs 1.8.1 for exact programs, behind the off-by-default `tfhe-rs`
-  feature, for research use only: Zama requires a patent license for
-  commercial use of its technology.
+- TFHE-rs 1.8.1, behind the off-by-default `research-tfhe-rs` feature, for
+  research and differential testing only: Zama requires a patent license
+  for commercial use of its technology. Production builds cannot select it
+  (BACKEND UNAVAILABLE), and `scripts/audit-commercial-build.sh` checks that
+  none of it is linked.
 
 ## Verification
 
@@ -418,13 +423,20 @@ cargo test --workspace --features encompute-runtime/openfhe,encompute-evaluator/
 
 Set `OPENFHE_ROOT` to use another static OpenFHE v1.5.1 install.
 
-TFHE-rs (research feature):
+Exact programs on OpenFHE exact, and the commercial build audit:
 
 ```sh
-cargo test --release -p encompute-runtime --features tfhe-rs --test exact
 cargo build --release -p encompute-cli -p encompute-evaluator \
-  --features encompute-cli/tfhe-rs,encompute-evaluator/tfhe-rs
-scripts/exact-demo.sh        # encrypted eligibility decision via a separate evaluator
+  --features encompute-cli/openfhe,encompute-evaluator/openfhe
+scripts/exact-demo.sh                        # encrypted eligibility decision via a separate evaluator
+scripts/audit-commercial-build.sh target/release   # no TFHE-rs anywhere in the build
+```
+
+TFHE-rs (research feature; never in commercial builds):
+
+```sh
+cargo test --release -p encompute-runtime --features research-tfhe-rs --test research_tfhe
+cargo test --release -p encompute-runtime --features openfhe,research-tfhe-rs --test cross_backend
 ```
 
 ### Python
@@ -490,8 +502,9 @@ binary contains no Encompute key-generation, encryption or decryption code.
 | `crates/encompute-trust` | Trust graph: authorizations, revocations, lineage, evidence, trust report |
 | `crates/encompute-assurance` | Assurance suite: invariant catalog, adversarial checks, release-gate report (not published) |
 | `crates/encompute-vfhe` | Re-execution proof verifier on OpenFHE BGV (research) |
-| `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption) |
-| `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature) |
+| `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption), CKKS and BinFHE |
+| `crates/encompute-openfhe-exact` | OpenFHE exact backend: envelopes, parameter profile, gate binding |
+| `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature, never in commercial builds) |
 | `crates/encompute-evaluator` | Evaluator sessions and HTTP service; never links client crypto |
 | `crates/encompute-runtime` | Execution, differential testing, explain, bench, audit, artifacts |
 | `crates/encompute-cli` | `encompute` command |
@@ -508,6 +521,11 @@ binary contains no Encompute key-generation, encryption or decryption code.
 - ✓ Confidential Space training worker: a Hugging Face workload, hardware
   attestation gating the model and dataset keys. It is rehearsed locally and
   in CI; the live GCP run needs a project.
+- ✓ Commercial exact execution on OpenFHE: exact programs run encrypted on
+  OpenFHE exact (BinFHE) by default, with a commercial build audit; TFHE-rs
+  is research-only.
+- → Faster exact execution: multi-bit (functional) bootstrapping and
+  parallel gate evaluation on OpenFHE.
 - → Production multi-machine confidential training.
 - → Enterprise deployment foundation: SSO, customer-managed keys,
   multi-tenant projects, central audit.
@@ -516,6 +534,6 @@ binary contains no Encompute key-generation, encryption or decryption code.
 
 AGPL-3.0-only, with commercial licenses available: see [LICENSING.md](LICENSING.md).
 Encompute statically links OpenFHE (BSD 2-Clause); research builds with the
-`tfhe-rs` feature also link TFHE-rs (BSD-3-Clause-Clear, plus Zama's patent
+`research-tfhe-rs` feature also link TFHE-rs (BSD-3-Clause-Clear, plus Zama's patent
 terms); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 Security reports: [SECURITY.md](SECURITY.md).

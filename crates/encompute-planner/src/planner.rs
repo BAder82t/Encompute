@@ -112,6 +112,8 @@ fn estimate(
                 Scheme::Ckks => 40 * o,
                 Scheme::Tfhe => 400 * o,
                 Scheme::Bgv => 60 * o,
+                // Tens of bootstrapped gates per operation.
+                Scheme::BinFhe => 500 * o,
             },
             Mechanism::VerifiedExecution => 180 * o,
             Mechanism::Attestation { .. } => 800,
@@ -160,6 +162,7 @@ fn options(
     c: Option<&Confidentiality>,
     boundary: Option<&AggregationBoundary>,
     ctx: &PlanningContext,
+    correctness: bool,
 ) -> Vec<Option_> {
     let mut out = vec![];
     let host = host_unusable(ctx);
@@ -199,10 +202,17 @@ fn options(
             let schemes: Vec<(Scheme, &str, bool)> = if ctx.facts.semantics == "approximate" {
                 vec![(Scheme::Ckks, "openfhe", ctx.catalog.ckks)]
             } else {
-                vec![
-                    (Scheme::Tfhe, "tfhe-rs", ctx.catalog.tfhe),
+                // OpenFHE exact first; TFHE-rs only where a research build
+                // offers it and OpenFHE exact is absent: never chosen over
+                // the production backend, whatever the cost model says.
+                let mut s = vec![
+                    (Scheme::BinFhe, "openfhe-exact", ctx.catalog.openfhe_exact),
                     (Scheme::Bgv, "openfhe", ctx.catalog.bgv),
-                ]
+                ];
+                if ctx.catalog.tfhe {
+                    s.push((Scheme::Tfhe, "tfhe-rs", !ctx.catalog.openfhe_exact));
+                }
+                s
             };
             for (scheme, backend, built) in schemes {
                 let fhe = Mechanism::Fhe {
@@ -213,13 +223,25 @@ fn options(
                     .clone()
                     .or_else(|| (!built).then(|| format!("{} is not available", fhe.name())))
                     .or_else(|| host.clone());
-                out.push(Option_ {
-                    placement: Placement::UntrustedHost,
-                    mechanisms: vec![fhe.clone()],
-                    unavailable: why.clone(),
-                });
+                // BGV runs exact programs only with execution proofs (the
+                // runtime uses it for verified programs); others run on
+                // OpenFHE exact.
+                if scheme != Scheme::Bgv {
+                    out.push(Option_ {
+                        placement: Placement::UntrustedHost,
+                        mechanisms: vec![fhe.clone()],
+                        unavailable: why.clone(),
+                    });
+                }
                 if scheme == Scheme::Bgv {
                     let why = why
+                        .or_else(|| {
+                            (!correctness).then(|| {
+                                "execution proofs are not required: unverified exact programs \
+                                 run on OpenFHE exact"
+                                    .to_owned()
+                            })
+                        })
                         .or_else(|| {
                             (!ctx.catalog.verified_execution)
                                 .then(|| "verified execution is not available".to_owned())
@@ -502,7 +524,10 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
         let mut best: Option<(u64, Candidate, Vec<RequirementSatisfaction>)> = None;
         let mut reasons = vec![];
         let mut here = vec![];
-        for o in options(step, c, boundary, ctx) {
+        let correctness = requirements.iter().any(
+            |r| matches!(r, TrustRequirement::RequireCorrectness { step: s } if s == &step.id),
+        );
+        for o in options(step, c, boundary, ctx, correctness) {
             let est = estimate(step, &o.placement, &o.mechanisms, ctx, n);
             let mut cand = Candidate {
                 step: step.id.clone(),

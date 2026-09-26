@@ -5,9 +5,10 @@
 #   docker build -f Dockerfile.evaluator -t encompute-evaluator .
 #   docker run --rm -p 8750:8750 encompute-evaluator
 #
-# Exact programs on TFHE-rs (research use only; commercial use needs a patent
-# license from Zama):
-#   docker build -f Dockerfile.evaluator --build-arg FEATURES=openfhe,tfhe-rs -t encompute-evaluator-exact .
+# The default image runs approximate programs on OpenFHE CKKS and exact ones
+# on OpenFHE exact (BinFHE); it contains no TFHE-rs. A research image with
+# TFHE-rs (research use only; commercial use needs a patent license from Zama):
+#   docker build -f Dockerfile.evaluator --build-arg FEATURES=openfhe,research-tfhe-rs -t encompute-evaluator-research .
 
 FROM rust:1.98-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake git g++ && rm -rf /var/lib/apt/lists/*
@@ -26,6 +27,6 @@ COPY --from=build /src/target/release/encompute-evaluator /usr/local/bin/encompu
 USER evaluator
 EXPOSE 8750
 # Each program runs on the real backend for its semantics that this image
-# was built with (OpenFHE for CKKS; TFHE-rs for exact, if built).
+# was built with (OpenFHE CKKS for approximate, OpenFHE exact for exact).
 ENTRYPOINT ["encompute-evaluator", "serve", "--listen", "0.0.0.0:8750"]
 CMD ["--workers", "2"]

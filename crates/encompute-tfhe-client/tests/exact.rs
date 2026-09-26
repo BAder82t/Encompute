@@ -5,7 +5,7 @@
 //!   integer widths (default: u8 and i16);
 //! - `ENCOMPUTE_EXACT_PROGRAMS=N` runs N random programs (the mock tests'
 //!   generator) on TFHE-rs.
-#![cfg(feature = "tfhe-rs")]
+#![cfg(feature = "research-tfhe-rs")]
 
 #[path = "../../encompute-exact/tests/gen/mod.rs"]
 mod gen;

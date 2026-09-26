@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Release check: from a clean checkout to a trusted adapter, using only
 # documented commands. The core (Rust workspace, Python SDK, confidential
-# fine-tuning, examples, assurance) must pass; OpenFHE, TFHE-rs and
-# Confidential Space checks run when available and report SKIPPED otherwise.
+# fine-tuning, examples, assurance) must pass; OpenFHE (CKKS and exact, and
+# the commercial dependency audit), TFHE-rs research and Confidential Space
+# checks run when available and report SKIPPED otherwise.
 #
 #   scripts/release-check.sh            # expects cargo, python3, network for pip
 set -uo pipefail
@@ -45,14 +46,26 @@ check "Examples" env PYTHON="$PWD/.venv/bin/python" EXAMPLES_REQUIRE="15 16 17 1
 check "Assurance" bash -c 'cargo build -q --release -p encompute-assurance --bins --examples && target/release/assurance-report'
 
 if [ -d .deps/openfhe ]; then
-  check "OpenFHE" bash -c 'cargo build -q --release --bins --features encompute-cli/openfhe,encompute-evaluator/openfhe -p encompute-cli -p encompute-evaluator && BIN=target/release examples/run-all.sh crypto'
+  check "OpenFHE" bash -c 'cargo build -q --release --bins --features encompute-cli/openfhe,encompute-evaluator/openfhe -p encompute-cli -p encompute-evaluator && BIN=target/release EXAMPLES_REQUIRE="19" examples/run-all.sh crypto'
+  check "OpenFHE Exact" cargo test -q --release -p encompute-openfhe-client -p encompute-openfhe-exact
+  check "Exact remote execution" bash -c 'cargo test -q --release -p encompute-runtime --features openfhe --test openfhe_exact && scripts/exact-demo.sh'
+  # The release binaries were just built with the production features.
+  check "Commercial dependency audit" scripts/audit-commercial-build.sh target/release
+  if grep -q "TFHE-rs contamination NONE" "$LOG/Commercial dependency audit.log"; then
+    row "TFHE-rs contamination" "NONE"
+  else
+    row "TFHE-rs contamination" "FOUND (see the audit)"
+    status=1
+  fi
 else
-  row "OpenFHE" "SKIPPED (scripts/install-openfhe.sh)"
+  for r in "OpenFHE" "OpenFHE Exact" "Exact remote execution" "Commercial dependency audit" "TFHE-rs contamination"; do
+    row "$r" "SKIPPED (scripts/install-openfhe.sh)"
+  done
 fi
 if [ -n "${ENCOMPUTE_TFHE:-}" ]; then
-  check "TFHE research" cargo test -q --release -p encompute-tfhe-client --features tfhe-rs
+  check "TFHE-rs research" cargo test -q --release -p encompute-tfhe-client --features research-tfhe-rs
 else
-  row "TFHE research" "SKIPPED (set ENCOMPUTE_TFHE=1; research feature)"
+  row "TFHE-rs research" "SKIPPED (set ENCOMPUTE_TFHE=1; research feature, never shipped)"
 fi
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   check "CS training image" bash -c 'D=deploy/confidential-space-training/Dockerfile &&

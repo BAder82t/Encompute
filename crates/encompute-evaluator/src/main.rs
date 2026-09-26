@@ -2,13 +2,14 @@
 //! links no client crypto.
 //!
 //!     encompute-evaluator serve <program.eir | model.encompute/>... [--listen ADDR]
-//!                               [--backend mock|openfhe|tfhe-rs]... [--workers N]
+//!                               [--backend mock|openfhe|openfhe-exact|tfhe-rs]... [--workers N]
 //!                               [--identity FILE] [--attestation FILE]
 //!     encompute-evaluator worker --backend …     (started by serve)
 //!
 //! Each program runs on the backend for its semantics: approximate programs
-//! on OpenFHE, exact ones on TFHE-rs, where built; `--backend mock` serves
-//! both on the mock.
+//! on OpenFHE CKKS, exact ones on OpenFHE exact (BinFHE), where built;
+//! `--backend mock` serves both on the mock. `tfhe-rs` exists only in
+//! research builds.
 //!
 //! `--identity FILE` holds the evaluator's receipt-signing key (created,
 //! mode 0600, if missing). Without it the identity is ephemeral and clients
@@ -29,7 +30,7 @@ use encompute_verification::EvaluatorSigner;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: encompute-evaluator serve <program.eir | model.encompute/>... \
-         [--listen 127.0.0.1:8750] [--backend mock|openfhe|tfhe-rs]... [--workers N] \
+         [--listen 127.0.0.1:8750] [--backend mock|openfhe|openfhe-exact|tfhe-rs]... [--workers N] \
          [--identity FILE] [--attestation FILE]"
     );
     ExitCode::from(2)
@@ -54,7 +55,14 @@ fn main() -> ExitCode {
                 let value = it.next().unwrap_or_default();
                 match BackendKind::parse(&value) {
                     Some(k) if !k.built() => {
-                        eprintln!("error: this evaluator was built without {}", k.name());
+                        if k == BackendKind::TfheRs {
+                            eprintln!(
+                                "error: BACKEND UNAVAILABLE: TFHE-rs is available only in research \
+                                 builds (the `research-tfhe-rs` feature)"
+                            );
+                        } else {
+                            eprintln!("error: this evaluator was built without {}", k.name());
+                        }
                         return ExitCode::from(2);
                     }
                     _ => match backends.apply(&a, &value) {

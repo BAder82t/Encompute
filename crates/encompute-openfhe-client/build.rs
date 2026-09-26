@@ -12,7 +12,11 @@ fn main() {
     let include = root.join("include/openfhe");
 
     let mut build = cxx_build::bridge("src/lib.rs");
-    build.file("cpp/client.cc").include("cpp").include(&shared);
+    build
+        .file("cpp/client.cc")
+        .file("cpp/binclient.cc")
+        .include("cpp")
+        .include(&shared);
     for dir in ["", "core", "pke", "binfhe", "cereal"] {
         build.flag(format!("-isystem{}", include.join(dir).display()));
     }
@@ -38,4 +42,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cpp/client.h");
     println!("cargo:rerun-if-changed=cpp/client.cc");
+    println!("cargo:rerun-if-changed=cpp/binclient.cc");
 }

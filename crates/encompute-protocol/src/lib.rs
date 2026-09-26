@@ -70,7 +70,7 @@ pub struct Header {
 #[derive(Clone, Debug)]
 pub struct Expect<'a> {
     pub kind: Kind,
-    /// "CKKS" or "TFHE"; never inferred from the backend.
+    /// "CKKS", "BinFHE", "BGV" or "TFHE" (research); never inferred from the backend.
     pub scheme: &'a str,
     pub backend: &'a str,
     pub backend_version: &'a str,

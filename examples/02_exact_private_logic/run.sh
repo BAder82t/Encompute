@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# 02: exact private logic. Clear and mock always; TFHE-rs when built.
+# 02: exact private logic. Clear and mock always; OpenFHE exact when built.
 source "$(dirname "$0")/../lib.sh"
 need_cli
 need_python
 export PYTHON PYTHONDONTWRITEBYTECODE=1  # `encompute compile file.py:fn` runs this Python
 
-step "Run an eligibility rule in clear and mock modes (and TFHE-rs when built)"
+step "Run an eligibility rule in clear and mock modes (and encrypted when built)"
 "$PYTHON" "$HERE/eligible.py"
 
 step "Compile it: overflow is checked for every input in range"
 "$E" compile "$HERE/eligible.py:eligible" -o "$W/eligible.encompute" >/dev/null
-"$E" explain "$W/eligible.encompute" | grep -E "semantics|comparisons|Boolean|overflow|result semantics"
+"$E" explain "$W/eligible.encompute" | grep -E "semantics|comparisons|Boolean|overflow|scheme|bootstrapped gates|result semantics"
 "$E" run "$W/eligible.encompute" --mode mock --input age=31 --input income=52000 --input risk=410
 
 # eligibility.py (with a debt ratio) is the program scripts/exact-demo.sh runs.

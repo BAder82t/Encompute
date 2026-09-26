@@ -54,7 +54,7 @@ fn inputs(age: f64, income: f64, debt: f64, risk: f64) -> Inputs {
 fn exact_model_runs_clear_and_mock() {
     let m = Model::compile(approve()).unwrap();
     assert_eq!(m.semantics(), Semantics::Exact);
-    assert_eq!(m.compiled().scheme(), "TFHE");
+    assert_eq!(m.compiled().scheme(), "BinFHE");
     let yes = inputs(35.0, 100_000.0, 20_000.0, 400.0);
     let no = inputs(35.0, 100_000.0, 20_000.0, 700.0);
     for mode in [Mode::Clear, Mode::Mock] {
@@ -77,8 +77,11 @@ fn exact_model_runs_clear_and_mock() {
         json.get("max_error").is_none(),
         "no error metrics for exact programs"
     );
-    // Without the research feature there is no exact cryptographic backend.
-    if !encompute_runtime::has_tfhe() {
+    // Encrypted exact programs need OpenFHE (OpenFHE exact); without it they
+    // are refused, never silently mocked.
+    if encompute_runtime::has_openfhe_exact() {
+        assert_eq!(m.run(Mode::Encrypted, &yes).unwrap()["approved"], vec![1.0]);
+    } else {
         assert_eq!(
             m.run(Mode::Encrypted, &yes).unwrap_err().code,
             Code::Backend
@@ -124,7 +127,7 @@ fn exact_artifacts_round_trip_deterministically() {
         serde_json::from_slice(&std::fs::read(a.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["compiler"]["plan"]["kind"], "exact");
     assert_eq!(manifest["crypto"]["semantics"], "exact");
-    assert_eq!(manifest["crypto"]["scheme"], "TFHE");
+    assert_eq!(manifest["crypto"]["scheme"], "BinFHE");
     let security: serde_json::Value =
         serde_json::from_slice(&std::fs::read(a.join("security.json")).unwrap()).unwrap();
     assert_eq!(security["result_semantics"], "exact");
@@ -269,7 +272,7 @@ fn exact_remote_round_trip() {
     std::thread::spawn(move || Evaluator::new(Backends::MOCK, Limits::default()).serve(server));
     let remote = Remote::new(&url);
     let info = remote.info().unwrap();
-    assert_eq!(info["backends"]["exact"]["scheme"], "TFHE");
+    assert_eq!(info["backends"]["exact"]["scheme"], "BinFHE");
 
     let m = Model::compile(approve()).unwrap();
     let client = m.new_client(Mode::Mock).unwrap();
@@ -283,82 +286,11 @@ fn exact_remote_round_trip() {
             .unwrap();
         assert_eq!(run.outputs["approved"], vec![want]);
         assert!(run.stats.request_bytes > 0);
-        assert_eq!(run.receipt.receipt.scheme, "TFHE");
+        assert_eq!(run.receipt.receipt.scheme, "BinFHE");
     }
     let programs = remote.info().unwrap()["programs"].clone();
-    assert_eq!(programs[0]["scheme"], "TFHE");
+    assert_eq!(programs[0]["scheme"], "BinFHE");
     assert_eq!(programs[0]["backend"], "mock");
-}
-
-/// Research build: the same program on TFHE-rs, locally and through an HTTP
-/// evaluator that holds only the server key. `ENCOMPUTE_EXACT_CASES` sets
-/// the differential-test size (default 20).
-#[cfg(feature = "tfhe-rs")]
-#[test]
-fn tfhe_rs_end_to_end() {
-    let m = Model::compile(approve()).unwrap();
-    let yes = inputs(35.0, 100_000.0, 20_000.0, 400.0);
-    assert_eq!(m.run(Mode::Encrypted, &yes).unwrap()["approved"], vec![1.0]);
-    let cases = std::env::var("ENCOMPUTE_EXACT_CASES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20);
-    let rep = m.test(Mode::Encrypted, cases, 11).unwrap();
-    let r = rep.exact().unwrap();
-    eprintln!(
-        "tfhe-rs: {} cases, {} matches, {} mismatches",
-        r.cases, r.matches, r.mismatches
-    );
-    assert!(r.passed && r.backend == "tfhe-rs", "{r:?}");
-
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
-    let backends = Backends::MOCK.with(BackendKind::TfheRs);
-    std::thread::spawn(move || Evaluator::new(backends, Limits::default()).serve(server));
-    let remote = Remote::new(&url);
-    let client = m.new_client(Mode::Encrypted).unwrap();
-    let trusted = remote.evaluator_identity().unwrap();
-    let run = remote
-        .run(
-            &client,
-            m.program(),
-            None,
-            &inputs(31.0, 120_000.0, 21_000.0, 400.0),
-            &trusted,
-        )
-        .unwrap();
-    assert_eq!(run.receipt.receipt.backend, "tfhe-rs");
-    let (out, stats) = (run.outputs, run.stats);
-    assert_eq!(out["approved"], vec![1.0]);
-
-    // Another TFHE client: its inputs are refused (keys not registered),
-    // and it cannot read this client's results.
-    let stranger = m.new_client(Mode::Encrypted).unwrap();
-    let x = inputs(31.0, 120_000.0, 21_000.0, 400.0);
-    let err = remote
-        .execute(
-            &m.ids().program_id,
-            &stranger.encrypt(m.program(), &x).unwrap(),
-        )
-        .unwrap_err();
-    assert_eq!(err.code, Code::WrongKey, "{err}");
-    let (response, _) = remote
-        .execute(
-            &m.ids().program_id,
-            &client.encrypt(m.program(), &x).unwrap(),
-        )
-        .unwrap();
-    assert_eq!(
-        stranger.decrypt(&response).unwrap_err().code,
-        Code::WrongKey
-    );
-    eprintln!(
-        "remote tfhe-rs: server key {} MiB, request {} KiB, response {} KiB, evaluator {:.0} ms",
-        stats.evaluation_key_bytes_uploaded >> 20,
-        stats.request_bytes >> 10,
-        stats.response_bytes >> 10,
-        stats.evaluator_ms
-    );
 }
 
 /// Integer sampling stays inside ranges wider than 2^53.

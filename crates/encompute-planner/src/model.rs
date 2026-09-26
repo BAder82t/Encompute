@@ -61,8 +61,11 @@ pub enum TrustRequirement {
 #[serde(rename_all = "snake_case")]
 pub enum Scheme {
     Ckks,
+    /// TFHE-rs (research builds only).
     Tfhe,
     Bgv,
+    /// OpenFHE BinFHE gate circuits: production exact programs.
+    BinFhe,
 }
 
 /// Something Encompute already has that makes requirements true.
@@ -114,6 +117,7 @@ impl Mechanism {
                     Scheme::Ckks => "CKKS",
                     Scheme::Tfhe => "TFHE",
                     Scheme::Bgv => "BGV",
+                    Scheme::BinFhe => "BinFHE",
                 }
             ),
             Mechanism::VerifiedExecution => "verified execution (re-execution proofs)".into(),
@@ -199,8 +203,11 @@ impl EvidenceKind {
 pub struct BackendCatalog {
     /// CKKS on OpenFHE.
     pub ckks: bool,
-    /// Exact programs on TFHE-rs.
+    /// Exact programs on TFHE-rs (research builds only).
     pub tfhe: bool,
+    /// Exact programs on OpenFHE BinFHE (production).
+    #[serde(default)]
+    pub openfhe_exact: bool,
     /// Exact programs on OpenFHE BGV.
     pub bgv: bool,
     /// Re-execution proofs on BGV (research build).

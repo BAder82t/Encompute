@@ -18,10 +18,10 @@ proptest.workspace = true
 
 [[example]]
 name = "exact_ops"
-required-features = ["tfhe-rs"]
+required-features = ["research-tfhe-rs"]
 
 [features]
-tfhe-rs = ["dep:tfhe", "encompute-tfhe/tfhe-rs"]
+research-tfhe-rs = ["dep:tfhe", "encompute-tfhe/research-tfhe-rs"]
 
 [lints]
 workspace = true

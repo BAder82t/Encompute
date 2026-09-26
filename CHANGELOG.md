@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+### Commercial exact execution on OpenFHE
+
+- **OpenFHE exact** (`openfhe-exact`, scheme BinFHE): exact programs run
+  encrypted on OpenFHE 1.5.1 BinFHE. Each value is a vector of encrypted
+  bits (two's complement), and every plan operation is a Boolean circuit:
+  - add, sub, mul, and multiplication by constants;
+  - signed and unsigned comparisons, select, min and max;
+  - division and remainder by constants;
+  - shifts, casts, Boolean logic;
+  - lookups up to 256 entries.
+
+  The language and `ExactPlan` are unchanged.
+- **The default exact backend.** The compiler, the evaluator and the
+  planner select OpenFHE exact for unverified exact programs. Verified
+  programs stay on BGV with re-execution proofs.
+- **One vetted profile**: `BINFHE_STD128_GINX_BITS_V1` (STD128, GINX,
+  128-bit, 2^-135 per gate). It is bound into artifacts, evaluation keys
+  and ciphertexts.
+- **Versioned envelopes** (`ENCBINF1`) bind every key and ciphertext to
+  its backend, parameter set, client key and type. Mismatches are refused
+  before any gate runs.
+- **TFHE-rs is research-only.** The feature is renamed `research-tfhe-rs`.
+  Selecting TFHE-rs in a production build (the
+  `ENCOMPUTE_RESEARCH_EXACT_BACKEND` variable, `--backend tfhe-rs`, or a
+  TFHE-rs artifact) fails with ENC1501 BACKEND UNAVAILABLE; it never falls
+  back.
+- **Commercial build audit** (`scripts/audit-commercial-build.sh`) checks
+  the dependency graph, a CycloneDX SBOM (`scripts/sbom.py`), and the CLI,
+  evaluator and Python extension binaries; optionally also a wheel and a
+  container image. CI runs it on production builds, and runs it on a
+  research build as a negative control.
+- **Capability matrix.** Operations outside it are refused at compile
+  time. `explain` prints each program's bootstrapped gate count.
+- **CLI and SDK.** `encompute info` has an `openfhe-exact` row, and
+  `encompute.has_exact()` is new.
+- **Evidence.**
+  - Exhaustive 8-bit circuit tests.
+  - OpenFHE exact equals the clear reference and the mock on every
+    operation and on random programs.
+  - Remote execution with receipts.
+  - Backend-independent transcripts.
+  - A research differential test: OpenFHE exact equals TFHE-rs.
+  - Invariants INV-149 to INV-155.
+- **Example 19** (`examples/19_openfhe_exact`) covers Boolean logic, a
+  lookup, and remote eligibility with a verified receipt. It also runs 13
+  attacks: forged keys, parameters and backends, corruption, a modified
+  plan, receipt replay, overflow, unsupported operations, and TFHE-rs
+  selection.
+- Benchmarks: gate counts per operation and width; about 62 ms per gate;
+  524 MiB of evaluation keys (docs/benchmarks.md).
+- ADR-020.
+
 ### Confidential training on Google Confidential Space
 
 - **Confidential training jobs**: `encompute.torch.job.prepare` plans a

@@ -1,5 +1,5 @@
 """Exact (integer/Boolean) programs from Python: tracing, typing, privacy
-diagnostics and execution on the mock backend (TFHE-rs when built)."""
+diagnostics and execution on the mock backend (OpenFHE exact when built)."""
 
 import subprocess
 import sys
@@ -22,7 +22,7 @@ from encompute import (
     u64,
 )
 
-tfhe = pytest.mark.skipif(not encompute.has_tfhe(), reason="built without TFHE-rs")
+exact = pytest.mark.skipif(not encompute.has_exact(), reason="built without OpenFHE")
 
 
 def code_of(fn):
@@ -281,14 +281,14 @@ def test_exact_artifact_round_trip_and_cli(tmp_path):
     assert loaded.run(age=31, income=120_000, debt=21_000, mode="mock") == {"out": True}
 
 
-def test_encrypted_mode_needs_tfhe():
-    if encompute.has_tfhe():
-        pytest.skip("built with TFHE-rs")
+def test_encrypted_mode_needs_openfhe():
+    if encompute.has_exact():
+        pytest.skip("built with OpenFHE exact")
     assert code_of(lambda: approve(30, 1, 1, 1, mode="encrypted")) == "ENC1501"
 
 
-@tfhe
-def test_tfhe_rs_encrypted():
+@exact
+def test_openfhe_exact_encrypted():
     yes = dict(age=35, income=100_000, debt=20_000, risk=400)
     assert approve(**yes, mode="encrypted") is True
     assert approve(**{**yes, "age": 17}, mode="encrypted") is False

@@ -821,6 +821,7 @@ dependencies = [
  "encompute-exact",
  "encompute-ir",
  "encompute-openfhe",
+ "encompute-openfhe-exact",
  "encompute-protocol",
  "encompute-tfhe",
  "encompute-verification",
@@ -890,6 +891,20 @@ dependencies = [
  "encompute-exact",
  "encompute-ir",
  "encompute-openfhe",
+ "encompute-openfhe-exact",
+ "getrandom 0.2.17",
+ "proptest",
+]
+
+[[package]]
+name = "encompute-openfhe-exact"
+version = "0.2.0"
+dependencies = [
+ "encompute-backend",
+ "encompute-exact",
+ "encompute-ir",
+ "encompute-openfhe",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -969,7 +984,6 @@ dependencies = [
  "encompute-privacy",
  "encompute-protocol",
  "encompute-secagg",
- "encompute-tfhe",
  "encompute-tfhe-client",
  "encompute-training",
  "encompute-trust",

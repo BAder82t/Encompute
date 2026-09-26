@@ -1,6 +1,8 @@
 # ADR-006 — Exact programs: one compiler, two schemes
 
-Status: **Accepted** (2026-09-25)
+Status: **Accepted** (2026-09-25). The backend choice is amended by
+ADR-020: exact programs run on OpenFHE exact (BinFHE); TFHE-rs is
+research-only.
 
 ## Context
 

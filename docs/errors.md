@@ -18,7 +18,7 @@ Python raises `encompute.EncomputeError` with `.code` and `.message`.
 | ENC1302 | IR parser | Malformed `.eir` text (message includes the line) | — |
 | ENC1303 | analysis | An exact integer operation may overflow its type for inputs in the declared ranges, a lookup index may leave its table, or an exact output may exceed ±2^53 | Use a wider type (`cast`) or narrower input ranges |
 | ENC1401 | runtime | Artifact missing, modified (hash mismatch), or compiled by a different Encompute version | Recompile the artifact |
-| ENC1501 | backend | Backend error (OpenFHE exception, missing rotation key, depth budget exhausted, build without OpenFHE) | See message |
+| ENC1501 | backend | Backend error (OpenFHE exception, missing rotation key, depth budget exhausted, build without OpenFHE); an operation outside the exact backend's capability matrix (for example a lookup table over 256 entries); BACKEND UNAVAILABLE: TFHE-rs requested in a production build | See message; for TFHE-rs, use OpenFHE exact (the default) |
 | ENC1601 | envelope | Malformed, truncated or corrupted envelope (checksum mismatch) | — |
 | ENC1602 | envelope | Wrong kind, format, scheme or backend version | Match client and evaluator versions |
 | ENC1603 | envelope | Made for a different parameter set | Recompile or regenerate keys |

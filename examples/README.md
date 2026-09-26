@@ -33,7 +33,7 @@ If you only run four, run **01 → 02 → 06 → 11**.
 | # | Example | Difficulty | Requires |
 |---|---|---|---|
 | 01 | [CKKS private inference](01_ckks_private_inference/) | beginner | Python SDK (OpenFHE for encrypted mode) |
-| 02 | [Exact private logic](02_exact_private_logic/) | beginner | Python SDK (TFHE-rs research build for encrypted mode) |
+| 02 | [Exact private logic](02_exact_private_logic/) | beginner | Python SDK (OpenFHE for encrypted mode) |
 | 03 | [Remote evaluator](03_remote_evaluator/) | beginner | two processes |
 | 04 | [Execution receipts](04_execution_receipts/) | intermediate | a local evaluator |
 | 05 | [Verified execution](05_verified_execution/) | advanced | the `vfhe-research` build (OpenFHE) |
@@ -50,12 +50,13 @@ If you only run four, run **01 → 02 → 06 → 11**.
 | 16 | [Patient-level differential privacy (DP-SGD)](16_patient_private_lora/) | advanced | Python SDK, PyTorch (CPU) |
 | 17 | [Hugging Face Transformers + PEFT](17_huggingface_peft/) | advanced | Python SDK, `encompute[huggingface]` (CPU; no download) |
 | 18 | [A training step in Google Confidential Space](18_confidential_space_hf/) | advanced | `encompute[huggingface]`; locally, or a GCP project for the real run |
+| 19 | [Exact programs on OpenFHE exact](19_openfhe_exact/) | intermediate | the `openfhe` build, Python SDK; about 1 GiB of scratch space |
 
 ## Learning paths
 
 - **Beginner:** 01, 02, 06, 11.
 - **Privacy engineer:** 06, 07, 08, 09, 10, 16.
-- **Cryptography engineer:** 01, 02, 04, 05.
+- **Cryptography engineer:** 01, 02, 04, 05, 19.
 - **Platform or security engineer:** 03, 07, 10, 12, 13, 18.
 - **AI engineer:** 11, 14, 15, 16, 17, 18.
 
@@ -71,10 +72,10 @@ examples/run-all.sh quick
 |---|---|---|
 | `quick` | 01 02 04 06 08 09 10 11 13 14 15 (mock and default-build examples) | about a minute |
 | `standard` | quick, plus 03 07 12 16 17 18 (everything without a cloud account or crypto build) | about 7 minutes |
-| `crypto` | 01 03 05 with OpenFHE and verified execution | needs `--features openfhe` / `vfhe-research` |
+| `crypto` | 01 03 05 19 with OpenFHE, OpenFHE exact and verified execution | needs `--features openfhe` / `vfhe-research` |
 | `full` | everything this machine can run, and every attack in 12 | a few minutes |
 
-An example that needs something this machine lacks (OpenFHE, TFHE-rs,
+An example that needs something this machine lacks (OpenFHE,
 verified execution, PyTorch) prints `SKIPPED` and the reason instead of
 failing. Examples 15 and 16 need PyTorch, and 17 also Transformers and PEFT
 (`pip install 'encompute[huggingface]'`). For PyTorch alone:

@@ -148,11 +148,14 @@ pub fn issue_receipt(
 }
 
 /// Which implementation runs a program. The mock serves both semantics;
-/// OpenFHE runs approximate (CKKS) programs, TFHE-rs exact ones.
+/// OpenFHE runs approximate (CKKS) programs and verified exact programs
+/// (BGV), OpenFHE exact runs exact programs (BinFHE), TFHE-rs runs exact
+/// programs in research builds only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackendKind {
     Mock,
     OpenFhe,
+    OpenFheExact,
     TfheRs,
 }
 
@@ -161,6 +164,7 @@ impl BackendKind {
         match s {
             "mock" => Some(BackendKind::Mock),
             "openfhe" => Some(BackendKind::OpenFhe),
+            "openfhe-exact" => Some(BackendKind::OpenFheExact),
             "tfhe-rs" => Some(BackendKind::TfheRs),
             _ => None,
         }
@@ -171,6 +175,7 @@ impl BackendKind {
         match self {
             BackendKind::Mock => "mock",
             BackendKind::OpenFhe => "openfhe",
+            BackendKind::OpenFheExact => "openfhe-exact",
             BackendKind::TfheRs => "tfhe-rs",
         }
     }
@@ -180,7 +185,14 @@ impl BackendKind {
         match self {
             BackendKind::Mock => ("mock", "0"),
             BackendKind::OpenFhe => (encompute_ckks::BACKEND, encompute_ckks::BACKEND_VERSION),
-            BackendKind::TfheRs => (encompute_tfhe::BACKEND, encompute_tfhe::BACKEND_VERSION),
+            BackendKind::OpenFheExact => (
+                encompute_exact::bits::OPENFHE_EXACT_BACKEND,
+                encompute_exact::bits::OPENFHE_EXACT_VERSION,
+            ),
+            BackendKind::TfheRs => (
+                encompute_exact::research::TFHE_RS_BACKEND,
+                encompute_exact::research::TFHE_RS_VERSION,
+            ),
         }
     }
 
@@ -188,7 +200,7 @@ impl BackendKind {
         match self {
             BackendKind::Mock => true,
             BackendKind::OpenFhe => s == Semantics::Approximate,
-            BackendKind::TfheRs => s == Semantics::Exact,
+            BackendKind::OpenFheExact | BackendKind::TfheRs => s == Semantics::Exact,
         }
     }
 
@@ -196,8 +208,8 @@ impl BackendKind {
     pub fn built(self) -> bool {
         match self {
             BackendKind::Mock => true,
-            BackendKind::OpenFhe => cfg!(feature = "openfhe"),
-            BackendKind::TfheRs => cfg!(feature = "tfhe-rs"),
+            BackendKind::OpenFhe | BackendKind::OpenFheExact => cfg!(feature = "openfhe"),
+            BackendKind::TfheRs => cfg!(feature = "research-tfhe-rs"),
         }
     }
 
@@ -228,8 +240,9 @@ impl BackendKind {
                 Code::Backend,
                 match self {
                     BackendKind::TfheRs => {
-                        "this build has no TFHE-rs backend (research use only): rebuild with \
-                         the `tfhe-rs` feature, or use the mock"
+                        "BACKEND UNAVAILABLE: TFHE-rs is available only in research builds (the \
+                         `research-tfhe-rs` feature); production exact programs run on OpenFHE \
+                         exact"
                     }
                     _ => "this build has no OpenFHE backend: rebuild with the `openfhe` feature",
                 },
@@ -260,8 +273,9 @@ impl Backends {
             } else {
                 BackendKind::Mock
             },
-            exact: if BackendKind::TfheRs.built() {
-                BackendKind::TfheRs
+            // Never TFHE-rs: a research build must ask for it.
+            exact: if BackendKind::OpenFheExact.built() {
+                BackendKind::OpenFheExact
             } else {
                 BackendKind::Mock
             },
@@ -273,7 +287,7 @@ impl Backends {
         match k {
             BackendKind::Mock => Self::MOCK,
             BackendKind::OpenFhe => Self { approx: k, ..self },
-            BackendKind::TfheRs => Self { exact: k, ..self },
+            BackendKind::OpenFheExact | BackendKind::TfheRs => Self { exact: k, ..self },
         }
     }
 
@@ -339,6 +353,8 @@ mod tests {
         for (approx, exact) in [
             (Mock, Mock),
             (OpenFhe, Mock),
+            (Mock, OpenFheExact),
+            (OpenFhe, OpenFheExact),
             (Mock, TfheRs),
             (OpenFhe, TfheRs),
         ] {
@@ -365,10 +381,12 @@ enum Keyed {
     #[cfg(feature = "openfhe")]
     OpenFhe(encompute_openfhe::OpenFheEvaluator),
     ExactMock(PlainExactEvaluator),
-    #[cfg(feature = "tfhe-rs")]
+    #[cfg(feature = "research-tfhe-rs")]
     TfheRs(encompute_tfhe::tfhe_rs::TfheRsEvaluator),
     #[cfg(feature = "openfhe")]
     Bgv(encompute_openfhe::BgvEvaluator),
+    #[cfg(feature = "openfhe")]
+    OpenFheExact(Box<encompute_openfhe_exact::OpenFheExactEvaluator>),
 }
 
 /// One compiled program, the evaluation keys registered for it, and nothing
@@ -398,6 +416,11 @@ impl EvaluatorSession {
     pub fn new(program: Program, kind: BackendKind) -> Result<Self> {
         let compiled = compile_program(&program)?;
         kind.check(&compiled)?;
+        if kind == BackendKind::OpenFheExact {
+            if let Some(e) = compiled.exact() {
+                encompute_exact::bits::check_capabilities(&e.plan)?;
+            }
+        }
         let ids = Ids::of(&program, &compiled);
         let spec = execution_spec(&ids, &compiled, kind);
         let transcript_hash = transcript_for(&compiled, &spec).map(|t| t.id().hex());
@@ -504,9 +527,16 @@ impl EvaluatorSession {
                 ev.load_keys(&env.payload)?;
                 Keyed::Bgv(ev)
             }
-            #[cfg(feature = "tfhe-rs")]
+            #[cfg(feature = "research-tfhe-rs")]
             (CompiledProgram::Exact(_), BackendKind::TfheRs) => {
                 Keyed::TfheRs(encompute_tfhe::tfhe_rs::TfheRsEvaluator::new(&env.payload)?)
+            }
+            #[cfg(feature = "openfhe")]
+            (CompiledProgram::Exact(e), BackendKind::OpenFheExact) => {
+                Keyed::OpenFheExact(Box::new(encompute_openfhe_exact::evaluator(
+                    &e.profile,
+                    &env.payload,
+                )?))
             }
             _ => unreachable!("backend checked in new()"),
         };
@@ -561,9 +591,13 @@ impl EvaluatorSession {
             (Keyed::Bgv(ev), CompiledProgram::Exact(e)) => {
                 run_exact(ev, &e.plan, &items, &self.context(), observer)?
             }
-            #[cfg(feature = "tfhe-rs")]
+            #[cfg(feature = "research-tfhe-rs")]
             (Keyed::TfheRs(ev), CompiledProgram::Exact(e)) => {
                 run_exact(ev, &e.plan, &items, &self.context(), observer)?
+            }
+            #[cfg(feature = "openfhe")]
+            (Keyed::OpenFheExact(ev), CompiledProgram::Exact(e)) => {
+                run_exact(ev.as_ref(), &e.plan, &items, &self.context(), observer)?
             }
             _ => unreachable!("keys are registered for this session's program"),
         };

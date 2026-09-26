@@ -1,0 +1,17 @@
+[package]
+name = "encompute-openfhe-exact"
+description = "Exact encrypted execution on OpenFHE BinFHE for Encompute (evaluator side)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+encompute-ir.workspace = true
+encompute-backend.workspace = true
+encompute-exact.workspace = true
+encompute-openfhe.workspace = true
+sha2 = "0.10"
+
+[lints]
+workspace = true

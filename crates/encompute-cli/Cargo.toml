@@ -30,7 +30,7 @@ encompute-evaluator.workspace = true
 [features]
 openfhe = ["encompute-runtime/openfhe"]
 # Research use only: TFHE-rs requires a patent license from Zama for commercial use.
-tfhe-rs = ["encompute-runtime/tfhe-rs"]
+research-tfhe-rs = ["encompute-runtime/research-tfhe-rs"]
 # Research: verify execution proofs (re-execution on OpenFHE BGV, ADR-009).
 vfhe-research = ["encompute-runtime/vfhe-research"]
 

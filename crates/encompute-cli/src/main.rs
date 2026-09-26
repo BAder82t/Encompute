@@ -689,6 +689,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 "openfhe             {}",
                 yes(encompute_runtime::has_openfhe())
             );
+            println!(
+                "openfhe-exact       {}",
+                yes(encompute_runtime::has_openfhe_exact())
+            );
             println!("tfhe-rs             {}", yes(encompute_runtime::has_tfhe()));
             println!(
                 "verified-execution  {}",

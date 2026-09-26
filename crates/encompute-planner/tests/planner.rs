@@ -83,6 +83,7 @@ fn ctx(semantics: &str, profile: Profile) -> PlanningContext {
         catalog: BackendCatalog {
             ckks: true,
             tfhe: true,
+            openfhe_exact: false,
             bgv: true,
             verified_execution: true,
         },
@@ -410,4 +411,43 @@ fn verified_training_requires_attested_workloads() {
         step(&plan, "train:patients-a").placement,
         Placement::Tee(_)
     ));
+}
+
+#[test]
+fn exact_programs_plan_openfhe_exact_never_tfhe_rs_by_default() {
+    let p = prog(&ELIGIBILITY.replace(" verification required", ""));
+    let fhe = |plan: &ConfidentialExecutionPlan| {
+        step(plan, "evaluate")
+            .mechanisms
+            .iter()
+            .find(|m| matches!(m, Mechanism::Fhe { .. }))
+            .cloned()
+    };
+    let openfhe_exact = Some(Mechanism::Fhe {
+        scheme: Scheme::BinFhe,
+        backend: "openfhe-exact".into(),
+    });
+    // Production catalog: OpenFHE exact, no TFHE-rs.
+    let mut c = ctx("exact", Profile::Standard);
+    c.catalog.tfhe = false;
+    c.catalog.openfhe_exact = true;
+    assert_eq!(fhe(&planned(&p, &c)), openfhe_exact);
+    // A research build offering both still prefers OpenFHE exact.
+    c.catalog.tfhe = true;
+    assert_eq!(fhe(&planned(&p, &c)), openfhe_exact);
+    // Without OpenFHE exact, a production catalog never falls back to TFHE-rs.
+    c.catalog.tfhe = false;
+    c.catalog.openfhe_exact = false;
+    if let Ok(plan) = plan_or_fail(&p, &c) {
+        assert!(
+            !matches!(
+                fhe(&plan),
+                Some(Mechanism::Fhe {
+                    scheme: Scheme::Tfhe,
+                    ..
+                })
+            ),
+            "{plan:?}"
+        );
+    }
 }

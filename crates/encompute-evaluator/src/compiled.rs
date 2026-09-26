@@ -73,7 +73,15 @@ pub fn compile_program(program: &Program) -> Result<CompiledProgram> {
                 check_coverage(&c.plan)?;
                 encompute_exact::bgv::profile(&c.plan)
             } else {
-                encompute_tfhe::default_profile()
+                // Exact programs run on OpenFHE (BinFHE). TFHE-rs is a
+                // research backend, never chosen by default.
+                let profile = exact_profile()?;
+                if profile.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND {
+                    // Outside the capability matrix: refused here, not at
+                    // key generation or on the evaluator.
+                    encompute_exact::bits::check_capabilities(&c.plan)?;
+                }
+                profile
             };
             CompiledProgram::Exact(ExactProgram {
                 plan: c.plan,
@@ -83,6 +91,29 @@ pub fn compile_program(program: &Program) -> Result<CompiledProgram> {
             })
         }
     })
+}
+
+/// Selects TFHE-rs for exact programs, in research builds only.
+pub const RESEARCH_EXACT_BACKEND_ENV: &str = "ENCOMPUTE_RESEARCH_EXACT_BACKEND";
+
+/// The profile unverified exact programs compile to: OpenFHE exact, unless
+/// a research build is asked (`ENCOMPUTE_RESEARCH_EXACT_BACKEND=tfhe-rs`)
+/// for TFHE-rs. A production build refuses that request instead of
+/// ignoring it.
+fn exact_profile() -> Result<encompute_exact::ExactProfile> {
+    match std::env::var(RESEARCH_EXACT_BACKEND_ENV).as_deref() {
+        Err(_) | Ok("") | Ok("openfhe-exact") => Ok(encompute_exact::bits::openfhe_exact_profile()),
+        Ok("tfhe-rs") if cfg!(feature = "research-tfhe-rs") => Ok(encompute_exact::research::tfhe_rs_profile()),
+        Ok("tfhe-rs") => Err(Error::new(
+            Code::Backend,
+            "BACKEND UNAVAILABLE: TFHE-rs is available only in research builds (the \
+             `research-tfhe-rs` feature); production exact programs run on OpenFHE exact",
+        )),
+        Ok(other) => Err(Error::new(
+            Code::Backend,
+            format!("{RESEARCH_EXACT_BACKEND_ENV}={other}: the exact backends are openfhe-exact and (research builds) tfhe-rs"),
+        )),
+    }
 }
 
 /// Whether execution proofs cover every instruction of `plan`.
@@ -134,6 +165,11 @@ impl CompiledProgram {
         match self {
             CompiledProgram::Approx(_) => "CKKS",
             CompiledProgram::Exact(e) if e.profile.backend == "openfhe" => "BGV",
+            CompiledProgram::Exact(e)
+                if e.profile.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND =>
+            {
+                "BinFHE"
+            }
             CompiledProgram::Exact(_) => "TFHE",
         }
     }
@@ -159,6 +195,11 @@ impl CompiledProgram {
             CompiledProgram::Approx(_) => crate::BackendKind::OpenFhe,
             CompiledProgram::Exact(e) if e.profile.backend == "openfhe" => {
                 crate::BackendKind::OpenFhe
+            }
+            CompiledProgram::Exact(e)
+                if e.profile.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND =>
+            {
+                crate::BackendKind::OpenFheExact
             }
             CompiledProgram::Exact(_) => crate::BackendKind::TfheRs,
         }

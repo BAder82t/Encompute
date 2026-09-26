@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Encompute 0.3 exact demo: the client encrypts age, income, debt and risk;
 # a separate evaluator process decides eligibility on ciphertexts with
-# TFHE-rs and returns an encrypted Boolean; only the client decrypts.
+# OpenFHE exact (BinFHE, bit-level) and returns an encrypted Boolean; only
+# the client decrypts.
 #
 #   scripts/exact-demo.sh [--container | EVALUATOR_URL]
 #
-# Needs the research build (TFHE-rs; commercial use needs a patent license
-# from Zama):
+# Needs the OpenFHE build (the commercial build; no TFHE-rs):
 #   cargo build --release -p encompute-cli -p encompute-evaluator \
-#     --features encompute-cli/tfhe-rs,encompute-evaluator/tfhe-rs
+#     --features encompute-cli/openfhe,encompute-evaluator/openfhe
 # Without an argument, an evaluator is started here as a separate process
 # with no access to the client's key directory. With --container, the
 # evaluator runs in a container (its own filesystem, network namespace and
 # user: the "second machine"). With a URL, an evaluator already running
-# elsewhere (encompute-evaluator serve --backend tfhe-rs) is used.
+# elsewhere (encompute-evaluator serve --backend openfhe-exact) is used.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
@@ -36,28 +36,28 @@ step "client: compile the program (exact: integers and Booleans)"
 "$ENCOMPUTE" compile "$ROOT/examples/02_exact_private_logic/eligibility.py:eligibility" -o "$WORK/eligibility.encompute"
 "$ENCOMPUTE" explain "$WORK/eligibility.encompute" | sed -n '/Plan/,/Security/p'
 
-step "client: generate TFHE keys (secret.key never leaves the client)"
+step "client: generate OpenFHE exact keys (secret.key never leaves the client)"
 "$ENCOMPUTE" keys generate "$WORK/eligibility.encompute" -o "$WORK/client.keys"
 ls -l "$WORK/client.keys"
 
 if [ "$URL" = "--container" ]; then
-  step "evaluator: build and start the container (TFHE-rs; no keys, no model inside)"
-  docker build -q -f "$ROOT/Dockerfile.evaluator" --build-arg FEATURES=openfhe,tfhe-rs \
+  step "evaluator: build and start the container (OpenFHE exact; no keys, no model inside)"
+  docker build -q -f "$ROOT/Dockerfile.evaluator" --build-arg FEATURES=openfhe \
     -t encompute-evaluator-exact "$ROOT" >/dev/null
   CONTAINER="$(docker run -d -p 127.0.0.1:18752:8750 encompute-evaluator-exact --workers 0)"
   URL="http://127.0.0.1:18752"
   for _ in $(seq 1 60); do curl -fs "$URL/v1/info" >/dev/null && break; sleep 1; done
 elif [ -z "$URL" ]; then
-  step "evaluator: start a separate process with the TFHE-rs backend (no keys)"
+  step "evaluator: start a separate process with the OpenFHE exact backend (no keys)"
   mkdir -p "$WORK/evaluator"
-  (cd "$WORK/evaluator" && exec "$EVALUATOR" serve --listen 127.0.0.1:18751 --backend tfhe-rs) &
+  (cd "$WORK/evaluator" && exec "$EVALUATOR" serve --listen 127.0.0.1:18751 --backend openfhe-exact) &
   PID=$!
   URL="http://127.0.0.1:18751"
   for _ in $(seq 1 60); do curl -fs "$URL/v1/info" >/dev/null && break; sleep 1; done
 fi
 curl -fs "$URL/v1/info"; echo
 
-step "client → evaluator: upload program and server key, send encrypted inputs, decrypt"
+step "client → evaluator: upload program and evaluation keys, send encrypted inputs, decrypt"
 run() {
   "$ENCOMPUTE" run "$WORK/eligibility.encompute" --remote "$URL" --keys "$WORK/client.keys" \
     --input age="$1" --input income="$2" --input debt="$3" --input risk="$4"

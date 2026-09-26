@@ -94,6 +94,7 @@ __all__ = [
     "compile",
     "dot",
     "has_openfhe",
+    "has_exact",
     "has_tfhe",
     "i8",
     "i16",
@@ -132,9 +133,15 @@ def has_openfhe() -> bool:
     return _native.has_openfhe()
 
 
+def has_exact() -> bool:
+    """Whether mode="encrypted" is available for exact programs (OpenFHE
+    exact)."""
+    return _native.has_exact()
+
+
 def has_tfhe() -> bool:
-    """Whether mode="encrypted" is available for exact programs (TFHE-rs,
-    research use only)."""
+    """Whether this is a research build with TFHE-rs (research use only;
+    exact programs run on OpenFHE exact unless selected explicitly)."""
     return _native.has_tfhe()
 
 
@@ -224,7 +231,7 @@ class Model:
     @property
     def parameters(self) -> Dict[str, Any]:
         """CKKS parameters (ring dimension, scale, depth, security table...)
-        or, for exact programs, the TFHE parameter profile."""
+        or, for exact programs, the exact backend's parameter profile."""
         return json.loads(self._native.artifact_files()["parameters.json"])
 
     @property
@@ -260,7 +267,7 @@ class Model:
 
     def run(self, *args: Any, mode: str = "clear", **kwargs: Any) -> Any:
         """Run on inputs. mode: "clear" (plaintext), "mock", or "encrypted"
-        (OpenFHE for approximate programs, TFHE-rs for exact ones)."""
+        (OpenFHE CKKS for approximate programs, OpenFHE exact for exact ones)."""
         raw = _call(self._native.run, self._encode(args, kwargs), mode)
         vals = {name: _typed(raw[name], is_scalar, elem) for name, _, is_scalar, elem in self._outputs}
         if self._style == "single":

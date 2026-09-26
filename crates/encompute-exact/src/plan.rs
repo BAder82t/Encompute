@@ -211,7 +211,7 @@ impl ExactPlan {
 }
 
 /// The parameter profile a backend runs a plan with (vetted profiles only;
-/// Encompute does not select TFHE parameters itself in 0.3).
+/// Encompute does not select exact-backend parameters itself).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExactProfile {
     pub backend: String,

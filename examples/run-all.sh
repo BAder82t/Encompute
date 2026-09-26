@@ -5,7 +5,7 @@
 #
 #   examples/run-all.sh quick      mock-only examples, a couple of minutes
 #   examples/run-all.sh standard   every example that needs no cloud or crypto build
-#   examples/run-all.sh crypto     the OpenFHE / verified-execution examples
+#   examples/run-all.sh crypto     the OpenFHE / OpenFHE exact / verified-execution examples
 #   examples/run-all.sh full       everything this machine can run
 #
 # Build first: cargo build --bins, and (for Python examples)
@@ -16,12 +16,12 @@ MODE="${1:-quick}"
 
 QUICK="01 02 04 06 08 09 10 11 13 14 15"
 STANDARD="$QUICK 03 07 12 16 17 18"
-CRYPTO="01 03 05"
+CRYPTO="01 03 05 19"
 case "$MODE" in
   quick) LIST="$QUICK" ;;
   standard) LIST="$STANDARD" ;;
   crypto) LIST="$CRYPTO" ;;
-  full) LIST="$STANDARD 05" ;;
+  full) LIST="$STANDARD 05 19" ;;
   *) echo "usage: $0 quick|standard|crypto|full" >&2; exit 2 ;;
 esac
 export EXAMPLES_MODE="$MODE"

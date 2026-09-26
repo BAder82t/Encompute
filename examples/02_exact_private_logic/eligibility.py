@@ -4,8 +4,8 @@
     encompute compile examples/02_exact_private_logic/eligibility.py:eligibility
 
 The evaluator computes the decision on encrypted inputs and returns an
-encrypted Boolean; only the client can decrypt it. With the research
-`tfhe-rs` build, mode="encrypted" runs on TFHE-rs.
+encrypted Boolean; only the client can decrypt it. With the `openfhe`
+build, mode="encrypted" runs on OpenFHE exact.
 """
 
 import encompute
@@ -29,7 +29,7 @@ if __name__ == "__main__":
     applicant = dict(age=31, income=120_000, debt=21_000, risk=400)
     print("clear:", eligibility(**applicant))
     print("mock: ", eligibility(**applicant, mode="mock"))
-    if encompute.has_tfhe():
-        print("tfhe: ", eligibility(**applicant, mode="encrypted"))
+    if encompute.has_exact():
+        print("encrypted:", eligibility(**applicant, mode="encrypted"))
     print(eligibility.test(cases=1000))
     print(eligibility.explain())

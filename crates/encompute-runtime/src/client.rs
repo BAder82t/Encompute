@@ -18,10 +18,12 @@ enum Client {
     #[cfg(feature = "openfhe")]
     OpenFhe(encompute_openfhe_client::OpenFheClient),
     ExactMock(PlainExactClient),
-    #[cfg(feature = "tfhe-rs")]
+    #[cfg(feature = "research-tfhe-rs")]
     TfheRs(Box<encompute_tfhe_client::TfheRsClient>),
     #[cfg(feature = "openfhe")]
     Bgv(encompute_openfhe_client::BgvClient),
+    #[cfg(feature = "openfhe")]
+    OpenFheExact(Box<encompute_openfhe_client::OpenFheExactClient>),
 }
 
 impl Client {
@@ -37,10 +39,12 @@ impl Client {
     fn exact(&self) -> &dyn ExactClient {
         match self {
             Client::ExactMock(c) => c,
-            #[cfg(feature = "tfhe-rs")]
+            #[cfg(feature = "research-tfhe-rs")]
             Client::TfheRs(c) => c.as_ref(),
             #[cfg(feature = "openfhe")]
             Client::Bgv(c) => c,
+            #[cfg(feature = "openfhe")]
+            Client::OpenFheExact(c) => c.as_ref(),
             _ => unreachable!("CKKS client used for an exact program"),
         }
     }
@@ -48,10 +52,12 @@ impl Client {
     fn evaluation_keys(&self) -> Result<Vec<u8>> {
         match self {
             Client::ExactMock(_) => self.exact().evaluation_keys(),
-            #[cfg(feature = "tfhe-rs")]
+            #[cfg(feature = "research-tfhe-rs")]
             Client::TfheRs(_) => self.exact().evaluation_keys(),
             #[cfg(feature = "openfhe")]
             Client::Bgv(_) => self.exact().evaluation_keys(),
+            #[cfg(feature = "openfhe")]
+            Client::OpenFheExact(_) => self.exact().evaluation_keys(),
             _ => self.ckks().evaluation_keys(),
         }
     }
@@ -62,10 +68,12 @@ impl Client {
             #[cfg(feature = "openfhe")]
             Client::OpenFhe(c) => c.secret_key(),
             Client::ExactMock(c) => Ok(c.secret_key()),
-            #[cfg(feature = "tfhe-rs")]
+            #[cfg(feature = "research-tfhe-rs")]
             Client::TfheRs(c) => c.secret_key(),
             #[cfg(feature = "openfhe")]
             Client::Bgv(c) => c.secret_key(),
+            #[cfg(feature = "openfhe")]
+            Client::OpenFheExact(c) => c.secret_key(),
         }
     }
 }
@@ -137,7 +145,7 @@ impl ClientSession {
             (CompiledProgram::Exact(_), BackendKind::Mock) => {
                 Client::ExactMock(PlainExactClient::new(seed))
             }
-            #[cfg(feature = "tfhe-rs")]
+            #[cfg(feature = "research-tfhe-rs")]
             (CompiledProgram::Exact(_), BackendKind::TfheRs) => {
                 Client::TfheRs(Box::new(encompute_tfhe_client::TfheRsClient::generate()?))
             }
@@ -146,6 +154,14 @@ impl ClientSession {
                 Client::Bgv(encompute_openfhe_client::BgvClient::generate(
                     encompute_exact::bgv::mult_depth(&e.plan),
                 )?)
+            }
+            #[cfg(feature = "openfhe")]
+            (CompiledProgram::Exact(e), BackendKind::OpenFheExact) => {
+                // Before any key: the backend must support every operation.
+                encompute_exact::bits::check_capabilities(&e.plan)?;
+                Client::OpenFheExact(Box::new(
+                    encompute_openfhe_client::OpenFheExactClient::generate()?,
+                ))
             }
             (c, k) if !k.runs(c) => {
                 return Err(Error::new(
@@ -216,10 +232,16 @@ impl ClientSession {
                         &env.payload,
                     )?)
                 }
-                #[cfg(feature = "tfhe-rs")]
+                #[cfg(feature = "research-tfhe-rs")]
                 (CompiledProgram::Exact(_), BackendKind::TfheRs) => Client::TfheRs(Box::new(
                     encompute_tfhe_client::TfheRsClient::restore(&env.payload)?,
                 )),
+                #[cfg(feature = "openfhe")]
+                (CompiledProgram::Exact(_), BackendKind::OpenFheExact) => {
+                    Client::OpenFheExact(Box::new(
+                        encompute_openfhe_client::OpenFheExactClient::restore(&env.payload)?,
+                    ))
+                }
                 (_, k) => return Err(not_built(k)),
             };
         Ok(Self {

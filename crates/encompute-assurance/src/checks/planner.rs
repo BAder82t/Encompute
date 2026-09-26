@@ -197,6 +197,7 @@ pub fn scenario(seed: u64) -> Option<Scenario> {
         catalog: BackendCatalog {
             ckks: r.coin(),
             tfhe: r.coin(),
+            openfhe_exact: false,
             bgv: r.coin(),
             verified_execution: r.coin(),
         },
@@ -400,6 +401,7 @@ fn ctx() -> PlanningContext {
         catalog: BackendCatalog {
             ckks: true,
             tfhe: true,
+            openfhe_exact: false,
             bgv: true,
             verified_execution: true,
         },

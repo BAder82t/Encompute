@@ -1,5 +1,5 @@
 //! TFHE-rs spike: keygen, encrypt u32, compare, select, serialize, decrypt.
-#![cfg(feature = "tfhe-rs")]
+#![cfg(feature = "research-tfhe-rs")]
 
 use std::time::Instant;
 

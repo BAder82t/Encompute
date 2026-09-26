@@ -40,7 +40,7 @@ need_python() {
     skip "the Python SDK is not installed (maturin develop -m crates/encompute-py/Cargo.toml)"
 }
 
-# has openfhe | tfhe-rs | verified-execution
+# has openfhe | openfhe-exact | tfhe-rs | verified-execution
 has() {
   "$E" info 2>/dev/null | grep -q "^$1 *yes"
 }

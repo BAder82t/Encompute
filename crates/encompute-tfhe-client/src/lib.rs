@@ -3,8 +3,8 @@
 //! TFHE-rs source is BSD-3-Clause-Clear; Zama states that commercial use of
 //! its technology requires a separate patent license.
 
-#[cfg(feature = "tfhe-rs")]
+#[cfg(feature = "research-tfhe-rs")]
 mod client;
 
-#[cfg(feature = "tfhe-rs")]
+#[cfg(feature = "research-tfhe-rs")]
 pub use client::TfheRsClient;

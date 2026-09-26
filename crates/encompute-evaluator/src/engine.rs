@@ -14,7 +14,7 @@ pub struct ProgramInfo {
     pub name: String,
     pub program_id: String,
     pub parameter_set_id: String,
-    /// "CKKS" or "TFHE".
+    /// "CKKS", "BinFHE", "BGV" or "TFHE" (research).
     pub scheme: String,
     pub backend: String,
     /// What this evaluator executes for the program; receipts state it.

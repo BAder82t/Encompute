@@ -257,7 +257,7 @@ fn remote_receipts_and_verify() {
     let text = std::fs::read_to_string(dir.join("result.receipt.json")).unwrap();
     std::fs::write(
         dir.join("result.receipt.json"),
-        text.replace("\"scheme\":\"TFHE\"", "\"scheme\":\"CKKS\""),
+        text.replace("\"scheme\":\"BinFHE\"", "\"scheme\":\"CKKS\""),
     )
     .unwrap();
     let (code, out, _) = verify(&full);

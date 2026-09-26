@@ -13,25 +13,28 @@ def eligible(age: secret[u8, 0:120],
     return (age >= 18) & (income >= 40_000) & (risk <= 650)
 ```
 
-Comparisons (`>=`, `<=`) and Boolean `&` compile to TFHE. The rule runs on
+Comparisons (`>=`, `<=`) and Boolean `&` compile to OpenFHE exact (BinFHE:
+one ciphertext per bit, bootstrapped gates). The rule runs on
 five inputs placed on or next to each threshold, in each available mode,
 and every mode must give exactly the same answer:
 
 | Mode | What runs | Needs |
 |---|---|---|
 | clear | the reference semantics, in plaintext | nothing |
-| mock | the compiled TFHE plan, without encryption | nothing |
-| encrypted | the plan on TFHE-rs ciphertexts | the research `tfhe-rs` build |
+| mock | the compiled plan, without encryption | nothing |
+| encrypted | the plan on OpenFHE exact ciphertexts | the `openfhe` build |
 
-Then 500 sampled inputs are compared (exact match, no tolerance).
+Then 500 sampled inputs are compared on the mock (exact match, no
+tolerance). `explain` shows the scheme and the plan's bootstrapped gate
+count, which is the same for every input.
 
 It also shows the two contracts an exact program carries: declared input
 ranges, enforced before anything is encrypted, and overflow freedom, proven
 at compile time for every input in range.
 
 `eligibility.py` is a second, larger rule (with a debt-to-income ratio). It
-is the program `scripts/exact-demo.sh` runs against a remote TFHE-rs
-evaluator.
+is the program `scripts/exact-demo.sh` and example 19 run against a remote
+OpenFHE exact evaluator.
 
 ## Threat model
 
@@ -56,15 +59,15 @@ cargo build --bins && maturin develop -m crates/encompute-py/Cargo.toml
 examples/02_exact_private_logic/run.sh
 ```
 
-The encrypted mode needs the research build (TFHE-rs; commercial use needs
-a patent license from Zama). Without it, the script says
-`Encrypted mode    not run: TFHE-rs is not in this build`.
+The encrypted mode needs the `openfhe` build (`maturin develop --features
+openfhe`). Without it, the script says
+`Encrypted mode    not run: OpenFHE is not in this build`.
 
 ## Expected output
 
 ```text
-Scheme            exact (TFHE: integers and Booleans)
-Encrypted mode    not run: TFHE-rs is not in this build
+Scheme            exact (OpenFHE exact: integers and Booleans)
+Encrypted mode    not run: OpenFHE is not in this build
 age=31 income=52000 risk=410       clear=True  mock=True   MATCH
 age=18 income=40000 risk=650       clear=True  mock=True   MATCH
 age=17 income=52000 risk=410       clear=False mock=False  MATCH
@@ -74,6 +77,8 @@ Sampled inputs    500 cases, 0 mismatches
 MATCH
 ...
   integer overflow        proven: no operation overflows for inputs in range
+  scheme                  BinFHE
+  bootstrapped gates      92 (the same for every input; ~60 ms each on one core)
   result semantics        exact (no approximation error)
 ```
 
@@ -121,7 +126,9 @@ MATCH
 
 - `python/encompute/_frontend.py`: tracing Python into the IR.
 - `crates/encompute-analysis/src/exact.rs`: range and overflow analysis.
-- `crates/encompute-exact`: lowering exact programs to TFHE.
+- `crates/encompute-exact`: lowering exact programs to a
+  backend-independent plan, and its bit-level circuits.
+- `crates/encompute-openfhe-exact`, `crates/encompute-openfhe-client`:
+  OpenFHE exact.
 - `crates/encompute-ir/src/eval.rs`: reference semantics and input checks.
-- `crates/encompute-tfhe`, `crates/encompute-tfhe-client`: TFHE-rs backend.
 - `docs/adr/0006-exact-programs.md`.

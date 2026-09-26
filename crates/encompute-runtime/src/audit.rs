@@ -10,7 +10,7 @@ use std::process::Command;
 use encompute_evaluator::CompiledProgram;
 use serde::Serialize;
 
-use crate::model::{has_tfhe, Model};
+use crate::model::Model;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -173,8 +173,10 @@ fn exact_checks(out: &mut Vec<Check>, model: &Model, e: &encompute_evaluator::Ex
     });
     let known = if e.proof_required {
         encompute_exact::bgv::profile(&e.plan)
+    } else if e.profile.backend == encompute_exact::research::TFHE_RS_BACKEND {
+        encompute_exact::research::tfhe_rs_profile()
     } else {
-        encompute_tfhe::default_profile()
+        encompute_exact::bits::openfhe_exact_profile()
     };
     out.push(if e.profile == known {
         check(
@@ -241,25 +243,33 @@ fn exact_checks(out: &mut Vec<Check>, model: &Model, e: &encompute_evaluator::Ex
              for execution proofs",
         )
     });
-    out.push(match (e.proof_required, has_tfhe()) {
-        (true, _) => check(
-            "exact.backend",
-            Status::Pass,
-            "OpenFHE BGV (BSD 2-Clause): exact modular arithmetic, reproducible byte for byte",
-        ),
-        (false, true) => check(
-            "exact.backend",
-            Status::Warn,
-            "TFHE-rs backend is research-only in this Encompute configuration; commercial use \
-             needs a patent license from Zama",
-        ),
-        (false, false) => check(
-            "exact.backend",
-            Status::Info,
-            "no production exact cryptographic backend in this build: exact execution uses the \
-             mock evaluator (TFHE-rs is behind the research `tfhe-rs` feature)",
-        ),
-    });
+    let tfhe = e.profile.backend == encompute_exact::research::TFHE_RS_BACKEND;
+    out.push(
+        match (e.proof_required, tfhe, crate::model::has_openfhe()) {
+            (true, _, _) => check(
+                "exact.backend",
+                Status::Pass,
+                "OpenFHE BGV (BSD 2-Clause): exact modular arithmetic, reproducible byte for byte",
+            ),
+            (false, true, _) => check(
+                "exact.backend",
+                Status::Warn,
+                "this artifact targets TFHE-rs, a research-only backend: commercial use needs a \
+             patent license from Zama; recompile for OpenFHE exact",
+            ),
+            (false, false, true) => check(
+                "exact.backend",
+                Status::Pass,
+                "OpenFHE exact (BinFHE, BSD 2-Clause): exact integer and Boolean circuits, 128-bit",
+            ),
+            (false, false, false) => check(
+                "exact.backend",
+                Status::Info,
+                "this build has no OpenFHE: exact programs run on the mock here; build with the \
+             `openfhe` feature for encrypted execution",
+            ),
+        },
+    );
 }
 
 fn secret_permissions(path: &Path) -> Check {

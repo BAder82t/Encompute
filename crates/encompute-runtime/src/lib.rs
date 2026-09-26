@@ -33,7 +33,7 @@ pub use encompute_training as training;
 pub use encompute_trust as trust;
 pub use encompute_verification as verification;
 pub use explain::Measurement;
-pub use model::{has_openfhe, has_tfhe, BenchDetail, BenchReport, Mode, Model};
+pub use model::{has_openfhe, has_openfhe_exact, has_tfhe, BenchDetail, BenchReport, Mode, Model};
 pub use remote::{Remote, RemoteRun, RemoteStats};
 
 /// The execution spec for `model` on backend `kind` (what its receipts

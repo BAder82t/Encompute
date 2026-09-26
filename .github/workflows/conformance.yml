@@ -2,8 +2,9 @@ name: conformance
 
 # Full parameter-conformance grids: 10 080 parameter points checked against
 # OpenFHE, and 200 random programs executed encrypted. Exact programs: 25 000
-# random programs on the mock, and TFHE-rs on every operation and width,
-# random programs and the flagship. Nightly, and on demand.
+# random programs on the mock; OpenFHE exact (BinFHE) on every operation and
+# width, random programs and the flagship; research: TFHE-rs, and OpenFHE
+# exact against TFHE-rs. Nightly, and on demand.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -14,6 +15,9 @@ on:
       - "crates/encompute-ckks/src/params.rs"
       - "crates/encompute-ckks/src/lower.rs"
       - "crates/encompute-exact/**"
+      - "crates/encompute-openfhe-exact/**"
+      - "crates/encompute-openfhe/cpp/binfhe.*"
+      - "crates/encompute-openfhe-client/cpp/binclient.cc"
       - "crates/encompute-tfhe/**"
       - "crates/encompute-tfhe-client/**"
 
@@ -48,11 +52,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: random exact programs on the mock (plan == interpreter == transcript replay)
         run: ENCOMPUTE_EXACT_PROGRAMS=25000 cargo test --release -p encompute-exact --test lower --test transcript -- --nocapture
+      - uses: actions/cache@v6
+        with:
+          path: .deps/openfhe
+          key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
+      - run: ./scripts/install-openfhe.sh
+      - name: OpenFHE exact == clear reference == mock
+        env:
+          ENCOMPUTE_EXACT_PROGRAMS: "8"
+          ENCOMPUTE_EXACT_CASES: "20"
+        run: cargo test --release -p encompute-openfhe-client --test exact -- --nocapture --test-threads 1
+      - name: OpenFHE exact end to end (sessions, envelopes, HTTP, receipts)
+        run: cargo test --release -p encompute-runtime --features openfhe --test openfhe_exact -- --nocapture
+      - name: research differential (OpenFHE exact == TFHE-rs)
+        run: cargo test --release -p encompute-runtime --features openfhe,research-tfhe-rs --test cross_backend -- --nocapture
       - name: TFHE-rs (research feature) == clear reference
         env:
           ENCOMPUTE_EXACT_WIDTHS: all
           ENCOMPUTE_EXACT_PROGRAMS: "24"
           ENCOMPUTE_EXACT_CASES: "200"
-        run: cargo test --release -p encompute-tfhe-client --features tfhe-rs --test exact -- --nocapture --test-threads 1
+        run: cargo test --release -p encompute-tfhe-client --features research-tfhe-rs --test exact -- --nocapture --test-threads 1
       - name: TFHE-rs end to end (sessions, envelopes, HTTP, wrong keys)
-        run: ENCOMPUTE_EXACT_CASES=100 cargo test --release -p encompute-runtime --features tfhe-rs --test exact -- --nocapture
+        run: ENCOMPUTE_EXACT_CASES=100 cargo test --release -p encompute-runtime --features research-tfhe-rs --test exact -- --nocapture

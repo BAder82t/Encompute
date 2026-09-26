@@ -12,9 +12,12 @@ encompute-ir.workspace = true
 encompute-ckks.workspace = true
 encompute-backend.workspace = true
 encompute-openfhe.workspace = true
+encompute-openfhe-exact.workspace = true
+encompute-exact.workspace = true
+getrandom = "0.2"
 
 [dev-dependencies]
-encompute-exact.workspace = true
+proptest.workspace = true
 
 [build-dependencies]
 cxx-build.workspace = true

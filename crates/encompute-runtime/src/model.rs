@@ -57,9 +57,14 @@ pub fn has_openfhe() -> bool {
     cfg!(feature = "openfhe")
 }
 
+/// Whether this build runs exact programs encrypted (OpenFHE exact).
+pub fn has_openfhe_exact() -> bool {
+    has_openfhe()
+}
+
 /// Whether this build includes the TFHE-rs backend (research use only).
 pub fn has_tfhe() -> bool {
-    cfg!(feature = "tfhe-rs")
+    cfg!(feature = "research-tfhe-rs")
 }
 
 /// Client and evaluator for one mode, sharing a process but talking only
@@ -194,11 +199,27 @@ impl Model {
                     ))
                 }
             }
+            (Mode::Encrypted, Semantics::Exact)
+                if self.compiled.target_backend() == BackendKind::OpenFheExact =>
+            {
+                if has_openfhe() {
+                    Ok(BackendKind::OpenFheExact)
+                } else {
+                    Err(Error::new(
+                        Code::Backend,
+                        "this build has no OpenFHE backend: exact programs run encrypted on \
+                         OpenFHE exact; rebuild with the `openfhe` feature (see README) or use \
+                         mode \"mock\"",
+                    ))
+                }
+            }
+            // An artifact compiled for the research backend.
             (Mode::Encrypted, Semantics::Exact) if has_tfhe() => Ok(BackendKind::TfheRs),
             (Mode::Encrypted, Semantics::Exact) => Err(Error::new(
                 Code::Backend,
-                "no exact cryptographic backend in this build: TFHE-rs is research-only and \
-                 behind the `tfhe-rs` feature (see README); use mode \"mock\"",
+                "BACKEND UNAVAILABLE: this artifact targets TFHE-rs, which is available only in \
+                 research builds (the `research-tfhe-rs` feature); recompile it for OpenFHE exact \
+                 or use mode \"mock\"",
             )),
         }
     }

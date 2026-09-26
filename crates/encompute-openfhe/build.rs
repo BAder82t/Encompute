@@ -19,8 +19,11 @@ fn main() {
         );
     }
 
-    let mut build = cxx_build::bridge("src/lib.rs");
-    build.file("cpp/shim.cc").include("cpp");
+    let mut build = cxx_build::bridges(["src/lib.rs", "src/binfhe.rs"]);
+    build
+        .file("cpp/shim.cc")
+        .file("cpp/binfhe.cc")
+        .include("cpp");
     // -isystem: warnings in OpenFHE's own headers are not ours to fix.
     for dir in ["", "core", "pke", "binfhe", "cereal"] {
         build.flag(format!("-isystem{}", include.join(dir).display()));
@@ -64,6 +67,9 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/common.h");
     println!("cargo:rerun-if-changed=cpp/shim.h");
     println!("cargo:rerun-if-changed=cpp/shim.cc");
+    println!("cargo:rerun-if-changed=src/binfhe.rs");
+    println!("cargo:rerun-if-changed=cpp/binfhe.h");
+    println!("cargo:rerun-if-changed=cpp/binfhe.cc");
     println!("cargo:rerun-if-env-changed=OPENFHE_ROOT");
 }
 
