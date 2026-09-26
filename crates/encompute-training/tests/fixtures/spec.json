@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "project": "contract",
+  "purpose": "disease-training",
+  "plan_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "program_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "policy_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "privacy_policy_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "aggregation_spec_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "base_model": {
+    "asset_id": "base-model",
+    "owner": "modelco",
+    "architecture": "{\"factory\":\"m:f\",\"kwargs\":{}}",
+    "weights_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "datasets": [
+    {
+      "asset_id": "patients-a",
+      "owner": "hospital-a",
+      "gradient_asset": "gradient-patients-a",
+      "digest": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "asset_id": "patients-b",
+      "owner": "hospital-b",
+      "gradient_asset": "gradient-patients-b",
+      "digest": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "code_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "layout_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+  "config": {
+    "method": "lora",
+    "rank": 4,
+    "alpha": 8,
+    "target_modules": [
+      "q",
+      "v"
+    ],
+    "optimizer": "sgd",
+    "learning_rate": "0.1",
+    "update_clip": "0.5",
+    "local_steps": 10,
+    "batch_size": 16,
+    "rounds": 2,
+    "adapter_parameters": 256
+  },
+  "participants": [
+    {
+      "party": "hospital-a",
+      "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+    },
+    {
+      "party": "hospital-b",
+      "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+    }
+  ]
+}

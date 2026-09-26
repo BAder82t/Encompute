@@ -36,8 +36,15 @@ for n in $(echo $LIST | tr ' ' '\n' | sort -u); do
   code=$?
   secs=$(( $(date +%s) - start ))
   if [ $code -eq 77 ]; then
-    printf '%-34s SKIPPED  %s\n' "$dir" "$(echo "$out" | sed -n 's/^Reason: //p' | head -n 1)"
-    skipped=$((skipped + 1))
+    reason="$(echo "$out" | sed -n 's/^Reason: //p' | head -n 1)"
+    # EXAMPLES_REQUIRE lists examples that must run (a release gate).
+    if echo " ${EXAMPLES_REQUIRE:-} " | grep -q " $n "; then
+      printf '%-34s FAIL     (required, but skipped: %s)\n' "$dir" "$reason"
+      fail=$((fail + 1))
+    else
+      printf '%-34s SKIPPED  %s\n' "$dir" "$reason"
+      skipped=$((skipped + 1))
+    fi
     continue
   fi
   missing=""

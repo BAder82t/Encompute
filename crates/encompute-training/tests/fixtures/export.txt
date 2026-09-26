@@ -1,0 +1,6 @@
+ENC2503: EXPORT DENIED: adapter-1 inherits release restrictions from:
+  base-model (never)
+  patients-a (never)
+  gradient-patients-a (aggregate_only)
+  patients-b (never)
+  gradient-patients-b (aggregate_only)

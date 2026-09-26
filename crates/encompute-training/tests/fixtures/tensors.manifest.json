@@ -1,0 +1,1 @@
+[{"name":"a","dtype":"float32","shape":[2,3],"offset":0,"length":24},{"name":"b","dtype":"int64","shape":[3],"offset":24,"length":24}]

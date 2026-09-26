@@ -41,6 +41,16 @@ Encompute does the rest:
    in an attested workload, showing that training changed the model's
    predictions.
 
+**Privacy unit: organization.** Each hospital's whole update is clipped,
+so the budget bounds what the adapter reveals about one hospital's
+contribution. Patient-level DP requires per-example clipping (DP-SGD) and
+is not claimed.
+
+**Crash safety.** A round is accepted only when its signed adapter record
+enters the trust bundle. After a crash, `recover(workdir)` finalizes or
+discards the round, and `finetune(resume=workdir)` continues. A released
+but unaccepted round stays charged.
+
 ## Threat model
 
 - The cloud host is untrusted.

@@ -1,0 +1,21 @@
+{
+  "record": {
+    "version": 1,
+    "project": "contract",
+    "adapter_id": "adapter-1",
+    "round": 1,
+    "previous": null,
+    "training_spec_id": "26bcf9153d9e65879af628f2b826f15c5bbaf39446771684b4eaf12385c535a8",
+    "run_id": "9999999999999999999999999999999999999999999999999999999999999999",
+    "aggregation_receipt_id": "8888888888888888888888888888888888888888888888888888888888888888",
+    "aggregation_output": "update",
+    "adapter_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+    "base_model": "base-model",
+    "datasets": [
+      "patients-a",
+      "patients-b"
+    ]
+  },
+  "signer_key": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+  "signature": "5f8cf414e69e831678b6fb0f04b2b45c8e523ac97ad8e596b62fe9238bfb73be5bec02d8c7547da616fac03ffc3343062934b3b2b9c6c5ffd0f6ef2b1ad11507"
+}

@@ -32,10 +32,16 @@ def dumps(tensors: Dict[str, torch.Tensor]) -> bytes:
 
 
 def loads(data: bytes) -> Dict[str, torch.Tensor]:
-    if data[:8] != MAGIC:
-        raise ValueError("not a canonical tensor file")
+    """Loads a canonical tensor file, after the native validator (the single
+    authority for this format) has checked it: a pickle, or a malformed or
+    padded file, is refused before anything is read."""
+    from .. import _native
+
+    try:
+        header = json.loads(_native.tensor_manifest(bytes(data)))
+    except _native.NativeError as e:
+        raise ValueError(e.args[1]) from None
     n = int.from_bytes(data[8:12], "little")
-    header = json.loads(data[12:12 + n])
     body = memoryview(data)[12 + n:]
     out = {}
     for e in header:

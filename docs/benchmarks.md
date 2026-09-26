@@ -100,3 +100,25 @@ OpenFHE BGV (t = 65537), Apple M3 Max, release, median of 5:
 | request / response | 1027 KiB / 514 KiB |
 
 Re-execution is sound but not succinct: the verifier redoes the work.
+
+## Confidential LoRA fine-tuning
+
+`examples/15_confidential_lora`: two hospitals and ModelCo; a tiny transformer
+classifier (vocabulary 64, width 16); LoRA rank 4 on `q` and `v` (256
+adapter parameters); 2 rounds of 10 local steps; development attestation.
+Every party runs as a separate process on one Apple M3 Max. Debug build,
+3 runs:
+
+| Stage | Seconds |
+|---|---|
+| plain PyTorch, one party's local steps (the baseline) | 0.50–0.63 |
+| workers attest and receive the model key; open, check and build the model | 1.05–1.11 |
+| 2 rounds: local training, secure aggregation, DP release (coordinator and joins) | 5.81–5.86 |
+| sealed adapters and checkpoints | 0.01 |
+| adapter records into the trust graph | 0.04–0.05 |
+| total | 8.36–8.38 |
+
+For this model, the secure-aggregation round trips dominate: process start
+and four protocol stages per round, on one machine. Nothing is optimized
+yet; these numbers are a baseline. Real TEEs add hardware attestation and
+key-release latency that the mock does not show.

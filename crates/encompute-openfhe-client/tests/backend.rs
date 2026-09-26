@@ -21,6 +21,11 @@ fn close(a: &[f64], b: &[f64], tol: f64) {
     }
 }
 
+/// The parameters are selected for a declared precision of 1e-3; CKKS
+/// noise is random, so assert well inside that (100x) but not tighter than
+/// the scheme guarantees (a 1e-6 bound failed on a noisy draw).
+const TOL: f64 = 1e-5;
+
 #[test]
 fn arithmetic_through_serialized_ciphertexts() {
     let params = select_params(3, 4.0, 1e-3, 8).unwrap();
@@ -35,37 +40,37 @@ fn arithmetic_through_serialized_ciphertexts() {
     let (ca, cb) = (load(&a), load(&b));
     let zip = |f: fn(f64, f64) -> f64| a.iter().zip(&b).map(|(x, y)| f(*x, *y)).collect::<Vec<_>>();
 
-    close(&dec(&ev.add(&ca, &cb).unwrap()), &zip(|x, y| x + y), 1e-6);
-    close(&dec(&ev.sub(&ca, &cb).unwrap()), &zip(|x, y| x - y), 1e-6);
+    close(&dec(&ev.add(&ca, &cb).unwrap()), &zip(|x, y| x + y), TOL);
+    close(&dec(&ev.sub(&ca, &cb).unwrap()), &zip(|x, y| x - y), TOL);
     close(
         &dec(&ev.neg(&ca).unwrap()),
         &a.iter().map(|x| -x).collect::<Vec<_>>(),
-        1e-6,
+        TOL,
     );
     let prod = ev.mul(&ca, &cb).unwrap();
-    close(&dec(&prod), &zip(|x, y| x * y), 1e-6);
+    close(&dec(&prod), &zip(|x, y| x * y), TOL);
     close(
         &dec(&ev.mul_plain(&prod, &b).unwrap()),
         &zip(|x, y| x * y * y),
-        1e-6,
+        TOL,
     );
     close(
         &dec(&ev.add_plain(&prod, &a).unwrap()),
         &zip(|x, y| x * y + x),
-        1e-6,
+        TOL,
     );
     close(
         &dec(&ev.add_const(&ca, 2.5).unwrap()),
         &a.iter().map(|x| x + 2.5).collect::<Vec<_>>(),
-        1e-6,
+        TOL,
     );
     close(
         &dec(&ev.mul_const(&ca, -3.0).unwrap()),
         &a.iter().map(|x| -3.0 * x).collect::<Vec<_>>(),
-        1e-6,
+        TOL,
     );
     let mixed = ev.add(&ev.mul_plain(&prod, &b).unwrap(), &ca).unwrap();
-    close(&dec(&mixed), &zip(|x, y| x * y * y + x), 1e-6);
+    close(&dec(&mixed), &zip(|x, y| x * y * y + x), TOL);
 }
 
 #[test]

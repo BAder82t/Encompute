@@ -146,7 +146,8 @@ class Project:
             raise EncomputeError("ENC1906", f"model policy is one of {', '.join(MODEL_POLICIES)}")
         return self._add(id, owner, "model", policy, module)
 
-    def finetune(self, *, model: ProjectAsset, data: Sequence[ProjectAsset],
+    def finetune(self, *, model: Optional[ProjectAsset] = None,
+                 data: Optional[Sequence[ProjectAsset]] = None,
                  method: str = "lora", privacy: str = "strong",
                  verification: str = "required", **kwargs: Any):
         """Confidential LoRA fine-tuning of ``model`` on ``data``: planned,

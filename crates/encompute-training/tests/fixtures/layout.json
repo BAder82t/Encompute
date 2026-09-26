@@ -1,0 +1,5 @@
+{"version": 1, "entries": [
+ {"module": "q", "parameter": "lora_A", "shape": [4, 16], "offset": 0, "length": 64, "dtype": "float32"},
+ {"module": "q", "parameter": "lora_B", "shape": [16, 4], "offset": 64, "length": 64, "dtype": "float32"},
+ {"module": "v", "parameter": "lora_A", "shape": [4, 16], "offset": 128, "length": 64, "dtype": "float32"},
+ {"module": "v", "parameter": "lora_B", "shape": [16, 4], "offset": 192, "length": 64, "dtype": "float32"}]}

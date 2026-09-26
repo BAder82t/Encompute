@@ -5,7 +5,6 @@ adapter is flattened in for secure aggregation."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Sequence
@@ -62,8 +61,14 @@ def apply_lora(model: nn.Module, cfg: LoRAConfig) -> nn.Module:
     return model
 
 
+LAYOUT_VERSION = 1
+
+
 def adapter_parameters(model: nn.Module) -> Dict[str, nn.Parameter]:
-    return {n: p for n, p in sorted(model.named_parameters()) if "lora_" in n}
+    """The adapter's parameters in canonical order: by (module, parameter)."""
+    ps = [(n.rpartition(".")[0], n.rpartition(".")[2], n, p)
+          for n, p in model.named_parameters() if "lora_" in n]
+    return {n: p for _, _, n, p in sorted(ps, key=lambda t: (t[0], t[1]))}
 
 
 def layout(model: nn.Module) -> List[dict]:
@@ -78,9 +83,11 @@ def layout(model: nn.Module) -> List[dict]:
 
 
 def layout_digest(model: nn.Module) -> str:
-    return hashlib.sha256(
-        json.dumps(layout(model), sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    """The layout's digest, computed (and the layout validated) natively."""
+    from .. import _native
+
+    return _native.layout_digest(json.dumps({"version": LAYOUT_VERSION,
+                                             "entries": layout(model)}))
 
 
 def get_flat(model: nn.Module) -> torch.Tensor:

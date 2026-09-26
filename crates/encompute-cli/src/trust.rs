@@ -203,11 +203,41 @@ pub fn lineage(
     })
 }
 
-/// `encompute export`: permitted only if every parent's policy allows it.
-pub fn export(adapter: &str, bundle: &Path) -> Result<ExitCode> {
-    let g = open(bundle)?;
+/// `encompute export`: permitted only if every parent's policy allows it,
+/// no parent was revoked, and the run's trust report is satisfied.
+pub fn export(adapter: &str, bundle: &Path, a: &AnchorArgs, trust: &TrustArgs) -> Result<ExitCode> {
+    let (g, r) = checked(bundle, a, trust)?;
     let (spec, program) = encompute_runtime::trust::lineage::adapter_context(&g, adapter)?;
     let p = encompute_ir::parse(&program)?;
+    let parents: Vec<String> = std::iter::once(&spec.base_model.asset_id)
+        .chain(
+            spec.datasets
+                .iter()
+                .flat_map(|d| [&d.asset_id, &d.gradient_asset]),
+        )
+        .map(|x| node_id(NodeKind::Asset, x))
+        .collect();
+    let revoked: Vec<&str> = r
+        .revoked
+        .keys()
+        .filter(|k| parents.contains(k))
+        .map(|k| k.trim_start_matches("asset:"))
+        .collect();
+    if !revoked.is_empty() {
+        println!(
+            "EXPORT DENIED: {adapter} derives from revoked assets: {}",
+            revoked.join(", ")
+        );
+        return Ok(ExitCode::from(1));
+    }
+    if !r.satisfied {
+        println!(
+            "EXPORT DENIED: the run that produced {adapter} does not satisfy its trust \
+             requirements:\n  {}",
+            r.unmet.join("\n  ")
+        );
+        return Ok(ExitCode::from(1));
+    }
     match encompute_runtime::training::check_export(&p, &spec, adapter) {
         Ok(()) => {
             println!("EXPORT PERMITTED: every parent of {adapter} allows public release");

@@ -1,0 +1,15 @@
+encompute 0.1
+program ft precision 0.001 purpose "disease-training"
+party "hospital-a" "A"
+party "hospital-b" "B"
+party "modelco" "M"
+asset "base-model" model owners ["modelco"] readers [] purposes ["disease-training"] release never
+asset "patients-a" dataset owners ["hospital-a"] readers [] purposes ["disease-training"] release never
+asset "patients-b" dataset owners ["hospital-b"] readers [] purposes ["disease-training"] release never
+asset "gradient-patients-a" gradient owners ["hospital-a"] readers ["modelco"] purposes ["disease-training"] release aggregate_only
+asset "gradient-patients-b" gradient owners ["hospital-b"] readers ["modelco"] purposes ["disease-training"] release aggregate_only
+%0 = input "a" [-1.0, 1.0] asset "gradient-patients-a" : secret vector<4>
+%1 = input "b" [-1.0, 1.0] asset "gradient-patients-b" : secret vector<4>
+%2 = add %0, %1 : secret vector<4>
+output "update" = %2 to "modelco"
+aggregate "update" sum minimum 2 colluding 0 clip [-1.0, 1.0] scale 256 modulus 32

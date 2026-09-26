@@ -203,8 +203,13 @@ try:
                                       rec["record"]["adapter_digest"]))
 
     def export():
+        run = json.loads((W / "run.json").read_text())
         out = subprocess.run([CLI, "export", rec["record"]["adapter_id"], "--bundle",
-                              str(MC / "trust.json")], capture_output=True, text=True)
+                              str(MC / "trust.json"), "--parties", str(W / "parties.json"),
+                              "--coordinator-key", run["coord_key"], "--mock-root",
+                              run["mock_root"], "--execution-policy",
+                              str(MC / "training-policy.json")],
+                             capture_output=True, text=True)
         if out.returncode:
             raise RuntimeError(out.stdout.strip())
     attack("export the adapter publicly", "export: the adapter inherits every parent's policy",

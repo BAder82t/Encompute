@@ -212,6 +212,10 @@ enum Cmd {
         adapter: String,
         #[command(flatten)]
         bundle: trust::Bundle,
+        #[command(flatten)]
+        anchors: trust::AnchorArgs,
+        #[command(flatten)]
+        trust: attest::TrustArgs,
     },
     /// Run a confidential training project (a Python file calling
     /// `project.finetune`).
@@ -633,7 +637,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             anchors,
             trust,
         } => trust::lineage(&adapter, &bundle.bundle, &anchors, &trust),
-        Cmd::Export { adapter, bundle } => trust::export(&adapter, &bundle.bundle),
+        Cmd::Export {
+            adapter,
+            bundle,
+            anchors,
+            trust,
+        } => trust::export(&adapter, &bundle.bundle, &anchors, &trust),
         Cmd::Train { project } => {
             let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
             let me =

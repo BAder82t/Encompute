@@ -257,6 +257,8 @@ fn checkpoint_resume_never_rolls_back_privacy() {
         policy_id: s.policy_id.as_deref(),
         privacy_policy_id: s.privacy_policy_id.as_deref(),
         ledger_dir: Box::leak(d.clone().into_boxed_path()),
+        lost_rounds: &[],
+        run_id: None,
     };
     release_round(&d, 1);
     let old = checkpoint_at(&d, 1, &key);
@@ -282,6 +284,30 @@ fn checkpoint_resume_never_rolls_back_privacy() {
     );
     std::fs::write(&path, text).unwrap();
     // Another project, spec or policy; a modified checkpoint; wrong key.
+    // A round released after the checkpoint but never accepted (a crash
+    // before the commit point): resuming from the last accepted checkpoint
+    // is allowed, and that round's spend stays charged. Declaring an
+    // accepted round lost does not help a stale checkpoint (round 2 is
+    // the one after `old`, round 1 is not).
+    let lost = vec![format!("{:064x}", 2)];
+    let mut e2 = expect(&d);
+    e2.lost_rounds = Box::leak(lost.into_boxed_slice());
+    resume(&key, &old, &e2).unwrap();
+    let wrong = vec![format!("{:064x}", 9)];
+    let mut e3 = expect(&d);
+    e3.lost_rounds = Box::leak(wrong.into_boxed_slice());
+    assert_eq!(resume(&key, &old, &e3).unwrap_err().code, Code::Checkpoint);
+    // Another run of the same spec.
+    let mut e4 = expect(&d);
+    e4.run_id = Some("another-run");
+    assert_eq!(
+        resume(&key, &current, &e4).unwrap_err().code,
+        Code::Checkpoint
+    );
+    let run = spec().run_id("r").unwrap();
+    let mut e5 = expect(&d);
+    e5.run_id = Some(Box::leak(run.into_boxed_str()));
+    resume(&key, &current, &e5).unwrap();
     let other = dir("resume-other");
     let mut e2 = expect(&d);
     e2.project = "other";

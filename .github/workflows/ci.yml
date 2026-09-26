@@ -42,8 +42,15 @@ jobs:
           pip install maturin numpy pytest
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           maturin develop
-          pytest -q python/tests/test_finetune.py
-      - run: examples/run-all.sh standard
+      # Confidential fine-tuning is a release gate: end to end, commitments,
+      # canary leakage, crash and kill recovery, and the Rust contract.
+      - name: confidential fine-tuning
+        run: |
+          . .venv/bin/activate
+          pytest -q python/tests/test_finetune.py python/tests/test_finetune_matrix.py \
+            python/tests/test_finetune_leakage.py python/tests/test_finetune_crash.py \
+            python/tests/test_training_contract.py
+      - run: EXAMPLES_REQUIRE="15" examples/run-all.sh standard
 
   # The release gate: every documented security invariant, quick scale.
   # Fails the build when any invariant is violated (docs/assurance.md).

@@ -191,7 +191,7 @@ pub fn seal_checkpoint(
 /// Opens a checkpoint for resuming, refusing one from another project,
 /// spec or policy, or one behind or ahead of the authoritative ledgers.
 #[pyfunction]
-#[pyo3(signature = (key, sealed, project, training_spec_id, policy_id, privacy_policy_id, ledger_dir))]
+#[pyo3(signature = (key, sealed, project, training_spec_id, policy_id, privacy_policy_id, ledger_dir, lost_rounds=Vec::new(), run_id=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn resume_checkpoint(
     py: Python<'_>,
@@ -202,6 +202,8 @@ pub fn resume_checkpoint(
     policy_id: Option<&str>,
     privacy_policy_id: Option<&str>,
     ledger_dir: &str,
+    lost_rounds: Vec<String>,
+    run_id: Option<&str>,
 ) -> PyResult<(String, Py<PyBytes>)> {
     let (h, payload) = training::resume(
         key,
@@ -212,6 +214,8 @@ pub fn resume_checkpoint(
             policy_id,
             privacy_policy_id,
             ledger_dir: Path::new(ledger_dir),
+            lost_rounds: &lost_rounds,
+            run_id,
         },
     )
     .map_err(err)?;
@@ -254,6 +258,26 @@ pub fn sign_adapter_record(
     Ok(serde_json::to_string_pretty(&r).expect("JSON"))
 }
 
+/// The digest of a canonical adapter layout (JSON: version and entries),
+/// after validating it.
+#[pyfunction]
+pub fn layout_digest(layout_json: &str) -> PyResult<String> {
+    let l: training::AdapterLayout = serde_json::from_str(layout_json).map_err(|e| {
+        err(Error::new(
+            Code::TrainingSpec,
+            format!("adapter layout: {e}"),
+        ))
+    })?;
+    l.digest().map_err(err)
+}
+
+/// Validates a canonical tensor file and returns its entries (JSON);
+/// refuses pickles and malformed files before anything is loaded.
+#[pyfunction]
+pub fn tensor_manifest(data: &[u8]) -> PyResult<String> {
+    Ok(serde_json::to_string(&training::tensor_manifest(data).map_err(err)?).expect("JSON"))
+}
+
 /// Refuses a public export unless every parent permits it (EXPORT DENIED,
 /// naming the restricting parents).
 #[pyfunction]
@@ -275,5 +299,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(resume_checkpoint, m)?)?;
     m.add_function(wrap_pyfunction!(sign_adapter_record, m)?)?;
     m.add_function(wrap_pyfunction!(check_export, m)?)?;
+    m.add_function(wrap_pyfunction!(layout_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(tensor_manifest, m)?)?;
     Ok(())
 }

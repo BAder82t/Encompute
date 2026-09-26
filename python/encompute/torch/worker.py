@@ -19,6 +19,7 @@ stdout.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import traceback
@@ -27,6 +28,12 @@ import torch
 
 from .. import _native
 from . import lora, models, tensors
+
+
+def _failpoint(name: str) -> None:
+    """Crash injection for the assurance tests (see finetune.py)."""
+    if os.environ.get("ENCOMPUTE_TRAINING_FAILPOINT") == name:
+        os._exit(137)
 
 
 def reply(**kw) -> None:
@@ -94,11 +101,18 @@ class Worker:
 
     def contribute(self, msg: dict) -> dict:
         update = self.train(msg["adapter"], msg["seed"])
+        _failpoint("after-local-training")
         # Clip the whole update to update_clip (the sensitivity the privacy
         # accounting assumes), scaled into the codec's [-1, 1] range.
         c = self.lcfg.update_clip
         norm = float(update.norm())
         v = update * min(1.0, c / max(norm, 1e-12)) / c
+        # Test-only: the leakage tests plant a known value in the
+        # contribution and check it never appears outside the masked
+        # secure-aggregation message.
+        canary = os.environ.get("ENCOMPUTE_CANARY_UPDATE")
+        if canary:
+            v[:4] = float(canary)
         cfg = self.cfg
         attested = (["--coordinator-policy", cfg["coordinator_policy"],
                      "--mock-root", cfg["mock_root"]] if cfg["coordinator_policy"] else [])
@@ -110,6 +124,7 @@ class Worker:
             input=json.dumps([float(x) for x in v]), capture_output=True, text=True,
         )
         del update, v
+        _failpoint("after-contribution")
         return {"ok": p.returncode == 0, "loss": self.loss, "clipped": norm > c,
                 "log": (p.stdout + p.stderr)[-2000:]}
 

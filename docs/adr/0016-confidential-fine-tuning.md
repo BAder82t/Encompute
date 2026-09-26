@@ -112,3 +112,51 @@ PyTorch.
   optimized yet.
 - Assurance: INV-120 to INV-127 ([assurance.md](../assurance.md)), and
   `examples/15_confidential_lora`.
+
+## Addendum: release hardening
+
+1. **One commit point per round.**
+   - The adapter and checkpoint are written provisionally (atomically,
+     into `pending/`).
+   - The round is accepted when its coordinator-signed adapter record
+     enters the trust bundle; only then do the files move into place.
+   - `recover` finalizes rounds that reached the commit point and discards
+     the rest.
+   - A round that was released but not accepted is *lost*: its privacy
+     stays spent in the ledgers. Resume accepts ledger entries after the
+     last accepted checkpoint only if they belong to declared lost rounds.
+     An older checkpoint whose later rounds were accepted is still stale.
+   - Resume also checks the run ID, and refuses once any parent asset has
+     been revoked.
+2. **Rust owns every format.**
+   - The training spec, checkpoint header, adapter record, sealed-asset
+     header, adapter layout and canonical tensor file are versioned and
+     validated in `encompute-training`. Unknown versions are refused.
+   - Python only orchestrates. The contract fixtures
+     (`crates/encompute-training/tests/fixtures`) are checked by the Rust
+     tests and, through the bindings, by `test_training_contract.py`.
+3. **Commitments.**
+   - The dataset digest covers every sample and label *in order*:
+     reordering a dataset is a different dataset.
+   - The model commitment is the factory, its arguments and the weights
+     digest.
+   - The layout digest covers every adapter parameter's module, name,
+     shape, offset, length and dtype.
+4. **Export.** Export is denied unless:
+   - every parent permits public adapters;
+   - no parent has been revoked;
+   - the run's trust report is satisfied.
+5. **Release gate.** Every pull request runs, with example 15 required:
+   - the fine-tuning end-to-end tests;
+   - the commitment matrix;
+   - canary leakage over the whole run directory and all output;
+   - crash and kill recovery at ten points: worker after training and
+     after contributing; coordinator killed; orchestrator after release,
+     after the adapter write, before and during the checkpoint write, and
+     before and after the commit point; broker killed;
+   - the contract tests.
+
+   `scripts/release-check.sh` runs the supported path from a clean
+   checkout. INV-128 and INV-129 record the crash and leakage guarantees.
+6. **Still open.** One real Confidential Space training worker. It needs a
+   GCP project, and the release check reports it as SKIPPED until then.

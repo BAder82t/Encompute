@@ -97,6 +97,8 @@ pub fn open<H: DeserializeOwned>(key: &[u8], bytes: &[u8]) -> Result<(H, Zeroizi
     Ok((header, Zeroizing::new(pt)))
 }
 
+pub const ASSET_VERSION: u32 = 1;
+
 /// What a sealed model or dataset is.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,7 +123,7 @@ pub fn seal_asset(
     seal(
         key,
         &AssetHeader {
-            version: 1,
+            version: ASSET_VERSION,
             kind: kind.into(),
             project: project.into(),
             asset_id: asset_id.into(),
@@ -141,6 +143,12 @@ pub fn open_asset(
     digest: &str,
 ) -> Result<Zeroizing<Vec<u8>>> {
     let (h, pt): (AssetHeader, _) = open(key, bytes)?;
+    if h.version != ASSET_VERSION {
+        return Err(Error::new(
+            Code::Checkpoint,
+            format!("sealed asset version {} is not supported", h.version),
+        ));
+    }
     if h.project != project || h.asset_id != asset_id {
         return Err(Error::new(
             Code::TrainingSpec,

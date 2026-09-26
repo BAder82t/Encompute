@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-### Confidential fine-tuning
+### Confidential PyTorch fine-tuning
 
 - **Real PyTorch LoRA fine-tuning, protected end to end** (ADR-016, new
   crate `encompute-training`, `encompute.torch`):
@@ -22,8 +22,30 @@
   parent permits), `encompute train`, `aggregate join --values -`; trust
   graph Training and Adapter nodes and a Training report row; attested
   inference with the adapter. Errors ENC2501–ENC2503.
-- `examples/15_confidential_lora` with every attack failing closed;
-  INV-120–INV-127 (60 invariants).
+- `examples/15_confidential_lora` with every attack failing closed.
+- **The PyTorch boundary**: PyTorch computes in plaintext inside the
+  attested workload; the TEE, secure aggregation and differential privacy
+  protect it. Privacy unit: organization (each hospital's whole update is
+  clipped). Patient-level DP requires per-example clipping (DP-SGD) and is
+  not claimed.
+- **Crash-safe rounds**: a round's adapter and checkpoint are provisional
+  until its signed adapter record enters the trust bundle (the commit
+  point); `recover` finalizes or discards after a crash, a released but
+  uncommitted round stays charged, and `finetune(resume=workdir)`
+  continues from the last accepted adapter (resume accepts only declared
+  lost rounds after the checkpoint, checks the run ID and refuses once a
+  parent is revoked).
+- **Rust owns the formats**: TrainingSpec, checkpoints, adapter records,
+  sealed-asset headers, the adapter layout (versioned, validated) and the
+  canonical tensor file (pickles refused before loading), with contract
+  fixtures checked by both the Rust tests and the Python bindings.
+- **Release gate**: end-to-end, commitment, canary-leakage (datasets,
+  weights, raw updates, keys), crash and kill (ten injection points) and
+  contract tests run on every pull request, with example 15 required;
+  `scripts/release-check.sh` from a clean checkout; export also refused
+  after a revocation or a failed trust report. Package description:
+  "Compiler and trust runtime for confidential AI".
+- INV-120–INV-129 (62 invariants).
 
 ### Examples
 
@@ -98,7 +120,7 @@
 ### Assurance
 
 - **System assurance suite** (`encompute-assurance`, `docs/assurance.md`):
-  60 security invariants, each with positive, negative, adversarial and
+  62 security invariants, each with positive, negative, adversarial and
   end-to-end evidence; adversarial checks for DP crash injection,
   multi-parent atomicity, multi-process double spend, ledger tampering,
   receipt mutation and SecAgg at scale; `assurance-report` as the release

@@ -51,6 +51,20 @@ jobs:
           maturin develop
       - run: examples/run-all.sh full
 
+  # From a clean checkout to a trusted adapter, with documented commands only.
+  release-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: scripts/release-check.sh
+
   supply-chain:
     runs-on: ubuntu-24.04
     steps:

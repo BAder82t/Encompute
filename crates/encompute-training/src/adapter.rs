@@ -92,6 +92,12 @@ impl AdapterRecord {
 impl SignedAdapterRecord {
     /// Checks the signature (by `trusted`, if given).
     pub fn verify(&self, trusted: Option<&str>) -> Result<()> {
+        if self.record.version != ADAPTER_VERSION {
+            return Err(err(format!(
+                "adapter record version {} is not supported",
+                self.record.version
+            )));
+        }
         if trusted.is_some_and(|t| t != self.signer_key) {
             return Err(err("the adapter record was signed by an untrusted key"));
         }

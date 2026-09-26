@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use encompute_ir::{Code, Error, Result};
-use encompute_privacy::{ledger, Checkpoint};
+use encompute_privacy::{ledger, Checkpoint, PrivacyEvent};
 
 use crate::seal::{open, seal, sha256_hex};
 
@@ -45,6 +45,15 @@ pub struct ResumeExpectation<'a> {
     pub privacy_policy_id: Option<&'a str>,
     /// The authoritative ledgers.
     pub ledger_dir: &'a Path,
+    /// Aggregation rounds released after this checkpoint whose adapters
+    /// were never accepted (a crash before the commit point). Their ledger
+    /// entries may follow the checkpoint: their privacy stays spent, only
+    /// their training progress is lost. Any other later entry (a round
+    /// whose adapter was accepted) makes the checkpoint stale.
+    pub lost_rounds: &'a [String],
+    /// The run being resumed, if a specific one: a checkpoint of another
+    /// run (even of the same spec) is refused.
+    pub run_id: Option<&'a str>,
 }
 
 fn err(m: impl Into<String>) -> Error {
@@ -76,6 +85,12 @@ pub fn resume(
             h.project, expect.project
         )));
     }
+    if expect.run_id.is_some_and(|r| r != h.run_id) {
+        return Err(err(format!(
+            "this checkpoint belongs to another training run ({})",
+            &h.run_id[..h.run_id.len().min(16)]
+        )));
+    }
     if h.training_spec_id != expect.training_spec_id {
         return Err(Error::new(
             Code::TrainingSpec,
@@ -96,14 +111,28 @@ pub fn resume(
         let view = ledger::read(&path)?;
         // The ledger must not have been rolled back past the checkpoint...
         view.extends(cp)?;
-        // ...and the checkpoint must be current: an older checkpoint would
-        // resume from a state whose releases the ledger already charged.
-        if view.checkpoint()? != *cp {
-            return Err(err(format!(
-                "the checkpoint is stale: {asset}'s privacy ledger has advanced to entry {} \
-                 since (a later round was released); resume from the latest checkpoint",
-                view.entries.len()
-            )));
+        // ...and the checkpoint must be current: every later entry must
+        // belong to a round released but never accepted. Otherwise an
+        // older checkpoint would resume from before accepted rounds.
+        let mut reserved = std::collections::BTreeMap::new();
+        for e in &view.entries {
+            if let PrivacyEvent::Reserve {
+                event_id, round_id, ..
+            } = &e.event
+            {
+                reserved.insert(event_id.clone(), round_id.clone());
+            }
+        }
+        for e in view.entries.iter().skip(cp.seq as usize) {
+            let round = reserved.get(e.event.event_id()).cloned().flatten();
+            if !round.is_some_and(|r| expect.lost_rounds.contains(&r)) {
+                return Err(err(format!(
+                    "the checkpoint is stale: {asset}'s privacy ledger has advanced to entry {} \
+                     since (a later round was released and accepted); resume from the latest \
+                     checkpoint",
+                    view.entries.len()
+                )));
+            }
         }
     }
     Ok((h, payload))

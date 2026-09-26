@@ -10,6 +10,23 @@ The orchestrator plays ModelCo. It holds the base model and the adapter,
 and never sees a dataset or an individual update. In a deployment, each
 party runs its part on its own machine; the checks are the same.
 
+A round becomes trusted at one commit point, in this order:
+1. The aggregate is released with differential privacy; the coordinator
+   commits the charge to the privacy ledgers.
+2. The new adapter and its checkpoint are sealed into ``pending/``, and are
+   provisional.
+3. The coordinator-signed adapter record is added to the trust bundle. This
+   is the commit point.
+4. The pending files move into place.
+
+After a crash, ``recover`` finalizes rounds that reached the commit point
+and discards the rest. A released but uncommitted round stays charged: its
+privacy is spent, only its progress is lost. ``finetune(resume=workdir)``
+continues from the last accepted adapter.
+
+Privacy unit: organization. Each hospital's whole update is clipped.
+Patient-level DP requires per-example clipping (DP-SGD) and is not claimed.
+
 Attestation here is DEVELOPMENT (mock): it exercises every check, but
 provides no hardware confidentiality.
 """
@@ -21,6 +38,7 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -28,7 +46,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -38,12 +56,24 @@ from . import lora, models, tensors
 
 IMAGE = "sha256:" + "5" * 64  # the training worker image (development)
 CODE = ["worker.py", "lora.py", "tensors.py", "models.py", "finetune.py", "infer.py"]
+PRIVACY_UNIT = ("Privacy unit: organization. Patient-level DP requires per-example clipping "
+                "(DP-SGD) and is not claimed.")
+FAILPOINTS = ("after-aggregate-release", "after-adapter-write", "before-checkpoint-write",
+              "during-checkpoint-write", "before-trust-update", "after-trust-update",
+              "kill-coordinator", "kill-broker")
 
 
 class TrainingFailed(EncomputeError):
     def __init__(self, message: str, log: str = ""):
         super().__init__("ENC2501", message)
         self.log = log
+
+
+def _failpoint(name: str) -> None:
+    """Crash injection for the assurance tests: exits abruptly here when
+    ENCOMPUTE_TRAINING_FAILPOINT names this point."""
+    if os.environ.get("ENCOMPUTE_TRAINING_FAILPOINT") == name:
+        os._exit(137)
 
 
 def _cli() -> str:
@@ -84,6 +114,15 @@ def _wait_port(port: int, proc: subprocess.Popen, what: str) -> None:
     raise TrainingFailed(f"{what} did not start")
 
 
+def _write_atomic(path: Path, data: bytes) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def code_digest(factory: str) -> str:
     h = hashlib.sha256()
     here = Path(__file__).parent
@@ -92,6 +131,104 @@ def code_digest(factory: str) -> str:
     src = models.source_file(factory)
     h.update(b"factory\0" + Path(src).read_bytes())
     return h.hexdigest()
+
+
+# --- run state ----------------------------------------------------------------
+
+
+def _bundle_state(mc: Path, spec_id: str) -> Tuple[Dict[int, dict], Dict[int, str]]:
+    """Accepted adapters by round (their signed records), and every released
+    round's aggregation round ID by sequence, from the trust bundle."""
+    b = json.loads((mc / "trust.json").read_text())
+    accepted, released = {}, {}
+    for key, node in b["nodes"].items():
+        ev = node.get("evidence") or {}
+        if key.startswith("adapter:") and ev.get("type") == "adapter":
+            rec = ev["value"]["record"]
+            if rec["training_spec_id"] == spec_id:
+                accepted[rec["round"]] = rec
+        if key.startswith("round:") and ev.get("type") == "aggregation_receipt":
+            m = ev["value"]["manifest"]
+            released[m["round"]["sequence"]] = m["round_id"]
+    return accepted, released
+
+
+def _round_of(name: str) -> int:
+    return int(name.split("-")[1].split(".")[0])
+
+
+def recover(workdir: str) -> dict:
+    """Brings a run directory to a consistent state after a crash, and says
+    what happened.
+
+    - A pending round that reached the commit point (its adapter record is
+      in the trust bundle) is finalized.
+    - Any other pending file is provisional and is discarded.
+    - Rounds released but never accepted are reported as lost: their
+      privacy stays spent.
+    - Every privacy ledger must verify.
+    """
+    W = Path(workdir)
+    st = json.loads((W / "run.json").read_text())
+    mc = W / st["model_owner"]
+    accepted, released = _bundle_state(mc, st["training_spec_id"])
+    finalized, discarded = [], []
+    pending = mc / "pending"
+    if pending.exists():
+        for f in sorted(pending.iterdir()):
+            r = _round_of(f.name)
+            target = (mc / "checkpoints" / f"round-{r}.enc" if f.name.endswith(".ckpt")
+                      else mc / f"adapter-{r}.enc")
+            if r in accepted and not f.name.endswith(".tmp"):
+                os.replace(f, target)
+                finalized.append(target.name)
+            else:
+                f.unlink()
+                discarded.append(f.name)
+    problems = []
+    for r in accepted:
+        if not (mc / f"adapter-{r}.enc").exists():
+            problems.append(f"accepted adapter-{r} is missing")
+        if not (mc / "checkpoints" / f"round-{r}.enc").exists():
+            problems.append(f"accepted round {r} has no checkpoint")
+    for f in mc.glob("adapter-*.enc"):
+        r = _round_of(f.name)
+        if r and r not in accepted:
+            problems.append(f"{f.name} exists but was never accepted")
+    # Reading every ledger verifies it (hash chain, reservations, commits).
+    present = [a for a in st["gradient_assets"] if (mc / "ledgers" / f"{a}.ledger").exists()]
+    ledgers = json.loads(_native.ledger_checkpoints(str(mc / "ledgers"), present))
+    lost = sorted(set(released) - set(accepted))
+    return {"accepted": sorted(accepted), "lost": lost,
+            "lost_round_ids": [released[r] for r in lost],
+            "finalized": finalized, "discarded": discarded, "problems": problems,
+            "ledgers": {a: c["seq"] for a, c in ledgers.items()},
+            "next_round": max(list(released) + list(accepted) + [0]) + 1}
+
+
+def _refuse_revoked(cli: str, mc: Path, anchors: List[str], spec: dict) -> None:
+    """Refuses to go on once an owner has revoked any parent asset."""
+    out = _run([cli, "trust", "report", "--bundle", "trust.json", *anchors, "--json"], mc,
+               check=False)
+    try:
+        revoked = set(json.loads(out).get("revoked", {}))
+    except ValueError:
+        raise TrainingFailed("the trust report could not be read", out) from None
+    parents = {f"asset:{spec['base_model']['asset_id']}"}
+    for d in spec["datasets"]:
+        parents |= {f"asset:{d['asset_id']}", f"asset:{d['gradient_asset']}"}
+    hit = sorted(p.split(":", 1)[1] for p in revoked & parents)
+    if hit:
+        raise EncomputeError("ENC2302", f"training cannot resume: its owners revoked {', '.join(hit)}")
+
+
+def _start_broker(cli: str, mc: Path, mock_root: str) -> Tuple[subprocess.Popen, str]:
+    port = _port()
+    p = subprocess.Popen([cli, "keys", "serve", "--listen", f"127.0.0.1:{port}",
+                          "--mock-root", mock_root, "--broker", "broker.json"],
+                         cwd=mc, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    _wait_port(port, p, "the key broker")
+    return p, f"http://127.0.0.1:{port}"
 
 
 @dataclass
@@ -111,23 +248,28 @@ class FineTuneResult:
     timings: Dict[str, float]
     losses: List[float]
     workdir: Path
+    recovery: Optional[dict] = None
     _ctx: Dict[str, Any] = field(repr=False, default_factory=dict)
 
     def summary(self) -> str:
         r = self.rows
-        ok = lambda *rows: all(r.get(x, "").split(" ")[0] in (
+        ok = lambda *rows: all(r.get(x, "").split(" ")[0] in (  # noqa: E731
             "VERIFIED", "SATISFIED", "AUTHORIZED", "ATTESTED", "COMPLETE") for x in rows)
+        yes = lambda b: "SATISFIED" if b else "NOT SATISFIED"  # noqa: E731
         lines = [
             "CONFIDENTIAL FINE-TUNING",
             "────────────────────────",
-            f"{'Model protection':<24}{'SATISFIED' if ok('Workload', 'Owner authorization', 'Plan') else 'NOT SATISFIED'}",
-            f"{'Dataset protection':<24}{'SATISFIED' if ok('Policy', 'Owner authorization', 'Plan') else 'NOT SATISFIED'}",
-            f"{'Gradient protection':<24}{'SATISFIED' if ok('Private aggregation') else 'NOT SATISFIED'}",
+            f"{'Model protection':<24}{yes(ok('Workload', 'Owner authorization', 'Plan'))}",
+            f"{'Dataset protection':<24}{yes(ok('Policy', 'Owner authorization', 'Plan'))}",
+            f"{'Gradient protection':<24}{yes(ok('Private aggregation'))}",
             f"{'Privacy budget':<24}{r.get('Privacy budget', 'NOT PRESENT')}",
             f"{'Workload identity':<24}{'VERIFIED' if ok('Workload') else r.get('Workload')}",
             f"{'Aggregation':<24}{r.get('Private aggregation')}",
             f"{'Checkpoint lineage':<24}{'COMPLETE' if ok('Training') else r.get('Training')}",
-            f"{'Adapter lineage':<24}{'COMPLETE' if ok('Training', 'Lineage') else r.get('Lineage')}",
+            f"{'Adapter lineage':<24}"
+            f"{'COMPLETE' if ok('Training', 'Lineage') else r.get('Lineage')}",
+            "",
+            PRIVACY_UNIT,
             "",
             "Output",
             self.adapter_id,
@@ -143,11 +285,18 @@ class FineTuneResult:
                     + c["anchors"], c["modelco"], check=False)
 
     def export_adapter(self) -> str:
-        """Asks to export the adapter publicly (denied unless every parent
-        permits it)."""
+        """Asks to export the adapter publicly: denied unless every parent
+        permits it and the run's trust report is satisfied."""
         c = self._ctx
-        return _run([c["cli"], "export", self.adapter_id, "--bundle", str(c["bundle"])],
-                    c["modelco"], check=False)
+        return _run([c["cli"], "export", self.adapter_id, "--bundle", str(c["bundle"])]
+                    + c["anchors"], c["modelco"], check=False)
+
+    def _broker(self) -> str:
+        c = self._ctx
+        b = c.get("broker_proc")
+        if b is None or b.poll() is not None:
+            c["broker_proc"], c["broker"] = _start_broker(c["cli"], c["modelco"], c["mock_root"])
+        return c["broker"]
 
     def infer(self, tokens: torch.Tensor, adapter: Optional[str] = None) -> torch.Tensor:
         """Runs the base model with an adapter (default: the final one) in
@@ -157,7 +306,7 @@ class FineTuneResult:
         rec = c["modelco"] / f"{which}.record.json"
         digest = (json.loads(rec.read_text())["record"]["adapter_digest"] if rec.exists()
                   else c["adapter0_digest"])
-        cfg = dict(c["infer"], adapter=which, adapter_digest=digest,
+        cfg = dict(c["infer"], broker=self._broker(), adapter=which, adapter_digest=digest,
                    adapter_sealed=str(c["modelco"] / f"{which}.enc"),
                    inputs=tensors.dumps({"tokens": tokens}).hex())
         path = c["modelco"] / f"infer-{which}.json"
@@ -170,20 +319,23 @@ class FineTuneResult:
             raise TrainingFailed("inference refused", out.get("error", p.stderr))
         return tensors.loads(bytes.fromhex(out["logits"]))["logits"]
 
-    def resume(self, checkpoint: str) -> dict:
+    def resume(self, checkpoint: str, lost_rounds: Optional[List[str]] = None) -> dict:
         """Opens a checkpoint for resuming (an attested workload receives
-        the checkpoint key); refuses a stale, foreign or rolled-back one."""
+        the checkpoint key). Refuses:
+        - a stale, foreign or rolled-back checkpoint;
+        - one from another run;
+        - any resume once a parent asset has been revoked."""
         c = self._ctx
+        _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]))
         keys, _ = _native.acquire_training_keys(
-            c["spec"], c["broker"], ["checkpoints"], str(c["modelco"] / "coord.key"),
+            c["spec"], self._broker(), ["checkpoints"], str(c["modelco"] / "coord.key"),
             str(c["hw_seed"]), IMAGE)
-        key = dict(keys)["checkpoints"]
-        sealed = Path(checkpoint).read_bytes()
         s = json.loads(c["spec"])
         try:
             header, _ = _native.resume_checkpoint(
-                key, sealed, s["project"], self.training_spec_id, s["policy_id"],
-                s["privacy_policy_id"], str(c["modelco"] / "ledgers"))
+                dict(keys)["checkpoints"], Path(checkpoint).read_bytes(), s["project"],
+                self.training_spec_id, s["policy_id"], s["privacy_policy_id"],
+                str(c["modelco"] / "ledgers"), lost_rounds or [], self.run_id)
         except _native.NativeError as e:
             code, message = e.args
             raise EncomputeError(code, message) from None
@@ -196,42 +348,26 @@ class FineTuneResult:
             b.wait()
 
 
-def finetune(project, *, model, data, method="lora", privacy="strong",
-             verification="required", config: Optional[lora.LoRAConfig] = None,
-             infrastructure: Optional[dict] = None, allow_development: bool = False,
-             workdir: Optional[str] = None, verbose: bool = True) -> FineTuneResult:
+# --- setup --------------------------------------------------------------------
+
+
+def _setup(project, model, data, privacy, verification, cfg, infrastructure,
+           allow_development, W: Path, cli: str, say) -> dict:
+    """Plans the run and prepares every party; writes the (non-secret) run
+    state to run.json."""
     from .._project import PlanningFailed
 
-    if method != "lora":
-        raise EncomputeError("ENC2501", "only method='lora' is supported")
-    if verification not in ("receipt", "required"):
-        raise EncomputeError("ENC1906", 'verification is "receipt" or "required"')
     module = model.payload
-    if module is None or not hasattr(module, "encompute_factory"):
-        raise EncomputeError("ENC2501", "the model needs a module built with "
-                             "encompute.torch.wrap_model (a factory, not a pickle)")
-    for d in data:
-        if d.payload is None:
-            raise EncomputeError("ENC2501", f"{d.id} needs a dataset (encompute.torch.private_dataset)")
-    cfg = config or lora.LoRAConfig()
-    say = print if verbose else (lambda *a, **k: None)
-    t0 = time.perf_counter()
-    timings: Dict[str, float] = {}
-    cli = _cli()
-    W = Path(workdir or tempfile.mkdtemp(prefix="encompute-finetune-"))
-    W.mkdir(parents=True, exist_ok=True)
     mc = W / model.owner
-    mc.mkdir(exist_ok=True)
-    env = dict(os.environ, ENCOMPUTE_CLI=cli, PYTHONDONTWRITEBYTECODE="1")
+    mc.mkdir(parents=True, exist_ok=True)
 
-    # ModelCo's view: the base model, LoRA added, its layout and adapter-0.
     base_state = {k: v.clone() for k, v in module.state_dict().items()}
     weights = tensors.dumps(base_state)
     ref = models.build(module.encompute_factory, module.encompute_kwargs)
     ref.load_state_dict(base_state)
     lora.apply_lora(ref, cfg)
-    dim = lora.get_flat(ref).numel()
-    adapter = lora.get_flat(ref).clone()
+    adapter0 = lora.get_flat(ref).clone()
+    dim = adapter0.numel()
 
     # 1. Declarations and the plan.
     eir = project._aggregation_program(data, model.owner, model, privacy=privacy,
@@ -252,7 +388,7 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
     if not (mc / "plan.json").exists():
         raise PlanningFailed(out)
     plan = json.loads((mc / "plan.json").read_text())
-    plan_id = [l for l in out.splitlines() if l.startswith("encplan1:")][0]
+    plan_id = [line for line in out.splitlines() if line.startswith("encplan1:")][0]
     agg_step = next(s for s in plan["steps"] if s["kind"]["kind"] == "aggregate")
     attested_coord = any(m["mechanism"] == "attestation" for m in agg_step["mechanisms"])
     say(f"{'Plan':<24}{plan_id[:25]}...")
@@ -288,7 +424,8 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
     spec_node = next(k for k in bundle["nodes"] if k.startswith("spec:"))
     agg_spec = bundle["nodes"][spec_node]["evidence"]["value"]
 
-    # 4. Datasets stay with their owners; only digests are shared.
+    # 4. Datasets stay with their owners; only digests are shared. The
+    # digest covers every sample and label, in order.
     commitments = []
     for d in data:
         x, y = d.payload
@@ -331,8 +468,6 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
     run_id = _native.training_run_id(spec_json, secrets.token_hex(16))
     (mc / "training-spec.json").write_text(spec_json)
     _run([cli, "trust", "add", "training-spec.json", "--bundle", "trust.json"], mc)
-    say(f"{'Training':<24}LoRA (rank {cfg.rank}, {dim} adapter parameters)")
-    say(f"{'Participants':<24}{len(data)}")
 
     # 6. ModelCo's key broker: the model, checkpoint and adapter keys,
     # released only to workloads attesting to this training spec.
@@ -341,67 +476,149 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
     model_key = secrets.token_bytes(32)
     (mc / f"{model.id}.enc").write_bytes(
         _native.seal_asset(model_key, "model", project.name, model.id, weights))
-    for asset, key in ((model.id, model_key), ("checkpoints", secrets.token_bytes(32)),
-                       ("adapters", secrets.token_bytes(32))):
+    keys = {model.id: model_key, "checkpoints": secrets.token_bytes(32),
+            "adapters": secrets.token_bytes(32)}
+    for asset, key in keys.items():
         kf = mc / f"{asset}.key"
         kf.write_bytes(key)
         _run([cli, "keys", "protect", "--asset", asset, "--policy", "training-policy.json",
               "--key-file", kf.name, "--broker-id", model.owner, "--development",
               "--broker", "broker.json"], mc)
         kf.unlink()  # the broker holds it now
-    del model_key
-    bport = _port()
-    broker = subprocess.Popen([cli, "keys", "serve", "--listen", f"127.0.0.1:{bport}",
-                               "--mock-root", mock_root, "--broker", "broker.json"],
-                              cwd=mc, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    _wait_port(bport, broker, "the key broker")
-    broker_url = f"http://127.0.0.1:{bport}"
+    # adapter-0, sealed under the adapters key (accepted by definition).
+    a0 = tensors.dumps({"adapter": adapter0})
+    (mc / "adapter-0.enc").write_bytes(
+        _native.seal_asset(keys["adapters"], "adapter", project.name, "adapter-0", a0))
+    del keys, model_key
+    (mc / "checkpoints").mkdir(exist_ok=True)
+
+    state = {
+        "version": 1, "project": project.name, "model_id": model.id,
+        "model_owner": model.owner, "data": [{"id": d.id, "owner": d.owner} for d in data],
+        "gradient_assets": [c["gradient_asset"] for c in commitments],
+        "commitments": commitments, "plan_id": plan_id, "spec": spec_json,
+        "training_spec_id": spec_id, "run_id": run_id, "attested_coord": attested_coord,
+        "mock_root": mock_root, "coord_key": coord, "eir": eir, "dim": dim,
+        "adapter0_digest": _native.sha256_hex(a0),
+        "lora": {"rank": cfg.rank, "alpha": cfg.alpha, "target_modules": list(cfg.target_modules),
+                 "optimizer": cfg.optimizer, "learning_rate": cfg.learning_rate,
+                 "update_clip": cfg.update_clip, "local_steps": cfg.local_steps,
+                 "batch_size": cfg.batch_size, "rounds": cfg.rounds, "seed": cfg.seed},
+        "privacy": privacy,
+    }
+    _write_atomic(W / "run.json", json.dumps(state, indent=1).encode())
+    return state
+
+
+# --- training -----------------------------------------------------------------
+
+
+def finetune(project=None, *, model=None, data=None, method="lora", privacy="strong",
+             verification="required", config: Optional[lora.LoRAConfig] = None,
+             infrastructure: Optional[dict] = None, allow_development: bool = False,
+             workdir: Optional[str] = None, resume: Optional[str] = None,
+             verbose: bool = True) -> FineTuneResult:
+    say = print if verbose else (lambda *a, **k: None)
+    t0 = time.perf_counter()
+    timings: Dict[str, float] = {}
+    cli = _cli()
+    env = dict(os.environ, ENCOMPUTE_CLI=cli, PYTHONDONTWRITEBYTECODE="1")
+    recovery = None
+    if resume:
+        W = Path(resume)
+        recovery = recover(str(W))
+        if recovery["problems"]:
+            raise TrainingFailed("the run directory is inconsistent: "
+                                 + "; ".join(recovery["problems"]))
+        st = json.loads((W / "run.json").read_text())
+        say(f"{'Resuming':<24}accepted rounds {recovery['accepted'] or 'none'}; "
+            f"lost rounds {recovery['lost'] or 'none'} (their privacy stays spent)")
+    else:
+        if method != "lora":
+            raise EncomputeError("ENC2501", "only method='lora' is supported")
+        if verification not in ("receipt", "required"):
+            raise EncomputeError("ENC1906", 'verification is "receipt" or "required"')
+        module = model.payload
+        if module is None or not hasattr(module, "encompute_factory"):
+            raise EncomputeError("ENC2501", "the model needs a module built with "
+                                 "encompute.torch.wrap_model (a factory, not a pickle)")
+        for d in data:
+            if d.payload is None:
+                raise EncomputeError("ENC2501",
+                                     f"{d.id} needs a dataset (encompute.torch.private_dataset)")
+        W = Path(workdir or tempfile.mkdtemp(prefix="encompute-finetune-"))
+        W.mkdir(parents=True, exist_ok=True)
+        st = _setup(project, model, data, privacy, verification, config or lora.LoRAConfig(),
+                    infrastructure, allow_development, W, cli, say)
+    c = st["lora"]
+    cfg = lora.LoRAConfig(rank=c["rank"], alpha=c["alpha"],
+                          target_modules=tuple(c["target_modules"]), optimizer=c["optimizer"],
+                          learning_rate=c["learning_rate"], update_clip=c["update_clip"],
+                          local_steps=c["local_steps"], batch_size=c["batch_size"],
+                          rounds=c["rounds"], seed=c["seed"])
+    mc = W / st["model_owner"]
+    spec_json, spec_id, run_id = st["spec"], st["training_spec_id"], st["run_id"]
+    spec = json.loads(spec_json)
+    parties = str(W / "parties.json")
+    mock_root = st["mock_root"]
+    coord_policy = (["--coordinator-policy", str(mc / "coord-policy.json")]
+                    if st["attested_coord"] else [])
+    say(f"{'Training':<24}LoRA (rank {cfg.rank}, {st['dim']} adapter parameters)")
+    say(f"{'Participants':<24}{len(st['data'])}")
+
+    broker, broker_url = _start_broker(cli, mc, mock_root)
+    ctx: Dict[str, Any] = dict(cli=cli, bundle=mc / "trust.json", modelco=mc, spec=spec_json,
+                               broker=broker_url, broker_proc=broker, hw_seed=W / "hw.seed",
+                               env=env, mock_root=mock_root, adapter0_digest=st["adapter0_digest"])
+    ctx["anchors"] = ["--parties", parties, "--coordinator-key", st["coord_key"], "--mock-root",
+                      mock_root, "--execution-policy", str(mc / "training-policy.json")]
+    ctx["infer"] = dict(spec=spec_json, identity=str(mc / "coord.key"),
+                        mock_seed=str(W / "hw.seed"), image=IMAGE,
+                        model_sealed=str(mc / f"{st['model_id']}.enc"),
+                        lora={k: c[k] for k in ("rank", "alpha", "target_modules", "seed")})
     say(f"{'Model protection':<24}ACTIVE (key released only to attested training workloads)")
     say(f"{'Dataset protection':<24}ACTIVE (datasets never leave their owners' workers)")
-    say(f"{'Attestation':<24}{'REQUIRED' if verification == 'required' else 'PLANNED'}")
+    say(f"{'Attestation':<24}REQUIRED")
     say(f"{'Gradient protection':<24}SECURE AGGREGATION")
-    say(f"{'Privacy':<24}ACTIVE ({privacy}, organization-level: each hospital's clipped update)")
-
-    ctx: Dict[str, Any] = dict(cli=cli, bundle=mc / "trust.json", modelco=mc, spec=spec_json,
-                               broker=broker_url, hw_seed=W / "hw.seed", env=env,
-                               broker_proc=broker)
-    ctx["anchors"] = ["--parties", parties, "--coordinator-key", coord, "--mock-root",
-                      mock_root, "--execution-policy", str(mc / "training-policy.json")]
+    say(f"{'Privacy':<24}ACTIVE ({st['privacy']}, organization-level)")
 
     # Plain PyTorch baseline: the same local steps, no Encompute.
-    bl = models.build(module.encompute_factory, module.encompute_kwargs)
-    bl.load_state_dict(base_state)
-    lora.apply_lora(bl, cfg)
-    t = time.perf_counter()
-    x0, y0 = data[0].payload
-    opt = torch.optim.SGD(list(lora.adapter_parameters(bl).values()), lr=cfg.learning_rate)
-    for _ in range(cfg.local_steps):
-        opt.zero_grad()
-        torch.nn.functional.cross_entropy(bl(x0[:cfg.batch_size]), y0[:cfg.batch_size]).backward()
-        opt.step()
-    timings["plain_pytorch_local_training_s"] = time.perf_counter() - t
+    if not resume:
+        bl = models.build(model.payload.encompute_factory, model.payload.encompute_kwargs)
+        bl.load_state_dict(model.payload.state_dict())
+        lora.apply_lora(bl, cfg)
+        t = time.perf_counter()
+        x0, y0 = data[0].payload
+        opt = torch.optim.SGD(list(lora.adapter_parameters(bl).values()), lr=cfg.learning_rate)
+        for _ in range(cfg.local_steps):
+            opt.zero_grad()
+            torch.nn.functional.cross_entropy(bl(x0[:cfg.batch_size]),
+                                              y0[:cfg.batch_size]).backward()
+            opt.step()
+        timings["plain_pytorch_local_training_s"] = time.perf_counter() - t
 
-    # 7. Training workers: attest, receive the model key, build the model.
+    # Training workers: attest, receive the model key, build the model.
     workers = []
+    losses: List[float] = []
+    stopped = None
+    done = 0
+    adapter_id = "adapter-0"
     t = time.perf_counter()
     try:
-        for d in data:
-            pd = W / d.owner
+        for d in st["data"]:
+            pd = W / d["owner"]
             wcfg = {
                 "spec": spec_json, "broker": broker_url, "identity": str(pd / "party.key"),
                 "mock_seed": str(W / "hw.seed"), "image": IMAGE,
-                "model_sealed": str(mc / f"{model.id}.enc"),
-                "dataset": str(pd / "dataset.bin"), "dataset_asset": d.id,
-                "dataset_digest": next(c["digest"] for c in commitments if c["asset_id"] == d.id),
-                "lora": {"rank": cfg.rank, "alpha": cfg.alpha,
-                         "target_modules": list(cfg.target_modules), "optimizer": cfg.optimizer,
-                         "learning_rate": cfg.learning_rate, "update_clip": cfg.update_clip,
-                         "local_steps": cfg.local_steps, "batch_size": cfg.batch_size,
-                         "rounds": cfg.rounds, "seed": cfg.seed},
-                "cli": cli, "artifact": str(mc / "training.encompute"), "parties": parties,
-                "plan": str(mc / "plan.json"),
-                "coordinator_policy": str(mc / "coord-policy.json") if attested_coord else "",
-                "mock_root": mock_root, "party": d.owner, "state": str(pd / "round.state"),
+                "model_sealed": str(mc / f"{st['model_id']}.enc"),
+                "dataset": str(pd / "dataset.bin"), "dataset_asset": d["id"],
+                "dataset_digest": next(x["digest"] for x in st["commitments"]
+                                       if x["asset_id"] == d["id"]),
+                "lora": st["lora"], "cli": cli, "artifact": str(mc / "training.encompute"),
+                "parties": parties, "plan": str(mc / "plan.json"),
+                "coordinator_policy": (str(mc / "coord-policy.json")
+                                       if st["attested_coord"] else ""),
+                "mock_root": mock_root, "party": d["owner"], "state": str(pd / "round.state"),
             }
             (pd / "worker.json").write_text(json.dumps(wcfg))
             p = subprocess.Popen([sys.executable, "-m", "encompute.torch.worker",
@@ -410,33 +627,43 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
                                  stderr=subprocess.PIPE)
             hello = json.loads(p.stdout.readline() or '{"ready": false, "error": "no reply"}')
             if not hello.get("ready"):
-                raise TrainingFailed(f"{d.owner}'s training worker refused: {hello.get('error')}",
+                raise TrainingFailed(f"{d['owner']}'s training worker refused: {hello.get('error')}",
                                      p.stderr.read())
-            (pd / "attestation.json").write_text(hello["record"])
-            _run([cli, "trust", "add", str(pd / "attestation.json"), "--bundle", "trust.json"], mc)
             workers.append((d, p))
+            if not (pd / "attestation.json").exists():
+                (pd / "attestation.json").write_text(hello["record"])
+                _run([cli, "trust", "add", str(pd / "attestation.json"), "--bundle",
+                      "trust.json"], mc)
         timings["attestation_startup_s"] = time.perf_counter() - t
         say(f"{'Workers':<24}{len(workers)} attested, model key received")
 
-        # 8. Rounds.
-        ckpt = {k: v for k, v in dict(_native.acquire_training_keys(
+        keys = dict(_native.acquire_training_keys(
             spec_json, broker_url, ["checkpoints", "adapters"], str(mc / "coord.key"),
-            str(W / "hw.seed"), IMAGE)[0]).items()}
-        (mc / "checkpoints").mkdir(exist_ok=True)
-        ctx["infer"] = dict(spec=spec_json, broker=broker_url,
-                            identity=str(mc / "coord.key"), mock_seed=str(W / "hw.seed"),
-                            image=IMAGE, model_sealed=str(mc / f"{model.id}.enc"),
-                            lora={"rank": cfg.rank, "alpha": cfg.alpha,
-                                  "target_modules": list(cfg.target_modules), "seed": cfg.seed})
-        a0 = tensors.dumps({"adapter": adapter})
-        ctx["adapter0_digest"] = _native.sha256_hex(a0)
-        (mc / "adapter-0.enc").write_bytes(_native.seal_asset(
-            ckpt["adapters"], "adapter", project.name, "adapter-0", a0))
-        adapter_id, previous, stopped, losses = "adapter-0", None, None, []
-        timings["secure_aggregation_s"] = timings["checkpoint_s"] = timings["trust_graph_s"] = 0.0
-        gradient_assets = [c["gradient_asset"] for c in commitments]
-        done = 0
-        for r in range(1, cfg.rounds + 1):
+            str(W / "hw.seed"), IMAGE)[0])
+        if os.environ.get("ENCOMPUTE_TRAINING_FAILPOINT") == "kill-broker":
+            broker.kill()  # keys are already held: training must not need it now
+
+        # Where to start: adapter-0, or the latest accepted adapter (its
+        # checkpoint checked against the ledgers, allowing only lost rounds).
+        adapter = tensors.loads(bytes(_native.open_asset(
+            keys["adapters"], (mc / "adapter-0.enc").read_bytes(), st["project"], "adapter-0",
+            st["adapter0_digest"])))["adapter"]
+        previous, r = None, 1
+        if recovery:
+            _refuse_revoked(cli, mc, ctx["anchors"], spec)
+            if recovery["accepted"]:
+                last = recovery["accepted"][-1]
+                _, payload = _native.resume_checkpoint(
+                    keys["checkpoints"], (mc / "checkpoints" / f"round-{last}.enc").read_bytes(),
+                    st["project"], spec_id, spec["policy_id"], spec["privacy_policy_id"],
+                    str(mc / "ledgers"), recovery["lost_round_ids"], run_id)
+                adapter = tensors.loads(bytes(payload))["adapter"]
+                adapter_id = previous = f"adapter-{last}"
+            r = recovery["next_round"]
+            done = len(recovery["accepted"])
+        timings.update(secure_aggregation_s=0.0, checkpoint_s=0.0, trust_graph_s=0.0)
+        (mc / "pending").mkdir(exist_ok=True)
+        while done < cfg.rounds:
             t = time.perf_counter()
             port = _port()
             serve = [cli, "aggregate", "serve", "training.encompute", "--parties", parties,
@@ -444,7 +671,7 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
                      f"127.0.0.1:{port}", "--stage-timeout", "30", "--sequence", str(r),
                      "--ledger", "ledgers", "--out", f"update-{r}.json",
                      "--receipt", f"receipt-{r}.json", "--trust-bundle", "trust.json"]
-            if attested_coord:
+            if st["attested_coord"]:
                 serve += [*coord_policy, "--attester", "mock", "--mock-seed",
                           str(W / "hw.seed"), "--mock-image", IMAGE]
             cp = subprocess.Popen(serve, cwd=mc, stdout=subprocess.PIPE,
@@ -461,47 +688,72 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
                                           "seed": cfg.seed * 1000 + r * 10 + i,
                                           "coordinator": f"http://127.0.0.1:{port}"}) + "\n")
                 p.stdin.flush()
-            replies = [json.loads(p.stdout.readline()) for _, p in workers]
+            if os.environ.get("ENCOMPUTE_TRAINING_FAILPOINT") == "kill-coordinator":
+                time.sleep(0.3)
+                cp.send_signal(signal.SIGKILL)
+            replies = []
+            for d, p in workers:
+                line = p.stdout.readline()
+                if not line:
+                    # Abort the round: nothing from it is accepted.
+                    cp.kill()
+                    cp.wait()
+                    raise TrainingFailed(f"{d['owner']}'s training worker died in round {r}",
+                                         p.stderr.read())
+                replies.append(json.loads(line))
             log = cp.communicate()[0]
             if cp.returncode != 0:
                 if "ENC2201" in log:
                     stopped = f"round {r}: privacy budget exhausted (RELEASE DENIED)"
                     break
                 raise TrainingFailed(f"round {r} failed", log + "".join(x["log"] for x in replies))
+            _failpoint("after-aggregate-release")
             timings["secure_aggregation_s"] += time.perf_counter() - t
             losses.append(sum(x["loss"] for x in replies) / len(replies))
             # The released (noised) sum of clipped, scaled updates: the mean
             # update, rescaled.
             agg = json.loads((mc / f"update-{r}.json").read_text())
             n = len(agg["contributors"])
-            mean = torch.tensor(agg["values"], dtype=torch.float32) / n * cfg.update_clip
-            adapter = adapter + mean
+            adapter = adapter + torch.tensor(agg["values"], dtype=torch.float32) / n * cfg.update_clip
             new_id = f"adapter-{r}"
             t = time.perf_counter()
+            # Provisional: sealed into pending/.
             payload = tensors.dumps({"adapter": adapter})
-            (mc / f"{new_id}.enc").write_bytes(_native.seal_asset(
-                ckpt["adapters"], "adapter", project.name, new_id, payload))
+            _write_atomic(mc / "pending" / f"adapter-{r}.enc", bytes(_native.seal_asset(
+                keys["adapters"], "adapter", st["project"], new_id, payload)))
+            _failpoint("after-adapter-write")
             header = {
-                "version": 1, "project": project.name, "training_spec_id": spec_id,
+                "version": 1, "project": st["project"], "training_spec_id": spec_id,
                 "run_id": run_id, "round": r, "adapter_id": new_id,
                 "payload_digest": _native.sha256_hex(payload),
                 "policy_id": spec["policy_id"], "privacy_policy_id": spec["privacy_policy_id"],
                 "ledgers": json.loads(_native.ledger_checkpoints(str(mc / "ledgers"),
-                                                                 gradient_assets)),
+                                                                 st["gradient_assets"])),
                 "lineage_root": None,
             }
-            (mc / "checkpoints" / f"round-{r}.enc").write_bytes(
-                _native.seal_checkpoint(ckpt["checkpoints"], json.dumps(header), payload))
+            _failpoint("before-checkpoint-write")
+            ckpt = bytes(_native.seal_checkpoint(keys["checkpoints"], json.dumps(header), payload))
+            if os.environ.get("ENCOMPUTE_TRAINING_FAILPOINT") == "during-checkpoint-write":
+                (mc / "pending" / f"round-{r}.ckpt.tmp").write_bytes(ckpt[: len(ckpt) // 2])
+                os._exit(137)
+            _write_atomic(mc / "pending" / f"round-{r}.ckpt", ckpt)
             timings["checkpoint_s"] += time.perf_counter() - t
             t = time.perf_counter()
             rec = _native.sign_adapter_record(
                 spec_json, run_id, r, previous, (mc / f"receipt-{r}.json").read_text(),
                 "update", _native.sha256_hex(payload), str(mc / "coord.key"))
             (mc / f"{new_id}.record.json").write_text(rec)
+            _failpoint("before-trust-update")
+            # The commit point.
             _run([cli, "trust", "add", f"{new_id}.record.json", "--bundle", "trust.json"], mc)
+            _failpoint("after-trust-update")
+            os.replace(mc / "pending" / f"adapter-{r}.enc", mc / f"{new_id}.enc")
+            os.replace(mc / "pending" / f"round-{r}.ckpt", mc / "checkpoints" / f"round-{r}.enc")
             timings["trust_graph_s"] += time.perf_counter() - t
-            previous, adapter_id, done = new_id, new_id, r
+            previous, adapter_id = new_id, new_id
+            done += 1
             say(f"{f'Round {r}/{cfg.rounds}':<24}COMPLETE (mean local loss {losses[-1]:.3f})")
+            r += 1
         if stopped:
             say(f"{'Stopped':<24}{stopped}")
     finally:
@@ -509,11 +761,14 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
             try:
                 p.stdin.write('{"cmd": "exit"}\n')
                 p.stdin.flush()
-            except (BrokenPipeError, ValueError):
+            except (BrokenPipeError, ValueError, OSError):
                 pass
-            p.wait(timeout=30)
+            try:
+                p.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                p.kill()
 
-    # 9. The trust report and the export decision.
+    # The trust report and the export decision.
     report = _run([cli, "trust", "report", "--bundle", "trust.json", *ctx["anchors"],
                    "--require", "Private aggregation", "--require", "Privacy budget",
                    "--require", "Plan", "--require", "Workload", "--require", "Training"],
@@ -525,16 +780,16 @@ def finetune(project, *, model, data, method="lora", privacy="strong",
             if line.startswith(name + " ") and line[len(name):].startswith("  "):
                 rows[name] = line[24:].strip()
     try:
-        _native.check_export(eir, spec_json, adapter_id)
+        _native.check_export(st["eir"], spec_json, adapter_id)
         export = "EXPORT PERMITTED"
     except _native.NativeError as e:
         export = e.args[1]
     timings["total_s"] = time.perf_counter() - t0
     result = FineTuneResult(
-        adapter_id=adapter_id, plan_id=plan_id, training_spec_id=spec_id, run_id=run_id,
+        adapter_id=adapter_id, plan_id=st["plan_id"], training_spec_id=spec_id, run_id=run_id,
         rounds=done, stopped=stopped, report=report, rows=rows,
         satisfied="TRUST REQUIREMENTS SATISFIED" in report and done > 0,
-        export=export, timings=timings, losses=losses, workdir=W, _ctx=ctx,
+        export=export, timings=timings, losses=losses, workdir=W, recovery=recovery, _ctx=ctx,
     )
     say("")
     say(result.summary())
