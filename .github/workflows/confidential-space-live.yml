@@ -1,0 +1,72 @@
+# Live Confidential Space training: real Google attestation on Intel TDX.
+# Manual (workflow_dispatch), on a self-hosted runner inside the project's
+# VPC: it runs the key broker the VMs reach, and deploy.sh. Authenticates
+# with workload identity federation; no key or secret is stored in the
+# repository. Without the configuration, it reports SKIPPED.
+name: confidential-space-live
+on:
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: "variants to run"
+        default: "approved tampered debug"
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  live:
+    name: LIVE CONFIDENTIAL SPACE
+    runs-on: ${{ vars.GCP_RUNNER_LABEL || 'ubuntu-24.04' }}
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT }}
+      REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+      ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+      BROKER_URL: ${{ vars.ENCOMPUTE_BROKER_URL }}
+    steps:
+      - name: configuration
+        id: cfg
+        run: |
+          if [ -z "$PROJECT" ] || [ -z "$BROKER_URL" ] || [ -z "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
+            echo "SKIPPED — GCP environment unavailable" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.cfg.outputs.run == 'true'
+        uses: actions/checkout@v7
+      - if: steps.cfg.outputs.run == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+      - if: steps.cfg.outputs.run == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+      - if: steps.cfg.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@1.98.1
+      - if: steps.cfg.outputs.run == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - if: steps.cfg.outputs.run == 'true'
+        name: build encompute and the Python SDK
+        run: |
+          cargo build --release --bins
+          python -m venv .venv && . .venv/bin/activate
+          pip install maturin numpy
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r deploy/confidential-space-training/requirements.txt
+          maturin develop --release
+      - if: steps.cfg.outputs.run == 'true'
+        name: approved, tampered and debug runs
+        run: |
+          . .venv/bin/activate
+          export PATH="$PWD/target/release:$PATH" PYTHON="$PWD/.venv/bin/python"
+          export WORK="$RUNNER_TEMP/cs-work"
+          # Prepare (approved) first, then serve its broker for the VMs.
+          deploy/confidential-space-training/deploy.sh prepare-only || true
+          (cd "$WORK/run/modelco" && encompute keys serve --broker broker.json \
+             --kek "$WORK/broker.kek" --jwks google --listen "0.0.0.0:${BROKER_URL##*:}" &)
+          for v in ${{ inputs.variants }}; do
+            CLEANUP=1 deploy/confidential-space-training/deploy.sh "$v"
+          done
+          echo "LIVE CONFIDENTIAL SPACE: PASS" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -122,6 +122,127 @@ pub fn attest_contribution(
     Ok(String::from_utf8(record.to_bytes().map_err(err)?).expect("JSON"))
 }
 
+/// The attestation policy for one participant's confidential training
+/// jobs (its dataset and output keys are released only under it).
+#[pyfunction]
+pub fn participant_attestation_policy(
+    spec_json: &str,
+    party: &str,
+    image: &str,
+    development: bool,
+) -> PyResult<String> {
+    let p = spec(spec_json)?
+        .participant_attestation_policy(party, image, development)
+        .map_err(err)?;
+    Ok(serde_json::to_string_pretty(&p).expect("JSON"))
+}
+
+/// Inside a confidential training job: attest with `attester`
+/// (`confidential-space`, whose `attester_arg` is the launcher socket or
+/// empty for the default; or `mock`, whose `attester_arg` is the mock
+/// seed file, development only) as a workload holding the in-memory
+/// session identity `identity_seed`, acting for `party` (the attestation
+/// binds the spec scoped to that participant), and receive `assets'` keys
+/// sealed to that session. Returns the keys and the attestation record.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn acquire_session_keys(
+    py: Python<'_>,
+    spec_json: &str,
+    broker: &str,
+    assets: Vec<String>,
+    identity_seed: &[u8],
+    attester: &str,
+    attester_arg: &str,
+    image: &str,
+    party: &str,
+) -> PyResult<Acquired> {
+    use encompute_runtime::attestation::gcp::ConfidentialSpaceAttester;
+    use encompute_runtime::attestation::Attester;
+    let s = spec(spec_json)?;
+    let seed: [u8; 32] = identity_seed
+        .try_into()
+        .map_err(|_| bad("the session identity is 32 bytes"))?;
+    let att: Box<dyn Attester> = match attester {
+        "mock" => Box::new(MockHardware::from_seed(&seed32(attester_arg)?).attester(image)),
+        "confidential-space" if attester_arg.is_empty() => {
+            Box::new(ConfidentialSpaceAttester::default())
+        }
+        "confidential-space" => Box::new(ConfidentialSpaceAttester::with_socket(attester_arg)),
+        other => {
+            return Err(bad(format!(
+                "attester is confidential-space or mock, not {other}"
+            )))
+        }
+    };
+    let signer = EvaluatorSigner::from_seed(&seed);
+    let session = WorkloadSession::new(&signer.identity());
+    let requests: Vec<_> = assets
+        .iter()
+        .map(|a| (BrokerClient::new(broker), a.clone()))
+        .collect();
+    let got = acquire_keys(
+        att.as_ref(),
+        &session,
+        &s.participant_execution_id(party).map_err(err)?,
+        s.policy_id.as_deref(),
+        &s.code_digest,
+        &requests,
+    )
+    .map_err(err)?;
+    let record = got
+        .first()
+        .map(|k| k.record.to_bytes())
+        .transpose()
+        .map_err(err)?
+        .map(|b| String::from_utf8(b).expect("JSON"))
+        .unwrap_or_default();
+    Ok((
+        got.iter()
+            .map(|k| (k.asset_id.clone(), bytes(py, &k.key)))
+            .collect(),
+        record,
+    ))
+}
+
+/// An attestation record's ID and its session's ID.
+#[pyfunction]
+pub fn attestation_record_ids(record_json: &str) -> PyResult<(String, String)> {
+    let r = encompute_runtime::attestation::AttestationRecord::from_bytes(record_json.as_bytes())
+        .map_err(err)?;
+    Ok((r.id().map_err(err)?, r.session_id().map_err(err)?))
+}
+
+/// Signs a training worker's evidence (JSON) with the session identity its
+/// attestation binds.
+#[pyfunction]
+pub fn sign_worker_evidence(evidence_json: &str, identity_seed: &[u8]) -> PyResult<String> {
+    let e: training::WorkerEvidence =
+        serde_json::from_str(evidence_json).map_err(|e| bad(format!("worker evidence: {e}")))?;
+    let seed: [u8; 32] = identity_seed
+        .try_into()
+        .map_err(|_| bad("the session identity is 32 bytes"))?;
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    Ok(serde_json::to_string_pretty(&e.sign(&key).map_err(err)?).expect("JSON"))
+}
+
+/// Checks signed worker evidence against its training spec and attestation
+/// record (the record's own verification is separate).
+#[pyfunction]
+pub fn verify_worker_evidence(
+    evidence_json: &str,
+    spec_json: &str,
+    record_json: &str,
+) -> PyResult<String> {
+    let e: training::SignedWorkerEvidence =
+        serde_json::from_str(evidence_json).map_err(|e| bad(format!("worker evidence: {e}")))?;
+    let record =
+        encompute_runtime::attestation::AttestationRecord::from_bytes(record_json.as_bytes())
+            .map_err(err)?;
+    e.verify(&spec(spec_json)?, &record).map_err(err)?;
+    e.id().map_err(err)
+}
+
 /// Validates a Hugging Face model package manifest (JSON) and returns its
 /// ID (hex; shown as `enchf1:`).
 #[pyfunction]
@@ -398,6 +519,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(contribution_attestation_policy, m)?)?;
     m.add_function(wrap_pyfunction!(attest_contribution, m)?)?;
     m.add_function(wrap_pyfunction!(hf_package_id, m)?)?;
+    m.add_function(wrap_pyfunction!(acquire_session_keys, m)?)?;
+    m.add_function(wrap_pyfunction!(participant_attestation_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(sign_worker_evidence, m)?)?;
+    m.add_function(wrap_pyfunction!(attestation_record_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_worker_evidence, m)?)?;
     m.add_function(wrap_pyfunction!(hf_check_file, m)?)?;
     m.add_function(wrap_pyfunction!(hf_tokenizer_digest, m)?)?;
     m.add_function(wrap_pyfunction!(hf_check_index, m)?)?;

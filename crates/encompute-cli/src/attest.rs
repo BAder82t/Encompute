@@ -212,6 +212,31 @@ pub enum AttestCmd {
     /// DEVELOPMENT ONLY: create a mock hardware root (a seed file, mode
     /// 0600) and print its public key for `--mock-root`.
     MockRoot { seed: PathBuf },
+    /// DEVELOPMENT ONLY: serve Confidential Space launcher tokens on a Unix
+    /// socket, signed with a test key, so the real attester and a
+    /// production broker can be exercised without Google Cloud. Brokers
+    /// accept them only with the matching `--jwks`; no hardware is involved.
+    SimulateLauncher {
+        /// The Unix socket the attester connects to.
+        #[arg(long)]
+        socket: PathBuf,
+        /// RSA private key (PEM) standing in for Google's signing key.
+        #[arg(long)]
+        key: PathBuf,
+        /// Its key ID in the JWKS.
+        #[arg(long, default_value = "test-key-1")]
+        kid: String,
+        /// The container image digest the tokens measure.
+        #[arg(long)]
+        image: String,
+        /// Report a debug-enabled VM.
+        #[arg(long)]
+        debug: bool,
+        #[arg(long, default_value = "GCP_INTEL_TDX")]
+        hwmodel: String,
+        #[arg(long, default_value_t = 3600)]
+        lifetime: u64,
+    },
 }
 
 pub fn attest(cmd: AttestCmd) -> Result<ExitCode> {
@@ -288,6 +313,29 @@ pub fn attest(cmd: AttestCmd) -> Result<ExitCode> {
             p.allow_development = development;
             p.validate()?;
             println!("{}", serde_json::to_string_pretty(&p).expect("JSON"));
+            Ok(ExitCode::SUCCESS)
+        }
+        AttestCmd::SimulateLauncher {
+            socket,
+            key,
+            kid,
+            image,
+            debug,
+            hwmodel,
+            lifetime,
+        } => {
+            let pem = read(&key)?;
+            let key = jsonwebtoken::EncodingKey::from_rsa_pem(&pem)
+                .map_err(|e| Error::new(Code::Attestation, format!("{}: {e}", key.display())))?;
+            crate::launcher_sim::LauncherSim {
+                key,
+                kid,
+                image_digest: image,
+                debug,
+                hwmodel,
+                lifetime,
+            }
+            .serve(&socket)?;
             Ok(ExitCode::SUCCESS)
         }
         AttestCmd::MockRoot { seed } => {
@@ -421,6 +469,9 @@ pub enum BrokerCmd {
     Serve {
         #[arg(long, default_value = "127.0.0.1:8760")]
         listen: String,
+        /// Requests allowed per source address per minute.
+        #[arg(long, default_value_t = encompute_runtime::keybroker::REQUESTS_PER_MINUTE)]
+        requests_per_minute: u32,
         #[command(flatten)]
         trust: TrustArgs,
         #[command(flatten)]
@@ -590,6 +641,7 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
         }
         BrokerCmd::Serve {
             listen,
+            requests_per_minute,
             trust,
             file,
         } => {
@@ -602,7 +654,11 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 b.mode(),
                 trust.verifier(Some(b.id()))?.providers().join(", ")
             );
-            encompute_runtime::keybroker::serve(&Mutex::new(b), &server);
+            encompute_runtime::keybroker::serve_with_limit(
+                &Mutex::new(b),
+                &server,
+                requests_per_minute,
+            );
             Ok(ExitCode::SUCCESS)
         }
     }

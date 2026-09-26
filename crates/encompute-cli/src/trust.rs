@@ -310,6 +310,11 @@ fn add_evidence(g: &mut TrustGraph, bytes: &[u8]) -> Result<String> {
     {
         return g.add_adapter(r);
     }
+    if let Ok(r) =
+        serde_json::from_slice::<encompute_runtime::training::SignedWorkerEvidence>(bytes)
+    {
+        return g.add_worker_evidence(r);
+    }
     Err(Error::new(
         Code::TrustEvidence,
         "not a receipt, record or spec Encompute knows",

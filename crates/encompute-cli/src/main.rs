@@ -2,6 +2,7 @@
 
 mod aggregate;
 mod attest;
+mod launcher_sim;
 mod plan;
 mod trust;
 

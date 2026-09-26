@@ -24,9 +24,9 @@ impl std::fmt::Debug for AcquiredKey {
     }
 }
 
-/// The workload side: for each `(broker, asset)`, fetch a challenge, attest
-/// the binding, open a session and receive and open the grant. Fails on the
-/// first refusal.
+/// The workload side: attest once to each broker (a fresh challenge, the
+/// binding, a session), then receive and open the grant for each of its
+/// `(broker, asset)` requests in that session. Fails on the first refusal.
 pub fn acquire_keys(
     attester: &dyn Attester,
     session: &WorkloadSession,
@@ -36,18 +36,29 @@ pub fn acquire_keys(
     requests: &[(BrokerClient, String)],
 ) -> Result<Vec<AcquiredKey>> {
     let mut out = Vec::new();
+    // Broker URL -> (its session, the evidence that opened it).
+    let mut sessions: std::collections::BTreeMap<String, (String, AttestationRecord)> =
+        std::collections::BTreeMap::new();
     for (broker, asset_id) in requests {
-        let challenge = broker.challenge()?;
-        let binding = session.binding(&challenge, execution_spec_id, policy_id, artifact_digest);
-        let evidence = attester.attest(&challenge, &binding)?;
-        let info = broker.attest(&evidence)?;
-        if info.workload_session_id != session.session_id() {
-            return Err(Error::new(
-                Code::KeyRelease,
-                "the broker opened a session for another workload",
-            ));
+        if !sessions.contains_key(broker.url()) {
+            let challenge = broker.challenge()?;
+            let binding =
+                session.binding(&challenge, execution_spec_id, policy_id, artifact_digest);
+            let evidence = attester.attest(&challenge, &binding)?;
+            let info = broker.attest(&evidence)?;
+            if info.workload_session_id != session.session_id() {
+                return Err(Error::new(
+                    Code::KeyRelease,
+                    "the broker opened a session for another workload",
+                ));
+            }
+            sessions.insert(
+                broker.url().to_owned(),
+                (info.session, AttestationRecord::new(evidence)),
+            );
         }
-        let grant = broker.release(&info.session, asset_id)?;
+        let (broker_session, record) = &sessions[broker.url()];
+        let grant = broker.release(broker_session, asset_id)?;
         if &grant.header.asset_id != asset_id || grant.header.execution_spec_id != execution_spec_id
         {
             return Err(Error::new(
@@ -60,7 +71,7 @@ pub fn acquire_keys(
             asset_id: asset_id.clone(),
             header: grant.header,
             key,
-            record: AttestationRecord::new(evidence),
+            record: record.clone(),
         });
     }
     Ok(out)

@@ -52,8 +52,50 @@ jobs:
           pytest -q python/tests/test_finetune.py python/tests/test_finetune_matrix.py \
             python/tests/test_finetune_leakage.py python/tests/test_finetune_crash.py \
             python/tests/test_training_contract.py python/tests/test_dpsgd.py \
-            python/tests/test_huggingface.py
-      - run: EXAMPLES_REQUIRE="15 16 17" examples/run-all.sh standard
+            python/tests/test_huggingface.py python/tests/test_confidential_job.py
+      - run: EXAMPLES_REQUIRE="15 16 17 18" examples/run-all.sh standard
+
+  # The Confidential Space training worker image: built as released
+  # (linux/amd64), then run against a locally prepared job with a
+  # production broker and a simulated launcher inside the container. A
+  # rebuilt (tampered) image must get no key. No GCP needed; the live test
+  # is confidential-space-live.yml.
+  confidential-space-image:
+    name: confidential space training image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: cargo build --bins
+      - name: python sdk
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin numpy
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r deploy/confidential-space-training/requirements.txt
+          maturin develop
+      - name: build the approved and a tampered image
+        run: |
+          D=deploy/confidential-space-training/Dockerfile
+          # The production image: no CLI inside.
+          docker build -f $D -t encompute-training:production .
+          docker run --rm --entrypoint sh encompute-training:production -c '! command -v encompute'
+          docker image inspect encompute-training:production --format '{{.Id}}' >> "$GITHUB_STEP_SUMMARY"
+          # The rehearsal images (the same layers plus the CLI).
+          docker build --target rehearsal -f $D -t encompute-training:approved .
+          docker build --target rehearsal --build-arg VARIANT=tampered -f $D -t encompute-training:tampered .
+      - name: the approved image trains; the tampered image gets no key
+        run: |
+          . .venv/bin/activate
+          export ENCOMPUTE_CLI="$PWD/target/debug/encompute"
+          python examples/18_confidential_space_hf/job.py container "$RUNNER_TEMP/approved"
+          python examples/18_confidential_space_hf/job.py container "$RUNNER_TEMP/tampered" \
+            --run encompute-training:tampered
 
   # The release gate: every documented security invariant, quick scale.
   # Fails the build when any invariant is violated (docs/assurance.md).

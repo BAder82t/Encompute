@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 MODE="${1:-quick}"
 
 QUICK="01 02 04 06 08 09 10 11 13 14 15"
-STANDARD="$QUICK 03 07 12 16 17"
+STANDARD="$QUICK 03 07 12 16 17 18"
 CRYPTO="01 03 05"
 case "$MODE" in
   quick) LIST="$QUICK" ;;

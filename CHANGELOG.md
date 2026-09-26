@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Confidential training on Google Confidential Space
+
+- **Confidential training jobs**: `encompute.torch.job.prepare` plans a
+  run for Intel TDX on Confidential Space and writes:
+  - production attestation policies (the image digest, no debugging, no
+    mock evidence);
+  - a production broker with wrapped keys for the model, datasets, adapter
+    and outputs;
+  - sealed assets;
+  - per-participant job descriptors with public commitments only.
+- **The job worker** (`python -m encompute.torch.cs_worker`):
+  - attests once per broker from an in-memory session, receives its keys
+    sealed to that session, and decrypts and checks every asset in memory;
+  - runs the same Hugging Face + PEFT DP-SGD step as example 17;
+  - seals its contribution and signs **worker evidence** (run, spec,
+    participant, round, model package, dataset, layout, image,
+    attestation, output commitments).
+  - Refusals: KEY RELEASE DENIED, TRAINING SPEC MISMATCH, ASSET MISMATCH,
+    DATASET ASSET MISMATCH, MODEL PACKAGE MISMATCH.
+- **Participant-scoped attestation**: a job attests to the spec scoped to
+  its participant, so one session never receives another participant's
+  dataset or output key, and the evidence's participant is attested.
+- **Trust graph**: worker evidence nodes. The Training row verifies them
+  against their spec and attestation, and flags a second output for one
+  round.
+- **The worker image** (`deploy/confidential-space-training`): pinned
+  dependencies, `--locked` builds, offline Hugging Face. The launch policy
+  lets the operator set only `JOB_URL`.
+  - `deploy.sh`: `prepare-only`, `approved`, `tampered` and `debug`
+    variants.
+  - `cleanup.sh`, least-privilege worker identity, separate input and
+    output buckets.
+- **Local rehearsal**: `encompute attest simulate-launcher` (development
+  only) and a production broker with a test JWKS; `job.py container` runs
+  the built image.
+- **CI**: builds the image and runs approved and tampered images on every
+  pull request; `test_confidential_job.py`; example 18 required; a manual
+  `confidential-space-live` workflow (SKIPPED without GCP); release-check
+  rows for the image and the live run.
+- **Broker**: one attestation per broker per session;
+  `keys serve --requests-per-minute`; `trust init --attestation-policy`.
+- **DP-SGD**: the gradient-path probe's tolerance is relative to the
+  gradient's scale (see the benchmarks).
+- ADR-019; INV-143–INV-148 (81 invariants). The live GCP run is pending a
+  project.
+
 ### Hugging Face Transformers + PEFT
 
 - **Hugging Face models**:

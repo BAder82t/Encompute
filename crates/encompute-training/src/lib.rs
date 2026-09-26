@@ -11,6 +11,7 @@ pub mod hf;
 pub mod layout;
 pub mod seal;
 pub mod spec;
+pub mod worker;
 
 pub use adapter::{adapter_policy, check_export, AdapterRecord, SignedAdapterRecord};
 pub use checkpoint::{resume, seal_checkpoint, CheckpointHeader, ResumeExpectation};
@@ -21,6 +22,7 @@ pub use spec::{
     DatasetCommitment, DpSgdConfig, ModelCommitment, PeftConfig, TextPreprocessing, TrainingConfig,
     TrainingSpec,
 };
+pub use worker::{SignedWorkerEvidence, WorkerEvidence, WORKER_EVIDENCE_VERSION};
 
 use sha2::{Digest, Sha256};
 

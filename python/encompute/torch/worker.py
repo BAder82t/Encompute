@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import traceback
+from typing import Tuple
 
 import torch
 
@@ -69,7 +70,31 @@ class Worker:
             spec["base_model"]["weights_digest"],
         )
         del key
-        c = cfg["lora"]
+        data, unit_ids = load_dataset(cfg)
+        self._prepare(spec, weights, data, unit_ids, cfg["dataset_asset"], cfg["lora"],
+                      int(cfg.get("microbatch", 64)))
+        if self.dp is not None:
+            # The coordinator accepts DP-SGD contributions only from an
+            # attested worker running this training code.
+            self.contribution_record = os.path.join(os.path.dirname(cfg["state"]),
+                                                    "contribution-attestation.json")
+            with open(self.contribution_record, "w") as f:
+                f.write(_native.attest_contribution(
+                    spec["plan_id"], None, spec["code_digest"], cfg["identity"],
+                    cfg["mock_seed"], cfg["image"]))
+
+    @classmethod
+    def from_assets(cls, spec: dict, weights: bytes, data: dict, unit_ids, dataset_asset: str,
+                    lora_cfg: dict, microbatch: int = 64) -> "Worker":
+        """A worker for already opened assets (a confidential training job
+        decrypts them itself): the same checks and the same training."""
+        w = cls.__new__(cls)
+        w.cfg, w.spec, w.record = {}, spec, None
+        w._prepare(spec, weights, data, unit_ids, dataset_asset, lora_cfg, microbatch)
+        return w
+
+    def _prepare(self, spec: dict, weights: bytes, data: dict, unit_ids, dataset_asset: str,
+                 c: dict, microbatch: int) -> None:
         self.lcfg = lora.LoRAConfig(
             rank=c["rank"], alpha=c["alpha"], target_modules=tuple(c["target_modules"]),
             optimizer=c["optimizer"], learning_rate=c["learning_rate"],
@@ -80,7 +105,7 @@ class Worker:
         # are checked first), the bound adapter, the approved layout.
         self.model = tasks.build(spec, weights, c["seed"])
         self.task = tasks.of_spec(spec)
-        self.data, unit_ids = load_dataset(cfg)
+        self.data = data
         self.n = tasks.records(self.data)
         self.versions = None
         if spec["base_model"].get("huggingface"):
@@ -90,7 +115,7 @@ class Worker:
         self.dp = None
         if spec["config"].get("dp_sgd"):
             d = spec["config"]["dp_sgd"]
-            mine = next(x for x in spec["datasets"] if x["asset_id"] == cfg["dataset_asset"])
+            mine = next(x for x in spec["datasets"] if x["asset_id"] == dataset_asset)
             self.unit_of, n_units = dpsgd.unit_index(unit_ids, self.n)
             # The grouping must be the committed one.
             if (d["grouping"] == "unit_ids") != (unit_ids is not None):
@@ -106,18 +131,10 @@ class Worker:
                 sampling_rate=float(d["sampling_rate"]),
                 noise_multiplier=float(d["noise_multiplier"]), delta=float(d["delta"]),
                 grouping=d["grouping"], expected_batch=float(d["expected_batch"]),
-                microbatch=int(cfg.get("microbatch", 64)))
+                microbatch=microbatch)
             # Per-unit gradients, on the fast path if this model supports
             # it; never ordinary clipping (fails closed otherwise).
             self.grad_path = dpsgd.select_path(self.model, self.task, self.data)
-            # The coordinator accepts DP-SGD contributions only from an
-            # attested worker running this training code.
-            self.contribution_record = os.path.join(os.path.dirname(cfg["state"]),
-                                                    "contribution-attestation.json")
-            with open(self.contribution_record, "w") as f:
-                f.write(_native.attest_contribution(
-                    spec["plan_id"], None, spec["code_digest"], cfg["identity"],
-                    cfg["mock_seed"], cfg["image"]))
 
     def train(self, adapter: list, seed: int) -> torch.Tensor:
         """Local LoRA training from `adapter`; returns the update."""
@@ -149,6 +166,18 @@ class Worker:
         g = dpsgd.clipped_sum(self.model, self.task, self.data, self.unit_of, sampled,
                               self.dp.per_example_clip, self.dp.microbatch, self.grad_path)
         return g * (dpsgd.CODEC_CLIP / self.dp.per_example_clip)
+
+    def contribution(self, adapter: list, seed: int) -> Tuple[torch.Tensor, float, float]:
+        """One round's contribution, in the codec's range: DP-SGD's sum of
+        clipped per-unit gradients, or the whole clipped update. Returns it
+        with the update's norm and clip (organization mode)."""
+        if self.dp is not None:
+            self.loss = None
+            return self.dp_sgd_step(adapter), 0.0, 1.0
+        update = self.train(adapter, seed)
+        c = self.lcfg.update_clip
+        norm = float(update.norm())
+        return update * min(1.0, c / max(norm, 1e-12)) / c, norm, c
 
     def contribute(self, msg: dict) -> dict:
         if self.dp is not None:

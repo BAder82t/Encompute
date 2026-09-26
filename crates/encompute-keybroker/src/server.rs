@@ -26,9 +26,18 @@ const MAX_BODY: u64 = 96 << 10;
 pub const REQUESTS_PER_MINUTE: u32 = 60;
 
 /// A fixed one-minute window per source address.
-#[derive(Default)]
 struct RateLimit {
     windows: HashMap<IpAddr, (u64, u32)>,
+    per_minute: u32,
+}
+
+impl Default for RateLimit {
+    fn default() -> Self {
+        Self {
+            windows: HashMap::new(),
+            per_minute: REQUESTS_PER_MINUTE,
+        }
+    }
 }
 
 impl RateLimit {
@@ -42,7 +51,7 @@ impl RateLimit {
             *w = (minute, 0);
         }
         w.1 += 1;
-        w.1 <= REQUESTS_PER_MINUTE
+        w.1 <= self.per_minute
     }
 }
 
@@ -107,7 +116,15 @@ fn handle(broker: &Mutex<KeyBroker>, path: &str, body: &[u8]) -> Result<String, 
 
 /// Serves `broker` until the server is dropped.
 pub fn serve(broker: &Mutex<KeyBroker>, server: &tiny_http::Server) {
-    let mut limit = RateLimit::default();
+    serve_with_limit(broker, server, REQUESTS_PER_MINUTE)
+}
+
+/// Serves `broker` with its own per-address request limit.
+pub fn serve_with_limit(broker: &Mutex<KeyBroker>, server: &tiny_http::Server, per_minute: u32) {
+    let mut limit = RateLimit {
+        per_minute,
+        ..RateLimit::default()
+    };
     for mut req in server.incoming_requests() {
         if let Some(ip) = req.remote_addr().map(|a| a.ip()) {
             if !limit.allow(ip, encompute_attestation::unix_now()) {

@@ -59,7 +59,7 @@ from . import dpsgd, lora, models, tasks, tensors
 
 IMAGE = "sha256:" + "5" * 64  # the training worker image (development)
 CODE = ["worker.py", "lora.py", "tensors.py", "models.py", "finetune.py", "infer.py",
-        "dpsgd.py", "tasks.py", "hf.py"]
+        "dpsgd.py", "tasks.py", "hf.py", "cs_worker.py"]
 PRIVACY_UNIT = ("Privacy unit: organization. Patient-level DP requires per-example clipping "
                 "(DP-SGD) and is not claimed.")
 
@@ -466,9 +466,16 @@ def _dp_settings(pv, data, cfg: lora.LoRAConfig) -> dict:
 
 
 def _setup(project, model, data, privacy, verification, cfg, infrastructure,
-           allow_development, W: Path, cli: str, say) -> dict:
+           allow_development, W: Path, cli: str, say, target: Optional[dict] = None) -> dict:
     """Plans the run and prepares every party; writes the (non-secret) run
-    state to run.json."""
+    state to run.json.
+
+    ``target`` (confidential training jobs) names a real attestation
+    target instead of development attestation: ``image`` (the worker image
+    digest), ``tee`` (``intel_tdx``), ``broker_id`` and ``kek`` (a
+    production broker's key-encryption key file). Policies are then
+    production policies (no mock, no debug), and the broker is a
+    production broker with wrapped keys."""
     from .._project import PlanningFailed
 
     from .._privacy import Privacy
@@ -525,8 +532,15 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
                 f"its budget affords {r['affordable']} rounds")
     (mc / "training.eir").write_text(eir)
     _run([cli, "compile", "training.eir", "-o", "training.encompute"], mc)
+    image = target["image"] if target else IMAGE
+    dev = target is None
     infra = infrastructure
-    if infra is None and allow_development:
+    if target is not None:
+        infra = {"tees": [{"tee": target["tee"].replace("_", "-"),
+                           "provider": "gcp-confidential-space", "cloud": True}],
+                 "key_broker": True}
+        allow_development = False
+    elif infra is None and allow_development:
         infra = {"tees": [{"tee": "mock", "provider": "mock", "cloud": True}], "key_broker": True}
     (mc / "infra.json").write_text(json.dumps(infra or {}))
     (mc / "training-decl.json").write_text(json.dumps(
@@ -567,8 +581,9 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     coord_policy = []
     if attested_coord:
         (mc / "coord-policy.json").write_text(_run(
-            [cli, "aggregate", "coordinator-policy", "training.encompute", "--image", IMAGE,
-             "--tee", "mock", "--development", "--plan", "plan.json"], mc))
+            [cli, "aggregate", "coordinator-policy", "training.encompute", "--image", image,
+             "--tee", "mock" if dev else target["tee"], *(["--development"] if dev else []),
+             "--plan", "plan.json"], mc))
         coord_policy = ["--coordinator-policy", str(mc / "coord-policy.json")]
     # DP-SGD: no party-side clip bounds a contribution (each patient is
     # clipped inside the worker), so contributions must come from attested
@@ -576,7 +591,7 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     contrib = []
     if dp is not None:
         (mc / "contribution-policy.json").write_text(_native.contribution_attestation_policy(
-            plan_id.split(":", 1)[1], None, code_digest(module.encompute_factory), IMAGE, True))
+            plan_id.split(":", 1)[1], None, code_digest(module.encompute_factory), image, dev))
         contrib = ["--attestation-policy", str(mc / "contribution-policy.json")]
     _run([cli, "trust", "init", "training.encompute", "--parties", parties, "--plan",
           "plan.json", *coord_policy, *contrib, "--bundle", "trust.json"], mc)
@@ -645,19 +660,46 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     # 6. ModelCo's key broker: the model, checkpoint and adapter keys,
     # released only to workloads attesting to this training spec.
     (mc / "training-policy.json").write_text(
-        _native.training_attestation_policy(spec_json, IMAGE, True))
+        _native.training_attestation_policy(spec_json, image, dev))
     model_key = secrets.token_bytes(32)
     (mc / f"{model.id}.enc").write_bytes(
         _native.seal_asset(model_key, "model", project.name, model.id, weights))
     keys = {model.id: model_key, "checkpoints": secrets.token_bytes(32),
             "adapters": secrets.token_bytes(32)}
-    for asset, key in keys.items():
+    staged = {}
+    # Keys by asset, and the policy each is released under.
+    scoped: Dict[str, Tuple[bytes, str]] = {a: (k, "training-policy.json") for a, k in keys.items()}
+    if target is not None:
+        # Confidential training jobs attest as one participant: each
+        # participant's policy releases the model and adapter to its jobs,
+        # and its own dataset and output keys only to its jobs. Each
+        # dataset travels sealed, its key with the broker.
+        for c in commitments:
+            party = c["owner"]
+            policy = f"training-policy-{party}.json"
+            (mc / policy).write_text(_native.participant_attestation_policy(
+                spec_json, party, image, dev))
+            k = secrets.token_bytes(32)
+            blob = (W / party / "dataset.bin").read_bytes()
+            staged[c["asset_id"]] = _native.seal_asset(k, "dataset", project.name, c["asset_id"],
+                                                       blob)
+            scoped[f"dataset-{c['asset_id']}"] = (k, policy)
+            scoped[f"contribution-{party}"] = (secrets.token_bytes(32), policy)
+            scoped[f"{model.id}.{party}"] = (keys[model.id], policy)
+            scoped[f"adapters.{party}"] = (keys["adapters"], policy)
+    broker_args = (["--broker-id", model.owner, "--development"] if dev else
+                   ["--broker-id", target["broker_id"], "--kek", str(target["kek"])])
+    for asset, (key, policy) in scoped.items():
         kf = mc / f"{asset}.key"
         kf.write_bytes(key)
-        _run([cli, "keys", "protect", "--asset", asset, "--policy", "training-policy.json",
-              "--key-file", kf.name, "--broker-id", model.owner, "--development",
-              "--broker", "broker.json"], mc)
+        _run([cli, "keys", "protect", "--asset", asset, "--policy", policy,
+              "--key-file", kf.name, *broker_args, "--broker", "broker.json"], mc)
         kf.unlink()  # the broker holds it now
+    del scoped
+    if staged:
+        (W / "staged").mkdir(exist_ok=True)
+        for asset_id, blob in staged.items():
+            (W / "staged" / f"{asset_id}.enc").write_bytes(bytes(blob))
     # adapter-0, sealed under the adapters key (accepted by definition).
     a0 = tensors.dumps({"adapter": adapter0})
     (mc / "adapter-0.enc").write_bytes(

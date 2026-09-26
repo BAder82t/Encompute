@@ -178,3 +178,31 @@ Results:
   matches Encompute's attested inference to 1e-6.
 - About 2.9 s per round, as for the reference model: the protocol's round
   trips dominate, not the per-patient gradients.
+
+## Confidential training jobs (Confidential Space)
+
+One participant's job from `examples/18_confidential_space_hf`:
+- the model: a tiny BERT with PEFT LoRA (1,090 adapter parameters);
+- the data: 300 patients (600 notes);
+- one patient-level DP-SGD step;
+- measured by the worker itself (`timings.json`).
+
+| Stage | Local (macOS arm64, simulated launcher) | Container (Linux arm64 image, simulated launcher) |
+|---|---|---|
+| attestation and key release (one attestation, four grants) | 0.05 s | 0.03 s |
+| sealed asset download | < 0.01 s | < 0.01 s |
+| decryption | 0.04 s | < 0.01 s |
+| model loading and gradient-path probe | 4.7 s | 0.6 s |
+| training step (per-patient gradients) | 0.02 s (vectorized) | 0.59 s (one patient at a time) |
+| output sealing | < 0.01 s | < 0.01 s |
+| total in the worker | 4.8 s | 1.3 s |
+
+In the container, this PyTorch build's vectorized gradients disagreed with
+the reference by 1.5%. The probe chose the one-patient-at-a-time path:
+slower, with the same privacy.
+
+**Live Confidential Space: pending a GCP run.** `deploy.sh` records VM
+startup, image build, staging, time to evidence and verification in
+`deploy-timings-*.json`, and the worker's per-stage `timings.json`. The
+setup is a `c3-standard-4` TDX VM (about $0.25 an hour in `us-central1`);
+a run is expected to cost well under a dollar.

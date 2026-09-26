@@ -17,7 +17,7 @@ use encompute_secagg::{
     aggregate_asset_id, verify_aggregation_receipt, AggregationReceipt, AggregationSpec,
     PartyIdentity,
 };
-use encompute_training::{SignedAdapterRecord, TrainingSpec};
+use encompute_training::{SignedAdapterRecord, SignedWorkerEvidence, TrainingSpec};
 use encompute_verification::{PolicyId, PrivacyPolicyId, SignedExecutionReceipt};
 
 use crate::authz::{SignedAuthorization, SignedRevocation};
@@ -314,6 +314,53 @@ impl TrustGraph {
 
     /// An adapter produced by a training round, signed by the coordinator
     /// (the report requires a trusted coordinator key).
+    /// A confidential training worker's evidence: it trained under a
+    /// training spec, in an attested workload, on a model and a dataset,
+    /// and produced a sealed output. The report checks it against the spec
+    /// and the attestation.
+    pub fn add_worker_evidence(&mut self, r: SignedWorkerEvidence) -> Result<String> {
+        self.link_worker(&r)
+    }
+
+    fn link_worker(&mut self, r: &SignedWorkerEvidence) -> Result<String> {
+        let e = &r.evidence;
+        let id = node_id(NodeKind::Worker, &r.id()?);
+        let mut n = with(
+            node(
+                NodeKind::Worker,
+                &format!("{} training worker (round {})", e.participant, e.round),
+            ),
+            &[
+                ("output_asset", e.output_asset.clone()),
+                ("output_commitment", e.output_commitment.clone()),
+                ("image_digest", e.image_digest.clone()),
+            ],
+        );
+        n.evidence = Some(Evidence::TrainingWorker(Box::new(r.clone())));
+        self.upsert(id.clone(), n)?;
+        self.edge(
+            &id,
+            EdgeKind::GovernedBy,
+            &node_id(NodeKind::Training, &e.training_spec_id),
+        );
+        self.edge(
+            &id,
+            EdgeKind::AttestedBy,
+            &node_id(NodeKind::Attestation, &e.attestation_record_id),
+        );
+        self.edge(
+            &id,
+            EdgeKind::Uses,
+            &node_id(NodeKind::Asset, &e.model_asset),
+        );
+        self.edge(
+            &id,
+            EdgeKind::Uses,
+            &node_id(NodeKind::Asset, &e.dataset_asset),
+        );
+        Ok(id)
+    }
+
     pub fn add_adapter(&mut self, r: SignedAdapterRecord) -> Result<String> {
         r.verify(None)?;
         self.link_adapter(&r)
@@ -624,6 +671,7 @@ impl TrustGraph {
             Evidence::Plan(_) => 0,
             Evidence::TrainingSpec(_) => 1,
             Evidence::Adapter(_) => 8,
+            Evidence::TrainingWorker(_) => 8,
             Evidence::AggregationSpec(_) => 1,
             Evidence::Attestation(_) => 2,
             Evidence::Authorization(_) => 3,
@@ -644,6 +692,7 @@ impl TrustGraph {
                 Evidence::Plan(p) => g.link_plan(p),
                 Evidence::TrainingSpec(s) => g.link_training_spec(s),
                 Evidence::Adapter(r) => g.link_adapter(r),
+                Evidence::TrainingWorker(r) => g.link_worker(r),
                 Evidence::AggregationSpec(s) => g.link_aggregation_spec(s),
                 Evidence::Attestation(a) => g.link_attestation(a),
                 Evidence::Authorization(a) => g.link_authorization(a),

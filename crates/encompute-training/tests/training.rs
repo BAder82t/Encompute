@@ -744,3 +744,114 @@ fn hugging_face_packages_and_peft_are_bound_and_checked() {
         );
     }
 }
+
+fn worker_evidence(
+    s: &TrainingSpec,
+    key: &SigningKey,
+) -> (encompute_attestation::AttestationRecord, WorkerEvidence) {
+    use encompute_attestation::mock::MockHardware;
+    use encompute_attestation::{
+        AttestationChallenge, AttestationRecord, Attester, WorkloadSession,
+    };
+    let identity = encompute_verification::EvaluatorSigner::from_seed(&key.to_bytes()).identity();
+    let session = WorkloadSession::new(&identity);
+    let challenge = AttestationChallenge::new("broker", 1_000, 60).unwrap();
+    let binding = session.binding(
+        &challenge,
+        &s.participant_execution_id(&s.datasets[0].owner).unwrap(),
+        s.policy_id.as_deref(),
+        &s.code_digest,
+    );
+    let evidence = MockHardware::from_seed(&[9; 32])
+        .attester(&format!("sha256:{}", h('7')))
+        .attest(&challenge, &binding)
+        .unwrap();
+    let record = AttestationRecord::new(evidence);
+    let d = &s.datasets[0];
+    let e = WorkerEvidence {
+        version: WORKER_EVIDENCE_VERSION,
+        project: s.project.clone(),
+        training_spec_id: s.id().unwrap(),
+        run_id: s.run_id("n").unwrap(),
+        plan_id: s.plan_id.clone(),
+        policy_id: s.policy_id.clone(),
+        privacy_policy_id: s.privacy_policy_id.clone(),
+        participant: d.owner.clone(),
+        round: 1,
+        model_asset: s.base_model.asset_id.clone(),
+        model_package_id: s.base_model.huggingface.as_ref().map(|p| p.id().unwrap()),
+        weights_digest: s.base_model.weights_digest.clone(),
+        dataset_asset: d.asset_id.clone(),
+        dataset_digest: d.digest.clone(),
+        layout_digest: s.layout_digest.clone(),
+        image_digest: format!("sha256:{}", h('7')),
+        attestation_record_id: record.id().unwrap(),
+        session_id: record.session_id().unwrap(),
+        output_asset: format!("contribution-{}-r1", d.owner),
+        output_commitment: h('a'),
+        step_commitment: h('b'),
+        gradient_path: "vmap".into(),
+        libraries: BTreeMap::new(),
+    };
+    (record, e)
+}
+
+#[test]
+fn worker_evidence_binds_its_spec_assets_and_attestation() {
+    let s = hf_spec();
+    let key = SigningKey::from_bytes(&[5; 32]);
+    let (record, e) = worker_evidence(&s, &key);
+    let signed = e.clone().sign(&key).unwrap();
+    signed.verify(&s, &record).unwrap();
+    // Signed by another key than the attested one.
+    let other = e.clone().sign(&SigningKey::from_bytes(&[6; 32])).unwrap();
+    assert!(other.verify(&s, &record).is_err());
+    // Any edited field breaks the signature; re-signed, it breaks a binding.
+    type Edit = fn(&mut WorkerEvidence);
+    let edits: Vec<(&str, Edit)> = vec![
+        ("participant", |e| e.participant = "hospital-b".into()),
+        ("dataset", |e| e.dataset_asset = "patients-b".into()),
+        ("dataset digest", |e| e.dataset_digest = h('3')),
+        ("model", |e| e.weights_digest = h('0')),
+        ("package", |e| e.model_package_id = Some(h('0'))),
+        ("layout", |e| e.layout_digest = h('0')),
+        ("spec", |e| e.training_spec_id = h('0')),
+        ("record", |e| e.attestation_record_id = h('0')),
+        ("session", |e| e.session_id = h('0')),
+        ("round", |e| e.round = 99),
+        ("plan", |e| e.plan_id = h('0')),
+    ];
+    for (what, edit) in edits {
+        let mut forged = signed.clone();
+        edit(&mut forged.evidence);
+        assert!(forged.verify(&s, &record).is_err(), "{what}: signature");
+        let mut resigned = e.clone();
+        edit(&mut resigned);
+        assert!(
+            resigned.sign(&key).unwrap().verify(&s, &record).is_err(),
+            "{what}: binding"
+        );
+    }
+    // Evidence under another training spec (a lower rank) does not verify.
+    let mut t = hf_spec();
+    t.config.rank = 8;
+    t.config.peft.as_mut().unwrap().r = 8;
+    assert!(signed.verify(&t, &record).is_err());
+    // An attestation for another spec, or of another key, does not either.
+    let (record2, _) = worker_evidence(&t, &key);
+    assert!(signed.verify(&s, &record2).is_err());
+    let (record3, _) = worker_evidence(&s, &SigningKey::from_bytes(&[8; 32]));
+    assert!(signed.verify(&s, &record3).is_err());
+    // A session attested for another participant cannot act for this one:
+    // hospital-a's evidence, claimed by a session scoped to hospital-b.
+    let mut as_b = e.clone();
+    as_b.participant = s.datasets[1].owner.clone();
+    as_b.dataset_asset = s.datasets[1].asset_id.clone();
+    as_b.dataset_digest = s.datasets[1].digest.clone();
+    assert!(as_b.sign(&key).unwrap().verify(&s, &record).is_err());
+    assert_ne!(
+        s.participant_execution_id("hospital-a").unwrap(),
+        s.participant_execution_id("hospital-b").unwrap()
+    );
+    assert!(s.participant_execution_id("mallory").is_err());
+}

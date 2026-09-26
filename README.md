@@ -60,7 +60,7 @@ privacy, and every step leaves verifiable evidence.
 | Trust graph (authorizations, revocation, lineage, one trust report) | working: owner-signed program approvals, revocation reach, a report rebuilt from evidence and checked against verifier-supplied keys |
 | Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
 | Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control; organization-level DP or patient-level DP-SGD; Hugging Face Transformers + PEFT (development attestation on one machine) |
-| Assurance (security invariants under attack) | 75 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Assurance (security invariants under attack) | 81 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## Start here
 
@@ -76,6 +76,7 @@ does and does not protect ([examples/](examples/)):
 | AI flagship | [Confidential LoRA fine-tuning](examples/15_confidential_lora/) |
 | Patient privacy | [Patient-level DP-SGD](examples/16_patient_private_lora/) |
 | Hugging Face | [Transformers + PEFT fine-tuning](examples/17_huggingface_peft/) |
+| Confidential Space | [A training step in a hardware-attested workload](examples/18_confidential_space_hf/) |
 
 ```sh
 cargo build --bins && maturin develop -m crates/encompute-py/Cargo.toml
@@ -504,7 +505,9 @@ binary contains no Encompute key-generation, encryption or decryption code.
 - ✓ Patient-level DP-SGD (per-patient clipping, Poisson sampling, Rényi DP
   accounting).
 - ✓ Hugging Face Transformers + PEFT LoRA (sequence classification).
-- → Real Confidential Space training worker, with a Hugging Face workload.
+- ✓ Confidential Space training worker: a Hugging Face workload, hardware
+  attestation gating the model and dataset keys. It is rehearsed locally and
+  in CI; the live GCP run needs a project.
 - → Production multi-machine confidential training.
 - → Enterprise deployment foundation: SSO, customer-managed keys,
   multi-tenant projects, central audit.

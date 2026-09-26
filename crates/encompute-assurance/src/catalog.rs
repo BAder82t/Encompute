@@ -513,4 +513,44 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:python/tests/test_huggingface.py::test_export_after_revocation_writes_nothing"),
         (EndToEnd, "script:examples/17_huggingface_peft/attack.py"),
     ]),
+    // Confidential Space training workers.
+    inv!("INV-143", "confidential-space", "Production model and dataset keys are released only to a hardware-attested workload running the approved training image, acting for the participant whose keys they are; development (mock) evidence never receives them.", [
+        (Positive, "test:python/tests/test_confidential_job.py::test_the_approved_workload_trains_and_its_evidence_verifies"),
+        (Negative, "test:python/tests/test_confidential_job.py::test_mock_evidence_gets_no_production_keys"),
+        (Negative, "test:crates/encompute-keybroker/tests/release.rs::production_brokers_refuse_development_evidence"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_a_genuine_tee_with_another_image_gets_no_keys"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_a_session_acts_for_one_participant_only"),
+        (EndToEnd, "script:examples/18_confidential_space_hf/job.py"),
+    ]),
+    inv!("INV-144", "confidential-space", "Debug-enabled Confidential Space workloads cannot receive production asset keys.", [
+        (Positive, "test:python/tests/test_confidential_job.py::test_the_approved_workload_trains_and_its_evidence_verifies"),
+        (Negative, "test:python/tests/test_confidential_job.py::test_a_debug_workload_gets_no_keys"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/release.rs::untrusted_workloads_receive_no_key"),
+        (EndToEnd, "script:examples/18_confidential_space_hf/job.py"),
+    ]),
+    inv!("INV-145", "confidential-space", "A genuine TEE running an unapproved image, or the approved image under another training spec, cannot receive production asset keys.", [
+        (Positive, "test:python/tests/test_confidential_job.py::test_the_approved_workload_trains_and_its_evidence_verifies"),
+        (Negative, "test:python/tests/test_confidential_job.py::test_a_genuine_tee_with_another_image_gets_no_keys"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_another_training_spec_gets_no_keys"),
+        (EndToEnd, "script:examples/18_confidential_space_hf/job.py"),
+    ]),
+    inv!("INV-146", "confidential-space", "Training asset key grants are bound to one fresh attested session: a replayed token, challenge or grant receives nothing.", [
+        (Positive, "test:crates/encompute-attestation/tests/attestation.rs::grants_open_only_in_their_session"),
+        (Negative, "test:crates/encompute-attestation/tests/attestation.rs::freshness"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_replayed_evidence_and_outputs_are_refused"),
+        (EndToEnd, "script:examples/18_confidential_space_hf/job.py"),
+    ]),
+    inv!("INV-147", "confidential-space", "A confidential training output is sealed, and bound by signed evidence to its training spec, participant, round, source assets and attestation; substituted assets or a second output for a round are refused.", [
+        (Positive, "test:crates/encompute-training/tests/training.rs::worker_evidence_binds_its_spec_assets_and_attestation"),
+        (Negative, "test:python/tests/test_confidential_job.py::test_substituted_assets_are_refused"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_replayed_evidence_and_outputs_are_refused"),
+        (EndToEnd, "test:python/tests/test_confidential_job.py::test_the_approved_workload_trains_and_its_evidence_verifies"),
+        (EndToEnd, "test:python/tests/test_confidential_job.py::test_the_output_is_sealed_to_attested_workloads"),
+    ]),
+    inv!("INV-148", "confidential-space", "Plaintext model weights, patient records, per-patient gradients and asset keys never cross the confidential workload boundary in the tested deployment.", [
+        (Positive, "test:python/tests/test_confidential_job.py::test_the_output_is_sealed_to_attested_workloads"),
+        (Negative, "test:python/tests/test_confidential_job.py::test_no_plaintext_leaves_the_workload"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_no_plaintext_leaves_the_workload"),
+        (EndToEnd, "script:examples/18_confidential_space_hf/job.py"),
+    ]),
 ];

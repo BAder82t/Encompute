@@ -1,0 +1,12 @@
+# The training worker's Python dependencies, pinned. PyTorch comes from the
+# CPU index (see the Dockerfile). The model package binds the major.minor
+# versions of transformers, peft and torch; changing them changes nothing
+# silently: packages imported with other versions are refused.
+torch==2.3.1
+transformers==4.46.3
+peft==0.12.0
+safetensors==0.4.5
+tokenizers==0.20.3
+numpy==1.26.4
+huggingface-hub==0.26.2
+accelerate==1.1.1

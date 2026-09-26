@@ -39,8 +39,9 @@ check "Python SDK" bash -c "$(declare -f python_env); python_env && .venv/bin/py
   --ignore=python/tests/test_finetune_leakage.py --ignore=python/tests/test_finetune_crash.py"
 check "Fine-tuning E2E" .venv/bin/python -m pytest -q python/tests/test_finetune.py \
   python/tests/test_finetune_matrix.py python/tests/test_finetune_leakage.py \
-  python/tests/test_finetune_crash.py python/tests/test_training_contract.py
-check "Examples" env PYTHON="$PWD/.venv/bin/python" EXAMPLES_REQUIRE="15 16 17" examples/run-all.sh standard
+  python/tests/test_finetune_crash.py python/tests/test_training_contract.py \
+  python/tests/test_dpsgd.py python/tests/test_huggingface.py python/tests/test_confidential_job.py
+check "Examples" env PYTHON="$PWD/.venv/bin/python" EXAMPLES_REQUIRE="15 16 17 18" examples/run-all.sh standard
 check "Assurance" bash -c 'cargo build -q --release -p encompute-assurance --bins --examples && target/release/assurance-report'
 
 if [ -d .deps/openfhe ]; then
@@ -53,11 +54,25 @@ if [ -n "${ENCOMPUTE_TFHE:-}" ]; then
 else
   row "TFHE research" "SKIPPED (set ENCOMPUTE_TFHE=1; research feature)"
 fi
-if [ -n "${ENCOMPUTE_GCP_PROJECT:-}" ]; then
-  row "Confidential Space" "SKIPPED (run deploy/confidential-space manually; see docs)"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  check "CS training image" bash -c 'D=deploy/confidential-space-training/Dockerfile &&
+    docker build -q -f $D -t encompute-training:production . >/dev/null &&
+    docker run --rm --entrypoint sh encompute-training:production -c "! command -v encompute" &&
+    docker build -q --target rehearsal -f $D -t encompute-training:approved . >/dev/null &&
+    docker build -q --target rehearsal --build-arg VARIANT=tampered -f $D -t encompute-training:tampered . >/dev/null &&
+    W="$(mktemp -d)" && ENCOMPUTE_CLI="$PWD/target/debug/encompute" .venv/bin/python examples/18_confidential_space_hf/job.py container "$W/a" &&
+    ENCOMPUTE_CLI="$PWD/target/debug/encompute" .venv/bin/python examples/18_confidential_space_hf/job.py container "$W/t" --run encompute-training:tampered'
 else
-  row "Confidential Space" "SKIPPED (needs a GCP project: ENCOMPUTE_GCP_PROJECT)"
+  row "CS training image" "SKIPPED (needs docker)"
 fi
+# Live Confidential Space training: real hardware attestation on GCP. Needs
+# a project, a reachable broker URL and gcloud; never a secret.
+if [ -n "${ENCOMPUTE_GCP_PROJECT:-}" ] && [ -n "${ENCOMPUTE_BROKER_URL:-}" ] && command -v gcloud >/dev/null 2>&1; then
+  check "CS training (live)" bash -c 'for v in approved tampered debug; do PROJECT="$ENCOMPUTE_GCP_PROJECT" BROKER_URL="$ENCOMPUTE_BROKER_URL" PYTHON="$PWD/.venv/bin/python" CLEANUP=1 deploy/confidential-space-training/deploy.sh "$v" || exit 1; done'
+else
+  row "CS training (live)" "SKIPPED — GCP environment unavailable (ENCOMPUTE_GCP_PROJECT, ENCOMPUTE_BROKER_URL, gcloud)"
+fi
+row "CS key release (live)" "SKIPPED (manual: deploy/confidential-space)"
 echo
 [ $status -eq 0 ] && echo "RELEASE CHECK PASSED" || echo "RELEASE CHECK FAILED"
 exit $status

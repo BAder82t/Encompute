@@ -1,0 +1,32 @@
+# Local rehearsal
+LOCAL REHEARSAL: SIMULATED CONFIDENTIAL SPACE LAUNCHER, TEST SIGNING KEY
+Attester                Google Confidential Space launcher
+Attestation             VERIFIED BY THE BROKER
+Model key               RELEASED TO ATTESTED SESSION
+Dataset key             RELEASED TO ATTESTED SESSION
+Privacy unit            patient
+Per-patient clipping    ACTIVE
+Training                COMPLETE
+Output                  SEALED (contribution-hospital-a-r1
+Evidence                SIGNED BY THE ATTESTED SESSION
+Workload                ATTESTED
+Training                VERIFIED
+# Summary
+Provider                Google Confidential Space (SIMULATED)
+Platform                Intel TDX (SIMULATED)
+Debug mode              DISABLED
+Attestation             VERIFIED
+Framework               Transformers
+PEFT                    LoRA
+Raw model exposure      NONE DETECTED
+Raw dataset exposure    NONE DETECTED
+TRAINING STEP VERIFIED
+# Attacks
+workload image sha256:d121be3103007b41edf96f8262925f8c7d61894afe9a041843b631f69445bc57 is not allowed
+the workload runs with debugging enabled
+KEY RELEASE DENIED: ENC2002: broker: the workload is bound to execution spec
+TRAINING SPEC MISMATCH
+ASSET MISMATCH: the sealed artifact was modified, or this is the wrong key
+DATASET ASSET MISMATCH: not this participant's approved dataset
+the evidence answers no open challenge (unknown, expired or already used)
+ALL ATTACKS FAILED CLOSED

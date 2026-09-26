@@ -181,7 +181,13 @@ def select_path(model: torch.nn.Module, task: tasks.Task, batch: tasks.Batch) ->
             per_example_grads(model, task, probe)
         except Exception:
             return "reference"
-        return "vmap" if torch.allclose(fast, ref, atol=1e-5, rtol=1e-4) else "reference"
+        # The probe catches semantic failures (a path computing something
+        # other than per-example gradients differs by O(1)), not kernel
+        # rounding, which varies across CPUs (up to ~1e-3 of the gradient's
+        # scale on some). Either way clipping bounds each unit exactly, so
+        # the privacy guarantee never depends on this tolerance.
+        scale = float(ref.abs().max()) or 1.0
+        return "vmap" if float((fast - ref).abs().max()) <= 1e-3 * scale else "reference"
     finally:
         model.train(was)
 

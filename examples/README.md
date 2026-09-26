@@ -24,6 +24,7 @@ Each example does three things:
 | AI flagship | [15 confidential LoRA fine-tuning](15_confidential_lora/) |
 | Patient privacy | [16 patient-level DP-SGD](16_patient_private_lora/) |
 | Hugging Face | [17 Transformers + PEFT](17_huggingface_peft/) |
+| Confidential Space | [18 training on real TEEs](18_confidential_space_hf/) |
 
 If you only run four, run **01 → 02 → 06 → 11**.
 
@@ -48,14 +49,15 @@ If you only run four, run **01 → 02 → 06 → 11**.
 | 15 | [Confidential LoRA fine-tuning](15_confidential_lora/) | advanced | Python SDK, PyTorch (CPU) |
 | 16 | [Patient-level differential privacy (DP-SGD)](16_patient_private_lora/) | advanced | Python SDK, PyTorch (CPU) |
 | 17 | [Hugging Face Transformers + PEFT](17_huggingface_peft/) | advanced | Python SDK, `encompute[huggingface]` (CPU; no download) |
+| 18 | [A training step in Google Confidential Space](18_confidential_space_hf/) | advanced | `encompute[huggingface]`; locally, or a GCP project for the real run |
 
 ## Learning paths
 
 - **Beginner:** 01, 02, 06, 11.
 - **Privacy engineer:** 06, 07, 08, 09, 10, 16.
 - **Cryptography engineer:** 01, 02, 04, 05.
-- **Platform or security engineer:** 03, 07, 10, 12, 13.
-- **AI engineer:** 11, 14, 15, 16, 17.
+- **Platform or security engineer:** 03, 07, 10, 12, 13, 18.
+- **AI engineer:** 11, 14, 15, 16, 17, 18.
 
 ## Running them
 
@@ -68,7 +70,7 @@ examples/run-all.sh quick
 | Mode | Runs | Time |
 |---|---|---|
 | `quick` | 01 02 04 06 08 09 10 11 13 14 15 (mock and default-build examples) | about a minute |
-| `standard` | quick, plus 03 07 12 16 17 (everything without a cloud account or crypto build) | about 6 minutes |
+| `standard` | quick, plus 03 07 12 16 17 18 (everything without a cloud account or crypto build) | about 7 minutes |
 | `crypto` | 01 03 05 with OpenFHE and verified execution | needs `--features openfhe` / `vfhe-research` |
 | `full` | everything this machine can run, and every attack in 12 | a few minutes |
 

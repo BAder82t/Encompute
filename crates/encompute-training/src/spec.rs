@@ -17,6 +17,7 @@ use crate::tagged_hex;
 pub const SPEC_VERSION: u32 = 1;
 const SPEC: &str = "encompute.training-spec.v1";
 const RUN: &str = "encompute.training-run.v1";
+const PARTICIPANT: &str = "encompute.training-participant.v1";
 
 fn bad(m: impl Into<String>) -> Error {
     Error::new(Code::TrainingSpec, m)
@@ -462,6 +463,35 @@ impl TrainingSpec {
     /// dataset keys: a workload must bind this training spec (which binds
     /// the plan, policies, model, code, configuration and participants)
     /// and run exactly this training code in an approved image.
+    /// The execution a confidential training job attests to: this training
+    /// spec, as this participant. A participant's dataset and output keys
+    /// are released only under it, so a session acts for one participant,
+    /// and its evidence's participant is attested, not merely claimed.
+    pub fn participant_execution_id(&self, party: &str) -> Result<String> {
+        if !self.participants.iter().any(|p| p.party.as_str() == party) {
+            return Err(bad(format!(
+                "{party} is not a participant of this training spec"
+            )));
+        }
+        Ok(tagged_hex(
+            PARTICIPANT,
+            &[self.id()?.as_bytes(), party.as_bytes()],
+        ))
+    }
+
+    /// [`Self::attestation_policy`], scoped to one participant's jobs.
+    pub fn participant_attestation_policy(
+        &self,
+        party: &str,
+        image: &str,
+        development: bool,
+    ) -> Result<AttestationPolicy> {
+        let mut p = self.attestation_policy(image, development)?;
+        p.execution_spec_id = self.participant_execution_id(party)?;
+        p.validate()?;
+        Ok(p)
+    }
+
     pub fn attestation_policy(&self, image: &str, development: bool) -> Result<AttestationPolicy> {
         let mut p = AttestationPolicy::new(&self.id()?, self.policy_id.as_deref());
         p.artifact_digest = Some(self.code_digest.clone());

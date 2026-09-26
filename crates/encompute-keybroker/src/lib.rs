@@ -31,7 +31,7 @@ use encompute_attestation::{
 use encompute_ir::{Code, Error, Result};
 
 pub use client::BrokerClient;
-pub use server::serve;
+pub use server::{serve, serve_with_limit, REQUESTS_PER_MINUTE};
 pub use store::{
     DevelopmentFileStore, KeyContext, LocalKekStore, SecretStore, StoreSecurity, StoredKey,
 };

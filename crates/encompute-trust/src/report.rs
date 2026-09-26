@@ -367,9 +367,29 @@ impl TrustGraph {
                     _ => None,
                 }
             });
+            // A confidential training job attests as its participant: the
+            // execution policy, scoped to that participant.
+            let worker_policy = g.into_(id, EdgeKind::AttestedBy).find_map(|w| {
+                let Evidence::TrainingWorker(e) = g.node(w)?.evidence.as_ref()? else {
+                    return None;
+                };
+                let Evidence::TrainingSpec(s) = g
+                    .node(&node_id(NodeKind::Training, &e.evidence.training_spec_id))?
+                    .evidence
+                    .as_ref()?
+                else {
+                    return None;
+                };
+                let mut p = opts.execution_policy?.clone();
+                p.execution_spec_id = s.participant_execution_id(&e.evidence.participant).ok()?;
+                Some(p)
+            });
             match (
                 opts.verifier,
-                spec_policy.as_ref().or(opts.execution_policy),
+                spec_policy
+                    .as_ref()
+                    .or(worker_policy.as_ref())
+                    .or(opts.execution_policy),
             ) {
                 (Some(v), Some(p)) => match rec.verify(v, p) {
                     Ok(_) => {
@@ -548,7 +568,7 @@ impl TrustGraph {
             }
         }
         rows.push(ex.row("Execution", Status::Verified));
-        rows.push(training_row(&g, a));
+        rows.push(training_row(&g, a, opts));
 
         // Lineage: aggregates derive from owned assets that their
         // contributors own; nothing revoked was used in a round opened (per
@@ -795,7 +815,7 @@ fn plan_row(g: &TrustGraph) -> Row {
 /// aggregation spec is bound to that plan; each adapter is signed by a
 /// trusted coordinator, comes from a round of its spec's aggregation, and
 /// extends an earlier adapter of the same run.
-fn training_row(g: &TrustGraph, a: &Anchors) -> Row {
+fn training_row(g: &TrustGraph, a: &Anchors, opts: &ReportOptions<'_>) -> Row {
     let mut t = Tally::default();
     let spec_of = |id: &str| match g
         .node(&node_id(NodeKind::Training, id))
@@ -976,6 +996,72 @@ fn training_row(g: &TrustGraph, a: &Anchors) -> Row {
                     "{id}: it does not extend an earlier adapter of its run"
                 )),
             }
+        }
+    }
+    // Confidential training workers: signed by the attested key, bound to
+    // their training spec, model, dataset and attestation; the attestation
+    // itself verified against the training spec's policy.
+    for (id, n) in g.of(NodeKind::Worker) {
+        t.present = true;
+        let Some(Evidence::TrainingWorker(r)) = &n.evidence else {
+            continue;
+        };
+        let e = &r.evidence;
+        let Some(s) = spec_of(&e.training_spec_id) else {
+            t.fail(format!("{id}: its training spec is not in the bundle"));
+            continue;
+        };
+        let record = match g
+            .node(&node_id(NodeKind::Attestation, &e.attestation_record_id))
+            .and_then(|n| n.evidence.as_ref())
+        {
+            Some(Evidence::Attestation(rec)) => rec,
+            _ => {
+                t.fail(format!("{id}: its attestation record is not in the bundle"));
+                continue;
+            }
+        };
+        if let Err(x) = r.verify(s, record) {
+            t.fail(format!("{id}: {}", x.message));
+            continue;
+        }
+        // The job attests as its participant: the policy, scoped to it.
+        let scoped = opts.execution_policy.map(|p| {
+            let mut p = p.clone();
+            if let Ok(id) = s.participant_execution_id(&e.participant) {
+                p.execution_spec_id = id;
+            }
+            p
+        });
+        match (opts.verifier, scoped.as_ref()) {
+            (Some(v), Some(p)) => match record.verify(v, p) {
+                Ok(w) if w.image_digest.as_deref() == Some(e.image_digest.as_str()) => {}
+                Ok(_) => t.fail(format!(
+                    "{id}: the attestation measures another image than the evidence claims"
+                )),
+                Err(x) => t.fail(format!(
+                    "{id}: its attestation does not verify: {}",
+                    x.message
+                )),
+            },
+            _ => t.unanchored(format!(
+                "{id}: no attestation policy and verifier to check its workload"
+            )),
+        }
+        // One output per participant and round.
+        let dup = g.of(NodeKind::Worker).any(|(other, m)| {
+            other != id
+                && matches!(&m.evidence, Some(Evidence::TrainingWorker(o))
+                    if o.evidence.training_spec_id == e.training_spec_id
+                        && o.evidence.run_id == e.run_id
+                        && o.evidence.participant == e.participant
+                        && o.evidence.round == e.round)
+        });
+        if dup {
+            t.fail(format!(
+                "{id}: {} has two outputs for round {} (a replay)",
+                e.participant, e.round
+            ));
         }
     }
     t.row("Training", Status::Verified)
