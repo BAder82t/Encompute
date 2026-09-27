@@ -68,14 +68,14 @@ fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
 /// A party's `--state`: the last round joined and, per budgeted asset, the
 /// last privacy-ledger checkpoint seen. (A bare number is the old format.)
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-struct PartyStateFile {
-    sequence: Option<u64>,
+pub(crate) struct PartyStateFile {
+    pub(crate) sequence: Option<u64>,
     #[serde(default)]
-    checkpoints: std::collections::BTreeMap<String, encompute_runtime::dp::Checkpoint>,
+    pub(crate) checkpoints: std::collections::BTreeMap<String, encompute_runtime::dp::Checkpoint>,
 }
 
 impl PartyStateFile {
-    fn read(p: &Path) -> Result<Self> {
+    pub(crate) fn read(p: &Path) -> Result<Self> {
         let text = String::from_utf8(read(p)?)
             .map_err(|_| Error::new(Code::AggregationBinding, "state file is not UTF-8"))?;
         if let Ok(n) = text.trim().parse::<u64>() {
