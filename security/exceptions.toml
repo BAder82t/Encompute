@@ -14,8 +14,8 @@
 # "security scans" row of scripts/release-check.sh reports FAIL.
 
 [approval]
-approved_by = ""          # the release manager's GitHub handle, after review
-approved_on = ""          # YYYY-MM-DD
+approved_by = "BAder82t"  # the release manager's GitHub handle, after review
+approved_on = "2026-09-27"  # YYYY-MM-DD
 
 # --- Rust --------------------------------------------------------------------------
 

@@ -7,8 +7,8 @@
 
 version = "v1.5.1"
 commit = "1306d14f8c26bb6150d3e6ad54f28dfe1007689e"
-reviewed_by = ""        # GitHub handle of the reviewer
-reviewed_on = ""        # YYYY-MM-DD
+reviewed_by = "BAder82t"  # GitHub handle of the reviewer
+reviewed_on = "2026-09-27"  # YYYY-MM-DD
 
 # Where to look, every time:
 sources = [
