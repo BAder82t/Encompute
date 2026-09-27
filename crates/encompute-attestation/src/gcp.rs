@@ -375,7 +375,8 @@ fn parse_http_response(raw: &[u8]) -> Result<(u16, Vec<u8>)> {
         if size == 0 {
             return Ok((status, out));
         }
-        if rest.len() < size + 2 {
+        // `size` is untrusted: `size + 2` must not overflow.
+        if size.checked_add(2).is_none_or(|n| rest.len() < n) {
             return Err(bad());
         }
         out.extend_from_slice(&rest[..size]);
@@ -398,6 +399,31 @@ mod tests {
         .unwrap();
         assert_eq!((s, b.as_slice()), (200, &b"abcde"[..]));
         assert!(parse_http_response(b"garbage").is_err());
+    }
+
+    /// Regression: a chunk size near `usize::MAX` overflowed `size + 2`
+    /// (a panic in debug builds, an out-of-bounds slice in release builds).
+    #[test]
+    fn huge_chunk_sizes_are_refused() {
+        for size in [
+            "ffffffffffffffff",
+            "fffffffffffffffe",
+            "10000000000000000",
+            "7fffffffffffffff",
+        ] {
+            let raw = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{size}\r\nabc\r\n0\r\n\r\n"
+            );
+            assert!(parse_http_response(raw.as_bytes()).is_err(), "{size}");
+        }
+        for raw in [
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab"[..],
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"HTTP/1.1 99999 OK\r\n\r\n",
+            b"\xff\xfe\r\n\r\n",
+        ] {
+            assert!(parse_http_response(raw).is_err());
+        }
     }
 
     #[test]
