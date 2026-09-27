@@ -40,7 +40,7 @@ revealing what each needs to keep private: confidentiality policies are
 enforced by attested key release, secure aggregation and differential
 privacy, and every step leaves verifiable evidence.
 
-**Status: preparing release candidate 0.3.0-rc.1, the frozen target for
+**Status: release candidate 0.3.0-rc.1, the frozen target for
 independent security review; no review has been completed yet** (last
 release: v0.2.0). What you can rely on is in the
 [support matrix](docs/support-matrix.md); what Encompute does not do is in

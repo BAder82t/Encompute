@@ -4,8 +4,8 @@ Start here. This page should make a reviewer productive within an hour:
 what Encompute is, what it trusts, where the code is, how to build and
 test it, and how to attack it.
 
-Encompute is pre-release software (workspace version 0.2.0; work on `main`
-after the v0.2.0 release). The review targets the release candidate under
+Encompute is pre-release software (version 0.3.0-rc.1, on the `release/0.3`
+branch). The review targets the release candidate under
 a feature freeze: documentation, tests and hardening only.
 
 ## Reading order (about an hour)
