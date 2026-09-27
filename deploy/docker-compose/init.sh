@@ -20,12 +20,20 @@ new db-password "$(rand 24)"
 new db-url "postgres://encompute:$(cat secrets/db-password)@postgres:5432/encompute"
 for k in control evaluator secagg keybroker; do new "$k.key" "$(rand 32)"; done
 new bao-token "$(rand 16)"
-pub() { docker run --rm -v "$PWD/secrets:/s:ro" "encompute-control:${ENCOMPUTE_VERSION:-dev}" public-key "/s/$1.key"; }
+# Mount only the one key file: the container's user cannot enter the 0700
+# directory (on Linux; Docker Desktop does not enforce it), but a file bind
+# mount is opened directly, as the compose secrets are.
+pub() { docker run --rm -v "$PWD/secrets/$1.key:/run/secrets/key:ro" "encompute-control:${ENCOMPUTE_VERSION:-dev}" public-key /run/secrets/key; }
+# Assignments, so a failure stops the script instead of writing empty keys.
+control_pub="$(pub control)"
+evaluator_pub="$(pub evaluator)"
+keybroker_pub="$(pub keybroker)"
+secagg_pub="$(pub secagg)"
 {
-  echo "ENCOMPUTE_CONTROL_PUBLIC_KEY=$(pub control)"
-  echo "ENCOMPUTE_EVALUATOR_PUBLIC_KEY=$(pub evaluator)"
-  echo "ENCOMPUTE_KEYBROKER_PUBLIC_KEY=$(pub keybroker)"
-  echo "ENCOMPUTE_SECAGG_PUBLIC_KEY=$(pub secagg)"
+  echo "ENCOMPUTE_CONTROL_PUBLIC_KEY=$control_pub"
+  echo "ENCOMPUTE_EVALUATOR_PUBLIC_KEY=$evaluator_pub"
+  echo "ENCOMPUTE_KEYBROKER_PUBLIC_KEY=$keybroker_pub"
+  echo "ENCOMPUTE_SECAGG_PUBLIC_KEY=$secagg_pub"
   echo "ENCOMPUTE_DEV_BAO_TOKEN=$(cat secrets/bao-token)"
   echo "ENCOMPUTE_OIDC_ISSUER=${ENCOMPUTE_OIDC_ISSUER:-}"
   echo "ENCOMPUTE_OIDC_AUDIENCE=${ENCOMPUTE_OIDC_AUDIENCE:-encompute}"
