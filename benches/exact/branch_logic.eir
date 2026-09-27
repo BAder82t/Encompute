@@ -1,0 +1,32 @@
+encompute 0.1
+program branch_logic precision 0.001
+# A fee decided by nested conditions (selects), and a routing code.
+%0 = input "tier" [0.0, 3.0] : secret u8
+%1 = input "region" [0.0, 5.0] : secret u8
+%2 = input "amount" [0.0, 50000.0] : secret u16
+%3 = input "vip" [0.0, 1.0] : secret bool
+%4 = input "flagged" [0.0, 1.0] : secret bool
+%5 = const [10000.0] : public u16
+%6 = gt %2, %5 : secret bool
+%7 = const [2.0] : public u8
+%8 = eq %1, %7 : secret bool
+%9 = ge %0, %7 : secret bool
+%10 = const [5.0] : public u16
+%11 = const [15.0] : public u16
+%12 = const [25.0] : public u16
+%13 = const [10.0] : public u16
+%14 = const [0.0] : public u16
+%15 = const [100.0] : public u16
+%16 = select %9, %10, %11 : secret u16
+%17 = select %8, %12, %16 : secret u16
+%18 = select %6, %17, %13 : secret u16
+%19 = select %3, %14, %18 : secret u16
+%20 = select %4, %15, %19 : secret u16
+%21 = const [1.0] : public u8
+%22 = const [3.0] : public u8
+%23 = const [4.0] : public u8
+%24 = select %6, %22, %21 : secret u8
+%25 = select %8, %23, %24 : secret u8
+%26 = select %4, %7, %25 : secret u8
+output "fee" = %20
+output "route" = %26

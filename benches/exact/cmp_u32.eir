@@ -1,0 +1,16 @@
+encompute 0.1
+program cmp_u32 precision 0.001
+# Comparisons of two u32 values (declared range [0, 3e9]).
+%0 = input "x" [0.0, 3000000000.0] : secret u32
+%1 = input "y" [0.0, 3000000000.0] : secret u32
+%2 = const [1000000000.0] : public u32
+%3 = lt %0, %1 : secret bool
+%4 = le %0, %1 : secret bool
+%5 = eq %0, %1 : secret bool
+%6 = gt %0, %2 : secret bool
+%7 = ne %1, %2 : secret bool
+output "lt" = %3
+output "le" = %4
+output "eq" = %5
+output "x_gt_1e9" = %6
+output "y_ne_1e9" = %7

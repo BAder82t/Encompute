@@ -949,6 +949,7 @@ dependencies = [
  "encompute-openfhe-exact",
  "getrandom 0.2.17",
  "proptest",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,33 @@
+encompute 0.1
+program arith_scoring precision 0.001
+# A weighted sum of six u16 features with public weights, in u32.
+%0 = input "f1" [0.0, 1000.0] : secret u16
+%1 = input "f2" [0.0, 1000.0] : secret u16
+%2 = input "f3" [0.0, 1000.0] : secret u16
+%3 = input "f4" [0.0, 1000.0] : secret u16
+%4 = input "f5" [0.0, 1000.0] : secret u16
+%5 = input "f6" [0.0, 1000.0] : secret u16
+%6 = cast %0 : secret u32
+%7 = cast %1 : secret u32
+%8 = cast %2 : secret u32
+%9 = cast %3 : secret u32
+%10 = cast %4 : secret u32
+%11 = cast %5 : secret u32
+%12 = const [37.0] : public u32
+%13 = const [12.0] : public u32
+%14 = const [5.0] : public u32
+%15 = const [88.0] : public u32
+%16 = const [3.0] : public u32
+%17 = const [150.0] : public u32
+%18 = mul %6, %12 : secret u32
+%19 = mul %7, %13 : secret u32
+%20 = mul %8, %14 : secret u32
+%21 = mul %9, %15 : secret u32
+%22 = mul %10, %16 : secret u32
+%23 = mul %11, %17 : secret u32
+%24 = add %18, %19 : secret u32
+%25 = add %24, %20 : secret u32
+%26 = add %25, %21 : secret u32
+%27 = add %26, %22 : secret u32
+%28 = add %27, %23 : secret u32
+output "score" = %28

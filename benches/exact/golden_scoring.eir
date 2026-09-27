@@ -1,0 +1,35 @@
+encompute 0.1
+program golden_scoring precision 0.001
+# Commercial golden benchmark: an exact credit score. Arithmetic-heavy
+# (public weights, two divisions), one clamp.
+%0 = input "payment_history" [0.0, 1000.0] : secret u16
+%1 = input "utilization" [0.0, 100.0] : secret u16
+%2 = input "history_months" [0.0, 600.0] : secret u16
+%3 = input "accounts" [0.0, 100.0] : secret u16
+%4 = input "income_k" [0.0, 5000.0] : secret u16
+%5 = input "inquiries" [0.0, 50.0] : secret u16
+%6 = const [35.0] : public u16
+%7 = mul %0, %6 : secret u16
+%8 = const [100.0] : public u16
+%9 = sub %8, %1 : secret u16
+%10 = const [30.0] : public u16
+%11 = mul %9, %10 : secret u16
+%12 = const [2.0] : public u16
+%13 = mul %2, %12 : secret u16
+%14 = const [5.0] : public u16
+%15 = mul %3, %14 : secret u16
+%16 = const [10.0] : public u16
+%17 = div %4, %16 : secret u16
+%18 = add %7, %11 : secret u16
+%19 = add %18, %13 : secret u16
+%20 = add %19, %15 : secret u16
+%21 = add %20, %17 : secret u16
+%22 = div %21, %16 : secret u16
+%23 = const [300.0] : public u16
+%24 = add %22, %23 : secret u16
+%25 = const [4.0] : public u16
+%26 = mul %5, %25 : secret u16
+%27 = sub %24, %26 : secret u16
+%28 = const [850.0] : public u16
+%29 = min %27, %28 : secret u16
+output "score" = %29

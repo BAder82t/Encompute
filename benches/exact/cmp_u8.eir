@@ -1,0 +1,16 @@
+encompute 0.1
+program cmp_u8 precision 0.001
+# Comparisons of two u8 values and against a public threshold.
+%0 = input "x" [0.0, 255.0] : secret u8
+%1 = input "y" [0.0, 255.0] : secret u8
+%2 = const [100.0] : public u8
+%3 = lt %0, %1 : secret bool
+%4 = le %0, %1 : secret bool
+%5 = eq %0, %1 : secret bool
+%6 = gt %0, %2 : secret bool
+%7 = ne %1, %2 : secret bool
+output "lt" = %3
+output "le" = %4
+output "eq" = %5
+output "x_gt_100" = %6
+output "y_ne_100" = %7

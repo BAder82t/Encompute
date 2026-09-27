@@ -1,0 +1,22 @@
+encompute 0.1
+program range_check precision 0.001
+# Is a reading inside a fixed band, a private band, or outside a safe band?
+%0 = input "x" [0.0, 10000.0] : secret u16
+%1 = input "lo" [0.0, 10000.0] : secret u16
+%2 = input "hi" [0.0, 10000.0] : secret u16
+%3 = const [250.0] : public u16
+%4 = const [7500.0] : public u16
+%5 = const [100.0] : public u16
+%6 = const [9000.0] : public u16
+%7 = ge %0, %3 : secret bool
+%8 = le %0, %4 : secret bool
+%9 = and %7, %8 : secret bool
+%10 = ge %0, %1 : secret bool
+%11 = le %0, %2 : secret bool
+%12 = and %10, %11 : secret bool
+%13 = lt %0, %5 : secret bool
+%14 = gt %0, %6 : secret bool
+%15 = or %13, %14 : secret bool
+output "in_fixed" = %9
+output "in_private" = %12
+output "alarm" = %15

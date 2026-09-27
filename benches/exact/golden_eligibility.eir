@@ -1,0 +1,46 @@
+encompute 0.1
+program golden_eligibility precision 0.001
+# Commercial golden benchmark: loan eligibility with a reason code.
+%0 = input "age" [0.0, 120.0] : secret u8
+%1 = input "income" [0.0, 2000000.0] : secret u32
+%2 = input "debt" [0.0, 1000000.0] : secret u32
+%3 = input "risk" [0.0, 1000.0] : secret u16
+%4 = input "years_employed" [0.0, 60.0] : secret u8
+%5 = input "defaults" [0.0, 20.0] : secret u8
+%6 = const [18.0] : public u8
+%7 = ge %0, %6 : secret bool
+%8 = const [75.0] : public u8
+%9 = le %0, %8 : secret bool
+%10 = and %7, %9 : secret bool
+# debt-to-income below 43%: debt * 100 < income * 43
+%11 = const [100.0] : public u32
+%12 = mul %2, %11 : secret u32
+%13 = const [43.0] : public u32
+%14 = mul %1, %13 : secret u32
+%15 = lt %12, %14 : secret bool
+%16 = const [650.0] : public u16
+%17 = le %3, %16 : secret bool
+# stable: two years employed, or a high income
+%18 = const [2.0] : public u8
+%19 = ge %4, %18 : secret bool
+%20 = const [150000.0] : public u32
+%21 = ge %1, %20 : secret bool
+%22 = or %19, %21 : secret bool
+%23 = const [0.0] : public u8
+%24 = eq %5, %23 : secret bool
+%25 = and %10, %15 : secret bool
+%26 = and %25, %17 : secret bool
+%27 = and %26, %22 : secret bool
+%28 = and %27, %24 : secret bool
+# reason: 1 age, 2 debt, 3 risk, 4 stability, 5 defaults, 0 eligible
+%29 = const [1.0] : public u8
+%30 = const [3.0] : public u8
+%31 = const [4.0] : public u8
+%32 = const [5.0] : public u8
+%33 = select %24, %23, %32 : secret u8
+%34 = select %22, %33, %31 : secret u8
+%35 = select %17, %34, %30 : secret u8
+%36 = select %15, %35, %18 : secret u8
+%37 = select %10, %36, %29 : secret u8
+output "eligible" = %28
+output "reason" = %37

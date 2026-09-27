@@ -15,6 +15,7 @@ on:
       - "crates/encompute-ckks/src/params.rs"
       - "crates/encompute-ckks/src/lower.rs"
       - "crates/encompute-exact/**"
+      - "benches/exact/**"
       - "crates/encompute-openfhe-exact/**"
       - "crates/encompute-openfhe/cpp/binfhe.*"
       - "crates/encompute-openfhe-client/cpp/binclient.cc"
@@ -64,6 +65,23 @@ jobs:
         run: cargo test --release -p encompute-openfhe-client --test exact -- --nocapture --test-threads 1
       - name: OpenFHE exact end to end (sessions, envelopes, HTTP, receipts)
         run: cargo test --release -p encompute-runtime --features openfhe --test openfhe_exact -- --nocapture
+      # Timings are informational (shared runners vary); the stable
+      # quantities are gated by `encompute-exact --test bench_baseline` in CI.
+      - name: timed benchmark, golden exact programs (8 workers)
+        continue-on-error: true
+        run: |
+          cargo run --release -p encompute-openfhe-client --example exact_bench -- \
+            --golden --workers 8 --no-reference --history "$RUNNER_TEMP/exact-history.jsonl" \
+            | tee "$RUNNER_TEMP/exact-bench.md"
+      - name: upload benchmark history lines
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exact-bench-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/exact-history.jsonl
+            ${{ runner.temp }}/exact-bench.md
+          if-no-files-found: warn
       - name: research differential (OpenFHE exact == TFHE-rs)
         run: cargo test --release -p encompute-runtime --features openfhe,research-tfhe-rs --test cross_backend -- --nocapture
       - name: TFHE-rs (research feature) == clear reference

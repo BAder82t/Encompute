@@ -103,6 +103,79 @@ production backend because it carries no patent-license restriction on
 commercial use. Parallel gate evaluation and multi-bit (functional)
 bootstrapping are the planned speed-ups.
 
+## Exact programs: optimized OpenFHE exact
+
+The exact corpus (`benches/exact`, 16 programs, described in its README;
+`golden_*` are the three commercial golden benchmarks) on OpenFHE exact,
+reference execution (instruction by instruction, reference circuits)
+against the optimized execution plan (range-aware widths, simplification,
+common subexpressions, dead gates, and ripple or logarithmic-depth circuits
+chosen per worker count) run level by level on 1 to 8 workers. Every result
+was decrypted and checked against the clear interpreter.
+
+Apple M3 Max, 14 logical cores, macOS 26 (Darwin 25.6); OpenFHE 1.5.1,
+profile `BINFHE_STD128_GINX_BITS_V1`, optimizer version 1, commit
+`81aebad`. One run; 61 ms per bootstrapped gate on one core. Times are
+evaluation only, including loading input ciphertexts and sealing outputs.
+
+| program | ref. gates | ref. depth | ref. s | opt. gates (1 / 8 workers) | opt. depth (1 / 8) | 1 worker s | 2 s | 4 s | 8 s | speedup, 1 worker | speedup, 8 workers |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| boolean_policy | 15 | 8 | 0.92 | 15 / 15 | 8 / 8 | 0.92 | 0.67 | 0.58 | 0.53 | 1.0× | 1.7× |
+| cmp_u8 | 94 | 16 | 6.75 | 78 / 83 | 16 / 8 | 5.51 | 3.74 | 2.38 | 2.06 | 1.2× | 3.3× |
+| cmp_u16 | 194 | 32 | 11.79 | 162 / 179 | 32 / 10 | 9.57 | 5.83 | 4.23 | 3.39 | 1.2× | 3.5× |
+| cmp_u32 | 392 | 64 | 23.77 | 328 / 372 | 64 / 12 | 20.09 | 14.26 | 9.58 | 7.43 | 1.2× | 3.2× |
+| eligibility | 533 | 60 | 36.99 | 381 / 381 | 48 / 48 | 31.10 | 16.09 | 9.16 | 7.84 | 1.2× | 4.7× |
+| range_check | 224 | 33 | 13.83 | 189 / 218 | 29 / 9 | 11.97 | 6.69 | 6.13 | 5.41 | 1.2× | 2.6× |
+| min_max | 763 | 68 | 45.24 | 494 / 563 | 68 / 24 | 29.18 | 18.04 | 12.87 | 11.24 | 1.6× | 4.0× |
+| lookup_small | 103 | 8 | 6.84 | 67 / 67 | 8 / 8 | 4.14 | 2.53 | 1.76 | 1.37 | 1.7× | 5.0× |
+| lookup_large | 2152 | 20 | 158.56 | 892 / 892 | 20 / 20 | 57.46 | 37.48 | 20.28 | 16.89 | 2.8× | 9.4× |
+| arith_scoring | 1235 | 55 | 72.34 | 769 / 769 | 43 / 43 | 50.41 | 30.40 | 20.97 | 13.83 | 1.4× | 5.2× |
+| const_arith | 2931 | 229 | 196.31 | 1032 / 1032 | 156 / 156 | 69.62 | 41.58 | 29.67 | 24.11 | 2.8× | 8.1× |
+| branch_logic | 77 | 25 | 4.62 | 57 / 62 | 25 / 12 | 3.42 | 2.16 | 1.82 | 1.20 | 1.4× | 3.9× |
+| mixed | 1774 | 277 | 105.62 | 967 / 1260 | 211 / 163 | 56.63 | 39.17 | 30.42 | 27.63 | 1.9× | 3.8× |
+| **golden_eligibility** | 926 | 71 | 54.47 | 663 / 663 | 61 / 61 | 36.11 | 21.48 | 14.23 | 12.12 | 1.5× | 4.5× |
+| **golden_policy** | 119 | 23 | 6.39 | 80 / 90 | 23 / 18 | 7.63 | 4.62 | 2.56 | 2.20 | 0.8× | 2.9× |
+| **golden_scoring** | 1632 | 196 | 105.59 | 827 / 827 | 168 / 168 | 49.46 | 33.18 | 29.67 | 21.19 | 2.1× | 5.0× |
+
+Reference depth is the reference circuit's critical path (no range
+information). The single-worker gains come from fewer gates (ranges fold
+the high bits of narrow inputs, constant-heavy arithmetic and tables
+simplify); the rest from running independent gates of a level together.
+Narrow, shallow programs (`boolean_policy`, `golden_policy`) are bound by
+their depth, so extra workers help little; `golden_policy` at one worker
+measured slower than the reference despite fewer gates (run-to-run noise
+at this size). Key generation 4.5 s, evaluation keys 525 MiB, compile under
+1 ms, encryption and decryption a few ms; request sizes 35–458 KiB,
+response sizes 5–704 KiB; peak RSS 3.6 GiB for the whole run (key
+generation dominates). All fields are in the history.
+
+**Reproduce.**
+
+```sh
+OPENFHE_ROOT=$PWD/.deps/openfhe cargo run --release -p encompute-openfhe-client \
+    --example exact_bench -- [--golden] [--workers 1,2,4,8] [--budget 180] [PROGRAM...]
+```
+
+Each run appends one JSON line per program to `benches/exact/history.jsonl`
+(the published history: time, commit, machine, OpenFHE and optimizer
+versions, every timing and size above); commit the new lines. A reference
+run whose estimate (gates × measured time per gate) exceeds `--budget`
+seconds is skipped and recorded as `null`; the 8-worker run always runs.
+The nightly conformance workflow times the golden programs at 8 workers and
+uploads the lines as an artifact (informational: shared runners vary).
+
+**Regression gate.** Timings vary by machine; gate counts, depth and rounds
+do not. `benches/exact/baseline.json` records them per program
+(`cargo run --release -p encompute-exact --example exact_stats` prints
+them), and `cargo test -p encompute-exact --test bench_baseline`, part of
+the normal workspace tests, fails if any optimized gate count, depth,
+rounds at 8 workers or active input bits grew, if the optimized circuit
+needs more rounds than the reference circuit, if the reference strategy
+needs more gates than the reference lowering, or if any optimized circuit
+disagrees with the clear interpreter on in-range inputs. An improvement
+is accepted by regenerating the baseline:
+`ENCOMPUTE_UPDATE_BASELINE=1 cargo test -p encompute-exact --test bench_baseline`.
+
 ## Exact programs on TFHE-rs (research feature, never in commercial builds)
 
 Apple M3 Max, 14 cores; TFHE-rs 1.8.1, profile
