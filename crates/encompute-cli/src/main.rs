@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use encompute_ir::{Code, Error, Inputs, Result};
 use encompute_runtime::verification::{
     output_commitment, request_commitment, EvaluatorIdentity, ExecutionProof,
-    SignedExecutionReceipt, VerificationState,
+    SignedExecutionReceipt, VerificationEvidence, VerificationState,
 };
 use encompute_runtime::{BackendKind, BenchDetail, ClientSession, Mode, Model, Remote, TestReport};
 
@@ -985,6 +985,14 @@ fn verify(
         .map(read)
         .transpose()?
         .map(|b| output_commitment(&b));
+    // The evidence the receipt must carry, as the online client expects it:
+    // an execution proof exactly when the artifact requires one on a real
+    // backend, otherwise none.
+    let proof_expected = match (&model, kind) {
+        (Some(m), Some(k)) => Some(m.compiled().proof_required() && k != BackendKind::Mock),
+        _ => None,
+    };
+    let names_proof = !matches!(r.evidence, VerificationEvidence::None);
 
     let section = |t: &str| println!("\n{t}\n{}", "─".repeat(40));
     println!("Execution Receipt");
@@ -1001,6 +1009,21 @@ fn verify(
     );
     println!("  {:<16}{}", "Request", short(&r.request_commitment));
     println!("  {:<16}{}", "Output", short(&r.output_commitment));
+    match &r.evidence {
+        VerificationEvidence::None => {
+            println!("  {:<16}receipt only (no execution proof)", "Evidence")
+        }
+        VerificationEvidence::Vfhe {
+            protocol,
+            protocol_version,
+            proof_digest,
+            ..
+        } => println!(
+            "  {:<16}execution proof ({protocol} v{protocol_version}, proof {})",
+            "Evidence",
+            short(proof_digest)
+        ),
+    }
 
     // The signature against the trusted key (or, without one, the
     // receipt's own), then each binding that can be checked here.
@@ -1045,6 +1068,15 @@ fn verify(
         );
     }
     bind("output commitment", &r.output_commitment, oc.clone());
+    bind(
+        "evidence",
+        if names_proof {
+            "execution proof"
+        } else {
+            "none"
+        },
+        proof_expected.map(|p| if p { "execution proof" } else { "none" }.to_owned()),
+    );
     // The transcript the artifact's plan implies on that backend.
     let transcript = match (&model, kind) {
         (Some(m), Some(k)) => {
@@ -1083,6 +1115,12 @@ fn verify(
         println!("  {:<16}checked (encpolicy1:{})", "Policy", short(p));
     }
     println!("  {:<16}{}", "Backend", checked(expected_backend.is_some()));
+    println!(
+        "  {:<16}{}",
+        "Evidence kind",
+        checked(proof_expected.is_some())
+    );
+    println!("  {:<16}{}", "Key", checked(rc.is_some()));
     println!("  {:<16}{}", "Request", checked(rc.is_some()));
     println!("  {:<16}{}", "Response", checked(oc.is_some()));
     println!("  {:<16}{}", "Transcript", checked(transcript.is_some()));
@@ -1130,6 +1168,8 @@ fn verify(
                 "Status",
                 if proof.is_some() {
                     "NOT CHECKED (needs a complete verification)"
+                } else if names_proof {
+                    "NAMED BY THE RECEIPT, NOT CHECKED (no --proof)"
                 } else {
                     "NOT PRESENT"
                 }
@@ -1221,11 +1261,29 @@ fn verify(
                 println!("RECEIPT VERIFIED");
             } else {
                 println!("RECEIPT SIGNATURE VALID (some bindings not checked)");
+                let unchecked: Vec<&str> = [
+                    ("trusted evaluator key", trusted.is_some()),
+                    ("artifact", spec.is_some()),
+                    ("evidence kind", proof_expected.is_some()),
+                    ("key ID", rc.is_some()),
+                    ("request", rc.is_some()),
+                    ("response", oc.is_some()),
+                ]
+                .iter()
+                .filter(|(_, ok)| !ok)
+                .map(|(what, _)| *what)
+                .collect();
+                println!("NOT CHECKED: {}", unchecked.join(", "));
             }
-            println!("EXECUTION PROOF NOT PRESENT");
-            // Exit 0 only for a fully verified receipt; 3 when bindings
+            if names_proof {
+                println!("EXECUTION PROOF NAMED BUT NOT CHECKED");
+            } else {
+                println!("EXECUTION PROOF NOT PRESENT");
+            }
+            // Exit 0 only for a fully verified receipt with nothing left
+            // unchecked; 3 when bindings, or a proof the receipt names,
             // were left unchecked.
-            Ok(if complete {
+            Ok(if complete && !names_proof {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(3)

@@ -3,6 +3,7 @@
   "execution_spec_id": "26bcf9153d9e65879af628f2b826f15c5bbaf39446771684b4eaf12385c535a8",
   "policy_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "artifact_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "privacy_policy_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
   "allowed_tee": [
     "mock"
   ],

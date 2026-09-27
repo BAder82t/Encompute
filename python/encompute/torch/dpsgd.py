@@ -27,6 +27,7 @@ the other units hold. That is the sensitivity the accountant charges.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -68,13 +69,27 @@ def unit_index(unit_ids: Optional[torch.Tensor], n: int) -> Tuple[torch.Tensor, 
     return inverse, len(uniq)
 
 
+def _os_bernoulli(n: int, q: float) -> torch.Tensor:
+    """``n`` independent Bernoulli(``q``) draws straight from the operating
+    system's CSPRNG: one ``os.urandom`` word per draw, its low 63 bits a
+    uniform integer, included when below ``floor(q * 2^63)`` (bias under
+    2^-63). No PRNG state exists that the sample could reveal."""
+    if n <= 0:
+        return torch.zeros(0, dtype=torch.bool)
+    words = torch.frombuffer(bytearray(os.urandom(8 * n)), dtype=torch.int64)
+    threshold = min(math.floor(math.ldexp(max(q, 0.0), 63)), (1 << 63) - 1)
+    return (words & ((1 << 63) - 1)) < threshold if q < 1 else torch.ones(n, dtype=torch.bool)
+
+
 def poisson_sample(n_units: int, q: float, generator: Optional[torch.Generator] = None
                    ) -> torch.Tensor:
     """The sampled units: each independently with probability ``q``. By
-    default the randomness comes from the operating system (``os.urandom``),
-    fresh every call, so no party can choose or replay the sample."""
+    default each draw comes from the operating system's CSPRNG
+    (``os.urandom``), fresh every call, so no party can choose, replay or
+    predict the sample (privacy amplification by sampling assumes it is
+    secret). ``generator`` is for reproducible tests only."""
     if generator is None:
-        generator = torch.Generator().manual_seed(int.from_bytes(os.urandom(8), "little"))
+        return torch.nonzero(_os_bernoulli(n_units, q)).flatten()
     return torch.nonzero(torch.rand(n_units, generator=generator) < q).flatten()
 
 

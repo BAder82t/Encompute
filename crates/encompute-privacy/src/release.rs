@@ -132,6 +132,58 @@ impl ReleaseSpec {
         )
     }
 
+    /// Checks that `r` is this release's receipt for one of its charged
+    /// assets: signed by `signer` with production randomness, for this
+    /// round, output, policies, execution, mechanism and budget, naming this
+    /// release's ledger event, and (given the released values) committing
+    /// exactly `noisy`.
+    pub fn check_receipt(
+        &self,
+        r: &PrivacyReceipt,
+        signer: &str,
+        noisy: Option<&[i64]>,
+    ) -> Result<()> {
+        verify_privacy_receipt(r, Some(signer), None, noisy)?;
+        let c = self
+            .charged
+            .iter()
+            .find(|c| c.asset_id == r.asset_id)
+            .ok_or_else(|| {
+                mech_err(format!(
+                    "asset {} is not charged by this release",
+                    r.asset_id
+                ))
+            })?;
+        let s = sensitivity(
+            &c.budget.unit,
+            &self.mechanism,
+            &self.codec,
+            self.vector_len,
+        );
+        let bound = r.version == RECEIPT_VERSION
+            && r.event_id == self.event_id(&c.asset_id)
+            && r.round_id == self.round_id
+            && r.output == self.output
+            && r.policy_id == self.policy_id
+            && r.privacy_policy_id == self.privacy_policy_id
+            && r.execution_spec_id == self.execution_spec_id
+            && r.unit == c.budget.unit
+            && r.mechanism == self.mechanism
+            && r.sensitivity == s
+            && r.sigma2 == sigma2(&self.mechanism, &self.codec)?
+            && r.delta == num(c.budget.delta)
+            && r.budget_epsilon == num(c.budget.epsilon)
+            && r.ledger_seq > 0;
+        if !bound {
+            return Err(mech_err(format!(
+                "asset {}'s privacy receipt is not for this release (round, output, policy, \
+                 mechanism, budget or ledger event differ)",
+                r.asset_id
+            )));
+        }
+        Ok(())
+    }
+
     /// Refuses the release if `view` (the ledger of `c`) cannot afford it.
     pub fn check(&self, c: &Charged, view: &LedgerView) -> Result<()> {
         if view.genesis != self.genesis(c) {

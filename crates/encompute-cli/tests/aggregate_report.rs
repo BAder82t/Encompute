@@ -1,8 +1,9 @@
-//! Regression (soak finding): a coordinator whose control-plane report
-//! fails (here: ENCOMPUTE_CONTROL_URL set, as after `encompute login`, but
-//! no service identity) must still give the parties the window to collect
-//! the receipt of the aggregate it already released. It used to exit at
-//! once, and every party failed with "connection refused".
+//! Regression (soak finding): a coordinator configured for a control plane
+//! it cannot report to (here: ENCOMPUTE_CONTROL_URL set, as after
+//! `encompute login`, but no service identity) used to run the round,
+//! release the aggregate and exit at once, so every party failed with
+//! "connection refused". It now refuses before the round starts: no party
+//! contributes, and nothing is released without a reservation.
 
 use std::process::{Command, Stdio};
 
@@ -20,7 +21,7 @@ fn encompute(args: &[&str]) -> (i32, String, String) {
 }
 
 #[test]
-fn failed_control_report_still_lets_parties_collect_the_receipt() {
+fn a_coordinator_that_cannot_report_refuses_before_the_round() {
     let dir = std::env::temp_dir().join(format!("encompute-cli-aggreport-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -96,54 +97,19 @@ fn failed_control_report_still_lets_parties_collect_the_receipt() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let start = std::time::Instant::now();
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(start.elapsed().as_secs() < 20, "coordinator did not start");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    let url = format!("http://127.0.0.1:{port}");
-    let joins: Vec<_> = ["a", "b", "c"]
-        .iter()
-        .map(|x| {
-            let args: Vec<String> = [
-                "aggregate",
-                "join",
-                &p("f.encompute"),
-                "--parties",
-                &p("parties.json"),
-                "--coordinator",
-                &url,
-                "--party",
-                &format!("hospital-{x}"),
-                "--key",
-                &p(&format!("{x}.key")),
-                "--values",
-                &p(&format!("{x}.json")),
-                "--state",
-                &p(&format!("{x}.round")),
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-            std::thread::spawn(move || {
-                let a: Vec<&str> = args.iter().map(String::as_str).collect();
-                encompute(&a)
-            })
-        })
-        .collect();
-    for j in joins {
-        let (code, out, err) = j.join().unwrap();
-        assert_eq!(code, 0, "a party could not collect the receipt: {out}{err}");
-        assert!(out.contains("CONTRIBUTION ACCEPTED"), "{out}");
-    }
     let o = coordinator.wait_with_output().unwrap();
     let (out, err) = (
         String::from_utf8_lossy(&o.stdout),
         String::from_utf8_lossy(&o.stderr),
     );
-    assert!(out.contains("AGGREGATION COMPLETE"), "{out}");
-    // The failed report is still an error of the coordinator.
     assert!(!o.status.success(), "{out}{err}");
     assert!(err.contains("ENC2605"), "{err}");
+    assert!(!out.contains("AGGREGATION COMPLETE"), "{out}");
+    assert!(
+        !std::path::Path::new(&p("agg.json")).exists(),
+        "nothing is released"
+    );
+    // It never listened: no party could contribute.
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }

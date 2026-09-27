@@ -358,6 +358,13 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 eprintln!("coordinator attested (record {})", short(&record.id()?));
             }
             let round_id = coord.round_id()?;
+            // With a control plane, its configuration is checked before the
+            // round starts: parties never contribute to a round whose
+            // release could not be reserved.
+            let sender = match std::env::var("ENCOMPUTE_CONTROL_URL") {
+                Ok(_) => Some(control_sender(&round_id)?),
+                Err(_) => None,
+            };
             let svc = CoordinatorService::new(coord, Duration::from_secs(stage_timeout))?;
             let server = encompute_verification::http::Server::http(&listen)
                 .map_err(|e| Error::new(Code::Remote, format!("{listen}: {e}")))?;
@@ -367,14 +374,47 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 short(&round_id)
             );
             let (asset, r) = svc.run_to_completion()?;
-            std::fs::write(&out, serde_json::to_vec_pretty(&asset).expect("JSON"))
-                .map_err(|e| io(&out, e))?;
-            std::fs::write(&receipt, r.to_bytes()?).map_err(|e| io(&receipt, e))?;
-            if let Some(b) = &trust_bundle {
-                let mut g = crate::trust::open(b)?;
-                g.add_aggregation(r.clone())?;
-                crate::trust::save(b, &g)?;
-            }
+            let written = std::cell::Cell::new(false);
+            let write_output = || -> Result<()> {
+                written.set(true);
+                std::fs::write(&out, serde_json::to_vec_pretty(&asset).expect("JSON"))
+                    .map_err(|e| io(&out, e))?;
+                std::fs::write(&receipt, r.to_bytes()?).map_err(|e| io(&receipt, e))?;
+                if let Some(b) = &trust_bundle {
+                    let mut g = crate::trust::open(b)?;
+                    g.add_aggregation(r.clone())?;
+                    crate::trust::save(b, &g)?;
+                }
+                Ok(())
+            };
+            // With a control plane, the round's privacy spend is reserved
+            // there before the aggregate is written: a release never exists
+            // without a durable reservation.
+            let reported = if let Some(sender) = sender {
+                let sent = release_after_reserve(
+                    &round_id,
+                    ledger.as_deref(),
+                    &control_assets,
+                    started.elapsed().as_millis() as u64,
+                    sender,
+                    write_output,
+                );
+                match sent {
+                    Ok(n) => Some(n),
+                    // Nothing was released: no receipt window is needed.
+                    Err(e) if !written.get() => return Err(e),
+                    // Released, but reporting after the release failed: let
+                    // participants collect the receipt, then report the error.
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::thread::sleep(Duration::from_secs(2));
+                        return Err(e);
+                    }
+                }
+            } else {
+                write_output()?;
+                None
+            };
             println!("AGGREGATION COMPLETE");
             print_manifest(&r);
             println!(
@@ -384,27 +424,14 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 asset.values.len()
             );
             println!("{:<16}{}", "Receipt", receipt.display());
-            let reported = if std::env::var("ENCOMPUTE_CONTROL_URL").is_ok() {
-                report_to_control(
-                    &round_id,
-                    ledger.as_deref(),
-                    &control_assets,
-                    started.elapsed().as_millis() as u64,
-                )
-                .map(|n| {
-                    println!(
-                        "{:<16}{n} privacy events reported to the control plane",
-                        "Control plane"
-                    )
-                })
-            } else {
-                Ok(())
-            };
-            // Let participants collect the receipt before exiting, even when
-            // reporting failed: the aggregate is already released, and they
-            // need the receipt to verify it.
+            if let Some(n) = reported {
+                println!(
+                    "{:<16}{n} privacy events reported to the control plane",
+                    "Control plane"
+                );
+            }
+            // Let participants collect the receipt before exiting.
             std::thread::sleep(Duration::from_secs(2));
-            reported?;
             Ok(ExitCode::SUCCESS)
         }
         AggregateCmd::CoordinatorPolicy {
@@ -569,17 +596,8 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
     }
 }
 
-/// Reports a finished round to the control plane as signed messages: each
-/// privacy event of this round (for the mapped assets; the control plane
-/// applies each once and enforces the budget again), and the round's
-/// duration.
-fn report_to_control(
-    round_id: &str,
-    ledger: Option<&Path>,
-    control_assets: &[String],
-    duration_ms: u64,
-) -> Result<usize> {
-    use encompute_runtime::dp::PrivacyEvent;
+/// A signed-message sender to the control plane for this round.
+fn control_sender(round_id: &str) -> Result<impl FnMut(&str, serde_json::Value) -> Result<()>> {
     use encompute_verification::service::{seal, signed_call, Scope};
     let env = |k: &str| {
         std::env::var(k).map_err(|_| Error::new(Code::InsecureConfiguration, format!("set {k}")))
@@ -593,36 +611,82 @@ fn report_to_control(
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(30))
         .build();
-    let send = |kind: &str, payload: serde_json::Value| -> Result<()> {
-        let m = seal(
-            &me,
-            kind,
-            &control,
-            Scope {
-                round: Some(round_id.to_owned()),
-                ..Scope::default()
-            },
-            &payload,
-            24 * 3600,
-        )?;
-        let body = serde_json::to_value(&m).expect("serializable");
-        signed_call(
-            &agent,
-            &me,
-            &url,
-            &control,
-            "POST",
-            "/v1/messages",
-            &Default::default(),
-            &body,
-        )
-        .map(|_| ())
-    };
+    let round_id = round_id.to_owned();
+    Ok(
+        move |kind: &str, payload: serde_json::Value| -> Result<()> {
+            let m = seal(
+                &me,
+                kind,
+                &control,
+                Scope {
+                    round: Some(round_id.clone()),
+                    ..Scope::default()
+                },
+                &payload,
+                24 * 3600,
+            )?;
+            let body = serde_json::to_value(&m).expect("serializable");
+            signed_call(
+                &agent,
+                &me,
+                &url,
+                &control,
+                "POST",
+                "/v1/messages",
+                &Default::default(),
+                &body,
+            )
+            .map(|_| ())
+        },
+    )
+}
+
+/// Tries a control-plane message a few times: privacy events are
+/// idempotent (the control plane charges a duplicate event once).
+fn send_retrying(
+    send: &mut impl FnMut(&str, serde_json::Value) -> Result<()>,
+    kind: &str,
+    payload: serde_json::Value,
+) -> Result<()> {
+    const ATTEMPTS: u32 = 3;
+    let mut attempt = 1;
+    loop {
+        match send(kind, payload.clone()) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt >= ATTEMPTS => return Err(e),
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(250 * u64::from(attempt)));
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// Releases a finished round through the control plane, as signed
+/// messages, in an order that never releases unrecorded privacy spend:
+/// 1. every reservation of this round (for the mapped assets; the control
+///    plane enforces the budget again and records the spend durably);
+/// 2. only then `write_output` (the release);
+/// 3. the commits and the round's duration.
+///
+/// If a reservation fails (after retries) nothing is written, and the
+/// noisy aggregate is dropped with the process. If a later message fails,
+/// the release exists but its spend is already recorded as reserved; the
+/// error says so, and resending is safe.
+fn release_after_reserve(
+    round_id: &str,
+    ledger: Option<&Path>,
+    control_assets: &[String],
+    duration_ms: u64,
+    mut send: impl FnMut(&str, serde_json::Value) -> Result<()>,
+    write_output: impl FnOnce() -> Result<()>,
+) -> Result<usize> {
+    use encompute_runtime::dp::PrivacyEvent;
     let map: std::collections::BTreeMap<&str, &str> = control_assets
         .iter()
         .filter_map(|m| m.split_once('='))
         .collect();
-    let mut sent = 0;
+    let (mut reserves, mut commits) = (vec![], vec![]);
     if let Some(dir) = ledger {
         for (local, remote) in &map {
             let path = dir.join(format!("{local}.ledger"));
@@ -644,18 +708,169 @@ fn report_to_control(
                 .collect();
             for e in &view.entries {
                 if mine.contains(e.event.event_id()) {
-                    send(
-                        "privacy.event",
-                        serde_json::json!({"asset": remote, "event": e.event}),
-                    )?;
-                    sent += 1;
+                    let m = serde_json::json!({"asset": remote, "event": e.event});
+                    match e.event {
+                        PrivacyEvent::Reserve { .. } => reserves.push(m),
+                        PrivacyEvent::Commit { .. } => commits.push(m),
+                    }
                 }
             }
         }
     }
-    send(
+    let sent = reserves.len() + commits.len();
+    for m in reserves {
+        send_retrying(&mut send, "privacy.event", m).map_err(|e| {
+            Error::new(
+                e.code,
+                format!(
+                    "the control plane did not record this round's privacy reservation, so \
+                     the aggregate was not released: {}",
+                    e.message
+                ),
+            )
+        })?;
+    }
+    write_output()?;
+    let pending = |e: Error| {
+        Error::new(
+            e.code,
+            format!(
+                "the aggregate was released and its privacy spend is reserved at the control \
+                 plane, but the round's completion was not delivered (resending is safe): {}",
+                e.message
+            ),
+        )
+    };
+    for m in commits {
+        send_retrying(&mut send, "privacy.event", m).map_err(pending)?;
+    }
+    send_retrying(
+        &mut send,
         "secagg.round.completed",
         serde_json::json!({"duration_ms": duration_ms}),
-    )?;
+    )
+    .map_err(pending)?;
     Ok(sent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encompute_ir::confidentiality::{
+        DpKind, DpMechanism, FixedPointCodec, PrivacyBudget, PrivacyUnit,
+    };
+    use encompute_runtime::dp::{release, Charged, Csprng, ReleaseSpec};
+    use std::cell::RefCell;
+
+    const ROUND: &str = "ab";
+
+    /// A ledger directory holding one DP release of round `ROUND`, charged
+    /// to gradient-a and gradient-b.
+    fn released_ledgers(name: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("encompute-cli-sf10-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let budget = PrivacyBudget {
+            unit: PrivacyUnit::Patient,
+            epsilon: 10.0,
+            delta: 1e-6,
+        };
+        let spec = ReleaseSpec {
+            round_id: ROUND.into(),
+            output: "g".into(),
+            policy_id: None,
+            privacy_policy_id: "bb".repeat(32),
+            execution_spec_id: None,
+            mechanism: DpMechanism {
+                kind: DpKind::DiscreteGaussian,
+                clip_norm: 1.0,
+                noise_multiplier: 5.0,
+                sampling_rate: None,
+            },
+            codec: FixedPointCodec {
+                clip_min: -1.0,
+                clip_max: 1.0,
+                scale: 256,
+                modulus_bits: 32,
+            },
+            vector_len: 4,
+            charged: ["gradient-a", "gradient-b"]
+                .map(|a| Charged {
+                    asset_id: a.into(),
+                    budget: budget.clone(),
+                })
+                .to_vec(),
+        };
+        release(
+            &spec,
+            &d,
+            &[1, 2, 3, 4],
+            &mut Csprng::from_os().unwrap(),
+            &ed25519_dalek::SigningKey::from_bytes(&[4; 32]),
+        )
+        .unwrap();
+        d
+    }
+
+    fn is_reserve(m: &serde_json::Value) -> bool {
+        m["event"]["kind"] == "reserve"
+    }
+
+    /// SF-10: whichever control-plane message fails, either nothing is
+    /// released, or every reservation of the round was recorded first.
+    #[test]
+    fn release_never_precedes_the_control_plane_reservation() {
+        let dir = released_ledgers("order");
+        let assets = ["gradient-a=ds-a".to_owned(), "gradient-b=ds-b".to_owned()];
+        // Messages in order: 2 reservations, 2 commits, the completion.
+        for fail_at in 0..5 {
+            let recorded = RefCell::new(vec![]);
+            let released = RefCell::new(false);
+            let send = |kind: &str, p: serde_json::Value| -> Result<()> {
+                // Fails persistently at message `fail_at` (every retry).
+                if recorded.borrow().len() == fail_at {
+                    return Err(Error::new(Code::Remote, "control plane down"));
+                }
+                recorded.borrow_mut().push((kind.to_owned(), p));
+                Ok(())
+            };
+            let r = release_after_reserve(ROUND, Some(&dir), &assets, 7, send, || {
+                // The release: every reservation is already recorded.
+                let rec = recorded.borrow();
+                let reserved = rec.iter().filter(|(_, p)| is_reserve(p)).count();
+                assert_eq!(
+                    reserved, 2,
+                    "released before the reservations were recorded"
+                );
+                *released.borrow_mut() = true;
+                Ok(())
+            });
+            assert!(r.is_err(), "failure at message {fail_at} was not reported");
+            let released = *released.borrow();
+            assert_eq!(released, fail_at >= 2, "fail at {fail_at}");
+            if released {
+                assert!(r.unwrap_err().message.contains("reserved"));
+            }
+        }
+        // A transient failure is retried; everything is delivered once.
+        let recorded = RefCell::new(vec![]);
+        let flaky = RefCell::new(true);
+        let send = |kind: &str, _: serde_json::Value| -> Result<()> {
+            if std::mem::replace(&mut *flaky.borrow_mut(), false) {
+                return Err(Error::new(Code::Remote, "timeout"));
+            }
+            recorded.borrow_mut().push(kind.to_owned());
+            Ok(())
+        };
+        let released = RefCell::new(false);
+        let sent = release_after_reserve(ROUND, Some(&dir), &assets, 7, send, || {
+            *released.borrow_mut() = true;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sent, 4);
+        assert!(*released.borrow());
+        assert_eq!(recorded.borrow().len(), 5);
+    }
 }

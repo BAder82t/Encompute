@@ -480,3 +480,87 @@ fn any_owner_detects_another_assets_rollback() {
     assert_eq!(e.code, Code::PrivacyLedger);
     assert!(e.message.contains("gradient-a"), "{e}");
 }
+
+/// `SHA256(domain || 0x00 || len-prefixed parts)`, as the crates hash.
+fn tagged(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(domain.as_bytes());
+    h.update([0u8]);
+    for p in parts {
+        h.update((p.len() as u64).to_le_bytes());
+        h.update(p);
+    }
+    h.finalize().into()
+}
+
+/// A malicious coordinator (it holds the round key) re-signs an edited
+/// manifest: only the receipt's content can give it away.
+fn resign(r: &mut AggregationReceipt) {
+    use ed25519_dalek::Signer;
+    let body = encompute_runtime::verification::canonical::canonical_json(&r.manifest).unwrap();
+    let sig = SigningKey::from_bytes(&[200; 32])
+        .sign(&tagged("encompute.aggregation-receipt.v1", &[&body]));
+    r.signature = encompute_runtime::verification::hex(&sig.to_bytes());
+}
+
+/// SF-9: a DP round's receipt passes verification only with a valid
+/// privacy receipt per budgeted contributor, bound to this round and to
+/// the released aggregate.
+#[test]
+fn dp_receipts_require_bound_privacy_receipts() {
+    let m = approved();
+    let spec = spec_of(&m);
+    let dir = ledger_dir("sf9");
+    let mut ps = parties(&m);
+    let (_, first) = round(&mut coordinator(&m, 1, &dir).unwrap(), &mut ps, None).unwrap();
+    let (agg, receipt) = round(&mut coordinator(&m, 2, &dir).unwrap(), &mut ps, None).unwrap();
+    verify_aggregation_receipt(&receipt, &spec, None, Some(&agg)).unwrap();
+
+    // Missing: the coordinator released without noise and dropped the
+    // privacy receipts.
+    let mut t = receipt.clone();
+    t.manifest.privacy.clear();
+    resign(&mut t);
+    let e = verify_aggregation_receipt(&t, &spec, None, None).unwrap_err();
+    assert_eq!(e.code, Code::PrivacyMechanism, "missing: {e}");
+    let mut t = receipt.clone();
+    t.manifest.privacy.pop();
+    resign(&mut t);
+    assert!(verify_aggregation_receipt(&t, &spec, None, None).is_err());
+
+    // Wrong round: round 1's genuine privacy receipts reused in round 2.
+    let mut t = receipt.clone();
+    t.manifest.privacy = first.manifest.privacy.clone();
+    resign(&mut t);
+    let e = verify_aggregation_receipt(&t, &spec, None, None).unwrap_err();
+    assert_eq!(e.code, Code::PrivacyMechanism, "wrong round: {e}");
+
+    // A different aggregate: the coordinator releases other values (say, the
+    // un-noised sum) under this round's privacy receipts, re-committing and
+    // re-signing everything it can.
+    let mut other = agg.clone();
+    other.encoded_sum[0] += 1;
+    let bytes: Vec<u8> = other
+        .encoded_sum
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let mut t = receipt.clone();
+    t.manifest.aggregate_commitment = encompute_runtime::verification::hex(&tagged(
+        "encompute.aggregate.v1",
+        &[t.manifest.round_id.as_bytes(), &bytes],
+    ));
+    resign(&mut t);
+    let n = other.contributors.len();
+    other.values = other
+        .encoded_sum
+        .iter()
+        .map(|&s| spec.plan.codec.decode_sum(s, n))
+        .collect();
+    other.receipt_id = t.id().unwrap();
+    other.asset_id =
+        encompute_runtime::secagg::aggregate_asset_id(&other.receipt_id, &other.output);
+    let e = verify_aggregation_receipt(&t, &spec, None, Some(&other)).unwrap_err();
+    assert_eq!(e.code, Code::PrivacyMechanism, "other aggregate: {e}");
+}

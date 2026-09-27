@@ -176,7 +176,8 @@ pub fn acquire_session_keys(
         }
     };
     let signer = EvaluatorSigner::from_seed(&seed);
-    let session = WorkloadSession::new(&signer.identity());
+    let session = WorkloadSession::new(&signer.identity())
+        .with_privacy_policy(s.privacy_policy_id.as_deref());
     let requests: Vec<_> = assets
         .iter()
         .map(|a| (BrokerClient::new(broker), a.clone()))
@@ -315,7 +316,8 @@ pub fn acquire_training_keys(
     let s = spec(spec_json)?;
     let attester = MockHardware::from_seed(&seed32(mock_seed)?).attester(image);
     let signer = EvaluatorSigner::from_seed(&seed32(identity)?);
-    let session = WorkloadSession::new(&signer.identity());
+    let session = WorkloadSession::new(&signer.identity())
+        .with_privacy_policy(s.privacy_policy_id.as_deref());
     let requests: Vec<_> = assets
         .iter()
         .map(|a| (BrokerClient::new(broker), a.clone()))

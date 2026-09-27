@@ -222,6 +222,62 @@ fn remote_receipts_and_verify() {
         "{out}"
     );
     assert!(out.contains("NOT CHECKED"), "{out}");
+    assert!(
+        out.contains("Evidence        receipt only (no execution proof)"),
+        "{out}"
+    );
+    // SF-12: without --request, the key and request bindings are reported
+    // as unchecked, never as verified.
+    // (Without the request envelope, the backend comes from --backend.)
+    let (code, out, _) = verify(&[
+        full[0],
+        full[1],
+        full[4],
+        full[5],
+        full[6],
+        full[7],
+        "--backend",
+        "mock",
+    ]);
+    assert_eq!(code, 3, "{out}");
+    assert!(out.contains("Artifact        checked"), "{out}");
+    assert!(out.contains("Key             NOT CHECKED"), "{out}");
+    assert!(out.contains("NOT CHECKED: key ID, request\n"), "{out}");
+    assert!(!out.contains("RECEIPT VERIFIED"), "{out}");
+
+    // SF-12: the evidence kind is checked against the artifact. A receipt
+    // (validly signed by a trusted key) naming an execution proof the mock
+    // program does not have is refused; one naming a proof that is not
+    // checked here is never reported as fully verified.
+    {
+        use encompute_runtime::verification::{EvaluatorSigner, SignedExecutionReceipt};
+        let signer = EvaluatorSigner::from_seed(&[42; 32]);
+        let s = SignedExecutionReceipt::from_bytes(&std::fs::read(&receipt).unwrap()).unwrap();
+        let mut r = s.receipt.clone();
+        r.evaluator_id = signer.identity().evaluator_id();
+        r.evidence = serde_json::from_value(serde_json::json!({
+            "kind": "vfhe", "relation": "fhe_evaluation_v1", "protocol": "reexec",
+            "protocol_version": 1, "verification_key_id": "aa".repeat(32),
+            "proof_digest": "bb".repeat(32),
+        }))
+        .unwrap();
+        let forged = p("forged.receipt.json");
+        std::fs::write(&forged, r.sign(&signer).unwrap().to_bytes().unwrap()).unwrap();
+        let key = signer.identity().public_key_hex();
+        let mut args = vec!["verify", forged.as_str()];
+        args.extend_from_slice(&full[..6]);
+        args.extend_from_slice(&["--trust-evaluator", &key]);
+        let (code, out, _) = encompute(&args);
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("receipt evidence does not match"), "{out}");
+        assert!(out.contains("execution proof (reexec v1"), "{out}");
+        let (code, out, _) = encompute(&["verify", &forged]);
+        assert_eq!(code, 3, "{out}");
+        assert!(
+            out.contains("EXECUTION PROOF NAMED BUT NOT CHECKED"),
+            "{out}"
+        );
+    }
 
     // The expected backend comes from the verifier, not the receipt.
     let mut other_backend = full.to_vec();

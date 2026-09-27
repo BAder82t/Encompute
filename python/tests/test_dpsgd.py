@@ -107,6 +107,50 @@ def test_poisson_sampling_uses_os_randomness():
     assert len(set(sizes)) > 1  # the batch size varies: Poisson, not fixed
 
 
+def test_poisson_sampling_draws_from_the_csprng(monkeypatch):
+    """SF-13: every unit's inclusion is drawn from os.urandom (a CSPRNG),
+    never from a seeded Mersenne Twister whose state its outputs reveal."""
+    import math
+    import os
+
+    real = os.urandom
+    asked = []
+
+    def counting(k):
+        asked.append(k)
+        return real(k)
+
+    def no_prng(*a, **k):
+        raise AssertionError("the default sampler must not use torch's PRNG")
+
+    monkeypatch.setattr(dpsgd.os, "urandom", counting)
+    monkeypatch.setattr(dpsgd.torch, "Generator", no_prng)
+    monkeypatch.setattr(dpsgd.torch, "rand", no_prng)
+    n, q = 200_000, 0.03
+    s = dpsgd.poisson_sample(n, q)
+    assert asked == [8 * n], "one 64-bit OS-random word per unit"
+    # The rate is right (binomial, ±6 sigma), over distinct sorted units.
+    sd = (n * q * (1 - q)) ** 0.5
+    assert abs(len(s) - n * q) < 6 * sd
+    assert torch.equal(s, torch.unique(s)) and int(s.max()) < n
+    for q in (1e-3, 0.5, 0.97):
+        k = len(dpsgd.poisson_sample(n, q))
+        assert abs(k - n * q) < 6 * (n * q * (1 - q)) ** 0.5, (q, k)
+    assert len(dpsgd.poisson_sample(0, q)) == 0
+
+    # Exact threshold: evenly spread words give exactly floor(q * n) units.
+    n = 1024
+
+    def spread(k):
+        assert k == 8 * n
+        step = (1 << 63) // n
+        return b"".join((i * step).to_bytes(8, "little") for i in range(n))
+
+    monkeypatch.setattr(dpsgd.os, "urandom", spread)
+    for q in (0.25, 0.03, 0.5):
+        assert len(dpsgd.poisson_sample(n, q)) == math.ceil(q * n), q
+
+
 def test_privacy_levels():
     assert encompute.Privacy.of("strong") == "strong"
     p = encompute.Privacy.of("strong-patient")
