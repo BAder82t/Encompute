@@ -5,3 +5,8 @@ target/
 *.so
 *.encompute/
 *.keys/
+**/target/
+.claude/
+.git/
+fuzz/work/
+target/soak/
