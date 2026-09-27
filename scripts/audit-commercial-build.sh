@@ -89,13 +89,18 @@ for img in ${IMAGE:-} ${IMAGES:-}; do
     continue
   fi
   cd_="$(mktemp -d)"
+  before=$status; status=0
   cid="$(docker create "$img" 2>/dev/null)"
-  if [ -n "$cid" ] && docker cp "$cid:/usr/local/bin/." "$cd_/" >/dev/null 2>&1; then
+  if [ -n "$cid" ] && docker cp "$cid:/usr/local/bin/." "$cd_/" >/dev/null 2>&1 &&
+     [ -n "$(ls -A "$cd_")" ]; then
     for b in "$cd_"/*; do [ -f "$b" ] && scan "container $img: $(basename "$b")" "$b"; done
+  else
+    fail "container $img" "could not copy its binaries out of /usr/local/bin (docker create/cp)"
   fi
   [ -z "$cid" ] || docker rm "$cid" >/dev/null 2>&1
   rm -rf "$cd_"
-  row "container $img" "PASS (no TFHE-rs packages or files)"
+  [ $status -eq 0 ] && row "container $img" "PASS (no TFHE-rs packages, files or symbols)"
+  [ $before -eq 0 ] || status=$before
 done
 [ -n "${IMAGE:-}${IMAGES:-}" ] || row "container" "SKIPPED (set IMAGE=tag or IMAGES=\"a b\")"
 

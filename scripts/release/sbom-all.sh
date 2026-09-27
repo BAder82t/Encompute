@@ -45,7 +45,7 @@ gen encompute-control control "" "$BIN/encompute-control"
 lic=()
 [ -f target/release-scan/python-licenses.json ] && lic=(--python-licenses target/release-scan/python-licenses.json)
 gen encompute-wheel wheel "$f_py" "${WHEEL:-/nonexistent}" \
-  --python-lock scripts/release/python/constraints.txt "${lic[@]}"
+  --python-lock scripts/release/python/constraints.txt ${lic[@]+"${lic[@]}"}
 python3 scripts/sbom.py -o "$OUT/encompute-production.cdx.json" || status=1
 
 # Container images.

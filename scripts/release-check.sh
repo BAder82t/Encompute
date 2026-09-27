@@ -58,16 +58,18 @@ record() {  # record NAME RESULT
   NAMES+=("$1"); RESULTS+=("$2")
   printf '%-28s%s\n' "$1" "$2"
 }
+logf() { echo "$LOG/$(echo "$1" | tr '/ ' '__').log"; }  # a row's log file
 check() {  # check NAME command...
-  local name="$1"
+  local name="$1" log
   shift
   wanted "$name" || return 0
   if [ "$LIST" = 1 ]; then printf '%-28s%s\n' "$name" "$*"; return 0; fi
-  if "$@" > "$LOG/$name.log" 2>&1; then
+  log="$(logf "$name")"
+  if "$@" > "$log" 2>&1; then
     record "$name" PASS
   else
     record "$name" FAIL
-    tail -n 30 "$LOG/$name.log" | sed 's/^/    | /'
+    tail -n 30 "$log" | sed 's/^/    | /'
   fi
 }
 skip() {  # skip NAME REASON
@@ -82,11 +84,13 @@ partial() {  # partial NAME REASON command...
   shift 2
   wanted "$name" || return 0
   if [ "$LIST" = 1 ]; then printf '%-28s%s  [then SKIPPED: %s]\n' "$name" "$*" "$reason"; return 0; fi
-  if "$@" > "$LOG/$name.log" 2>&1; then
+  local log
+  log="$(logf "$name")"
+  if "$@" > "$log" 2>&1; then
     record "$name" "SKIPPED (partial run passed; $reason)"
   else
     record "$name" FAIL
-    tail -n 30 "$LOG/$name.log" | sed 's/^/    | /'
+    tail -n 30 "$log" | sed 's/^/    | /'
   fi
 }
 
@@ -118,7 +122,9 @@ python_env() {
     # binds them, and the worker refuses packages made with others.
     .venv/bin/pip install -q -r deploy/confidential-space-training/requirements.txt \
       --extra-index-url https://download.pytorch.org/whl/cpu &&
-    (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" maturin develop -q)
+    # With OpenFHE when it is installed: the encrypted examples need it.
+    (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH"
+     if [ -n "$RELEASE_FEATURES" ]; then maturin develop -q --release --features openfhe; else maturin develop -q; fi)
 }
 # The release binaries (CLI, evaluator, control plane), with OpenFHE when it
 # is installed; built once, shared by the rows below.
@@ -126,7 +132,7 @@ release_bins() {
   [ -f "$LOG/.release-bins" ] && return 0
   local f=()
   [ -z "$RELEASE_FEATURES" ] || f=(--features "$RELEASE_FEATURES")
-  cargo build -q --release --locked -p encompute-cli -p encompute-evaluator -p encompute-control "${f[@]}" &&
+  cargo build -q --release --locked -p encompute-cli -p encompute-evaluator -p encompute-control ${f[@]+"${f[@]}"} &&
     touch "$LOG/.release-bins"
 }
 # One example, checked against its expected.txt (as examples/run-all.sh does).
@@ -143,7 +149,7 @@ example() {  # example NN [BIN]
   done < "$dir/expected.txt"
 }
 pytest_() { "$PY" -m pytest -q "$@"; }
-export -f python_env release_bins example pytest_
+export -f python_env release_bins example pytest_ logf
 export LOG RELEASE_FEATURES PY
 
 [ "$LIST" = 1 ] && printf '%-28s%s\n' "ROW" "COMMAND"
@@ -219,14 +225,20 @@ else
   skip "backup/restore" "scripts/release/backup-drill.sh not present yet; the enterprise E2E needs OpenFHE, the services and pg_dump/psql; the Compose smoke test needs docker and the :dev images"
 fi
 if [ -n "$E2E_DONE" ]; then
-  wanted "Enterprise E2E" && [ "$LIST" = 0 ] && record "Enterprise E2E" "same run as $E2E_DONE"
+  if wanted "Enterprise E2E"; then
+    if [ "$LIST" = 1 ]; then printf '%-28s%s\n' "Enterprise E2E" "(the backup/restore run)"
+    else record "Enterprise E2E" "same run as $E2E_DONE"; fi
+  fi
 elif [ "$E2E_READY" = 1 ]; then
   check "Enterprise E2E" bash -c 'release_bins && SDK_PYTHON="$PY" TOOL_PYTHON="$PY" scripts/enterprise-e2e.sh'
 else
   skip "Enterprise E2E" "needs OpenFHE, ENCOMPUTE_TEST_* (or ENCOMPUTE_E2E_DATABASE_URL, BAO_ADDR, BAO_TOKEN), pg_dump, psql"
 fi
 if [ -n "$COMPOSE_DONE" ]; then
-  wanted "Compose deployment" && [ "$LIST" = 0 ] && record "Compose deployment" "same run as $COMPOSE_DONE"
+  if wanted "Compose deployment"; then
+    if [ "$LIST" = 1 ]; then printf '%-28s%s\n' "Compose deployment" "(the backup/restore run)"
+    else record "Compose deployment" "same run as $COMPOSE_DONE"; fi
+  fi
 elif [ "$COMPOSE_READY" = 1 ]; then
   check "Compose deployment" bash -c 'release_bins && SDK_PYTHON="$PY" TOOL_PYTHON="$PY" deploy/docker-compose/smoke.sh'
 else
@@ -245,7 +257,7 @@ commercial() {
     [ -z "$RELEASE_FEATURES" ] || f=(--features openfhe)
     rm -rf target/release-check-wheels
     (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" \
-      maturin build -q --release --locked "${f[@]}" -m crates/encompute-py/Cargo.toml -o target/release-check-wheels) || return 1
+      maturin build -q --release --locked ${f[@]+"${f[@]}"} -m crates/encompute-py/Cargo.toml -o target/release-check-wheels) || return 1
     w="$(ls target/release-check-wheels/*.whl | head -n 1)"
   fi
   WHEEL="$w" IMAGES="${IMAGES:-}" scripts/audit-commercial-build.sh target/release
@@ -253,9 +265,9 @@ commercial() {
 export -f commercial
 check "commercial dependency" bash -c commercial
 if [ "$LIST" = 0 ] && wanted "TFHE-rs contamination"; then
-  if [ -f "$LOG/commercial dependency.log" ] && grep -q "TFHE-rs contamination NONE" "$LOG/commercial dependency.log"; then
+  if [ -f "$(logf "commercial dependency")" ] && grep -q "TFHE-rs contamination NONE" "$(logf "commercial dependency")"; then
     record "TFHE-rs contamination" "NONE"
-  elif [ -f "$LOG/commercial dependency.log" ]; then
+  elif [ -f "$(logf "commercial dependency")" ]; then
     record "TFHE-rs contamination" "FAIL (FOUND or not audited: see the commercial dependency row)"
   fi
 fi
