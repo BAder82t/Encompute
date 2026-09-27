@@ -40,6 +40,50 @@ use crate::model::{
 /// Evaluators silent for longer are unhealthy.
 pub const HEARTBEAT_TIMEOUT_SECS: u64 = 90;
 
+/// The scheduler's cost of one bootstrapped gate on one core, in
+/// milliseconds: OpenFHE BinFHE at STD128 (GINX) measures about 55 ms per
+/// gate. A ranking constant: placement compares evaluators by it, it
+/// promises no latency.
+pub const GATE_MS: u64 = 55;
+
+/// A job's scheduling work: its bootstrapped gates, and at least one unit
+/// (CKKS jobs and plans made before estimates count one each, so load still
+/// spreads).
+fn work_units(estimated_gates: u64) -> u64 {
+    estimated_gates.max(1)
+}
+
+/// Estimated completion time (ms) of a job of `gates` on an evaluator
+/// already holding `queued_units` of work, running
+/// `min(max_parallel_gates, logical_cores)` gates at a time (whichever it
+/// advertised; one when it advertised neither). The machine profile is
+/// self-reported: it steers placement, never a security decision.
+pub fn estimated_ms(
+    queued_units: u64,
+    gates: u64,
+    logical_cores: Option<i32>,
+    max_parallel_gates: Option<i32>,
+) -> u64 {
+    let parallel = match (max_parallel_gates, logical_cores) {
+        (Some(p), Some(c)) => p.min(c),
+        (Some(n), None) | (None, Some(n)) => n,
+        (None, None) => 1,
+    }
+    .max(1) as u64;
+    queued_units
+        .saturating_add(work_units(gates))
+        .saturating_mul(GATE_MS)
+        / parallel
+}
+
+/// Bootstrapped gates a compiled program costs (exact programs); 0 for
+/// CKKS, or when the count is unavailable.
+fn estimated_gates(c: &CompiledProgram) -> u64 {
+    c.exact()
+        .and_then(|e| encompute_exact::bits::gate_count(&e.plan).ok())
+        .unwrap_or(0)
+}
+
 /// The parameter profile a job needs from its evaluator.
 pub fn job_profile(c: &CompiledProgram) -> String {
     match c.exact() {
@@ -81,6 +125,10 @@ struct PlanDoc {
     backend_version: String,
     profile: String,
     proof_required: bool,
+    /// Bootstrapped gates (exact programs; 0 for CKKS). Absent from plans
+    /// made before schema version 2.
+    #[serde(default)]
+    estimated_gates: u64,
 }
 
 struct JobRow {
@@ -104,13 +152,15 @@ struct JobRow {
     error: Option<String>,
     initiated_by: String,
     created_at: SystemTime,
+    estimated_gates: u64,
+    estimated_ms: Option<u64>,
 }
 
 fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<JobRow>> {
     let q = format!(
         "SELECT id, organization_id, project_id, plan_id, spec_id, program_id, purpose, source_assets,
                 requested_output, scheme, backend, profile, state, evaluator_id, job_grant, receipt,
-                evidence, error, initiated_by, created_at
+                evidence, error, initiated_by, created_at, estimated_gates, estimated_ms
            FROM jobs WHERE id = $1 {}",
         if lock { "FOR UPDATE" } else { "" }
     );
@@ -140,6 +190,8 @@ fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<Jo
         error: r.get(17),
         initiated_by: r.get(18),
         created_at: r.get(19),
+        estimated_gates: r.get::<_, i64>(20).max(0) as u64,
+        estimated_ms: r.get::<_, Option<i64>>(21).map(|v| v.max(0) as u64),
     }))
 }
 
@@ -261,6 +313,7 @@ impl Control {
             backend_version: backend_version.into(),
             profile: job_profile(&compiled),
             proof_required: compiled.proof_required(),
+            estimated_gates: estimated_gates(&compiled),
         };
         let id = new_id("pln");
         self.db.tx(|t| {
@@ -295,6 +348,8 @@ impl Control {
             "program_id": ids.program_id, "spec_id": spec.id().hex(),
             "scheme": doc.scheme, "backend": doc.backend, "profile": doc.profile,
             "mechanisms": doc.plan.selected_mechanisms,
+            "estimated_gates": doc.estimated_gates,
+            "estimated_single_core_ms": doc.estimated_gates.saturating_mul(GATE_MS),
         }))
     }
 
@@ -479,8 +534,8 @@ impl Control {
             t.execute(
                 "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, policy_id, purpose,
                      source_assets, requested_output, scheme, backend, profile, state, initiated_by,
-                     idempotency_key, request_digest)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16)",
+                     idempotency_key, request_digest, estimated_gates)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17)",
                 &[
                     &id,
                     &org,
@@ -498,6 +553,7 @@ impl Control {
                     &ctx.actor(),
                     &key,
                     &digest,
+                    &(doc.estimated_gates.min(i64::MAX as u64) as i64),
                 ],
             )
             .map_err(|e| {
@@ -544,16 +600,19 @@ impl Control {
         let mut c = self.db.conn()?;
         let j = job_row(&mut *c, id, false)?.ok_or_else(|| not_found("job", id))?;
         job_visible(&mut *c, ctx, &j)?;
-        let (url, receipt_key): (Option<String>, Option<String>) = match &j.evaluator {
-            Some(e) => c
-                .query_opt(
-                    "SELECT url, receipt_key FROM evaluators WHERE id = $1",
-                    &[e],
-                )
-                .map_err(db_err)?
-                .map_or((None, None), |r| (Some(r.get(0)), Some(r.get(1)))),
-            None => (None, None),
-        };
+        let (url, receipt_key, parallel): (Option<String>, Option<String>, Option<i32>) =
+            match &j.evaluator {
+                Some(e) => c
+                    .query_opt(
+                        "SELECT url, receipt_key, max_parallel_gates FROM evaluators WHERE id = $1",
+                        &[e],
+                    )
+                    .map_err(db_err)?
+                    .map_or((None, None, None), |r| {
+                        (Some(r.get(0)), Some(r.get(1)), r.get(2))
+                    }),
+                None => (None, None, None),
+            };
         let transitions = c
             .query(
                 "SELECT from_state, to_state, actor, COALESCE(reason, '') FROM job_transitions WHERE job_id = $1 ORDER BY seq",
@@ -595,6 +654,9 @@ impl Control {
             error: j.error,
             initiated_by: j.initiated_by,
             transitions,
+            estimated_gates: j.estimated_gates,
+            estimated_ms: j.estimated_ms,
+            evaluator_parallel_gates: parallel.map(|p| p.max(1) as u32),
         };
         Ok(serde_json::to_value(v).expect("serializable"))
     }
@@ -729,32 +791,49 @@ impl Control {
 
     /// Schedules one authorized job: only an evaluator that registered the
     /// job's backend and parameter profile, is ready, heard from recently,
-    /// and has capacity. Returns whether it was placed.
+    /// and has capacity. Among those, the one with the lowest estimated
+    /// completion time ([`estimated_ms`]: its queued and running work plus
+    /// this job, over its advertised parallelism); ties go to the lowest
+    /// evaluator ID. Returns whether it was placed.
     pub fn schedule_job(&self, id: &str) -> Result<bool> {
         self.db.tx(|t| {
             let Some(j) = job_row(t, id, true)? else { return Ok(false) };
             if j.state != JobState::Authorized {
                 return Ok(false);
             }
+            // Hard constraints first (backend, profile, health, freshness,
+            // capacity); cost only orders what is left.
             let candidates = t
                 .query(
                     "SELECT e.id, e.capacity,
-                            (SELECT count(*) FROM jobs x WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running', 'verifying'))
+                            (SELECT count(*) FROM jobs x WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running', 'verifying')),
+                            (SELECT COALESCE(sum(GREATEST(x.estimated_gates, 1)), 0)::bigint FROM jobs x
+                              WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running')),
+                            e.logical_cores, e.max_parallel_gates
                        FROM evaluators e
                       WHERE e.status = 'ready'
                         AND e.backends ? $1 AND e.profiles ? $2
                         AND e.last_heartbeat > now() - make_interval(secs => $3)
-                      ORDER BY 3, e.id",
+                      ORDER BY e.id",
                     &[&j.backend, &j.profile, &(HEARTBEAT_TIMEOUT_SECS as f64)],
                 )
                 .map_err(db_err)?;
-            let Some(e) = candidates
+            let Some((estimate, evaluator)) = candidates
                 .iter()
-                .find(|r| r.get::<_, i64>(2) < r.get::<_, i32>(1) as i64)
+                .filter(|r| r.get::<_, i64>(2) < r.get::<_, i32>(1) as i64)
+                .map(|r| {
+                    let est = estimated_ms(
+                        r.get::<_, i64>(3).max(0) as u64,
+                        j.estimated_gates,
+                        r.get(4),
+                        r.get(5),
+                    );
+                    (est, r.get::<_, String>(0))
+                })
+                .min()
             else {
                 return Ok(false);
             };
-            let evaluator: String = e.get(0);
             let t0 = now();
             let mut g = JobGrant {
                 version: JOB_GRANT_VERSION,
@@ -775,8 +854,13 @@ impl Control {
             };
             g.signature = self.signer.sign(JOB_GRANT, &g.unsigned())?;
             t.execute(
-                "UPDATE jobs SET evaluator_id = $2, job_grant = $3 WHERE id = $1",
-                &[&id, &evaluator, &serde_json::to_value(&g).expect("serializable")],
+                "UPDATE jobs SET evaluator_id = $2, job_grant = $3, estimated_ms = $4 WHERE id = $1",
+                &[
+                    &id,
+                    &evaluator,
+                    &serde_json::to_value(&g).expect("serializable"),
+                    &(estimate.min(i64::MAX as u64) as i64),
+                ],
             )
             .map_err(db_err)?;
             self.transition_in(t, &self.service_id, "scheduler", id, JobState::Queued, None)?;
@@ -786,7 +870,9 @@ impl Control {
                     .org(&j.organization)
                     .project(&j.project)
                     .r#ref("evaluator", evaluator.clone())
-                    .r#ref("profile", j.profile.clone()),
+                    .r#ref("profile", j.profile.clone())
+                    .r#ref("estimated_gates", j.estimated_gates.to_string())
+                    .r#ref("estimated_ms", estimate.to_string()),
             )?;
             Ok(true)
         })
@@ -1191,13 +1277,38 @@ impl Control {
         for b in r.backends.iter().chain(&r.profiles) {
             check_name("backend/profile", b)?;
         }
+        // The machine profile is self-reported and only ever steers
+        // placement; validated for sanity, not trusted.
+        if let Some(m) = &r.cpu_model {
+            check_name("cpu_model", m)?;
+        }
+        if let Some(p) = &r.benchmark_profile {
+            check_name("benchmark_profile", p)?;
+        }
+        for (what, v) in [
+            ("logical_cores", r.logical_cores),
+            ("max_parallel_gates", r.max_parallel_gates),
+        ] {
+            if v.is_some_and(|n| !(1..=65_536).contains(&n)) {
+                return Err(bad(format!("{what} must be 1-65536")));
+            }
+        }
+        if r.memory_bytes.is_some_and(|n| n <= 0) {
+            return Err(bad("memory_bytes must be positive"));
+        }
         self.db.tx(|t| {
             t.execute(
-                "INSERT INTO evaluators (id, service_account, url, receipt_key, backends, profiles, openfhe_version, capacity, status)
-                 VALUES ($1, $1, $2, $3, $4, $5, $6, $7, 'ready')
+                "INSERT INTO evaluators (id, service_account, url, receipt_key, backends, profiles, openfhe_version, capacity, status,
+                                         cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates)
+                 VALUES ($1, $1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9, $10, $11, $12)
                  ON CONFLICT (id) DO UPDATE SET url = $2, receipt_key = $3, backends = $4, profiles = $5,
-                     openfhe_version = $6, capacity = $7, status = 'ready', last_heartbeat = now()",
-                &[&r.id, &r.url, &r.receipt_key, &json!(r.backends), &json!(r.profiles), &r.openfhe_version, &r.capacity],
+                     openfhe_version = $6, capacity = $7, status = 'ready', last_heartbeat = now(),
+                     cpu_model = $8, logical_cores = $9, memory_bytes = $10, benchmark_profile = $11,
+                     max_parallel_gates = $12",
+                &[
+                    &r.id, &r.url, &r.receipt_key, &json!(r.backends), &json!(r.profiles), &r.openfhe_version, &r.capacity,
+                    &r.cpu_model, &r.logical_cores, &r.memory_bytes, &r.benchmark_profile, &r.max_parallel_gates,
+                ],
             )
             .map_err(|e| {
                 if e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION) {
@@ -1206,14 +1317,16 @@ impl Control {
                     db_err(e)
                 }
             })?;
-            audit::append(
-                t,
-                ctx.draft("evaluator.registered", "evaluator", &r.id, Outcome::Succeeded)
-                    .org(PLATFORM_ORG)
-                    .r#ref("backends", r.backends.join("+"))
-                    .r#ref("profiles", r.profiles.join("+"))
-                    .r#ref("openfhe", r.openfhe_version.clone()),
-            )?;
+            let mut d = ctx
+                .draft("evaluator.registered", "evaluator", &r.id, Outcome::Succeeded)
+                .org(PLATFORM_ORG)
+                .r#ref("backends", r.backends.join("+"))
+                .r#ref("profiles", r.profiles.join("+"))
+                .r#ref("openfhe", r.openfhe_version.clone());
+            if let Some(p) = &r.benchmark_profile {
+                d = d.r#ref("benchmark_profile", p.clone());
+            }
+            audit::append(t, d)?;
             Ok(json!({"id": r.id, "status": "ready", "control_public_key": self.signer.public_key_hex()}))
         })
     }
@@ -1277,13 +1390,23 @@ impl Control {
         )?;
         let mut c = self.db.conn()?;
         Ok(Value::Array(
-            c.query("SELECT id, url, backends, profiles, openfhe_version, capacity, status FROM evaluators ORDER BY id", &[])
+            c.query(
+                "SELECT id, url, backends, profiles, openfhe_version, capacity, status,
+                        cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates
+                   FROM evaluators ORDER BY id",
+                &[],
+            )
                 .map_err(db_err)?
                 .iter()
                 .map(|r| {
                     json!({"id": r.get::<_, String>(0), "url": r.get::<_, String>(1), "backends": r.get::<_, Value>(2),
                            "profiles": r.get::<_, Value>(3), "openfhe_version": r.get::<_, String>(4),
-                           "capacity": r.get::<_, i32>(5), "status": r.get::<_, String>(6)})
+                           "capacity": r.get::<_, i32>(5), "status": r.get::<_, String>(6),
+                           "cpu_model": r.get::<_, Option<String>>(7),
+                           "logical_cores": r.get::<_, Option<i32>>(8),
+                           "memory_bytes": r.get::<_, Option<i64>>(9),
+                           "benchmark_profile": r.get::<_, Option<String>>(10),
+                           "max_parallel_gates": r.get::<_, Option<i32>>(11)})
                 })
                 .collect(),
         ))

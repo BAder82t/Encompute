@@ -8,4 +8,4 @@ mod policies;
 mod tenancy;
 
 pub use assets::asset_json;
-pub use jobs::{job_profile, HEARTBEAT_TIMEOUT_SECS};
+pub use jobs::{estimated_ms, job_profile, GATE_MS, HEARTBEAT_TIMEOUT_SECS};

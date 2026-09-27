@@ -393,6 +393,21 @@ pub struct RegisterEvaluator {
     pub profiles: Vec<String>,
     pub openfhe_version: String,
     pub capacity: i32,
+    /// The machine profile (all optional). Self-reported: it steers
+    /// placement and estimates only, never a security decision.
+    #[serde(default)]
+    pub cpu_model: Option<String>,
+    #[serde(default)]
+    pub logical_cores: Option<i32>,
+    #[serde(default)]
+    pub memory_bytes: Option<i64>,
+    /// The calibrated cost profile the evaluator was benchmarked under,
+    /// e.g. `openfhe-1.5.1/apple-m3-max`.
+    #[serde(default)]
+    pub benchmark_profile: Option<String>,
+    /// Worker threads the evaluator uses for one job's gates.
+    #[serde(default)]
+    pub max_parallel_gates: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,4 +446,13 @@ pub struct JobView {
     pub error: Option<String>,
     pub initiated_by: String,
     pub transitions: Vec<BTreeMap<String, String>>,
+    /// The plan's work estimate: bootstrapped gates for exact programs, 0
+    /// for CKKS or plans made before estimates existed.
+    pub estimated_gates: u64,
+    /// The scheduler's completion estimate on the chosen evaluator
+    /// (milliseconds; its queue included), once scheduled.
+    pub estimated_ms: Option<u64>,
+    /// Worker threads the chosen evaluator uses per job (its advertised
+    /// `max_parallel_gates`), when it said.
+    pub evaluator_parallel_gates: Option<u32>,
 }

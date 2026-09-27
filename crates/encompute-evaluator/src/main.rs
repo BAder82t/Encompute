@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use encompute_attestation::AttestationRecord;
-use encompute_evaluator::control::ControlLink;
+use encompute_evaluator::control::{ControlLink, MachineProfile};
 use encompute_evaluator::engine::{Engine, Local};
 use encompute_evaluator::pool::{run_worker, Pool};
 use encompute_evaluator::server::{Evaluator, Limits};
@@ -261,13 +261,22 @@ fn serve(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(workers.max(1) as u32);
+            // Self-reported hardware: steers placement only.
+            let machine = MachineProfile::detect();
             // The control plane may still be starting: retry for a minute.
             let mut registered = Err(encompute_ir::Error::new(
                 encompute_ir::Code::Remote,
                 "not tried",
             ));
             for _ in 0..30 {
-                registered = link.register(&advertise, &receipt_key, &caps, &profiles, capacity);
+                registered = link.register(
+                    &advertise,
+                    &receipt_key,
+                    &caps,
+                    &profiles,
+                    capacity,
+                    &machine,
+                );
                 if !matches!(&registered, Err(e) if e.code == encompute_ir::Code::Remote) {
                     break;
                 }

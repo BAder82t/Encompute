@@ -100,9 +100,9 @@ never contains key material. `privacy_budget` is
 
 | | |
 |---|---|
-| `POST /v1/plans` | `{project, program}` (`.eir` text). The planner chooses mechanisms from the deployment's registered backends; returns `{id, plan_id, program_id, spec_id, scheme, backend, profile, mechanisms}` |
+| `POST /v1/plans` | `{project, program}` (`.eir` text). The planner chooses mechanisms from the deployment's registered backends; returns `{id, plan_id, program_id, spec_id, scheme, backend, profile, mechanisms, estimated_gates, estimated_single_core_ms}`. `estimated_gates` counts bootstrapped gates (exact programs; 0 for CKKS) |
 | `POST /v1/jobs` | `{project, plan, purpose, source_assets, requested_output, policy?}` + `Idempotency-Key` |
-| `GET /v1/jobs?project=`, `GET /v1/jobs/{id}` | state, transitions, and, for the submitting organization, the evaluator's URL and receipt key and the grant |
+| `GET /v1/jobs?project=`, `GET /v1/jobs/{id}` | state, transitions, and, for the submitting organization, the evaluator's URL and receipt key and the grant. Also `estimated_gates` (from the plan; 0 for plans made before estimates), `estimated_ms` (the scheduler's completion estimate on the chosen evaluator, its queue included) and `evaluator_parallel_gates` (the threads per job that evaluator advertised) |
 | `POST /v1/jobs/{id}/approve` | owners of assets whose policy sets `require_job_approval` |
 | `POST /v1/jobs/{id}/cancel` | |
 | `POST /v1/jobs/{id}/start` | the scheduled evaluator, before running |
@@ -114,8 +114,8 @@ never contains key material. `privacy_budget` is
 
 | | |
 |---|---|
-| `POST /v1/evaluators` | the evaluator itself. `{id, url, receipt_key, backends, profiles, openfhe_version, capacity}`. Research backends are refused |
-| `GET /v1/evaluators` | platform operators |
+| `POST /v1/evaluators` | the evaluator itself. `{id, url, receipt_key, backends, profiles, openfhe_version, capacity}`, and optionally a machine profile: `cpu_model`, `logical_cores`, `memory_bytes`, `benchmark_profile`, `max_parallel_gates` (threads per job). The machine profile is self-reported and used only for scheduling, never for a security decision. Registering again without it clears it. Research backends are refused |
+| `GET /v1/evaluators` | platform operators. Includes each machine profile (`null` where not sent) |
 | `POST /v1/evaluators/{id}/status` | `{status}`: the evaluator (`ready`, `busy`, `unhealthy`), or operators (`draining`, `ready`) |
 
 ### Privacy

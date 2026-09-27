@@ -108,6 +108,19 @@ CREATED → PLANNING → PLANNED → (WAITING_FOR_APPROVAL) → AUTHORIZED → Q
      parameter profile (for example `BINFHE_STD128_GINX_BITS_V1`);
    - status ready, a recent heartbeat, and spare capacity.
 
+   Among the evaluators that pass these checks, it picks the one likely to
+   finish first. Each plan records its cost in bootstrapped gates (exact
+   programs; CKKS plans record 0 and count as one unit). The estimate on an
+   evaluator is (gates of its queued and running jobs + this job's gates) ×
+   55 ms ÷ min(`max_parallel_gates`, `logical_cores`). 55 ms is about one
+   OpenFHE BinFHE STD128 gate on one core. An evaluator that sent no
+   machine profile counts as one core. Ties go to the lowest evaluator ID.
+   The estimate is recorded in the job (`estimated_ms`) and in the
+   `job.scheduled` audit event. Cost only orders evaluators that already
+   passed every check above. The machine profile is what the evaluator
+   says about itself, and it is not verified: it steers placement and
+   performance estimates, never a security decision.
+
    The control plane signs a job grant for that evaluator.
 3. The client sends its encrypted inputs to the evaluator with the grant.
    The evaluator:
@@ -242,8 +255,13 @@ repository.
 Evaluators take `ENCOMPUTE_CONTROL_URL` and `ENCOMPUTE_CONTROL_PUBLIC_KEY`
 (the pinned control-plane key). They also take `ENCOMPUTE_SERVICE_ID`,
 `ENCOMPUTE_SERVICE_KEY_FILE`, `ENCOMPUTE_ADVERTISE_URL` and
-`ENCOMPUTE_CAPACITY`. Key brokers and SecAgg coordinators take the same
-service identity variables.
+`ENCOMPUTE_CAPACITY`. At registration an evaluator also sends its machine
+profile, which is used only for scheduling. It detects its logical cores,
+CPU model and memory (Linux `/proc`, macOS `sysctl`). It takes
+`ENCOMPUTE_EXACT_WORKERS` (threads per job, default the core count, at
+most 8) and `ENCOMPUTE_BENCHMARK_PROFILE` (the calibrated cost profile it
+was benchmarked under, for example `openfhe-1.5.1/apple-m3-max`). Key
+brokers and SecAgg coordinators take the same service identity variables.
 
 **Production mode refuses:**
 

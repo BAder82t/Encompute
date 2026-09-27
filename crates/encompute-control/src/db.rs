@@ -13,8 +13,14 @@ pub type Pool = r2d2::Pool<PostgresConnectionManager<NoTls>>;
 pub type Conn = r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
 
 /// Every migration, in order. Never edit one that has shipped: add another.
-pub const MIGRATIONS: &[(i32, &str, &str)] =
-    &[(1, "initial", include_str!("../migrations/0001_initial.sql"))];
+pub const MIGRATIONS: &[(i32, &str, &str)] = &[
+    (1, "initial", include_str!("../migrations/0001_initial.sql")),
+    (
+        2,
+        "evaluator_profiles",
+        include_str!("../migrations/0002_evaluator_profiles.sql"),
+    ),
+];
 
 /// Serializes migrations across control-plane replicas.
 const MIGRATION_LOCK: i64 = 0x656e_636f_6d70_7574; // "encomput"
@@ -84,10 +90,16 @@ impl Db {
 
     /// Applies pending migrations; returns the schema version.
     pub fn migrate(&self) -> Result<i32> {
+        self.migrate_to(i32::MAX)
+    }
+
+    /// Applies pending migrations up to version `target` (upgrade tests
+    /// build an older schema with it); returns the schema version.
+    pub fn migrate_to(&self, target: i32) -> Result<i32> {
         let mut c = self.conn()?;
         c.execute("SELECT pg_advisory_lock($1)", &[&MIGRATION_LOCK])
             .map_err(db_err)?;
-        let r = migrate_locked(&mut c);
+        let r = migrate_locked(&mut c, target);
         let _ = c.execute("SELECT pg_advisory_unlock($1)", &[&MIGRATION_LOCK]);
         r
     }
@@ -147,11 +159,14 @@ fn check_applied(c: &mut Conn) -> Result<i32> {
     Ok(version)
 }
 
-fn migrate_locked(c: &mut Conn) -> Result<i32> {
+fn migrate_locked(c: &mut Conn, target: i32) -> Result<i32> {
     let mut version = check_applied(c)?;
     for (v, name, sql) in MIGRATIONS {
         if *v <= version {
             continue;
+        }
+        if *v > target {
+            break;
         }
         let mut t = c.transaction().map_err(db_err)?;
         t.batch_execute(sql)

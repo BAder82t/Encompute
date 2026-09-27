@@ -25,4 +25,4 @@ mod ops;
 pub mod transport;
 
 pub use control::{Control, Ctx};
-pub use ops::{asset_json, job_profile, HEARTBEAT_TIMEOUT_SECS};
+pub use ops::{asset_json, estimated_ms, job_profile, GATE_MS, HEARTBEAT_TIMEOUT_SECS};

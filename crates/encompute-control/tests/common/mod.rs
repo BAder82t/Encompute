@@ -474,6 +474,20 @@ pub fn evaluator(
     profiles: &[&str],
     capacity: i32,
 ) -> Evaluator {
+    evaluator_with(t, platform, id, backends, profiles, capacity, json!({}))
+}
+
+/// Like [`evaluator`], registering the machine-profile fields in `machine`
+/// (e.g. `{"logical_cores": 16, "max_parallel_gates": 8}`).
+pub fn evaluator_with(
+    t: &T,
+    platform: &As,
+    id: &str,
+    backends: &[&str],
+    profiles: &[&str],
+    capacity: i32,
+    machine: Value,
+) -> Evaluator {
     let seed = {
         let mut s = [0u8; 32];
         for (i, b) in id.bytes().enumerate() {
@@ -494,14 +508,13 @@ pub fn evaluator(
     );
     let receipt = encompute_verification::EvaluatorSigner::from_seed(&seed.map(|b| b ^ 0x33));
     let service = As::Service(signer.clone());
-    t.ok(
-        &service,
-        "POST",
-        "/v1/evaluators",
-        Some(json!({"id": id, "url": format!("http://{id}.internal:8750"),
-                    "receipt_key": receipt.identity().public_key_hex(),
-                    "backends": backends, "profiles": profiles, "openfhe_version": "1.5.1", "capacity": capacity})),
-    );
+    let mut body = json!({"id": id, "url": format!("http://{id}.internal:8750"),
+                "receipt_key": receipt.identity().public_key_hex(),
+                "backends": backends, "profiles": profiles, "openfhe_version": "1.5.1", "capacity": capacity});
+    if let (Value::Object(b), Value::Object(m)) = (&mut body, machine) {
+        b.extend(m);
+    }
+    t.ok(&service, "POST", "/v1/evaluators", Some(body));
     Evaluator {
         id: id.into(),
         service,
