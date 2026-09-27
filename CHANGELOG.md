@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.3.0-rc.1 — 2026-09-27
+## 0.3.0-rc.2 — 2026-09-28
+
+The first published release candidate. 0.3.0-rc.1 was tagged but never
+released: its release workflow failed before signing (below).
+
+- **Release check:** the backup drill runs with the release-check Python
+  environment; on the release runner the system `python3` lacked
+  `cryptography`, which the drill's OIDC test issuer needs.
+- **Image builds:** agent worktrees, nested build output and git data stay
+  out of Docker build contexts.
+
+## 0.3.0-rc.1 — 2026-09-27 (tagged, not released)
 
 ### Release candidate hardening
 
