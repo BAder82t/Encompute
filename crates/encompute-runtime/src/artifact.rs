@@ -403,6 +403,15 @@ impl Model {
         json(&manifest)
     }
 
+    /// Every file of the artifact directory, `manifest.json` included,
+    /// exactly as [`Model::save`] writes them.
+    pub fn artifact_contents(&self) -> BTreeMap<&'static str, String> {
+        let mut files = self.artifact_files();
+        let manifest = self.manifest_json(&files);
+        files.insert("manifest.json", manifest);
+        files
+    }
+
     /// Write the artifact directory (created if missing).
     pub fn save(&self, dir: &Path) -> Result<()> {
         fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;

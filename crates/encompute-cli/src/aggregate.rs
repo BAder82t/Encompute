@@ -68,14 +68,14 @@ fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
 /// A party's `--state`: the last round joined and, per budgeted asset, the
 /// last privacy-ledger checkpoint seen. (A bare number is the old format.)
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-struct PartyStateFile {
-    sequence: Option<u64>,
+pub(crate) struct PartyStateFile {
+    pub(crate) sequence: Option<u64>,
     #[serde(default)]
-    checkpoints: std::collections::BTreeMap<String, encompute_runtime::dp::Checkpoint>,
+    pub(crate) checkpoints: std::collections::BTreeMap<String, encompute_runtime::dp::Checkpoint>,
 }
 
 impl PartyStateFile {
-    fn read(p: &Path) -> Result<Self> {
+    pub(crate) fn read(p: &Path) -> Result<Self> {
         let text = String::from_utf8(read(p)?)
             .map_err(|_| Error::new(Code::AggregationBinding, "state file is not UTF-8"))?;
         if let Ok(n) = text.trim().parse::<u64>() {
@@ -384,20 +384,27 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 asset.values.len()
             );
             println!("{:<16}{}", "Receipt", receipt.display());
-            if std::env::var("ENCOMPUTE_CONTROL_URL").is_ok() {
-                let n = report_to_control(
+            let reported = if std::env::var("ENCOMPUTE_CONTROL_URL").is_ok() {
+                report_to_control(
                     &round_id,
                     ledger.as_deref(),
                     &control_assets,
                     started.elapsed().as_millis() as u64,
-                )?;
-                println!(
-                    "{:<16}{n} privacy events reported to the control plane",
-                    "Control plane"
-                );
-            }
-            // Let participants collect the receipt before exiting.
+                )
+                .map(|n| {
+                    println!(
+                        "{:<16}{n} privacy events reported to the control plane",
+                        "Control plane"
+                    )
+                })
+            } else {
+                Ok(())
+            };
+            // Let participants collect the receipt before exiting, even when
+            // reporting failed: the aggregate is already released, and they
+            // need the receipt to verify it.
             std::thread::sleep(Duration::from_secs(2));
+            reported?;
             Ok(ExitCode::SUCCESS)
         }
         AggregateCmd::CoordinatorPolicy {

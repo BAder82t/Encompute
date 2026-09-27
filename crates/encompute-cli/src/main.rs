@@ -4,6 +4,7 @@ mod aggregate;
 mod attest;
 mod control;
 mod launcher_sim;
+mod migrate;
 mod plan;
 mod trust;
 
@@ -262,6 +263,45 @@ enum Cmd {
         model: PathBuf,
         #[command(flatten)]
         opts: plan::PlanOpts,
+    },
+    /// Check a saved artifact's version against this build; upgrade older
+    /// ones into a new copy.
+    ///
+    /// The kind is found by structure: a compiled model directory
+    /// (manifest.json), a key directory (secret.key, eval.keys), a privacy
+    /// ledger directory (*.ledger) or ledger file, an execution receipt, a
+    /// trust bundle, a confidential execution plan, a sealed checkpoint or
+    /// asset, a signed adapter record, an aggregation receipt, an
+    /// attestation record or policy, an envelope, or an aggregation party
+    /// state file (`aggregate join --state`).
+    ///
+    /// The input is never modified. An upgrade is written only with --out
+    /// DIR, as DIR/<name of PATH>, under a temporary name then renamed; an
+    /// existing DIR/<name> is never overwritten. --check never writes.
+    /// Migrations change metadata only: key material is never rewritten,
+    /// nothing is re-signed, and signed, sealed, hash-chained or
+    /// content-addressed objects are never rewritten.
+    ///
+    /// Upgrades: a model artifact of format 2, 3 or 4, or of the current
+    /// format with metadata written by another Encompute version, has its
+    /// derived files (security.json, verification.json, policy.json,
+    /// manifest.json) regenerated from program.eir, only if its program,
+    /// plan, parameters and backend are byte-identical to what this build
+    /// compiles (otherwise it is refused: recompile and regenerate keys). A
+    /// party state holding a bare sequence number becomes JSON. Execution
+    /// receipts of version 1 and 2 are kept as-is: rewriting them would
+    /// invalidate the evaluator's signature.
+    ///
+    /// Exit status: 0 current, or the upgrade was written; 1 an upgrade is
+    /// available and nothing was written; 3 an older version is kept as-is;
+    /// 2 refused: error[ENC1401] unrecognized or unreadable input, or an
+    /// existing output; error[ENC1602] a version newer than this build or
+    /// one it never knew; a corrupted object fails with its kind's own code
+    /// (e.g. ENC1401 artifact, ENC1601 envelope or keys, ENC1606 receipt,
+    /// ENC2202 ledger).
+    Migrate {
+        #[command(flatten)]
+        args: migrate::MigrateArgs,
     },
     /// Show the execution plan, parameters and precision.
     Explain {
@@ -716,6 +756,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             deep,
         } => plan::plan(&model, &opts, out.as_deref(), json, deep),
         Cmd::Check { model, opts } => plan::check(&model, &opts),
+        Cmd::Migrate { args } => migrate::migrate(&args),
         Cmd::Lineage {
             adapter,
             bundle,
