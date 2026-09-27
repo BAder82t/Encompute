@@ -347,6 +347,24 @@ pub struct ProgramFacts {
     pub proof_covered: bool,
     /// Encrypted operations (for cost estimates).
     pub operations: u64,
+    /// Exact programs: calibrated estimate of the evaluation on OpenFHE
+    /// BinFHE, in whole milliseconds; `None` when the program cannot be
+    /// lowered to gates, or no estimate was made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binfhe_ms: Option<u64>,
+    /// Exact programs: calibrated estimate of the evaluation on OpenFHE
+    /// BGV, in whole milliseconds; `None` when the program is outside the
+    /// BGV subset, or no estimate was made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bgv_ms: Option<u64>,
+}
+
+impl ProgramFacts {
+    /// Whether the runtime supplied calibrated exact-backend estimates
+    /// (facts from older runtimes carry none).
+    pub fn calibrated(&self) -> bool {
+        self.binfhe_ms.is_some() || self.bgv_ms.is_some()
+    }
 }
 
 /// Local training, declared by a project: each data owner's data and the

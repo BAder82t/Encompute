@@ -106,16 +106,21 @@ fn estimate(
         (StepKind::Evaluate, Placement::Tee(_)) => 1 + o / 50,
         (StepKind::Evaluate, _) => 1 + o / 100,
     };
+    let facts = &ctx.facts;
     for m in mechs {
         ms += match m {
+            // Exact backends: the runtime's calibrated estimates where it
+            // supplied them (the same numbers compile_program selects by),
+            // else coarse per-operation costs.
             Mechanism::Fhe { scheme, .. } => match scheme {
                 Scheme::Ckks => 40 * o,
                 Scheme::Tfhe => 400 * o,
-                Scheme::Bgv => 60 * o,
+                Scheme::Bgv => facts.bgv_ms.unwrap_or(60 * o),
                 // Tens of bootstrapped gates per operation.
-                Scheme::BinFhe => 500 * o,
+                Scheme::BinFhe => facts.binfhe_ms.unwrap_or(500 * o),
             },
-            Mechanism::VerifiedExecution => 180 * o,
+            // The client re-executes the BGV evaluation.
+            Mechanism::VerifiedExecution => facts.bgv_ms.unwrap_or(180 * o),
             Mechanism::Attestation { .. } => 800,
             Mechanism::AttestedKeyRelease => 200,
             Mechanism::DifferentialPrivacy { .. } => 5,
@@ -223,22 +228,50 @@ fn options(
                     .clone()
                     .or_else(|| (!built).then(|| format!("{} is not available", fhe.name())))
                     .or_else(|| host.clone());
-                // BGV runs exact programs only with execution proofs (the
-                // runtime uses it for verified programs); others run on
-                // OpenFHE exact.
-                if scheme != Scheme::Bgv {
-                    out.push(Option_ {
+                let facts = &ctx.facts;
+                match scheme {
+                    // Every exact program BinFHE can lower to gates.
+                    Scheme::BinFhe => out.push(Option_ {
+                        placement: Placement::UntrustedHost,
+                        mechanisms: vec![fhe.clone()],
+                        unavailable: why.clone().or_else(|| {
+                            (facts.calibrated() && facts.binfhe_ms.is_none())
+                                .then(|| "the program cannot be lowered to BinFHE gates".to_owned())
+                        }),
+                    }),
+                    // Unverified BGV: programs wholly in the BGV subset,
+                    // with a calibrated estimate to compare (the runtime
+                    // selects BGV or BinFHE by the same estimates).
+                    Scheme::Bgv => out.push(Option_ {
+                        placement: Placement::UntrustedHost,
+                        mechanisms: vec![fhe.clone()],
+                        unavailable: why.clone().or_else(|| {
+                            if !facts.proof_covered {
+                                Some(
+                                    "the program uses an operation outside the BGV subset"
+                                        .to_owned(),
+                                )
+                            } else if facts.bgv_ms.is_none() {
+                                Some("no calibrated BGV estimate for this program".to_owned())
+                            } else {
+                                None
+                            }
+                        }),
+                    }),
+                    _ => out.push(Option_ {
                         placement: Placement::UntrustedHost,
                         mechanisms: vec![fhe.clone()],
                         unavailable: why.clone(),
-                    });
+                    }),
                 }
                 if scheme == Scheme::Bgv {
+                    // BGV with execution proofs: only for programs that
+                    // require them (the runtime compiles those so).
                     let why = why
                         .or_else(|| {
                             (!correctness).then(|| {
                                 "execution proofs are not required: unverified exact programs \
-                                 run on OpenFHE exact"
+                                 run without them"
                                     .to_owned()
                             })
                         })

@@ -73,7 +73,7 @@ script prints `SKIPPED`.
   scheme                  BinFHE
   backend                 openfhe-exact 1.5.1
   parameter profile       BINFHE_STD128_GINX_BITS_V1
-  bootstrapped gates      19 (the same for every input; ~60 ms each on one core)
+  bootstrapped gates      19 (the same for every input; ~54 ms each on one core)
   failure probability     2^-135 per gate
 screen(member, consent, not flagged)     clear=True  mock=True  encrypted=True  MATCH
 tier(score=200)                          clear=2     mock=2     encrypted=2     MATCH

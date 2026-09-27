@@ -12,15 +12,22 @@ use encompute_planner::{
 /// What the compiler knows about `program`, for the planner.
 pub fn planning_facts(program: &Program) -> Result<ProgramFacts> {
     let semantics = encompute_analysis::semantics(program)?;
-    let (name, fhe_supported, proof_covered) = match semantics {
+    let (name, fhe_supported, proof_covered, (binfhe_ms, bgv_ms)) = match semantics {
         Semantics::Approximate => (
             "approximate",
             encompute_ckks::compile(program).is_ok(),
             false,
+            (None, None),
         ),
         Semantics::Exact => match encompute_exact::compile(program) {
-            Ok(c) => ("exact", true, encompute_evaluator::proof_coverable(&c.plan)),
-            Err(_) => ("exact", false, false),
+            Ok(c) => (
+                "exact",
+                true,
+                encompute_evaluator::proof_coverable(&c.plan),
+                // The estimates compile_program selects the backend by.
+                encompute_evaluator::exact_estimates(&c.plan),
+            ),
+            Err(_) => ("exact", false, false, (None, None)),
         },
     };
     Ok(ProgramFacts {
@@ -28,6 +35,8 @@ pub fn planning_facts(program: &Program) -> Result<ProgramFacts> {
         fhe_supported,
         proof_covered,
         operations: program.nodes().len() as u64,
+        binfhe_ms,
+        bgv_ms,
     })
 }
 

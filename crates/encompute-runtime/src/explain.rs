@@ -115,6 +115,36 @@ fn cost(s: &mut String, b: &BenchReport) {
     );
 }
 
+/// The exact backends considered, with their estimated evaluation times.
+fn candidates(s: &mut String, sel: &encompute_evaluator::cost::ExactSelection) {
+    use encompute_evaluator::cost::ExactScheme;
+    let mark = |x: ExactScheme| if sel.scheme == x { "  (selected)" } else { "" };
+    let bgv = match sel.bgv_ms {
+        Some(ms) => format!(
+            "~{ms} ms (depth {}){}",
+            sel.bgv_depth,
+            mark(ExactScheme::Bgv)
+        ),
+        None => "not a candidate: outside the BGV subset".to_owned(),
+    };
+    let binfhe = match (sel.binfhe_ms, sel.binfhe_gates) {
+        (Some(ms), Some(g)) => {
+            format!(
+                "~{ms} ms ({g} bootstrapped gates){}",
+                mark(ExactScheme::BinFhe)
+            )
+        }
+        _ => "not a candidate: cannot be lowered to gates".to_owned(),
+    };
+    let _ = writeln!(s, "  {:<24}{bgv}", "candidate OpenFHE BGV");
+    let _ = writeln!(s, "  {:<24}{binfhe}", "candidate OpenFHE BinFHE");
+    let _ = writeln!(
+        s,
+        "  {:<24}estimated evaluator time, calibrated on one core (docs/benchmarks.md)",
+        ""
+    );
+}
+
 fn kib(b: usize) -> String {
     if b >= 1 << 20 {
         format!("{:.1} MiB", b as f64 / (1 << 20) as f64)
@@ -327,7 +357,9 @@ impl Model {
             } else {
                 " (not in this build: mock only)"
             }
-        } else if pr.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND {
+        } else if pr.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND
+            || pr.backend == "openfhe"
+        {
             if openfhe {
                 ""
             } else {
@@ -349,17 +381,23 @@ impl Model {
             "reason",
             if e.proof_required {
                 "verified execution requires re-execution proofs on OpenFHE BGV"
+            } else if let Some(sel) = &e.selection {
+                sel.reason.as_str()
             } else {
                 "exact integer/Boolean semantics required; approximation is not permitted"
             }
         );
+        if let Some(sel) = &e.selection {
+            candidates(&mut s, sel);
+        }
         let _ = writeln!(s, "  {:<24}{}", "parameter profile", pr.profile);
         if pr.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND {
             if let Ok(g) = encompute_exact::bits::gate_count(&e.plan) {
                 let _ = writeln!(
                     s,
-                    "  {:<24}{g} (the same for every input; ~60 ms each on one core)",
-                    "bootstrapped gates"
+                    "  {:<24}{g} (the same for every input; ~{} ms each on one core)",
+                    "bootstrapped gates",
+                    encompute_evaluator::cost::BINFHE_MS_PER_GATE
                 );
             }
         }
