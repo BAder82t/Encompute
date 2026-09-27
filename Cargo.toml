@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# The cargo-fuzz crate builds on nightly with its own workspace.
+exclude = ["fuzz"]
 members = [
     "crates/encompute-ir",
     "crates/encompute-analysis",

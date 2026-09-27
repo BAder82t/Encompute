@@ -12,7 +12,7 @@
 //! extend it.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -299,6 +299,27 @@ impl LedgerView {
 /// DP: Poisson-subsampled ones with the Zhu–Wang bound, the others with
 /// their full curve.
 pub fn cost_of(releases: &[(f64, Option<f64>)], budget: &PrivacyBudget) -> Result<Cost> {
+    // Ledger entries and API events are untrusted: a sampling rate outside
+    // (0, 1) or a cost that is not a finite non-negative number would
+    // otherwise reach the accountant's assertions (a panic) or a NaN
+    // comparison (a release allowed).
+    for (r, q) in releases {
+        if !(r.is_finite() && *r >= 0.0) {
+            return Err(Error::new(
+                Code::PrivacyMechanism,
+                format!("release cost {r} is not a finite non-negative number"),
+            ));
+        }
+        if q.is_some_and(|q| !(q.is_finite() && q > 0.0 && q < 1.0)) {
+            return Err(Error::new(
+                Code::PrivacyMechanism,
+                format!(
+                    "sampling_rate must be in (0, 1) (Poisson sampling), got {}",
+                    q.unwrap_or_default()
+                ),
+            ));
+        }
+    }
     let rho = releases.iter().fold(0.0, |a, (r, _)| a + r);
     if releases.iter().all(|(_, q)| q.is_none()) {
         return Cost::of(rho, budget);
@@ -455,7 +476,10 @@ impl Ledger {
 pub fn read(path: &Path) -> Result<LedgerView> {
     let io = |e: std::io::Error| ledger_err(format!("{}: {e}", path.display()));
     let f = File::open(path).map_err(io)?;
-    let mut lines = BufReader::new(f).lines();
+    if f.metadata().map_err(io)?.len() > MAX_LEDGER_BYTES {
+        return Err(ledger_err(format!("{} is too large", path.display())));
+    }
+    let mut lines = BufReader::new(f.take(MAX_LEDGER_BYTES + 1)).lines();
     let genesis: Genesis = serde_json::from_str(
         &lines
             .next()

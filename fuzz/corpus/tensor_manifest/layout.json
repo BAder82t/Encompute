@@ -1,0 +1,1 @@
+{"version":1,"entries":[{"module":"q_proj","parameter":"lora_A","shape":[2,4],"offset":0,"length":8,"dtype":"float32"}]}

@@ -1,0 +1,1 @@
+{"version":1,"execution_spec_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_id":null,"artifact_digest":null,"allowed_tee":["mock"],"allowed_images":["sha256:0"],"debug":"forbidden","minimum_tcb":"supported","require_gpu_attestation":false,"allow_development":true,"max_evidence_age_secs":600}

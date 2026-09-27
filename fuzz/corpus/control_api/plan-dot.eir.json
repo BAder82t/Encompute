@@ -1,0 +1,1 @@
+{"program":"encompute 0.1\nprogram w precision 0.001\n%0 = input \"x\" [-1.0, 1.0] : secret vector<4>\n%1 = const [0.5, -1.0, 0.25, 2.0] : public vector<4>\n%2 = dot %1, %0 : secret scalar\noutput \"d\" = %2\n","project":"prj_1"}

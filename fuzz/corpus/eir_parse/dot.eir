@@ -1,0 +1,6 @@
+encompute 0.1
+program w precision 0.001
+%0 = input "x" [-1.0, 1.0] : secret vector<4>
+%1 = const [0.5, -1.0, 0.25, 2.0] : public vector<4>
+%2 = dot %1, %0 : secret scalar
+output "d" = %2

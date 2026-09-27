@@ -1,0 +1,209 @@
+{
+  "artifact_format": 5,
+  "program": "w",
+  "compiler": {
+    "version": "0.2.0",
+    "ir_version": "0.1",
+    "plan": {
+      "kind": "ckks",
+      "version": 1
+    }
+  },
+  "crypto": {
+    "semantics": "approximate",
+    "scheme": "CKKS",
+    "backend": "openfhe",
+    "backend_version": "1.5.1",
+    "parameter_profile": "ckks-rns/flexibleauto/hybrid/ternary/128-classic",
+    "parameter_selector_version": "1",
+    "security_table": "HE Standard 128-bit classical, ternary secret (OpenFHE v1.5.1 stdlatticeparms.cpp)"
+  },
+  "files": {
+    "parameters.json": "e9c115338f659639852e8445d58d3ad55d078215b58007cb7f5687ff29c13ab8",
+    "plan.json": "95fc64a442d315f0fd9ec2517bb7608510244efa8b8b14acaa5a3516592b3566",
+    "policy.json": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed",
+    "program.eir": "a4a6755a21f42844cd292d8043a81bf03e864d63182464b81e6e3b8360870131",
+    "security.json": "1e99487c1df631250b7cd8708120cd5e6703ff0fbe242c91a62df57059fa2df5",
+    "verification.json": "0ff67b83754ef46d59ee3d4a6da0c5341e5975de0bef4d673e8783660f4003e0"
+  }
+}
+
+--8<--
+encompute 0.1
+program w precision 0.001
+%0 = input "x" [-1.0, 1.0] : secret vector<4>
+%1 = const [0.5, -1.0, 0.25, 2.0] : public vector<4>
+%2 = dot %1, %0 : secret scalar
+output "d" = %2
+
+--8<--
+{
+  "slots": 4,
+  "inputs": [
+    {
+      "name": "x",
+      "len": 4,
+      "scalar": false
+    }
+  ],
+  "instrs": [
+    {
+      "input": {
+        "index": 0
+      }
+    },
+    {
+      "mul_plain": [
+        0,
+        {
+          "vector": {
+            "value": 1,
+            "negate": false
+          }
+        }
+      ]
+    },
+    {
+      "rotate": [
+        1,
+        1
+      ]
+    },
+    {
+      "add": [
+        1,
+        2
+      ]
+    },
+    {
+      "rotate": [
+        3,
+        2
+      ]
+    },
+    {
+      "add": [
+        3,
+        4
+      ]
+    }
+  ],
+  "levels": [
+    0,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "bounds": [
+    1.0,
+    2.0,
+    2.0,
+    4.0,
+    4.0,
+    3.7500000037500003
+  ],
+  "outputs": [
+    {
+      "name": "d",
+      "reg": 5,
+      "len": 1
+    }
+  ],
+  "rotations": [
+    1,
+    2
+  ],
+  "depth": 1,
+  "approximations": []
+}
+
+--8<--
+{
+  "ring_dim": 8192,
+  "slots": 4,
+  "mult_depth": 1,
+  "scale_bits": 34,
+  "first_mod_bits": 39,
+  "num_large_digits": 2,
+  "log_qp": 134,
+  "max_log_qp": 218,
+  "security": "128-bit classical",
+  "table_source": "HE Standard 128-bit classical, ternary secret (OpenFHE v1.5.1 stdlatticeparms.cpp)"
+}
+
+--8<--
+{
+  "semantics": "approximate",
+  "security_level": "128-bit classical",
+  "scheme": "CKKS",
+  "security_table": "HE Standard 128-bit classical, ternary secret (OpenFHE v1.5.1 stdlatticeparms.cpp)",
+  "result_semantics": "approximate, within the declared precision",
+  "evaluator_receives_secret_key": false,
+  "plaintext_logging": false,
+  "key_ownership": "the client generates all keys; the evaluator receives public and evaluation keys only",
+  "threat_model": {
+    "client": "trusted: holds the secret key, encrypts inputs, decrypts outputs",
+    "evaluator": "honest-but-curious: holds public and evaluation keys only",
+    "network": "untrusted",
+    "storage": "untrusted"
+  },
+  "conditions": [
+    "decrypted results are never returned to the evaluator (CKKS IND-CPA-D, Li–Micciancio 2021)",
+    "inputs lie within their declared ranges; the client checks this before encrypting"
+  ],
+  "inputs": [
+    {
+      "name": "x",
+      "shape": "vector<4>",
+      "range": [
+        -1.0,
+        1.0
+      ],
+      "encrypted": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "d",
+      "shape": "scalar",
+      "encrypted": true,
+      "depends_on": [
+        "x"
+      ]
+    }
+  ],
+  "evaluation_keys": {
+    "relinearization": true,
+    "rotations": [
+      1,
+      2
+    ]
+  },
+  "evaluator_observes": [
+    "program structure (operations and their order)",
+    "public constants (weights, coefficients)",
+    "input and output shapes",
+    "declared input ranges"
+  ],
+  "verification": "receipt"
+}
+
+--8<--
+{
+  "spec_id": "a4875f4784b46d2be9c58d1de97b8b2005d1cbba6d1e038ad84df64d09349ef6",
+  "version": 1,
+  "program_id": "a4a6755a21f42844cd292d8043a81bf03e864d63182464b81e6e3b8360870131",
+  "plan_id": "95fc64a442d315f0fd9ec2517bb7608510244efa8b8b14acaa5a3516592b3566",
+  "parameter_set_id": "e9c115338f659639852e8445d58d3ad55d078215b58007cb7f5687ff29c13ab8",
+  "plan_kind": "ckks",
+  "plan_version": 1,
+  "semantics": "approximate",
+  "scheme": "CKKS",
+  "backend": "openfhe",
+  "backend_version": "1.5.1"
+}
+
+--8<--
+null

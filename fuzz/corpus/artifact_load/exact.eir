@@ -1,0 +1,158 @@
+{
+  "artifact_format": 5,
+  "program": "exact",
+  "compiler": {
+    "version": "0.2.0",
+    "ir_version": "0.1",
+    "plan": {
+      "kind": "exact",
+      "version": 1
+    }
+  },
+  "crypto": {
+    "semantics": "exact",
+    "scheme": "BinFHE",
+    "backend": "openfhe-exact",
+    "backend_version": "1.5.1",
+    "parameter_profile": "BINFHE_STD128_GINX_BITS_V1",
+    "parameter_selector_version": "openfhe-exact-v1"
+  },
+  "files": {
+    "parameters.json": "4527d858ed60ba0758d28d0f502dcef39f7773f8b50df2a862681d17aa0f03a5",
+    "plan.json": "722d0d656426b38597159b13c1cde8bdf393e367683e7ceb1862adc8dac64a5b",
+    "policy.json": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed",
+    "program.eir": "19596282818067844fd41aae62d0b4283a3454d30e855e4512497c1a318e8e40",
+    "security.json": "fe05e076fb77a7aedf35ec045838f43904f884f235e5d631bc62fb0d20805400",
+    "verification.json": "5aa4d792a7e145942fe982d01a3c81779abd473317fcc8bc4e1ce6f2cf4a8ca0"
+  }
+}
+
+--8<--
+encompute 0.1
+program exact precision 0.001
+%0 = input "age" [0.0, 120.0] : secret u8
+%1 = const [18.0] : public u8
+%2 = ge %0, %1 : secret bool
+output "adult" = %2
+
+--8<--
+{
+  "inputs": [
+    {
+      "name": "age",
+      "elem": "u8"
+    }
+  ],
+  "instrs": [
+    {
+      "input": {
+        "index": 0
+      }
+    },
+    {
+      "cmp_scalar": [
+        "ge",
+        0,
+        18
+      ]
+    }
+  ],
+  "elems": [
+    "u8",
+    "bool"
+  ],
+  "outputs": [
+    {
+      "name": "adult",
+      "reg": 1,
+      "elem": "bool"
+    }
+  ]
+}
+
+--8<--
+{
+  "backend": "openfhe-exact",
+  "backend_version": "1.5.1",
+  "profile": "BINFHE_STD128_GINX_BITS_V1",
+  "security": "128-bit",
+  "failure_probability": "2^-135 per gate",
+  "parameter_selector_version": "openfhe-exact-v1"
+}
+
+--8<--
+{
+  "semantics": "exact",
+  "security_level": "128-bit",
+  "scheme": "BinFHE",
+  "backend": "openfhe-exact",
+  "parameter_profile": "BINFHE_STD128_GINX_BITS_V1",
+  "failure_probability": "2^-135 per gate",
+  "result_semantics": "exact",
+  "evaluator_receives_secret_key": false,
+  "plaintext_logging": false,
+  "key_ownership": "the client generates all keys; the evaluator receives the (compressed) server key only",
+  "threat_model": {
+    "client": "trusted: holds the secret key, encrypts inputs, decrypts outputs",
+    "evaluator": "honest-but-curious: holds public and evaluation keys only",
+    "network": "untrusted",
+    "storage": "untrusted"
+  },
+  "conditions": [
+    "inputs lie within their declared ranges; the client checks this before encrypting",
+    "integer range analysis proved that no operation overflows for inputs in range"
+  ],
+  "inputs": [
+    {
+      "name": "age",
+      "shape": "scalar",
+      "type": "u8",
+      "range": [
+        0.0,
+        120.0
+      ],
+      "encrypted": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "adult",
+      "shape": "scalar",
+      "type": "bool",
+      "encrypted": true,
+      "depends_on": [
+        "age"
+      ]
+    }
+  ],
+  "evaluation_keys": {
+    "server_key": "compressed TFHE server key (bootstrapping and key-switching keys)"
+  },
+  "evaluator_observes": [
+    "program structure (operations and their order)",
+    "public constants (weights, coefficients)",
+    "input and output shapes",
+    "declared input ranges"
+  ],
+  "verification": "receipt"
+}
+
+--8<--
+{
+  "spec_id": "05dea28513bd3b9dd1162ba01de8e5b1469d253feb5e5b8dd3c13718a61d1fba",
+  "version": 1,
+  "program_id": "19596282818067844fd41aae62d0b4283a3454d30e855e4512497c1a318e8e40",
+  "plan_id": "722d0d656426b38597159b13c1cde8bdf393e367683e7ceb1862adc8dac64a5b",
+  "parameter_set_id": "4527d858ed60ba0758d28d0f502dcef39f7773f8b50df2a862681d17aa0f03a5",
+  "plan_kind": "exact",
+  "plan_version": 1,
+  "semantics": "exact",
+  "scheme": "BinFHE",
+  "backend": "openfhe-exact",
+  "backend_version": "1.5.1",
+  "transcript_version": 1,
+  "transcript_hash": "2db729680e48e6b3eacb70cfe500440f6bcba673e9ee2b8b2530c54cb6390e8a"
+}
+
+--8<--
+null
