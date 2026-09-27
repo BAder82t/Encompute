@@ -1,12 +1,25 @@
-# cargo-deny: run nightly and before releases (`cargo deny check advisories
-# bans sources`). Licenses are reviewed separately (AGPL-3.0 plus commercial).
+# cargo-deny: the release gate (scripts/release/scan.sh) and nightly runs.
+#
+#   cargo deny check                   # advisories, bans, licenses, sources
+#
+# The graph is the production feature set: the binaries and the Python
+# extension as released, with OpenFHE. The research feature (TFHE-rs) is
+# not part of it and is banned outright below: if it ever reaches the
+# production graph, this check fails (as does
+# scripts/audit-commercial-build.sh).
 
 [graph]
 all-features = false
+features = [
+    "encompute-cli/openfhe",
+    "encompute-evaluator/openfhe",
+    "encompute-py/openfhe",
+]
 
 [advisories]
 # Unmaintained crates are reported but do not fail the gate; vulnerabilities
-# and yanked versions do.
+# and yanked versions do. Every ignored advisory is also recorded, with an
+# expiry, in security/exceptions.toml (docs/release-process.md).
 unmaintained = "workspace"
 yanked = "deny"
 ignore = [
@@ -22,6 +35,69 @@ ignore = [
 multiple-versions = "allow"
 # Internal path dependencies carry no version (the crates are not on crates.io).
 wildcards = "allow"
+# The commercial dependency boundary: TFHE-rs and the rest of Zama's stack
+# are research-only (commercial use needs a patent license from Zama).
+deny = [
+    { name = "tfhe", reason = "research-only: commercial use needs a patent license from Zama" },
+    { name = "tfhe-csprng", reason = "part of TFHE-rs (research-only)" },
+    { name = "tfhe-fft", reason = "part of TFHE-rs (research-only)" },
+    { name = "tfhe-ntt", reason = "part of TFHE-rs (research-only)" },
+    { name = "tfhe-versionable", reason = "part of TFHE-rs (research-only)" },
+    { name = "tfhe-versionable-derive", reason = "part of TFHE-rs (research-only)" },
+    { name = "tfhe-zk-pok", reason = "part of TFHE-rs (research-only)" },
+    { name = "tfhe-cuda-backend", reason = "part of TFHE-rs (research-only)" },
+    { name = "concrete-csprng", reason = "part of Zama's stack (research-only)" },
+    { name = "concrete-fft", reason = "part of Zama's stack (research-only)" },
+]
+
+[licenses]
+# Permissive licenses only for third-party code: Encompute is offered under
+# AGPL-3.0 and a commercial license, so no third-party copyleft may enter
+# (an "OR" expression passes when one of its branches is allowed).
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# Encompute's own crates (AGPL-3.0 plus commercial; not on crates.io).
+exceptions = [
+    { crate = "encompute-analysis", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-assurance", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-attestation", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-backend", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-ckks", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-cli", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-control", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-evaluator", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-exact", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-ir", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-keybroker", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-openfhe", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-openfhe-client", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-openfhe-exact", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-planner", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-privacy", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-protocol", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-py", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-runtime", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-secagg", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-tfhe", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-tfhe-client", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-training", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-trust", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-verification", allow = ["AGPL-3.0-only"] },
+    { crate = "encompute-vfhe", allow = ["AGPL-3.0-only"] },
+]
 
 [sources]
 unknown-registry = "deny"
