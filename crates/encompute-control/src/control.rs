@@ -287,6 +287,18 @@ impl Control {
                 )
             })?;
         }
+        // A revoked asset must still be revoked (an absent one cannot be
+        // used either: asset IDs are never reissued).
+        for asset in &a.revoked {
+            if let Some(status) = revoked_status(&mut *c, asset)? {
+                if status != "revoked" {
+                    return Err(rollback(
+                        "REVOCATION",
+                        format!("asset {asset} was revoked, but the database shows it {status}"),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -368,6 +380,26 @@ impl Control {
             }
             Ok(())
         })?;
+        // Revocations the restored database forgot are applied again: the
+        // asset is revoked, jobs not yet running fail, the broker is told.
+        for asset in &a.revoked {
+            self.db.tx(|t| {
+                let Some(row) = crate::authz::asset_row(t, asset)? else {
+                    return Ok(());
+                };
+                if row.status != "revoked" {
+                    self.revoke_in(
+                        t,
+                        operator,
+                        "recovery",
+                        &row,
+                        Some("anchored_revocation_reapplied"),
+                    )?;
+                    notes.push(format!("asset {asset}: revocation re-applied"));
+                }
+                Ok(())
+            })?;
+        }
         let mut c = self.db.conn()?;
         let (seq, root) = audit::verify_chain(&mut *c)?;
         let mut ledgers = a.ledgers.clone();
@@ -466,6 +498,15 @@ impl Control {
             }
         }
     }
+}
+
+/// An asset's status, or `None` if the database does not hold it.
+fn revoked_status(c: &mut impl GenericClient, asset: &str) -> Result<Option<String>> {
+    Ok(
+        c.query_opt("SELECT status FROM assets WHERE id = $1", &[&asset])
+            .map_err(db_err)?
+            .map(|r| r.get(0)),
+    )
 }
 
 /// A privacy ledger's view from the database, or `None`.
