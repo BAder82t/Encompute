@@ -949,9 +949,27 @@ impl Control {
         receipt: &Value,
         eval_seconds: Option<f64>,
     ) -> Result<Value> {
+        let out = self
+            .db
+            .tx(|t| self.evaluator_completed_in(t, evaluator, request, id, receipt))?;
+        if let Some(s) = eval_seconds {
+            self.metrics
+                .observe("encompute_evaluation_duration_seconds", "all", s);
+        }
+        Ok(out)
+    }
+
+    fn evaluator_completed_in(
+        &self,
+        t: &mut Transaction<'_>,
+        evaluator: &str,
+        request: &str,
+        id: &str,
+        receipt: &Value,
+    ) -> Result<Value> {
         let signed: SignedExecutionReceipt =
             serde_json::from_value(receipt.clone()).map_err(|e| bad(format!("receipt: {e}")))?;
-        let out = self.db.tx(|t| {
+        {
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             if j.evaluator.as_deref() != Some(evaluator) {
                 return Err(not_found("job", id));
@@ -1002,12 +1020,7 @@ impl Control {
                 .r#ref("execution", signed.receipt.execution_id.clone()),
             )?;
             Ok(json!({"id": id, "state": "verifying"}))
-        })?;
-        if let Some(s) = eval_seconds {
-            self.metrics
-                .observe("encompute_evaluation_duration_seconds", "all", s);
         }
-        Ok(out)
     }
 
     /// The client reports the receipt it received with its commitments to
@@ -1376,6 +1389,16 @@ impl Control {
     /// Heartbeat / status: the evaluator itself (ready, busy, draining,
     /// unhealthy) or a platform operator (draining, ready).
     pub fn evaluator_status(&self, ctx: &Ctx, id: &str, r: EvaluatorStatus) -> Result<Value> {
+        self.db.tx(|t| self.evaluator_status_in(t, ctx, id, &r))
+    }
+
+    fn evaluator_status_in(
+        &self,
+        t: &mut Transaction<'_>,
+        ctx: &Ctx,
+        id: &str,
+        r: &EvaluatorStatus,
+    ) -> Result<Value> {
         let own = ctx.principal.service_kind() == Some(ServiceKind::Evaluator) && ctx.actor() == id;
         let operator = ctx.principal.has_role(PLATFORM_ORG, Role::Operator);
         let allowed = match r.status.as_str() {
@@ -1388,9 +1411,12 @@ impl Control {
                 "an evaluator reports its own status; operators may drain it",
             ));
         }
-        self.db.tx(|t| {
+        {
             let current: String = t
-                .query_opt("SELECT status FROM evaluators WHERE id = $1 FOR UPDATE", &[&id])
+                .query_opt(
+                    "SELECT status FROM evaluators WHERE id = $1 FOR UPDATE",
+                    &[&id],
+                )
                 .map_err(db_err)?
                 .ok_or_else(|| not_found("evaluator", id))?
                 .get(0);
@@ -1420,7 +1446,7 @@ impl Control {
                 .map_err(db_err)?
                 .get(0);
             Ok(json!({"id": id, "status": r.status, "jobs_in_flight": running}))
-        })
+        }
     }
 
     pub fn list_evaluators(&self, ctx: &Ctx) -> Result<Value> {
@@ -1516,138 +1542,157 @@ impl Control {
             .map_err(db_err)?
             .get(0);
         crate::transport::open(m, &pk, &self.service_id, now())?;
-        {
-            let mut c = self.db.conn()?;
-            if let Some(r) = c
-                .query_opt(
-                    "SELECT outcome FROM inbox WHERE consumer = $1 AND message_id = $2",
-                    &[&self.service_id, &m.message_id],
-                )
-                .map_err(db_err)?
-            {
+        let duplicate = |t: &mut Transaction<'_>| -> Result<Option<Value>> {
+            Ok(t.query_opt(
+                "SELECT outcome FROM inbox WHERE consumer = $1 AND message_id = $2",
+                &[&self.service_id, &m.message_id],
+            )
+            .map_err(db_err)?
+            .map(|r| {
                 let mut v: Value = r.get(0);
                 v["duplicate"] = json!(true);
+                v
+            }))
+        };
+        if m.kind == "privacy.event" {
+            // The ledger applies an event once by its ID, under the
+            // ledger row's lock, in its own transaction (and anchors it
+            // after commit): a concurrent duplicate finds the entry.
+            if let Some(v) = self.db.tx(|t| duplicate(t))? {
                 return Ok(v);
             }
+            let asset = m.payload["asset"]
+                .as_str()
+                .ok_or_else(|| bad("privacy.event names no asset"))?;
+            let event = serde_json::from_value(m.payload["event"].clone())
+                .map_err(|e| bad(format!("event: {e}")))?;
+            let outcome = self.privacy_spend(ctx, asset, event)?;
+            self.db
+                .conn()?
+                .execute(
+                    "INSERT INTO inbox (consumer, message_id, outcome) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                    &[&self.service_id, &m.message_id, &outcome],
+                )
+                .map_err(db_err)?;
+            return Ok(outcome);
         }
-        let outcome = match m.kind.as_str() {
-            "job.completed" => {
-                let job = m
-                    .job
-                    .as_deref()
-                    .ok_or_else(|| bad("job.completed names no job"))?;
-                self.evaluator_completed(
+        // One transaction: the inbox row first (a concurrent delivery of
+        // the same message waits on it, then finds it), then the effect.
+        let outcome = self.db.tx(|t| {
+            let fresh = t
+                .execute(
+                    "INSERT INTO inbox (consumer, message_id, outcome) VALUES ($1, $2, 'null') ON CONFLICT DO NOTHING",
+                    &[&self.service_id, &m.message_id],
+                )
+                .map_err(db_err)?;
+            if fresh == 0 {
+                return duplicate(t)?.ok_or_else(|| conflict("message is being applied"));
+            }
+            let outcome = match m.kind.as_str() {
+                "job.completed" => {
+                    let job = m
+                        .job
+                        .as_deref()
+                        .ok_or_else(|| bad("job.completed names no job"))?;
+                    self.evaluator_completed_in(
+                        t,
+                        &m.sender,
+                        &ctx.request_id,
+                        job,
+                        &m.payload["receipt"],
+                    )?
+                }
+                "evaluator.heartbeat" => self.evaluator_status_in(
+                    t,
+                    ctx,
                     &m.sender,
-                    &ctx.request_id,
-                    job,
-                    &m.payload["receipt"],
-                    m.payload["evaluation_ms"]
-                        .as_u64()
-                        .map(|ms| ms as f64 / 1000.0),
-                )?
-            }
-            "evaluator.heartbeat" => self.evaluator_status(
-                ctx,
-                &m.sender,
-                EvaluatorStatus {
-                    status: m.payload["status"].as_str().unwrap_or("ready").into(),
-                },
-            )?,
-            "privacy.event" => {
-                let asset = m.payload["asset"]
-                    .as_str()
-                    .ok_or_else(|| bad("privacy.event names no asset"))?;
-                let event = serde_json::from_value(m.payload["event"].clone())
-                    .map_err(|e| bad(format!("event: {e}")))?;
-                self.privacy_spend(ctx, asset, event)?
-            }
-            "key.release" => {
-                if ctx.principal.service_kind() != Some(ServiceKind::Keybroker) {
-                    return Err(forbidden("key releases are reported by key brokers"));
-                }
-                let asset = m.payload["asset"]
-                    .as_str()
-                    .ok_or_else(|| bad("key.release names no asset"))?;
-                let allowed = m.payload["allowed"].as_bool().unwrap_or(false);
-                let mapped = self
-                    .db
-                    .conn()?
-                    .query_opt(
-                        "SELECT id, organization_id FROM assets WHERE key_ref->>'broker' = $1 AND key_ref->>'key_ref' = $2",
-                        &[&m.sender, &asset],
-                    )
-                    .map_err(db_err)?
-                    .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)));
-                let (resource, org) = match &mapped {
-                    Some((id, org)) => (id.clone(), Some(org.clone())),
-                    None => (asset.to_owned(), None),
-                };
-                let mut d = ctx
-                    .draft(
-                        if allowed {
-                            "key.release.allowed"
-                        } else {
-                            "key.release.denied"
-                        },
-                        "asset",
-                        &resource,
-                        if allowed {
-                            Outcome::Allowed
-                        } else {
-                            Outcome::Denied
-                        },
-                    )
-                    .r#ref("broker", m.sender.clone());
-                if let Some(o) = &org {
-                    d = d.org(o);
-                }
-                if let Some(reason) = m.payload["reason"].as_str() {
-                    d = d.r#ref("reason", reason.to_owned());
-                }
-                // Recorded once: the message ID enters the inbox in the
-                // same transaction as the audit event, so a duplicate
-                // (concurrent, or redelivered after a crash) finds it.
-                let outcome = json!({"recorded": true});
-                let first = self.db.tx(|t| {
-                    let n = t
-                        .execute(
-                            "INSERT INTO inbox (consumer, message_id, outcome) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-                            &[&self.service_id, &m.message_id, &outcome],
-                        )
-                        .map_err(db_err)?;
-                    if n > 0 {
-                        audit::append(t, d.clone())?;
+                    &EvaluatorStatus {
+                        status: m.payload["status"].as_str().unwrap_or("ready").into(),
+                    },
+                )?,
+                "key.release" => {
+                    if ctx.principal.service_kind() != Some(ServiceKind::Keybroker) {
+                        return Err(forbidden("key releases are reported by key brokers"));
                     }
-                    Ok(n > 0)
-                })?;
-                if !first {
-                    return Ok(json!({"recorded": true, "duplicate": true}));
+                    let asset = m.payload["asset"]
+                        .as_str()
+                        .ok_or_else(|| bad("key.release names no asset"))?;
+                    let allowed = m.payload["allowed"].as_bool().unwrap_or(false);
+                    let mapped = t
+                        .query_opt(
+                            "SELECT id, organization_id FROM assets WHERE key_ref->>'broker' = $1 AND key_ref->>'key_ref' = $2
+                              ORDER BY id LIMIT 1",
+                            &[&m.sender, &asset],
+                        )
+                        .map_err(db_err)?
+                        .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)));
+                    let (resource, org) = match &mapped {
+                        Some((id, org)) => (id.clone(), Some(org.clone())),
+                        None => (asset.to_owned(), None),
+                    };
+                    let mut d = ctx
+                        .draft(
+                            if allowed {
+                                "key.release.allowed"
+                            } else {
+                                "key.release.denied"
+                            },
+                            "asset",
+                            &resource,
+                            if allowed {
+                                Outcome::Allowed
+                            } else {
+                                Outcome::Denied
+                            },
+                        )
+                        .r#ref("broker", m.sender.clone());
+                    if let Some(o) = &org {
+                        d = d.org(o);
+                    }
+                    if let Some(reason) = m.payload["reason"].as_str() {
+                        d = d.r#ref("reason", reason.to_owned());
+                    }
+                    audit::append(t, d)?;
+                    json!({"recorded": true})
                 }
-                if !allowed {
-                    self.metrics
-                        .inc("encompute_key_release_denied_total", "broker");
-                }
-                json!({"recorded": true})
-            }
-            "secagg.round.completed" => {
-                if let Some(ms) = m.payload["duration_ms"].as_u64() {
-                    self.metrics.observe(
-                        "encompute_secagg_round_duration_seconds",
-                        "all",
-                        ms as f64 / 1000.0,
-                    );
-                }
-                json!({"recorded": true})
-            }
-            other => return Err(bad(format!("unknown message kind {other:?}"))),
-        };
-        self.db
-            .conn()?
-            .execute(
-                "INSERT INTO inbox (consumer, message_id, outcome) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                "secagg.round.completed" => json!({"recorded": true}),
+                other => return Err(bad(format!("unknown message kind {other:?}"))),
+            };
+            t.execute(
+                "UPDATE inbox SET outcome = $3 WHERE consumer = $1 AND message_id = $2",
                 &[&self.service_id, &m.message_id, &outcome],
             )
             .map_err(db_err)?;
+            Ok(outcome)
+        })?;
+        // Metrics for a message applied now (not for a duplicate).
+        if outcome.get("duplicate").is_none() {
+            match m.kind.as_str() {
+                "job.completed" => {
+                    if let Some(ms) = m.payload["evaluation_ms"].as_u64() {
+                        self.metrics.observe(
+                            "encompute_evaluation_duration_seconds",
+                            "all",
+                            ms as f64 / 1000.0,
+                        );
+                    }
+                }
+                "key.release" if m.payload["allowed"].as_bool() != Some(true) => {
+                    self.metrics
+                        .inc("encompute_key_release_denied_total", "broker");
+                }
+                "secagg.round.completed" => {
+                    if let Some(ms) = m.payload["duration_ms"].as_u64() {
+                        self.metrics.observe(
+                            "encompute_secagg_round_duration_seconds",
+                            "all",
+                            ms as f64 / 1000.0,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(outcome)
     }
 

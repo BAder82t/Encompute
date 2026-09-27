@@ -180,3 +180,58 @@ fn cross_tenant_key_ref_cannot_be_registered_or_revoked() {
     assert_eq!(sent[0].1.kind, "asset.revoked");
     assert_eq!(sent[0].1.organization.as_deref(), Some("modelco"));
 }
+
+/// The transport may deliver a message many times at once: the inbox row
+/// and the message's effect are one transaction, so it applies once, for
+/// every kind (here an evaluator's drain heartbeat, which is audited).
+#[test]
+fn concurrent_duplicate_messages_apply_once() {
+    let Some(w) = world() else { return };
+    let t = &w.t;
+    let drains = || {
+        t.ok(
+            &w.platform,
+            "GET",
+            "/v1/audit?organization=platform&limit=1000",
+            None,
+        )
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["action"] == "evaluator.status" && e["refs"]["status"] == "draining")
+        .count()
+    };
+    let before = drains();
+    let m = encompute_verification::service::seal(
+        &w.evaluator.signer,
+        "evaluator.heartbeat",
+        "control-plane",
+        Default::default(),
+        &json!({"status": "draining"}),
+        300,
+    )
+    .unwrap();
+    let body = serde_json::to_value(&m).unwrap();
+    let who = w.evaluator.service.clone();
+    let barrier = std::sync::Barrier::new(8);
+    let results: Vec<(u16, serde_json::Value)> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8)
+            .map(|_| {
+                s.spawn(|| {
+                    barrier.wait();
+                    t.call(&who, "POST", "/v1/messages", Some(body.clone()))
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (s, v) in &results {
+        assert_eq!(*s, 200, "{v}");
+    }
+    let fresh = results
+        .iter()
+        .filter(|(_, v)| v["duplicate"] != true)
+        .count();
+    assert_eq!(fresh, 1, "exactly one delivery applied: {results:?}");
+    assert_eq!(drains() - before, 1, "the drain was audited once");
+}
