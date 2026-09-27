@@ -495,6 +495,8 @@ impl TrainingSpec {
     pub fn attestation_policy(&self, image: &str, development: bool) -> Result<AttestationPolicy> {
         let mut p = AttestationPolicy::new(&self.id()?, self.policy_id.as_deref());
         p.artifact_digest = Some(self.code_digest.clone());
+        // Keys go only to a workload bound to the spec's DP configuration.
+        p.privacy_policy_id = self.privacy_policy_id.clone();
         p.allowed_images = vec![image.to_owned()];
         p.allowed_tee = if development {
             vec![TeeKind::Mock]

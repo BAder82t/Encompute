@@ -231,6 +231,9 @@ fn attestation_policy_binds_the_spec_and_code() {
     let p = s.attestation_policy("sha256:worker", true).unwrap();
     assert_eq!(p.execution_spec_id, s.id().unwrap());
     assert_eq!(p.artifact_digest.as_deref(), Some(h('3').as_str()));
+    // SF-11: keys go only to a workload bound to the spec's privacy policy.
+    assert!(s.privacy_policy_id.is_some());
+    assert_eq!(p.privacy_policy_id, s.privacy_policy_id);
     assert!(p.allow_development);
     let prod = s.attestation_policy("sha256:worker", false).unwrap();
     assert!(!prod.allow_development);

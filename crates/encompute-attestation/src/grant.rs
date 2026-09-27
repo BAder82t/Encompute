@@ -88,6 +88,9 @@ pub struct WorkloadSession {
     evaluator_public_key: [u8; 32],
     secret: <SessionKem as Kem>::PrivateKey,
     public: <SessionKem as Kem>::PublicKey,
+    /// The `PrivacyPolicyId` this workload applies, bound into every
+    /// binding (absent: the workload applies none).
+    privacy_policy_id: Option<String>,
 }
 
 impl WorkloadSession {
@@ -97,7 +100,17 @@ impl WorkloadSession {
             evaluator_public_key: evaluator.public_key(),
             secret,
             public,
+            privacy_policy_id: None,
         }
+    }
+
+    /// This session, for a workload applying `privacy_policy_id` (a
+    /// training or aggregation workload under differential privacy): its
+    /// bindings name it, so a key-release policy requiring it is satisfied
+    /// only by a workload bound to exactly that privacy policy.
+    pub fn with_privacy_policy(mut self, privacy_policy_id: Option<&str>) -> Self {
+        self.privacy_policy_id = privacy_policy_id.map(str::to_owned);
+        self
     }
 
     pub fn session_public_key_hex(&self) -> String {
@@ -134,7 +147,7 @@ impl WorkloadSession {
             evaluator_public_key: hex(&self.evaluator_public_key),
             session_public_key: self.session_public_key_hex(),
             challenge_nonce: challenge.nonce.clone(),
-            privacy_policy_id: None,
+            privacy_policy_id: self.privacy_policy_id.clone(),
         }
     }
 

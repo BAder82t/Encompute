@@ -135,6 +135,43 @@ fn policy_mismatches() {
     );
 }
 
+/// SF-11: a policy requiring a privacy policy is satisfied only by a
+/// workload whose session binds exactly that privacy policy.
+#[test]
+fn privacy_policy_binding() {
+    const PRIVACY: &str = "55555555555555555555555555555555555555555555555555555555555555dd";
+    const OTHER: &str = "66666666666666666666666666666666666666666666666666666666666666ee";
+    let w = world();
+    let mut p = dev_policy();
+    p.privacy_policy_id = Some(PRIVACY.into());
+    let signer = EvaluatorSigner::from_seed(&[9; 32]);
+    let evidence = |privacy: Option<&str>| {
+        let s = WorkloadSession::new(&signer.identity()).with_privacy_policy(privacy);
+        let b = s.binding(&w.challenge, SPEC, Some(POLICY), ARTIFACT);
+        assert_eq!(b.privacy_policy_id.as_deref(), privacy);
+        w.hw.attester(IMAGE)
+            .issued_at(NOW)
+            .attest(&w.challenge, &b)
+            .unwrap()
+    };
+    let v = w
+        .verifier
+        .verify(&evidence(Some(PRIVACY)), &p, &w.challenge, NOW)
+        .unwrap();
+    assert_eq!(v.binding.privacy_policy_id.as_deref(), Some(PRIVACY));
+    assert_eq!(w.code(&evidence(None), &p, NOW), Code::WorkloadPolicy);
+    assert_eq!(
+        w.code(&evidence(Some(OTHER)), &p, NOW),
+        Code::WorkloadPolicy
+    );
+    // A workload bound to a privacy policy does not satisfy a policy that
+    // names none: the binding is exact.
+    assert_eq!(
+        w.code(&evidence(Some(PRIVACY)), &dev_policy(), NOW),
+        Code::WorkloadPolicy
+    );
+}
+
 #[test]
 fn debug_and_tcb() {
     let w = world();
