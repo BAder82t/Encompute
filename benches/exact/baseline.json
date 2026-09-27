@@ -1,0 +1,661 @@
+{
+  "optimizer_version": 1,
+  "programs": {
+    "arith_scoring": {
+      "optimized": {
+        "1": {
+          "cse_hits": 0,
+          "dead_gates": 3,
+          "depth": 43,
+          "gates": 769,
+          "input_bits_total": 96,
+          "input_bits_used": 60,
+          "nots": 0,
+          "range_bits_folded": 39,
+          "rounds": 769,
+          "rounds_8": 119,
+          "simplifications": 0,
+          "strategy": "reference",
+          "width": 108
+        },
+        "8": {
+          "cse_hits": 0,
+          "dead_gates": 3,
+          "depth": 43,
+          "gates": 769,
+          "input_bits_total": 96,
+          "input_bits_used": 60,
+          "nots": 0,
+          "range_bits_folded": 39,
+          "rounds": 119,
+          "rounds_8": 119,
+          "simplifications": 0,
+          "strategy": "reference",
+          "width": 108
+        }
+      },
+      "reference": {
+        "circuit_depth": 55,
+        "circuit_gates": 1219,
+        "circuit_rounds_8": 180,
+        "gates": 1235,
+        "ranged_gates": 769
+      }
+    },
+    "boolean_policy": {
+      "optimized": {
+        "1": {
+          "cse_hits": 0,
+          "dead_gates": 0,
+          "depth": 8,
+          "gates": 15,
+          "input_bits_total": 12,
+          "input_bits_used": 12,
+          "nots": 4,
+          "range_bits_folded": 0,
+          "rounds": 15,
+          "rounds_8": 8,
+          "simplifications": 0,
+          "strategy": "reference",
+          "width": 6
+        },
+        "8": {
+          "cse_hits": 0,
+          "dead_gates": 0,
+          "depth": 8,
+          "gates": 15,
+          "input_bits_total": 12,
+          "input_bits_used": 12,
+          "nots": 4,
+          "range_bits_folded": 0,
+          "rounds": 8,
+          "rounds_8": 8,
+          "simplifications": 0,
+          "strategy": "reference",
+          "width": 6
+        }
+      },
+      "reference": {
+        "circuit_depth": 8,
+        "circuit_gates": 15,
+        "circuit_rounds_8": 8,
+        "gates": 15,
+        "ranged_gates": 15
+      }
+    },
+    "branch_logic": {
+      "optimized": {
+        "1": {
+          "cse_hits": 1,
+          "dead_gates": 0,
+          "depth": 25,
+          "gates": 57,
+          "input_bits_total": 34,
+          "input_bits_used": 22,
+          "nots": 32,
+          "range_bits_folded": 11,
+          "rounds": 57,
+          "rounds_8": 25,
+          "simplifications": 2,
+          "strategy": "reference",
+          "width": 6
+        },
+        "8": {
+          "cse_hits": 1,
+          "dead_gates": 0,
+          "depth": 12,
+          "gates": 62,
+          "input_bits_total": 34,
+          "input_bits_used": 22,
+          "nots": 32,
+          "range_bits_folded": 11,
+          "rounds": 13,
+          "rounds_8": 13,
+          "simplifications": 2,
+          "strategy": "parallel",
+          "width": 10
+        }
+      },
+      "reference": {
+        "circuit_depth": 25,
+        "circuit_gates": 74,
+        "circuit_rounds_8": 25,
+        "gates": 77,
+        "ranged_gates": 57
+      }
+    },
+    "cmp_u16": {
+      "optimized": {
+        "1": {
+          "cse_hits": 32,
+          "dead_gates": 0,
+          "depth": 32,
+          "gates": 162,
+          "input_bits_total": 32,
+          "input_bits_used": 32,
+          "nots": 51,
+          "range_bits_folded": 0,
+          "rounds": 162,
+          "rounds_8": 41,
+          "simplifications": 0,
+          "strategy": "reference",
+          "width": 57
+        },
+        "8": {
+          "cse_hits": 43,
+          "dead_gates": 0,
+          "depth": 10,
+          "gates": 179,
+          "input_bits_total": 32,
+          "input_bits_used": 32,
+          "nots": 51,
+          "range_bits_folded": 0,
+          "rounds": 28,
+          "rounds_8": 28,
+          "simplifications": 0,
+          "strategy": "parallel",
+          "width": 65
+        }
+      },
+      "reference": {
+        "circuit_depth": 32,
+        "circuit_gates": 162,
+        "circuit_rounds_8": 41,
+        "gates": 194,
+        "ranged_gates": 162
+      }
+    },
+    "cmp_u32": {
+      "optimized": {
+        "1": {
+          "cse_hits": 64,
+          "dead_gates": 0,
+          "depth": 64,
+          "gates": 328,
+          "input_bits_total": 64,
+          "input_bits_used": 64,
+          "nots": 99,
+          "range_bits_folded": 0,
+          "rounds": 328,
+          "rounds_8": 83,
+          "simplifications": 0,
+          "strategy": "reference",
+          "width": 113
+        },
+        "8": {
+          "cse_hits": 90,
+          "dead_gates": 0,
+          "depth": 12,
+          "gates": 372,
+          "input_bits_total": 64,
+          "input_bits_used": 64,
+          "nots": 99,
+          "range_bits_folded": 0,
+          "rounds": 52,
+          "rounds_8": 52,
+          "simplifications": 0,
+          "strategy": "parallel",
+          "width": 136
+        }
+      },
+      "reference": {
+        "circuit_depth": 64,
+        "circuit_gates": 328,
+        "circuit_rounds_8": 83,
+        "gates": 392,
+        "ranged_gates": 328
+      }
+    },
+    "cmp_u8": {
+      "optimized": {
+        "1": {
+          "cse_hits": 16,
+          "dead_gates": 0,
+          "depth": 16,
+          "gates": 78,
+          "input_bits_total": 16,
+          "input_bits_used": 16,
+          "nots": 27,
+          "range_bits_folded": 0,
+          "rounds": 78,
+          "rounds_8": 20,
+          "simplifications": 0,
+          "strategy": "reference",
+          "width": 29
+        },
+        "8": {
+          "cse_hits": 20,
+          "dead_gates": 0,
+          "depth": 8,
+          "gates": 83,
+          "input_bits_total": 16,
+          "input_bits_used": 16,
+          "nots": 27,
+          "range_bits_folded": 0,
+          "rounds": 14,
+          "rounds_8": 14,
+          "simplifications": 0,
+          "strategy": "parallel",
+          "width": 32
+        }
+      },
+      "reference": {
+        "circuit_depth": 16,
+        "circuit_gates": 78,
+        "circuit_rounds_8": 20,
+        "gates": 94,
+        "ranged_gates": 78
+      }
+    },
+    "const_arith": {
+      "optimized": {
+        "1": {
+          "cse_hits": 151,
+          "dead_gates": 162,
+          "depth": 156,
+          "gates": 1032,
+          "input_bits_total": 32,
+          "input_bits_used": 20,
+          "nots": 89,
+          "range_bits_folded": 15,
+          "rounds": 1032,
+          "rounds_8": 215,
+          "simplifications": 463,
+          "strategy": "reference",
+          "width": 74
+        },
+        "8": {
+          "cse_hits": 151,
+          "dead_gates": 162,
+          "depth": 156,
+          "gates": 1032,
+          "input_bits_total": 32,
+          "input_bits_used": 20,
+          "nots": 89,
+          "range_bits_folded": 15,
+          "rounds": 215,
+          "rounds_8": 215,
+          "simplifications": 463,
+          "strategy": "reference",
+          "width": 74
+        }
+      },
+      "reference": {
+        "circuit_depth": 229,
+        "circuit_gates": 1672,
+        "circuit_rounds_8": 321,
+        "gates": 2931,
+        "ranged_gates": 1032
+      }
+    },
+    "eligibility": {
+      "optimized": {
+        "1": {
+          "cse_hits": 0,
+          "dead_gates": 0,
+          "depth": 48,
+          "gates": 381,
+          "input_bits_total": 88,
+          "input_bits_used": 55,
+          "nots": 61,
+          "range_bits_folded": 32,
+          "rounds": 381,
+          "rounds_8": 68,
+          "simplifications": 4,
+          "strategy": "reference",
+          "width": 74
+        },
+        "8": {
+          "cse_hits": 0,
+          "dead_gates": 0,
+          "depth": 48,
+          "gates": 381,
+          "input_bits_total": 88,
+          "input_bits_used": 55,
+          "nots": 61,
+          "range_bits_folded": 32,
+          "rounds": 68,
+          "rounds_8": 68,
+          "simplifications": 4,
+          "strategy": "reference",
+          "width": 74
+        }
+      },
+      "reference": {
+        "circuit_depth": 60,
+        "circuit_gates": 529,
+        "circuit_rounds_8": 85,
+        "gates": 533,
+        "ranged_gates": 381
+      }
+    },
+    "golden_eligibility": {
+      "optimized": {
+        "1": {
+          "cse_hits": 1,
+          "dead_gates": 0,
+          "depth": 61,
+          "gates": 663,
+          "input_bits_total": 104,
+          "input_bits_used": 67,
+          "nots": 93,
+          "range_bits_folded": 35,
+          "rounds": 663,
+          "rounds_8": 110,
+          "simplifications": 16,
+          "strategy": "reference",
+          "width": 80
+        },
+        "8": {
+          "cse_hits": 1,
+          "dead_gates": 0,
+          "depth": 61,
+          "gates": 663,
+          "input_bits_total": 104,
+          "input_bits_used": 67,
+          "nots": 93,
+          "range_bits_folded": 35,
+          "rounds": 110,
+          "rounds_8": 110,
+          "simplifications": 16,
+          "strategy": "reference",
+          "width": 80
+        }
+      },
+      "reference": {
+        "circuit_depth": 71,
+        "circuit_gates": 909,
+        "circuit_rounds_8": 141,
+        "gates": 926,
+        "ranged_gates": 663
+      }
+    },
+    "golden_policy": {
+      "optimized": {
+        "1": {
+          "cse_hits": 4,
+          "dead_gates": 0,
+          "depth": 23,
+          "gates": 80,
+          "input_bits_total": 46,
+          "input_bits_used": 33,
+          "nots": 28,
+          "range_bits_folded": 12,
+          "rounds": 80,
+          "rounds_8": 27,
+          "simplifications": 8,
+          "strategy": "reference",
+          "width": 19
+        },
+        "8": {
+          "cse_hits": 6,
+          "dead_gates": 0,
+          "depth": 18,
+          "gates": 90,
+          "input_bits_total": 46,
+          "input_bits_used": 33,
+          "nots": 28,
+          "range_bits_folded": 12,
+          "rounds": 24,
+          "rounds_8": 24,
+          "simplifications": 4,
+          "strategy": "parallel",
+          "width": 29
+        }
+      },
+      "reference": {
+        "circuit_depth": 23,
+        "circuit_gates": 104,
+        "circuit_rounds_8": 27,
+        "gates": 119,
+        "ranged_gates": 80
+      }
+    },
+    "golden_scoring": {
+      "optimized": {
+        "1": {
+          "cse_hits": 73,
+          "dead_gates": 117,
+          "depth": 168,
+          "gates": 827,
+          "input_bits_total": 96,
+          "input_bits_used": 52,
+          "nots": 137,
+          "range_bits_folded": 61,
+          "rounds": 827,
+          "rounds_8": 211,
+          "simplifications": 264,
+          "strategy": "reference",
+          "width": 34
+        },
+        "8": {
+          "cse_hits": 73,
+          "dead_gates": 117,
+          "depth": 168,
+          "gates": 827,
+          "input_bits_total": 96,
+          "input_bits_used": 52,
+          "nots": 137,
+          "range_bits_folded": 61,
+          "rounds": 211,
+          "rounds_8": 211,
+          "simplifications": 264,
+          "strategy": "reference",
+          "width": 34
+        }
+      },
+      "reference": {
+        "circuit_depth": 196,
+        "circuit_gates": 1123,
+        "circuit_rounds_8": 266,
+        "gates": 1632,
+        "ranged_gates": 827
+      }
+    },
+    "lookup_large": {
+      "optimized": {
+        "1": {
+          "cse_hits": 905,
+          "dead_gates": 0,
+          "depth": 20,
+          "gates": 892,
+          "input_bits_total": 8,
+          "input_bits_used": 8,
+          "nots": 149,
+          "range_bits_folded": 0,
+          "rounds": 892,
+          "rounds_8": 115,
+          "simplifications": 355,
+          "strategy": "reference",
+          "width": 122
+        },
+        "8": {
+          "cse_hits": 905,
+          "dead_gates": 0,
+          "depth": 20,
+          "gates": 892,
+          "input_bits_total": 8,
+          "input_bits_used": 8,
+          "nots": 149,
+          "range_bits_folded": 0,
+          "rounds": 115,
+          "rounds_8": 115,
+          "simplifications": 355,
+          "strategy": "reference",
+          "width": 122
+        }
+      },
+      "reference": {
+        "circuit_depth": 20,
+        "circuit_gates": 892,
+        "circuit_rounds_8": 115,
+        "gates": 2152,
+        "ranged_gates": 892
+      }
+    },
+    "lookup_small": {
+      "optimized": {
+        "1": {
+          "cse_hits": 19,
+          "dead_gates": 0,
+          "depth": 8,
+          "gates": 67,
+          "input_bits_total": 16,
+          "input_bits_used": 8,
+          "nots": 16,
+          "range_bits_folded": 4,
+          "rounds": 67,
+          "rounds_8": 12,
+          "simplifications": 17,
+          "strategy": "reference",
+          "width": 14
+        },
+        "8": {
+          "cse_hits": 19,
+          "dead_gates": 0,
+          "depth": 8,
+          "gates": 67,
+          "input_bits_total": 16,
+          "input_bits_used": 8,
+          "nots": 16,
+          "range_bits_folded": 4,
+          "rounds": 12,
+          "rounds_8": 12,
+          "simplifications": 17,
+          "strategy": "reference",
+          "width": 14
+        }
+      },
+      "reference": {
+        "circuit_depth": 8,
+        "circuit_gates": 67,
+        "circuit_rounds_8": 12,
+        "gates": 103,
+        "ranged_gates": 67
+      }
+    },
+    "min_max": {
+      "optimized": {
+        "1": {
+          "cse_hits": 254,
+          "dead_gates": 1,
+          "depth": 68,
+          "gates": 494,
+          "input_bits_total": 64,
+          "input_bits_used": 64,
+          "nots": 166,
+          "range_bits_folded": 1,
+          "rounds": 494,
+          "rounds_8": 108,
+          "simplifications": 14,
+          "strategy": "reference",
+          "width": 65
+        },
+        "8": {
+          "cse_hits": 276,
+          "dead_gates": 1,
+          "depth": 24,
+          "gates": 563,
+          "input_bits_total": 64,
+          "input_bits_used": 64,
+          "nots": 171,
+          "range_bits_folded": 1,
+          "rounds": 82,
+          "rounds_8": 82,
+          "simplifications": 4,
+          "strategy": "parallel",
+          "width": 76
+        }
+      },
+      "reference": {
+        "circuit_depth": 68,
+        "circuit_gates": 494,
+        "circuit_rounds_8": 108,
+        "gates": 763,
+        "ranged_gates": 494
+      }
+    },
+    "mixed": {
+      "optimized": {
+        "1": {
+          "cse_hits": 62,
+          "dead_gates": 91,
+          "depth": 211,
+          "gates": 967,
+          "input_bits_total": 56,
+          "input_bits_used": 40,
+          "nots": 117,
+          "range_bits_folded": 18,
+          "rounds": 967,
+          "rounds_8": 255,
+          "simplifications": 213,
+          "strategy": "reference",
+          "width": 91
+        },
+        "8": {
+          "cse_hits": 46,
+          "dead_gates": 146,
+          "depth": 163,
+          "gates": 1260,
+          "input_bits_total": 56,
+          "input_bits_used": 40,
+          "nots": 117,
+          "range_bits_folded": 18,
+          "rounds": 242,
+          "rounds_8": 242,
+          "simplifications": 235,
+          "strategy": "parallel",
+          "width": 91
+        }
+      },
+      "reference": {
+        "circuit_depth": 277,
+        "circuit_gates": 1323,
+        "circuit_rounds_8": 342,
+        "gates": 1774,
+        "ranged_gates": 967
+      }
+    },
+    "range_check": {
+      "optimized": {
+        "1": {
+          "cse_hits": 1,
+          "dead_gates": 0,
+          "depth": 29,
+          "gates": 189,
+          "input_bits_total": 48,
+          "input_bits_used": 42,
+          "nots": 58,
+          "range_bits_folded": 6,
+          "rounds": 189,
+          "rounds_8": 36,
+          "simplifications": 6,
+          "strategy": "reference",
+          "width": 59
+        },
+        "8": {
+          "cse_hits": 20,
+          "dead_gates": 0,
+          "depth": 9,
+          "gates": 218,
+          "input_bits_total": 48,
+          "input_bits_used": 42,
+          "nots": 58,
+          "range_bits_folded": 6,
+          "rounds": 31,
+          "rounds_8": 31,
+          "simplifications": 4,
+          "strategy": "parallel",
+          "width": 77
+        }
+      },
+      "reference": {
+        "circuit_depth": 33,
+        "circuit_gates": 217,
+        "circuit_rounds_8": 41,
+        "gates": 224,
+        "ranged_gates": 189
+      }
+    }
+  }
+}

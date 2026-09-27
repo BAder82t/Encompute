@@ -1,0 +1,19 @@
+encompute 0.1
+program mixed precision 0.001
+# An order total (secret times secret), a volume discount and a budget check.
+%0 = input "price" [0.0, 5000.0] : secret u16
+%1 = input "qty" [0.0, 100.0] : secret u8
+%2 = input "budget" [0.0, 1000000.0] : secret u32
+%3 = cast %0 : secret u32
+%4 = cast %1 : secret u32
+%5 = mul %3, %4 : secret u32
+%6 = const [100000.0] : public u32
+%7 = gt %5, %6 : secret bool
+%8 = const [9.0] : public u32
+%9 = const [10.0] : public u32
+%10 = mul %5, %8 : secret u32
+%11 = div %10, %9 : secret u32
+%12 = select %7, %11, %5 : secret u32
+%13 = le %12, %2 : secret bool
+output "net" = %12
+output "within_budget" = %13

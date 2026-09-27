@@ -1,0 +1,42 @@
+encompute 0.1
+program boolean_policy precision 0.001
+# Twelve Boolean facts about an account; access is a Boolean formula over them.
+%0 = input "member" [0.0, 1.0] : secret bool
+%1 = input "consent" [0.0, 1.0] : secret bool
+%2 = input "flagged" [0.0, 1.0] : secret bool
+%3 = input "verified_id" [0.0, 1.0] : secret bool
+%4 = input "resident" [0.0, 1.0] : secret bool
+%5 = input "sanctioned" [0.0, 1.0] : secret bool
+%6 = input "minor" [0.0, 1.0] : secret bool
+%7 = input "guardian_consent" [0.0, 1.0] : secret bool
+%8 = input "premium" [0.0, 1.0] : secret bool
+%9 = input "trial" [0.0, 1.0] : secret bool
+%10 = input "suspended" [0.0, 1.0] : secret bool
+%11 = input "override" [0.0, 1.0] : secret bool
+%12 = not %2 : secret bool
+%13 = not %5 : secret bool
+%14 = not %10 : secret bool
+%15 = not %6 : secret bool
+# member, consenting, not flagged
+%16 = and %0, %1 : secret bool
+%17 = and %16, %12 : secret bool
+# identity: verified resident
+%18 = and %3, %4 : secret bool
+# adult, or a minor with a guardian's consent
+%19 = or %15, %7 : secret bool
+# exactly one subscription kind
+%20 = xor %8, %9 : secret bool
+%21 = and %17, %18 : secret bool
+%22 = and %21, %13 : secret bool
+%23 = and %22, %19 : secret bool
+%24 = and %23, %20 : secret bool
+%25 = and %24, %14 : secret bool
+# a manual override, never for a sanctioned party
+%26 = and %11, %13 : secret bool
+%27 = or %25, %26 : secret bool
+# needs review: flagged or suspended, not sanctioned, verified resident
+%28 = or %2, %10 : secret bool
+%29 = and %28, %13 : secret bool
+%30 = and %29, %18 : secret bool
+output "allow" = %27
+output "review" = %30

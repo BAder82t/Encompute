@@ -1,0 +1,69 @@
+encompute 0.1
+program golden_policy precision 0.001
+# Commercial golden benchmark: private access-policy evaluation. Many
+# Boolean conditions over private attributes, and a decision code.
+%0 = input "age" [0.0, 120.0] : secret u8
+%1 = input "country" [0.0, 250.0] : secret u8
+%2 = input "clearance" [0.0, 5.0] : secret u8
+%3 = input "department" [0.0, 31.0] : secret u8
+%4 = input "hour" [0.0, 23.0] : secret u8
+%5 = input "mfa" [0.0, 1.0] : secret bool
+%6 = input "managed_device" [0.0, 1.0] : secret bool
+%7 = input "on_vpn" [0.0, 1.0] : secret bool
+%8 = input "contractor" [0.0, 1.0] : secret bool
+%9 = input "incident_mode" [0.0, 1.0] : secret bool
+%10 = input "data_owner" [0.0, 1.0] : secret bool
+%11 = const [18.0] : public u8
+%12 = ge %0, %11 : secret bool
+# allowed jurisdictions: 44, 49 or 1..30
+%13 = const [44.0] : public u8
+%14 = eq %1, %13 : secret bool
+%15 = const [49.0] : public u8
+%16 = eq %1, %15 : secret bool
+%17 = const [30.0] : public u8
+%18 = le %1, %17 : secret bool
+%19 = const [0.0] : public u8
+%20 = ne %1, %19 : secret bool
+%21 = and %18, %20 : secret bool
+%22 = or %14, %16 : secret bool
+%23 = or %22, %21 : secret bool
+%24 = const [3.0] : public u8
+%25 = ge %2, %24 : secret bool
+%26 = const [7.0] : public u8
+%27 = eq %3, %26 : secret bool
+%28 = const [12.0] : public u8
+%29 = eq %3, %28 : secret bool
+%30 = or %27, %29 : secret bool
+# business hours 8..18
+%31 = const [8.0] : public u8
+%32 = ge %4, %31 : secret bool
+%33 = const [18.0] : public u8
+%34 = le %4, %33 : secret bool
+%35 = and %32, %34 : secret bool
+%36 = or %6, %7 : secret bool
+%37 = not %8 : secret bool
+%38 = or %37, %35 : secret bool
+%39 = and %12, %23 : secret bool
+%40 = and %39, %5 : secret bool
+%41 = and %40, %36 : secret bool
+%42 = and %41, %38 : secret bool
+# full access: cleared, in the department (or owner of the data)
+%43 = or %30, %10 : secret bool
+%44 = and %25, %43 : secret bool
+%45 = and %42, %44 : secret bool
+# in incident mode, owners keep access, others step up
+%46 = not %9 : secret bool
+%47 = or %46, %10 : secret bool
+%48 = and %45, %47 : secret bool
+%49 = and %45, %9 : secret bool
+# logged access: baseline conditions, but not cleared
+%50 = not %44 : secret bool
+%51 = and %42, %50 : secret bool
+# 0 deny, 1 allow, 2 allow with logging, 3 step-up authentication
+%52 = const [1.0] : public u8
+%53 = const [2.0] : public u8
+%54 = select %51, %53, %19 : secret u8
+%55 = select %49, %24, %54 : secret u8
+%56 = select %48, %52, %55 : secret u8
+output "allow" = %48
+output "decision" = %56

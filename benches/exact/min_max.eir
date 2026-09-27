@@ -1,0 +1,20 @@
+encompute 0.1
+program min_max precision 0.001
+# Minimum and maximum of four u16 bids, and a clamp of the first.
+%0 = input "a" [0.0, 40000.0] : secret u16
+%1 = input "b" [0.0, 40000.0] : secret u16
+%2 = input "c" [0.0, 40000.0] : secret u16
+%3 = input "d" [0.0, 40000.0] : secret u16
+%4 = min %0, %1 : secret u16
+%5 = min %2, %3 : secret u16
+%6 = min %4, %5 : secret u16
+%7 = max %0, %1 : secret u16
+%8 = max %2, %3 : secret u16
+%9 = max %7, %8 : secret u16
+%10 = const [1000.0] : public u16
+%11 = const [30000.0] : public u16
+%12 = max %0, %10 : secret u16
+%13 = min %12, %11 : secret u16
+output "min" = %6
+output "max" = %9
+output "clamped" = %13

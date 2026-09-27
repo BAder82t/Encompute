@@ -18,6 +18,8 @@ getrandom = "0.2"
 
 [dev-dependencies]
 proptest.workspace = true
+# examples/exact_bench.rs: benchmark history records (JSON lines).
+serde_json.workspace = true
 
 [build-dependencies]
 cxx-build.workspace = true

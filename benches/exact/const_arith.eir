@@ -1,0 +1,24 @@
+encompute 0.1
+program const_arith precision 0.001
+# Arithmetic with public constants on a u32: affine map, scaled
+# division, remainder, reflection and a masked shift.
+%0 = input "x" [0.0, 1000000.0] : secret u32
+%1 = const [3.0] : public u32
+%2 = const [7.0] : public u32
+%3 = const [100.0] : public u32
+%4 = const [1000.0] : public u32
+%5 = const [2000000.0] : public u32
+%6 = const [16711935.0] : public u32
+%7 = mul %0, %1 : secret u32
+%8 = add %7, %2 : secret u32
+%9 = mul %0, %3 : secret u32
+%10 = div %9, %2 : secret u32
+%11 = rem %0, %4 : secret u32
+%12 = sub %5, %0 : secret u32
+%13 = shr %0 3 : secret u32
+%14 = and %13, %6 : secret u32
+output "affine" = %8
+output "scaled" = %10
+output "rem" = %11
+output "reflect" = %12
+output "masked" = %14
