@@ -100,8 +100,8 @@ evaluation 30 s, key upload 524 MiB once.
 OpenFHE exact is roughly 10–15× slower than TFHE-rs's multi-bit integer
 operations below, and its evaluation keys are about 9× larger. It is the
 production backend because it carries no patent-license restriction on
-commercial use. Parallel gate evaluation and multi-bit (functional)
-bootstrapping are the planned speed-ups.
+commercial use. Parallel gate evaluation is the speed-up; functional
+bootstrapping was measured and not adopted (see the last section).
 
 ## Exact programs: optimized OpenFHE exact
 
@@ -374,3 +374,88 @@ startup, image build, staging, time to evidence and verification in
 `deploy-timings-*.json`, and the worker's per-stage `timings.json`. The
 setup is a `c3-standard-4` TDX VM (about $0.25 an hour in `us-central1`);
 a run is expected to cost well under a dollar.
+
+## Functional bootstrapping (LUTs): measured, not adopted
+
+Question: would OpenFHE BinFHE functional bootstrapping (`EvalFunc` on a
+lookup table over a small plaintext modulus p, or `EvalSign` on a wide
+value) beat the production Boolean gates for 8-bit add, compare and select?
+Answer: no. A LUT costs 8.5 to 28 times a gate, and an 8-bit operation
+needs only 3 to 10 times fewer LUTs than gates (p = 8 or 16), not
+enough to make up for it. Keys also grow about ten-fold.
+
+Measured with `scripts/lut-measure.sh` (a standalone C++ program,
+`crates/encompute-openfhe/bench/lut_measure.cc`, built against the same
+static OpenFHE 1.5.1; not part of any Encompute build). Apple M3 Max,
+14 cores, 36 GiB. Median of 10 single-thread runs (one OpenMP thread),
+then 24 operations on 8 concurrent workers with one OpenMP thread each.
+Every result was decrypted and checked: 0 wrong of 34 per row (too few to
+say anything about failure probability). **Caveat:** other jobs kept the
+machine at a load average of 28 to 100 during the runs. Absolute times are
+inflated and noisy, and the 8-worker figures most of all. The ratios
+between rows run back to back are the robust result.
+
+Parameters. The production gate uses STD128 with GINX (n = 556, N = 1024,
+q = 2048). OpenFHE's arbitrary-function variant of STD128
+(`GenerateBinFHEContext(STD128, true, 12, N)`) uses n = 1305,
+key-switching modulus 2^35, a 54-bit bootstrapping modulus Q split into
+2 digits, and q = N, so p ≤ N/256. The ring dimension N comes from the
+HE standard's 128-bit classical table (ternary secrets); N = 2048 allows
+p ≤ 8, and p = 16 needs N = 4096. OpenFHE labels these sets 128-bit but
+publishes no failure probability for them; the gate set's is 2^-135.
+An arbitrary (non-negacyclic) table costs OpenFHE two bootstraps
+(`EvalFunc` first reduces the input to half the range).
+
+| operation | n / N | keygen (one thread) | refresh key | switching key | one thread, median (min–max) | 8 workers, wall per op |
+|---|---|---:|---:|---:|---:|---:|
+| gate AND (production) | 556 / 1024 | 0.43 s | 105 MiB | 420 MiB | 62.5 ms (59–73) | 18.2 ms |
+| LUT, p = 4 | 1305 / 2048 | 6.0 s | 164 MiB | 4579 MiB | 530 ms (350–1070) | 80.9 ms |
+| LUT, p = 8 | 1305 / 2048 | 10.3 s | 164 MiB | 4579 MiB | 577 ms (419–1270) | 208 ms |
+| LUT, p = 8 (rerun) | 1305 / 2048 | 8.6 s | 164 MiB | 4579 MiB | 539 ms (391–633) | 76.3 ms |
+| LUT, p = 16 | 1305 / 4096 | 16.9 s | 327 MiB | 9158 MiB | 1937 ms (1115–2104) | 194 ms |
+| `EvalSign`, 17-bit modulus (p = 512) | 1305 / 2048 | 8.5 s | 327 MiB | 4579 MiB | 1721 ms (1122–2619) | 398 ms |
+| gate AND, same run as p = 16 | 556 / 1024 | 0.62 s | 105 MiB | 420 MiB | 71.0 ms (67–123) | 20.6 ms |
+
+Peak memory: 5.8 GiB for the p ≤ 8 runs and 10.0 GiB with p = 16, against
+well under 1 GiB for the gate set. The switching key alone is 4.5 GiB at
+N = 2048, and every client would upload it.
+
+**Cost of 8-bit operations.** Gates, depth and rounds come from the
+optimized circuit (`circuit::optimize`, 1 and 8 workers). For LUTs, an
+8-bit value is split into radix-2^k digits, with p ≥ 2^(k+1) so that a
+digit sum with its carry fits:
+- add: ripple carry, one carry LUT and one digit LUT per digit;
+- lt: ripple borrow, one LUT per digit;
+- select: per digit, `c ? x : 0` and `c ? 0 : y` (linear sum), or one LUT
+  when p ≥ 2^(k+2).
+
+Linear steps (sums, constants) are free. Time = count × the median
+latency above, one thread; with 8 workers, rounds × the same latency (a
+lower bound for LUTs, since concurrency slows each LUT more than it slows a
+gate).
+
+| 8-bit op | gates (1 w.) | gate rounds (8 w.) | LUT p = 4: LUTs / rounds | LUT p = 8: LUTs / rounds | LUT p = 16: LUTs / rounds |
+|---|---:|---:|---:|---:|---:|
+| add | 34 | 8 (49 gates, depth 7) | 15 / 8 | 7 / 4 | 5 / 3 |
+| lt | 31 | 9 (35 gates, depth 8) | 8 / 8 | 4 / 4 | 3 / 3 |
+| select (condition given) | 24 | 3 (depth 3) | 16 / 2 | 8 / 1 | 4 / 1 |
+
+| 8-bit op | gates, 1 thread | gates, 8 workers | best LUT, 1 thread | best LUT, 8 workers |
+|---|---:|---:|---:|---:|
+| add | 2.1 s | 0.50 s | 4.0 s (p = 8) | 2.3 s (p = 8) |
+| lt | 1.9 s | 0.56 s | 1.7 s (`EvalSign`, packed input) / 2.3 s (p = 8) | 1.7 s (`EvalSign`) |
+| select | 1.5 s | 0.19 s | 4.6 s (p = 8) | 0.58 s (p = 8) |
+
+**Verdict: not adopted.** LUTs lose on every operation with 8 workers, by
+3 to 5 times, and on add and select with one thread, by 2 to 3 times. For
+an 8-bit add to break even, a LUT would have to cost under 5 gates; it
+costs 8.5 to 9.2 at p ≤ 8 and about 27 at p = 16. The single near-tie,
+`EvalSign` for a comparison on one thread, needs its input packed at a
+17-bit modulus, which the rest of a gate or LUT circuit does not produce.
+LUTs would also make the client's upload about ten times larger (4.6 GiB
+instead of 525 MiB) and key generation 14 to 27 times slower. The cost
+is structural: OpenFHE's arbitrary-function parameters (n = 1305, a 54-bit
+Q in 2 digits) make each bootstrap several times heavier, and an arbitrary
+table takes two of them. Parallel Boolean gates remain the production path.
+Revisit if OpenFHE gains a multi-value or cheaper functional bootstrap
+for 128-bit sets.
