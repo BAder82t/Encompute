@@ -313,3 +313,91 @@ fn wide_exact_ranges_sample_in_range() {
         );
     }
 }
+
+/// u16 arithmetic in the BGV subset (unverified).
+const SCORING: &str = "encompute 0.1\nprogram scoring precision 0.001\n\
+     %0 = input \"income\" [0.0, 5000.0] : secret u16\n\
+     %1 = input \"debt\" [0.0, 200.0] : secret u16\n\
+     %2 = const [3.0] : public u16\n\
+     %3 = mul %0, %2 : secret u16\n\
+     %4 = add %3, %1 : secret u16\n\
+     %5 = mul %1, %1 : secret u16\n\
+     output \"score\" = %4\noutput \"sq\" = %5\n";
+
+/// The planner's FHE mechanism for an exact program is the scheme
+/// compile_program selects, from the same calibrated estimates; `explain`
+/// shows both candidates and the reason.
+#[test]
+fn planner_and_compiler_select_the_same_exact_backend() {
+    use encompute_runtime::planner::{Mechanism, Scheme};
+    use encompute_runtime::planning;
+    let scoring = encompute_ir::parse(SCORING).unwrap();
+    let mut b = Builder::new("gate", 1e-3).unwrap();
+    let x = b
+        .input_exact("x", Elem::U16, Some(Range::new(0.0, 100.0)))
+        .unwrap();
+    let k = b.constant_exact(Elem::U16, 50.0).unwrap();
+    let c = b.cmp(CmpOp::Lt, x, k).unwrap();
+    b.output("c", c).unwrap();
+    for (p, scheme, name) in [
+        (scoring, Scheme::Bgv, "BGV"),
+        (b.finish().unwrap(), Scheme::BinFhe, "BinFHE"),
+        (approve(), Scheme::BinFhe, "BinFHE"),
+    ] {
+        let m = Model::compile(p.clone()).unwrap();
+        assert_eq!(m.compiled().scheme(), name, "{}", p.name());
+        assert!(!m.compiled().proof_required());
+        let mut ctx = planning::planning_context(
+            &p,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            None,
+        )
+        .unwrap();
+        ctx.catalog.openfhe_exact = true;
+        ctx.catalog.bgv = true;
+        let sel = m.compiled().exact().unwrap().selection.clone().unwrap();
+        assert_eq!(ctx.facts.binfhe_ms, sel.binfhe_ms);
+        assert_eq!(ctx.facts.bgv_ms, sel.bgv_ms);
+        let plan = planning::plan_program(&p, &ctx).unwrap().plan.unwrap();
+        let fhe: Vec<_> = plan
+            .steps
+            .iter()
+            .flat_map(|s| &s.mechanisms)
+            .filter_map(|m| match m {
+                Mechanism::Fhe { scheme, .. } => Some(*scheme),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fhe, vec![scheme], "{}", p.name());
+        let text = m.explain(None);
+        assert!(text.contains("candidate BGV"), "{text}");
+        assert!(text.contains("candidate BinFHE"), "{text}");
+        assert!(text.contains(&sel.reason), "{text}");
+        assert!(text.contains("(selected)"), "{text}");
+    }
+}
+
+/// `explain` states the optimized circuit; `--deep` the optimizer's report.
+#[test]
+fn explain_reports_the_exact_optimization() {
+    let m = Model::compile(approve()).unwrap();
+    let text = m.explain(None);
+    assert!(text.contains("optimized circuit"), "{text}");
+    assert!(text.contains("results equal the reference"), "{text}");
+    let deep = m.explain_optimization().unwrap();
+    for k in [
+        "optimizer version",
+        "reference lowering",
+        "rounds, 8 workers",
+        "input bits read",
+    ] {
+        assert!(deep.contains(k), "{k}: {deep}");
+    }
+    // Approximate programs have no exact optimization report.
+    assert!(Model::compile(logistic(8, 1))
+        .unwrap()
+        .explain_optimization()
+        .is_none());
+}

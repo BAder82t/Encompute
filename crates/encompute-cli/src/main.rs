@@ -775,6 +775,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 print!("\n{}", m.privacy_preview(&dir)?);
             }
             if deep {
+                if let Some(o) = m.explain_optimization() {
+                    print!("\n{o}");
+                }
                 let opts = plan::PlanOpts {
                     profile: "standard".into(),
                     infrastructure: None,

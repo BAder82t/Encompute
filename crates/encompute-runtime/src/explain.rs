@@ -115,6 +115,36 @@ fn cost(s: &mut String, b: &BenchReport) {
     );
 }
 
+/// The exact backends considered, with their estimated evaluation times.
+fn candidates(s: &mut String, sel: &encompute_evaluator::cost::ExactSelection) {
+    use encompute_evaluator::cost::ExactScheme;
+    let mark = |x: ExactScheme| if sel.scheme == x { "  (selected)" } else { "" };
+    let bgv = match sel.bgv_ms {
+        Some(ms) => format!(
+            "~{ms} ms (depth {}){}",
+            sel.bgv_depth,
+            mark(ExactScheme::Bgv)
+        ),
+        None => "not a candidate: outside the BGV subset".to_owned(),
+    };
+    let binfhe = match (sel.binfhe_ms, sel.binfhe_gates) {
+        (Some(ms), Some(g)) => {
+            format!(
+                "~{ms} ms ({g} bootstrapped gates){}",
+                mark(ExactScheme::BinFhe)
+            )
+        }
+        _ => "not a candidate: cannot be lowered to gates".to_owned(),
+    };
+    let _ = writeln!(s, "  {:<24}{bgv}", "candidate BGV");
+    let _ = writeln!(s, "  {:<24}{binfhe}", "candidate BinFHE");
+    let _ = writeln!(
+        s,
+        "  {:<24}estimated evaluator time, calibrated on one core (docs/benchmarks.md)",
+        ""
+    );
+}
+
 fn kib(b: usize) -> String {
     if b >= 1 << 20 {
         format!("{:.1} MiB", b as f64 / (1 << 20) as f64)
@@ -327,7 +357,9 @@ impl Model {
             } else {
                 " (not in this build: mock only)"
             }
-        } else if pr.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND {
+        } else if pr.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND
+            || pr.backend == "openfhe"
+        {
             if openfhe {
                 ""
             } else {
@@ -349,17 +381,36 @@ impl Model {
             "reason",
             if e.proof_required {
                 "verified execution requires re-execution proofs on OpenFHE BGV"
+            } else if let Some(sel) = &e.selection {
+                sel.reason.as_str()
             } else {
                 "exact integer/Boolean semantics required; approximation is not permitted"
             }
         );
+        if let Some(sel) = &e.selection {
+            candidates(&mut s, sel);
+        }
         let _ = writeln!(s, "  {:<24}{}", "parameter profile", pr.profile);
         if pr.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND {
             if let Ok(g) = encompute_exact::bits::gate_count(&e.plan) {
                 let _ = writeln!(
                     s,
-                    "  {:<24}{g} (the same for every input; ~60 ms each on one core)",
-                    "bootstrapped gates"
+                    "  {:<24}{g} (the same for every input; ~{} ms each on one core)",
+                    "bootstrapped gates",
+                    encompute_evaluator::cost::BINFHE_MS_PER_GATE
+                );
+            }
+            if let Some(c) = self.optimized_circuit(e) {
+                let _ = writeln!(
+                    s,
+                    "  {:<24}{} gates, depth {} (optimizer v{}; results equal the reference)",
+                    "optimized circuit", c.stats.gates, c.stats.depth, c.optimizer_version
+                );
+                let _ = writeln!(
+                    s,
+                    "  {:<24}{} rounds of parallel gates with 8 workers",
+                    "parallelism",
+                    c.rounds(8)
                 );
             }
         }
@@ -401,6 +452,101 @@ impl Model {
             );
         }
         s
+    }
+
+    /// The circuit an OpenFHE exact evaluator with 8 workers runs.
+    fn optimized_circuit(&self, e: &ExactProgram) -> Option<encompute_exact::circuit::Circuit> {
+        let ranges = encompute_evaluator::input_ranges(self.program(), &e.plan);
+        encompute_exact::circuit::optimize(&e.plan, &ranges, 8).ok()
+    }
+
+    /// `explain --deep`: what the exact optimizer did (BinFHE programs).
+    pub fn explain_optimization(&self) -> Option<String> {
+        let CompiledProgram::Exact(e) = self.compiled() else {
+            return None;
+        };
+        if e.profile.backend != encompute_exact::bits::OPENFHE_EXACT_BACKEND {
+            return None;
+        }
+        let reference = encompute_exact::bits::gate_count(&e.plan).ok()?;
+        let c = self.optimized_circuit(e)?;
+        let st = &c.stats;
+        let ms = encompute_evaluator::cost::BINFHE_MS_PER_GATE;
+        let mut s = String::new();
+        section(&mut s, "Exact optimization");
+        let row = |s: &mut String, k: &str, v: String| {
+            let _ = writeln!(s, "  {k:<24}{v}");
+        };
+        row(&mut s, "optimizer version", c.optimizer_version.to_string());
+        row(
+            &mut s,
+            "strategy",
+            format!(
+                "{:?} adder, {:?} comparator",
+                c.strategy.adder, c.strategy.comparator
+            ),
+        );
+        row(
+            &mut s,
+            "bootstrapped gates",
+            format!(
+                "{} (reference lowering {reference}, {:.1}x fewer)",
+                st.gates,
+                reference as f64 / st.gates.max(1) as f64
+            ),
+        );
+        row(&mut s, "free NOTs", st.nots.to_string());
+        row(
+            &mut s,
+            "depth",
+            format!("{} gates on the critical path", st.depth),
+        );
+        row(
+            &mut s,
+            "widest level",
+            format!("{} independent gates", st.width),
+        );
+        for w in [1, 2, 4, 8, 16] {
+            row(
+                &mut s,
+                &format!("rounds, {w} worker{}", if w == 1 { "" } else { "s" }),
+                format!(
+                    "{} (lower bound ~{:.1} s)",
+                    c.rounds(w),
+                    c.rounds(w) as f64 * ms / 1e3
+                ),
+            );
+        }
+        row(
+            &mut s,
+            "input bits read",
+            format!(
+                "{} of {} (the rest proven by the declared ranges)",
+                st.input_bits_used, st.input_bits_total
+            ),
+        );
+        row(
+            &mut s,
+            "range-folded bits",
+            st.range_bits_folded.to_string(),
+        );
+        row(&mut s, "reused subexpressions", st.cse_hits.to_string());
+        row(&mut s, "simplified gates", st.simplifications.to_string());
+        row(&mut s, "dead gates removed", st.dead_gates.to_string());
+        row(
+            &mut s,
+            "estimated time",
+            format!(
+                "~{:.1} s on one core; the reference lowering ~{:.1} s",
+                st.gates as f64 * ms / 1e3,
+                reference as f64 * ms / 1e3
+            ),
+        );
+        let _ = writeln!(
+            s,
+            "  Optimizations never change results: every optimized circuit is checked\n  against the reference lowering, and ranges come only from declared,\n  client-enforced input ranges. Set ENCOMPUTE_EXACT_EXECUTION=reference on\n  the evaluator to run the reference lowering instead."
+        );
+        Some(s)
     }
 
     fn explain_approx(

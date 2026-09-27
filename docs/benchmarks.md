@@ -176,6 +176,51 @@ disagrees with the clear interpreter on in-range inputs. An improvement
 is accepted by regenerating the baseline:
 `ENCOMPUTE_UPDATE_BASELINE=1 cargo test -p encompute-exact --test bench_baseline`.
 
+## Exact backend selection: BGV or BinFHE (calibration)
+
+An unverified exact program runs as a whole on OpenFHE BGV when every
+operation is in the BGV subset (u8, u16, bool; add, sub, mul, constants,
+and/or/xor/not) and its estimated evaluation is no slower than on BinFHE;
+otherwise on BinFHE. The estimates are evaluator time (load inputs,
+evaluate, store outputs) from the constants in
+`crates/encompute-evaluator/src/cost.rs`; `explain` prints both candidates
+and the planner compares the same numbers.
+
+Measured 2026-09-27: Apple M3 Max, OpenFHE 1.5.1, release, one thread
+(`OMP_NUM_THREADS=1`), minimum over three runs of a 9–21-repetition
+median, on a machine under background load (single runs varied by up to
+2×).
+
+- BinFHE (`BINFHE_STD128_GINX_BITS_V1`): **54 ms per bootstrapped gate**
+  (a chain of 21 gates; `cargo test --release -p encompute-openfhe-client
+  --test binfhe -- --include-ignored --nocapture`). Estimate = gates × 54 ms.
+- BGV (`BGVRNS_T65537_DEPTH{d}_HEStd128_FIXEDAUTO_HYBRID`), each operation
+  on fresh top-level ciphertexts (`cargo test --release -p
+  encompute-openfhe-client --test bgv_cost -- --ignored --nocapture`), ms:
+
+| depth | keygen | encrypt | decrypt | load | store | add | add const | mul const | mul (relin) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 12.5 | 2.65 | 1.11 | 0.76 | 1.05 | 0.015 | 0.19 | 0.22 | 1.27 |
+| 2 | 36.0 | 7.12 | 3.61 | 2.49 | 3.06 | 0.039 | 0.52 | 0.64 | 4.24 |
+| 3 | 39.7 | 8.87 | 3.93 | 2.72 | 4.24 | 0.059 | 0.69 | 0.78 | 5.19 |
+| 4 | 61.6 | 10.77 | 4.45 | 2.62 | 5.27 | 0.077 | 0.83 | 1.03 | 7.65 |
+| 6 | 187.0 | 29.13 | 13.04 | 7.82 | 14.74 | 0.201 | 2.33 | 2.81 | 23.41 |
+| 8 | 212.9 | 39.64 | 16.28 | 8.23 | 19.05 | 0.267 | 2.95 | 3.60 | 31.14 |
+
+BGV estimate = Σ over instructions of the cost at the plan's
+multiplicative depth (interpolated between rows, extrapolated past 8),
+with `or` = mul + 2 add, `xor` = mul + 3 add, `not` and `c − x` = add +
+add const, plus a load per input and a store per output. It is an upper
+bound: operations below the top level are cheaper. Checked against whole
+programs (evaluate only): 32 scaled inputs summed, depth 1, estimate 32 ms,
+measured 32–34 ms; a chain of 3 products, depth 3, estimate 26 ms (without
+the output store), measured 28–36 ms.
+
+A u16 scoring rule (3·income + debt + years² + 7) estimates ~6 ms on BGV
+(depth 1) against ~48 s on BinFHE (896 gates); a single Boolean `not` stays on
+BinFHE (no bootstrapped gate); anything with a comparison, select, min/max,
+division, shift, lookup, cast or a wider type stays on BinFHE.
+
 ## Exact programs on TFHE-rs (research feature, never in commercial builds)
 
 Apple M3 Max, 14 cores; TFHE-rs 1.8.1, profile

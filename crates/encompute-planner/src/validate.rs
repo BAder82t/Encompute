@@ -180,12 +180,16 @@ fn check(program: &Program, plan: &ConfidentialExecutionPlan, p: &mut Vec<String
                             Scheme::Tfhe => {
                                 semantics == "exact" && ctx.catalog.tfhe && backend == "tfhe-rs"
                             }
-                            // BGV runs exact programs only with execution proofs.
+                            // BGV runs exact programs wholly inside its
+                            // subset (which is what execution proofs
+                            // cover), with or without proofs; a correctness
+                            // requirement demands the proofs (checked
+                            // below).
                             Scheme::Bgv => {
                                 semantics == "exact"
                                     && ctx.catalog.bgv
                                     && backend == "openfhe"
-                                    && s.mechanisms.contains(&Mechanism::VerifiedExecution)
+                                    && ctx.facts.proof_covered
                             }
                             Scheme::BinFhe => {
                                 semantics == "exact"

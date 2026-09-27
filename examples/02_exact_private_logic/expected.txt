@@ -10,4 +10,4 @@ REFUSED  error[ENC1102]: input "age"[0] = 130 is outside its declared range [0, 
 REFUSED  error[ENC1102]: input "age" = 31.5 must be an integer
 REFUSED  error[ENC1303]: possible integer overflow
 scheme                  BinFHE
-bootstrapped gates      92 (the same for every input; ~60 ms each on one core)
+bootstrapped gates      92 (the same for every input; ~54 ms each on one core)

@@ -301,8 +301,9 @@ impl Backends {
     /// on OpenFHE when this evaluator runs OpenFHE, else on the mock.
     pub fn for_program(self, compiled: &CompiledProgram) -> BackendKind {
         match (compiled, compiled.target_backend()) {
+            // BGV exact programs: any OpenFHE evaluator runs them.
             (CompiledProgram::Exact(_), BackendKind::OpenFhe) => {
-                if self.approx == BackendKind::OpenFhe {
+                if self.approx == BackendKind::OpenFhe || self.exact == BackendKind::OpenFheExact {
                     BackendKind::OpenFhe
                 } else {
                     BackendKind::Mock

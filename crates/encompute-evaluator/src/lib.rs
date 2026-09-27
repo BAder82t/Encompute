@@ -9,6 +9,7 @@
 pub mod budget;
 mod compiled;
 pub mod control;
+pub mod cost;
 pub mod engine;
 mod exec;
 pub mod keycache;
@@ -17,13 +18,13 @@ pub mod server;
 mod session;
 
 pub use compiled::{
-    compile_program, proof_coverable, refuse_aggregation, CompiledProgram, ExactProgram, Semantics,
-    EXACT_PLAN_VERSION,
+    compile_program, exact_estimates, proof_coverable, refuse_aggregation, CompiledProgram,
+    ExactProgram, Semantics, EXACT_PLAN_VERSION,
 };
 pub use exec::evaluate_encrypted;
 pub use session::{
-    execution_proof, execution_spec, issue_receipt, program_id, transcript_for, BackendKind,
-    Backends, EvaluatorSession, ExecTimes, Ids,
+    execution_proof, execution_spec, input_ranges, issue_receipt, program_id, transcript_for,
+    BackendKind, Backends, EvaluatorSession, ExecTimes, Ids,
 };
 
 /// The parameter profile name evaluators register for CKKS programs: any

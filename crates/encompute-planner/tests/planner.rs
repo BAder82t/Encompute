@@ -99,6 +99,8 @@ fn ctx(semantics: &str, profile: Profile) -> PlanningContext {
             fhe_supported: true,
             proof_covered: true,
             operations: 3,
+            binfhe_ms: None,
+            bgv_ms: None,
         },
         training: None,
     }
@@ -435,7 +437,8 @@ fn exact_programs_plan_openfhe_exact_never_tfhe_rs_by_default() {
     // A research build offering both still prefers OpenFHE exact.
     c.catalog.tfhe = true;
     assert_eq!(fhe(&planned(&p, &c)), openfhe_exact);
-    // Without OpenFHE exact, a production catalog never falls back to TFHE-rs.
+    // Without OpenFHE exact, a production catalog never falls back to TFHE-rs
+    // (and unverified BGV needs a calibrated estimate, absent here).
     c.catalog.tfhe = false;
     c.catalog.openfhe_exact = false;
     if let Ok(plan) = plan_or_fail(&p, &c) {
@@ -450,4 +453,100 @@ fn exact_programs_plan_openfhe_exact_never_tfhe_rs_by_default() {
             "{plan:?}"
         );
     }
+}
+
+fn fhe_of(plan: &ConfidentialExecutionPlan) -> Vec<Mechanism> {
+    step(plan, "evaluate").mechanisms.clone()
+}
+
+/// A production catalog with the runtime's calibrated estimates.
+fn production(binfhe_ms: Option<u64>, bgv_ms: Option<u64>, covered: bool) -> PlanningContext {
+    let mut c = ctx("exact", Profile::Standard);
+    c.catalog.tfhe = false;
+    c.catalog.openfhe_exact = true;
+    c.facts.proof_covered = covered;
+    c.facts.binfhe_ms = binfhe_ms;
+    c.facts.bgv_ms = bgv_ms;
+    c
+}
+
+fn bgv() -> Mechanism {
+    Mechanism::Fhe {
+        scheme: Scheme::Bgv,
+        backend: "openfhe".into(),
+    }
+}
+
+fn binfhe() -> Mechanism {
+    Mechanism::Fhe {
+        scheme: Scheme::BinFhe,
+        backend: "openfhe-exact".into(),
+    }
+}
+
+#[test]
+fn unverified_exact_programs_take_the_cheaper_calibrated_backend() {
+    let p = prog(&ELIGIBILITY.replace(" verification required", ""));
+    // In the subset and cheaper on BGV: BGV, without proofs.
+    let c = production(Some(54_000), Some(8), true);
+    let plan = planned(&p, &c);
+    assert_eq!(fhe_of(&plan), vec![bgv()]);
+    assert_eq!(step(&plan, "evaluate").estimated_ms, 1 + 8);
+    assert!(!plan
+        .evidence_required
+        .contains(&EvidenceKind::ExecutionProof));
+    // Both candidates are listed with their costs.
+    let all = encompute_planner::plan(&p, &c).unwrap().candidates;
+    assert!(all.iter().any(|c| c.mechanisms == vec![binfhe()]
+        && c.rejected.is_none()
+        && c.estimated_ms == 1 + 54_000
+        && !c.selected));
+    assert!(all
+        .iter()
+        .any(|c| c.mechanisms == vec![bgv()] && c.selected));
+    // Cheaper on BinFHE: BinFHE.
+    let plan = planned(&p, &production(Some(3), Some(9), true));
+    assert_eq!(fhe_of(&plan), vec![binfhe()]);
+    // A tie goes to BGV, as compile_program's rule does.
+    let plan = planned(&p, &production(Some(9), Some(9), true));
+    assert_eq!(fhe_of(&plan), vec![bgv()]);
+    // Outside the BGV subset: BinFHE whatever the numbers say.
+    let plan = planned(&p, &production(Some(54_000), Some(8), false));
+    assert_eq!(fhe_of(&plan), vec![binfhe()]);
+    // No calibrated estimates (facts from an older runtime): BinFHE.
+    let plan = planned(&p, &production(None, None, true));
+    assert_eq!(fhe_of(&plan), vec![binfhe()]);
+    // BinFHE cannot lower it to gates: BGV.
+    let plan = planned(&p, &production(None, Some(8), true));
+    assert_eq!(fhe_of(&plan), vec![bgv()]);
+}
+
+#[test]
+fn correctness_overrides_cost() {
+    // Verification required: BGV with proofs even where BinFHE is cheaper,
+    // never unverified BGV or BinFHE.
+    let p = prog(ELIGIBILITY);
+    let plan = planned(&p, &production(Some(1), Some(9), true));
+    assert_eq!(fhe_of(&plan), vec![bgv(), Mechanism::VerifiedExecution]);
+    let mut c = production(Some(54_000), Some(8), true);
+    c.catalog.verified_execution = false;
+    assert!(plan_or_fail(&p, &c).is_err(), "no weaker plan");
+}
+
+#[test]
+fn the_validator_accepts_unverified_bgv_only_in_the_subset() {
+    let p = prog(&ELIGIBILITY.replace(" verification required", ""));
+    let plan = planned(&p, &production(Some(54_000), Some(8), true));
+    // The same plan claiming a program outside the subset is invalid.
+    let mut bad = plan.clone();
+    bad.context.facts.proof_covered = false;
+    let e = verify_plan(&p, &bad).unwrap_err();
+    assert!(e.message.contains("FHE (BGV, openfhe)"), "{}", e.message);
+    // A verified program's plan without its proofs is invalid.
+    let v = prog(ELIGIBILITY);
+    let mut plan = planned(&v, &production(Some(54_000), Some(8), true));
+    let s = plan.steps.iter_mut().find(|s| s.id == "evaluate").unwrap();
+    s.mechanisms.retain(|m| *m != Mechanism::VerifiedExecution);
+    let e = verify_plan(&v, &plan).unwrap_err();
+    assert!(e.message.contains("RequireCorrectness"), "{}", e.message);
 }

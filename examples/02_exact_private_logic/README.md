@@ -78,7 +78,7 @@ MATCH
 ...
   integer overflow        proven: no operation overflows for inputs in range
   scheme                  BinFHE
-  bootstrapped gates      92 (the same for every input; ~60 ms each on one core)
+  bootstrapped gates      92 (the same for every input; ~54 ms each on one core)
   result semantics        exact (no approximation error)
 ```
 

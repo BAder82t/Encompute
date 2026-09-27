@@ -192,7 +192,7 @@ pub fn scenario(seed: u64) -> Option<Scenario> {
     let pool = tee_pool();
     let tees = pool.into_iter().filter(|_| r.below(3) == 0).collect();
     let regions = [None, Some("eu".to_owned()), Some("us".to_owned())];
-    let ctx = PlanningContext {
+    let mut ctx = PlanningContext {
         profile: [Profile::Standard, Profile::Strong, Profile::Maximum][r.below(3) as usize],
         catalog: BackendCatalog {
             ckks: r.coin(),
@@ -226,9 +226,20 @@ pub fn scenario(seed: u64) -> Option<Scenario> {
             fhe_supported: r.below(5) != 0,
             proof_covered: r.coin(),
             operations: 1 + r.below(50),
+            binfhe_ms: None,
+            bgv_ms: None,
         },
         training,
     };
+    if semantics == "exact" {
+        // Calibrated exact-backend estimates, derived without further draws
+        // (so the regression seeds keep their scenarios): sometimes absent,
+        // sometimes favouring either backend.
+        let o = ctx.facts.operations;
+        ctx.facts.bgv_ms = (!o.is_multiple_of(3)).then_some(4 * o);
+        ctx.facts.binfhe_ms =
+            (!o.is_multiple_of(4)).then_some(if o.is_multiple_of(2) { 2 * o } else { 3000 * o });
+    }
     Some(Scenario {
         program,
         ctx,
@@ -417,6 +428,8 @@ fn ctx() -> PlanningContext {
             fhe_supported: true,
             proof_covered: true,
             operations: 4,
+            binfhe_ms: None,
+            bgv_ms: None,
         },
         training: None,
     }

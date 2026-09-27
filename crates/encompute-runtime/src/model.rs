@@ -191,11 +191,18 @@ impl Model {
             {
                 if has_openfhe() {
                     Ok(BackendKind::OpenFhe)
-                } else {
+                } else if self.compiled.proof_required() {
                     Err(Error::new(
                         Code::Backend,
                         "this program requires verified execution on OpenFHE BGV; rebuild with \
                          the `openfhe` feature or use mode \"mock\"",
+                    ))
+                } else {
+                    Err(Error::new(
+                        Code::Backend,
+                        "this build has no OpenFHE backend: this exact program runs encrypted \
+                         on OpenFHE BGV; rebuild with the `openfhe` feature (see README) or use \
+                         mode \"mock\"",
                     ))
                 }
             }
