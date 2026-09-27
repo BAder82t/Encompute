@@ -51,12 +51,13 @@ If you only run four, run **01 → 02 → 06 → 11**.
 | 17 | [Hugging Face Transformers + PEFT](17_huggingface_peft/) | advanced | Python SDK, `encompute[huggingface]` (CPU; no download) |
 | 18 | [A training step in Google Confidential Space](18_confidential_space_hf/) | advanced | `encompute[huggingface]`; locally, or a GCP project for the real run |
 | 19 | [Exact programs on OpenFHE exact](19_openfhe_exact/) | intermediate | the `openfhe` build, Python SDK; about 1 GiB of scratch space |
+| 20 | [Optimized exact execution](20_openfhe_optimization/) | intermediate | Python SDK; the encrypted comparison needs the `openfhe` build and about 2 GiB of memory |
 
 ## Learning paths
 
 - **Beginner:** 01, 02, 06, 11.
 - **Privacy engineer:** 06, 07, 08, 09, 10, 16.
-- **Cryptography engineer:** 01, 02, 04, 05, 19.
+- **Cryptography engineer:** 01, 02, 04, 05, 19, 20.
 - **Platform or security engineer:** 03, 07, 10, 12, 13, 18.
 - **AI engineer:** 11, 14, 15, 16, 17, 18.
 

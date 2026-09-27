@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### OpenFHE performance and hybrid exact optimization
+
+- **Optimized exact circuits.** Exact plans run as a gate circuit:
+  - range-aware widths from the declared input ranges;
+  - constant folding, Boolean simplification, common-subexpression reuse
+    and dead-gate removal;
+  - parallel-prefix adders and tree comparators when they finish in fewer
+    rounds.
+
+  The reference lowering stays as the correctness oracle
+  (`ENCOMPUTE_EXACT_EXECUTION=reference`).
+- **Parallel gates.** Independent gates run concurrently, in a
+  deterministic order, within a process thread budget
+  (`ENCOMPUTE_EXACT_THREADS`, `ENCOMPUTE_EXACT_WORKERS`). With 8 workers,
+  the benchmark corpus runs 1.7 to 9.4 times faster than the reference
+  lowering, with identical results.
+- **BGV or BinFHE per program.** Unverified programs whose operations are
+  all in the BGV subset run on OpenFHE BGV when the calibrated estimate is
+  no slower. The planner and the compiler use the same estimates, and cost
+  never overrides a security or verification requirement. `explain` lists
+  both candidates.
+- **Evaluation-key cache.** Keys are loaded once, bounded
+  (`ENCOMPUTE_KEY_CACHE_BYTES`, LRU), shared read-only by concurrent jobs
+  and isolated per session. Evaluators serve `GET /metrics`.
+- **Provenance.** The optimizer version and circuit statistics are in the
+  evaluator's program info and job response, not in any semantic ID.
+  `explain` shows the optimized circuit; `explain --deep` shows the full
+  optimization report.
+- **Benchmarks.** `benches/exact/` is a 16-program corpus with a regression
+  gate (`bench_baseline`), a timed OpenFHE benchmark (`exact_bench`) and a
+  history (`history.jsonl`). Functional bootstrapping was measured and not
+  adopted (`scripts/lut-measure.sh`).
+- **Scheduling.** Evaluators register a machine profile. The control plane
+  estimates completion time from gate counts and the queue.
+- **Example 20** (`examples/20_openfhe_optimization`); ADR-022;
+  invariants INV-166 to INV-171.
+
 ### Enterprise deployment foundation
 
 - **Control plane** (`encompute-control`, API v1). It manages:

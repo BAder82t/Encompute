@@ -561,7 +561,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (EndToEnd, "test:crates/encompute-runtime/tests/openfhe_exact.rs::openfhe_exact_end_to_end"),
         (EndToEnd, "script:examples/19_openfhe_exact/run.sh"),
     ]),
-    inv!("INV-150", "openfhe-exact", "Production builds run exact programs on OpenFHE exact and never on TFHE-rs: the compiler, the evaluator and the planner select OpenFHE exact, and a request for TFHE-rs is BACKEND UNAVAILABLE, not a fallback.", [
+    inv!("INV-150", "openfhe-exact", "Production builds run exact programs on OpenFHE exact and never on TFHE-rs: the compiler, the evaluator and the planner select OpenFHE (BinFHE, or BGV for programs inside the BGV subset), and a request for TFHE-rs is BACKEND UNAVAILABLE, not a fallback.", [
         (Positive, "test:crates/encompute-evaluator/tests/exact_backend.rs::production_builds_select_openfhe_exact_and_refuse_tfhe_rs"),
         (Negative, "test:crates/encompute-planner/tests/planner.rs::exact_programs_plan_openfhe_exact_never_tfhe_rs_by_default"),
         (Adversarial, "script:examples/19_openfhe_exact/run.sh"),
@@ -659,5 +659,41 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:crates/encompute-control/tests/jobs.rs::lifecycle_receipt_trust_and_duplicate_messages"),
         (Adversarial, "test:crates/encompute-control/tests/isolation.rs::cross_tenant_attacks_fail"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
+    ]),
+    inv!("INV-166", "exact-optimization", "Optimized exact execution equals the reference lowering bit for bit: random programs under every circuit strategy and worker count, adversarial boundary inputs and the benchmark corpus match the clear interpreter, on the mock and on OpenFHE.", [
+        (Positive, "test:crates/encompute-exact/tests/circuit.rs::random_programs_are_identical_under_every_strategy_and_worker_count"),
+        (Negative, "test:crates/encompute-exact/tests/bench_baseline.rs::optimized_circuits_equal_the_interpreter"),
+        (Adversarial, "test:crates/encompute-exact/tests/circuit.rs::adversarial_boundaries"),
+        (EndToEnd, "test:crates/encompute-openfhe-client/tests/exact.rs::optimized_circuits_equal_reference_on_openfhe"),
+    ]),
+    inv!("INV-167", "exact-optimization", "Optimization cannot bypass range or overflow validation: circuits are built only for plans that passed overflow analysis, widths are narrowed only by the declared input ranges, and values outside those ranges are refused before encryption.", [
+        (Positive, "test:crates/encompute-exact/tests/circuit.rs::optimization_cannot_bypass_range_or_overflow_validation"),
+        (Negative, "test:crates/encompute-exact/tests/lower.rs::wrong_scheme_and_overflow_are_refused"),
+        (Adversarial, "test:crates/encompute-analysis/tests/exact.rs::exact_analysis_is_sound"),
+        (EndToEnd, "script:examples/20_openfhe_optimization/run.sh"),
+    ]),
+    inv!("INV-168", "exact-optimization", "Parallel gate scheduling is deterministic: the same plan, ranges and worker count build the same circuit, and every worker count gives the same result bits.", [
+        (Positive, "test:crates/encompute-exact/tests/circuit.rs::parallel_scheduling_is_deterministic"),
+        (Negative, "test:crates/encompute-exact/tests/bench_baseline.rs::stable_quantities_do_not_regress"),
+        (Adversarial, "test:crates/encompute-exact/tests/circuit.rs::random_programs_are_identical_under_every_strategy_and_worker_count"),
+        (EndToEnd, "test:crates/encompute-openfhe-client/tests/exact.rs::optimized_circuits_equal_reference_on_openfhe"),
+    ]),
+    inv!("INV-169", "exact-optimization", "Planner cost never overrides security: verification and correctness requirements are checked before cost, so a cheaper backend without the required proofs is never selected.", [
+        (Positive, "test:crates/encompute-planner/tests/planner.rs::unverified_exact_programs_take_the_cheaper_calibrated_backend"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::correctness_overrides_cost"),
+        (Adversarial, "test:crates/encompute-planner/tests/planner.rs::the_validator_accepts_unverified_bgv_only_in_the_subset"),
+        (EndToEnd, "test:crates/encompute-runtime/tests/exact.rs::planner_and_compiler_select_the_same_exact_backend"),
+    ]),
+    inv!("INV-170", "exact-optimization", "A program runs on BGV only when every one of its operations is in the BGV subset; one unsupported operation keeps the whole program on BinFHE, and schemes are never mixed within a program.", [
+        (Positive, "test:crates/encompute-evaluator/src/cost.rs::arithmetic_scoring_runs_on_bgv"),
+        (Negative, "test:crates/encompute-evaluator/src/cost.rs::one_op_outside_the_subset_keeps_the_whole_program_on_binfhe"),
+        (Adversarial, "test:crates/encompute-evaluator/src/cost.rs::comparisons_stay_on_binfhe"),
+        (EndToEnd, "test:crates/encompute-runtime/tests/openfhe_bgv.rs::arithmetic_programs_run_on_bgv_without_proofs"),
+    ]),
+    inv!("INV-171", "exact-optimization", "The evaluation-key cache is bounded and never runs a ciphertext under another client's keys: sessions use only keys registered with them, a ciphertext runs only under the key its envelope is bound to, and evicted keys are reported missing.", [
+        (Positive, "test:crates/encompute-runtime/tests/keycache.rs::bounded_shared_and_isolated"),
+        (Negative, "test:crates/encompute-runtime/tests/sessions.rs::round_trip_and_rejections"),
+        (Adversarial, "test:crates/encompute-evaluator/src/keycache.rs::bounded_lru_and_shared_loads"),
+        (EndToEnd, "test:crates/encompute-runtime/tests/network.rs::remote_round_trip_uploads_program_and_keys_once"),
     ]),
 ];

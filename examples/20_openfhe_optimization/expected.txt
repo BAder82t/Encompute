@@ -1,0 +1,10 @@
+# Lines that must appear in the output (values that vary are left out).
+  scheme                  BinFHE
+  optimized circuit       381 gates, depth 48 (optimizer v1; results equal the reference)
+  optimizer version       1
+  bootstrapped gates      381 (reference lowering 533, 1.4x fewer)
+  input bits read         55 of 88 (the rest proven by the declared ranges)
+  scheme                  BGV
+age=18  income=1000000 debt=399999 risk=650  clear=True  mock=True  MATCH
+REFUSED  error[ENC1102]: input "age"[0] = 121 is outside its declared range [0, 120]
+REFUSED  error[ENC1303]: possible integer overflow

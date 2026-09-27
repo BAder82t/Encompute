@@ -48,7 +48,7 @@ privacy, and every step leaves verifiable evidence.
 | Area | State |
 |---|---|
 | Approximate programs (CKKS, OpenFHE) | working, end to end, local and remote |
-| Exact programs (integers, Booleans) | working end to end, local and remote, on OpenFHE exact (BinFHE), the production exact backend; TFHE-rs only in research builds |
+| Exact programs (integers, Booleans) | working end to end, local and remote, on OpenFHE exact (BinFHE), the production exact backend, as an optimized circuit with parallel gates (1.7x to 9.4x faster than the reference lowering with 8 workers on the benchmark corpus, results identical); arithmetic-only programs selected for OpenFHE BGV by calibrated cost; TFHE-rs only in research builds |
 | Client/evaluator split over HTTP, worker processes | working |
 | Signed execution receipts | working, CKKS and exact |
 | Semantic transcripts (the statement a proof must satisfy) | working, exact programs |
@@ -62,7 +62,7 @@ privacy, and every step leaves verifiable evidence.
 | Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control; organization-level DP or patient-level DP-SGD; Hugging Face Transformers + PEFT (development attestation on one machine) |
 | Commercial dependency boundary | audited: no TFHE-rs in the dependency graph, SBOM, binaries, wheel or container of a production build (`scripts/audit-commercial-build.sh`) |
 | Enterprise deployment (control plane) | working, production mode: organizations, OIDC users and signed service identities, roles, tenant isolation, projects, asset registry, plans, idempotent jobs, capability-aware scheduling, PostgreSQL with versioned migrations, anchored privacy ledgers and audit trail, customer-managed root keys (OpenBao/Vault Transit), API v1, CLI and Python SDK over it, Docker Compose deployment with backup and restore ([docs/deployment.md](docs/deployment.md)) |
-| Assurance (security invariants under attack) | 88 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Assurance (security invariants under attack) | 104 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 
 ## Start here
 
@@ -121,7 +121,9 @@ and mismatches, boundary values first) for exact ones.
 **Backends.**
 - OpenFHE v1.5.1, statically linked: CKKS for approximate programs;
   **OpenFHE exact** (BinFHE, STD128, one ciphertext per bit, bootstrapped
-  gates) for exact programs; BGV for verified exact programs.
+  gates) for exact programs, run as an optimized circuit with parallel
+  gates; BGV for verified exact programs, and for unverified programs whose
+  operations are all in the BGV subset when it is estimated no slower.
 - A plaintext mock for both kinds, for development and tests.
 - TFHE-rs 1.8.1, behind the off-by-default `research-tfhe-rs` feature, for
   research and differential testing only: Zama requires a patent license
