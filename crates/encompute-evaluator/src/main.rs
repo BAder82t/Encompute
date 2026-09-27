@@ -221,17 +221,14 @@ fn serve(
             }
         }
     }
-    let server = match tiny_http::Server::http(listen) {
+    let server = match encompute_verification::http::Server::http(listen) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot listen on {listen}: {e}");
             return ExitCode::from(2);
         }
     };
-    let addr = server
-        .server_addr()
-        .to_ip()
-        .map_or(listen.to_owned(), |a| a.to_string());
+    let addr = server.server_addr().to_string();
     let mode = if workers == 0 {
         "in-process".to_owned()
     } else {

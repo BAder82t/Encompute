@@ -149,8 +149,8 @@ fn illegal_flows_fail_compilation() {
 /// verify as execution under another.
 #[test]
 fn receipts_bind_the_policy() {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr());
     std::thread::spawn(move || Evaluator::new(Backends::MOCK, Limits::default()).serve(server));
     let remote = Remote::new(&url);
     let trusted = remote.evaluator_identity().unwrap();

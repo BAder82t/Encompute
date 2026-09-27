@@ -65,8 +65,8 @@ fn openfhe_exact_end_to_end() {
     );
     assert!(r.passed && r.backend == "openfhe-exact", "{r:?}");
 
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr());
     let backends = Backends::MOCK.with(BackendKind::OpenFheExact);
     std::thread::spawn(move || Evaluator::new(backends, Limits::default()).serve(server));
     let remote = Remote::new(&url);

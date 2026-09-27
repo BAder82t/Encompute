@@ -18,6 +18,7 @@
 mod backend;
 pub mod canonical;
 mod hash;
+pub mod http;
 mod identity;
 pub mod proof;
 mod receipt;

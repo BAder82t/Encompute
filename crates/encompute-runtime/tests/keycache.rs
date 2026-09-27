@@ -45,8 +45,8 @@ fn bounded_shared_and_isolated() {
     assert!(ev.execute(&req_a).is_ok());
 
     // Metrics: counters only.
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/metrics", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/metrics", server.server_addr());
     std::thread::spawn(move || Evaluator::new(Backends::MOCK, Limits::default()).serve(server));
     let resp = ureq::get(&url).call().unwrap();
     assert!(resp.content_type().starts_with("text/plain"));

@@ -13,7 +13,6 @@
 //! can only revoke.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::net::IpAddr;
 use std::sync::Mutex;
 
@@ -21,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use encompute_attestation::AttestationEvidence;
 use encompute_ir::{Code, Error};
+use encompute_verification::http;
 
 use crate::KeyBroker;
 
@@ -73,16 +73,11 @@ pub(crate) struct ErrorBody {
     pub message: String,
 }
 
-fn reply(req: tiny_http::Request, status: u16, body: String) {
-    let h = tiny_http::Header::from_bytes("Content-Type", "application/json").expect("header");
-    let _ = req.respond(
-        tiny_http::Response::from_string(body)
-            .with_status_code(status)
-            .with_header(h),
-    );
+fn reply(status: u16, body: String) -> http::Response {
+    http::Response::new(status, "application/json", body.into_bytes())
 }
 
-fn error_reply(req: tiny_http::Request, e: &Error) {
+fn error_reply(e: &Error) -> http::Response {
     let status = match e.code {
         Code::Remote => 400,
         Code::Freshness if e.message.starts_with("too many requests") => 429,
@@ -94,7 +89,7 @@ fn error_reply(req: tiny_http::Request, e: &Error) {
         message: e.message.clone(),
     })
     .unwrap_or_default();
-    reply(req, status, body);
+    reply(status, body)
 }
 
 fn json<T: Serialize>(v: &T) -> Result<String, Error> {
@@ -259,75 +254,79 @@ fn handle(broker: &Mutex<KeyBroker>, path: &str, body: &[u8]) -> Result<String, 
     }
 }
 
-/// Serves `broker` until the server is dropped.
-pub fn serve(broker: &Mutex<KeyBroker>, server: &tiny_http::Server) {
+/// Serves `broker` until the process exits.
+pub fn serve(broker: &Mutex<KeyBroker>, server: http::Server) {
     serve_with_limit(broker, server, REQUESTS_PER_MINUTE)
 }
 
 /// Serves `broker` with its own per-address request limit.
-pub fn serve_with_limit(broker: &Mutex<KeyBroker>, server: &tiny_http::Server, per_minute: u32) {
+pub fn serve_with_limit(broker: &Mutex<KeyBroker>, server: http::Server, per_minute: u32) {
     serve_with_control(broker, server, per_minute, None, &|_| Ok(()))
 }
 
 /// Serves `broker`, accepting revocations from `control`; `persist` saves
-/// the broker's state after a revocation.
+/// the broker's state after a revocation. Requests are read on the
+/// server's connection threads, within its time and size limits, so a
+/// slow client never holds the broker.
 pub fn serve_with_control(
     broker: &Mutex<KeyBroker>,
-    server: &tiny_http::Server,
+    server: http::Server,
     per_minute: u32,
     control: Option<&ControlChannel>,
-    persist: &dyn Fn(&KeyBroker) -> Result<(), Error>,
+    persist: &(dyn Fn(&KeyBroker) -> Result<(), Error> + Sync),
 ) {
-    let mut limit = RateLimit {
-        per_minute,
-        ..RateLimit::default()
+    let h = Broker {
+        broker,
+        control,
+        persist,
+        limit: Mutex::new(RateLimit {
+            per_minute,
+            ..RateLimit::default()
+        }),
     };
-    for mut req in server.incoming_requests() {
-        if let Some(ip) = req.remote_addr().map(|a| a.ip()) {
-            if !limit.allow(ip, encompute_attestation::unix_now()) {
-                error_reply(
-                    req,
-                    &Error::new(Code::Freshness, "too many requests; retry later"),
-                );
-                continue;
+    server.serve(&h)
+}
+
+struct Broker<'a> {
+    broker: &'a Mutex<KeyBroker>,
+    control: Option<&'a ControlChannel>,
+    persist: &'a (dyn Fn(&KeyBroker) -> Result<(), Error> + Sync),
+    limit: Mutex<RateLimit>,
+}
+
+impl http::Handler for Broker<'_> {
+    fn body_limit(&self, _: &http::Request) -> usize {
+        MAX_BODY as usize
+    }
+
+    fn handle(&self, req: http::Request) -> http::Response {
+        if let Some(ip) = req.remote.map(|a| a.ip()) {
+            let allowed = self
+                .limit
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .allow(ip, encompute_attestation::unix_now());
+            if !allowed {
+                return error_reply(&Error::new(
+                    Code::Freshness,
+                    "too many requests; retry later",
+                ));
             }
         }
-        let path = req.url().split('?').next().unwrap_or("").to_owned();
-        if *req.method() == tiny_http::Method::Get && (path == "/live" || path == "/ready") {
-            reply(req, 200, "{\"ok\":true}".into());
-            continue;
+        let path = req.path().to_owned();
+        if req.method == "GET" && (path == "/live" || path == "/ready") {
+            return reply(200, "{\"ok\":true}".into());
         }
-        if *req.method() != tiny_http::Method::Post {
-            error_reply(req, &Error::new(Code::Remote, "use POST"));
-            continue;
+        if req.method != "POST" {
+            return error_reply(&Error::new(Code::Remote, "use POST"));
         }
-        let headers: Vec<(String, String)> = req
-            .headers()
-            .iter()
-            .map(|h| {
-                (
-                    h.field.as_str().as_str().to_owned(),
-                    h.value.as_str().to_owned(),
-                )
-            })
-            .collect();
-        let mut body = Vec::new();
-        if req
-            .as_reader()
-            .take(MAX_BODY + 1)
-            .read_to_end(&mut body)
-            .is_err()
-            || body.len() as u64 > MAX_BODY
-        {
-            error_reply(req, &Error::new(Code::Remote, "request body too large"));
-            continue;
-        }
+        let body = &req.body;
         let out = if path == "/v1/messages" {
-            match control {
+            match self.control {
                 Some(c) => {
-                    let mut b = broker.lock().unwrap_or_else(|p| p.into_inner());
-                    c.receive(&mut b, &headers, &body)
-                        .and_then(|r| persist(&b).map(|_| r))
+                    let mut b = self.broker.lock().unwrap_or_else(|p| p.into_inner());
+                    c.receive(&mut b, &req.headers, body)
+                        .and_then(|r| (self.persist)(&b).map(|_| r))
                 }
                 None => Err(Error::new(
                     Code::ServiceAuthentication,
@@ -335,10 +334,10 @@ pub fn serve_with_control(
                 )),
             }
         } else {
-            let r = handle(broker, &path, &body);
+            let r = handle(self.broker, &path, body);
             if path == "/v1/release" {
                 if let (Some(c), Ok(req)) =
-                    (control, serde_json::from_slice::<ReleaseRequest>(&body))
+                    (self.control, serde_json::from_slice::<ReleaseRequest>(body))
                 {
                     let reason = r.as_ref().err().map(|e| e.code.as_str());
                     c.report_release(&req.asset_id, r.is_ok(), reason);
@@ -347,8 +346,8 @@ pub fn serve_with_control(
             r
         };
         match out {
-            Ok(json) => reply(req, 200, json),
-            Err(e) => error_reply(req, &e),
+            Ok(json) => reply(200, json),
+            Err(e) => error_reply(&e),
         }
     }
 }

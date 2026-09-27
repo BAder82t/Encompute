@@ -89,8 +89,8 @@ fn receipts_bind_the_attested_session() {
     assert_eq!(e.code, Code::Attestation);
 
     let serve = |ev: Evaluator| {
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
         std::thread::spawn(move || ev.serve(server));
         Remote::new(&url)
     };

@@ -85,8 +85,8 @@ fn arithmetic_programs_run_on_bgv_without_proofs() {
 
     // Remote: an OpenFHE evaluator holding only evaluation keys; a signed
     // receipt with no proof evidence.
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr());
     let backends = Backends::for_build();
     std::thread::spawn(move || Evaluator::new(backends, Limits::default()).serve(server));
     let remote = Remote::new(&url);

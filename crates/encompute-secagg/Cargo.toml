@@ -24,7 +24,6 @@ chacha20 = "0.10"
 chacha20poly1305 = "0.11"
 vsss-rs = { version = "6.0.1", default-features = false, features = ["std"] }
 rand_core = "0.10"
-tiny_http = "0.12"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 
 [lints]

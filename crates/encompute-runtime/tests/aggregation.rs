@@ -99,8 +99,8 @@ fn three_hospitals_over_http() {
     let spec = spec_of(&m);
     let coord = RoundCoordinator::open(spec.clone(), 1, coordinator_key(), None, T0).unwrap();
     let svc = CoordinatorService::new(coord, Duration::from_secs(20)).unwrap();
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr());
     svc.spawn(server);
 
     let hospitals: Vec<_> = (0..3)

@@ -18,7 +18,6 @@ serde_json.workspace = true
 encompute-verification.workspace = true
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 clap = { version = "~4.5", features = ["derive"] }
-tiny_http = "0.12"
 zeroize = "1.8"
 getrandom = "0.2"
 serde.workspace = true
