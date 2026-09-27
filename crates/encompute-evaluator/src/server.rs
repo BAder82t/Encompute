@@ -113,6 +113,12 @@ fn error_reply(e: &Error) -> Reply {
         Code::WrongProgram => 404,
         Code::Unsupported | Code::DepthExceeded | Code::PrecisionUnreachable => 422,
         Code::Remote => 413,
+        // A job the control plane did not grant (or refused to start).
+        Code::ServiceAuthentication | Code::Unauthenticated => 401,
+        Code::Forbidden => 403,
+        Code::NotFound => 404,
+        Code::Conflict => 409,
+        Code::Scheduling => 503,
         _ => 500,
     };
     Reply {
@@ -363,7 +369,20 @@ impl Evaluator {
     fn job(&self, pid: &str, body: &[u8], grant: Option<&str>) -> Result<Reply> {
         // With a control plane: only granted jobs, started with its consent.
         let granted = match &self.control {
-            Some(c) => Some(c.authorize(grant, pid)?),
+            // An unreachable control plane is not an oversized request.
+            Some(c) => Some(c.authorize(grant, pid).map_err(|e| {
+                if e.code == Code::Remote {
+                    Error::new(
+                        Code::Scheduling,
+                        format!(
+                            "the control plane did not authorize this job: {}",
+                            e.message
+                        ),
+                    )
+                } else {
+                    e
+                }
+            })?),
             None => None,
         };
         let (out, times) = self.engine.execute(pid, body)?;
