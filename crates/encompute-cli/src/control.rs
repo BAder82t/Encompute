@@ -226,7 +226,15 @@ pub fn login(url: &str, token_file: Option<&Path>) -> Result<()> {
             o.mode(0o600);
         }
         o.open(&tmp)
-            .and_then(|mut f| f.write_all(&body))
+            .and_then(|mut f| {
+                // A leftover temporary file keeps its own mode.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                }
+                f.write_all(&body)
+            })
             .map_err(|e| cfg_err(format!("{}: {e}", tmp.display())))?;
     }
     std::fs::rename(&tmp, &p).map_err(|e| cfg_err(e.to_string()))?;

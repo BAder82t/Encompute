@@ -102,6 +102,11 @@ impl Remote {
         self
     }
 
+    /// The evaluator's base URL.
+    pub fn base_url(&self) -> &str {
+        &self.base
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }

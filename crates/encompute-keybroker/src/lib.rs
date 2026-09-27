@@ -740,6 +740,14 @@ impl KeyBroker {
                 o.mode(0o600);
             }
             let mut f = o.open(&tmp).map_err(io)?;
+            // The mode above applies only to a new file: a leftover one
+            // keeps its own, so set it before writing any key.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                f.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(io)?;
+            }
             f.write_all(&json).map_err(io)?;
             f.sync_all().map_err(io)?;
         }

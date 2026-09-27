@@ -296,6 +296,20 @@ fn state_round_trips_without_printing_keys() {
         other => panic!("{other:?}"),
     }
     assert!(!format!("{secret:?}").contains("hospital patient"));
+    // A leftover temporary file with a wider mode does not carry the keys
+    // into a readable state file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, b"stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        s.broker.save(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

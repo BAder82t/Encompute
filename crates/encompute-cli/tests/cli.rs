@@ -96,6 +96,12 @@ fn keys_and_audit() {
         let (code, out, _) = encompute(&["audit", a, "--keys", k]);
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("FAIL  keys.secret_permissions"));
+        // Generating keys over a secret.key with a wider mode makes it
+        // owner-only again (not only when the file is created).
+        let (code, _, err) = encompute(&["keys", "generate", a, "-o", k, "--mode", "mock"]);
+        assert_eq!(code, 0, "{err}");
+        let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secret.key is {mode:o}");
     }
 }
 
@@ -163,6 +169,34 @@ fn remote_receipts_and_verify() {
     assert!(err.contains("Execution proof         not present"), "{err}");
     assert!(err.contains("on first use"), "{err}");
     let pinned = std::fs::read_to_string(dir.join("keys/evaluator.pub")).unwrap();
+    // The pin is public and written 0644 whatever the umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let pin = dir.join("keys/evaluator.pub");
+        std::fs::remove_file(&pin).unwrap();
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg("umask 077; exec \"$@\"")
+            .arg("sh")
+            .arg(env!("CARGO_BIN_EXE_encompute"))
+            .args([
+                "run",
+                &p("adult.encompute"),
+                "--remote",
+                &url,
+                "--keys",
+                &p("keys"),
+                "--input",
+                "age=30",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let mode = std::fs::metadata(&pin).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "evaluator.pub is {mode:o}");
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), pinned);
+    }
 
     let receipt = p("result.receipt.json");
     let verify = |extra: &[&str]| {
