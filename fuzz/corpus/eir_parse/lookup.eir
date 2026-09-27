@@ -1,0 +1,11 @@
+encompute 0.1
+program lookup_small precision 0.001
+# A 16-entry fee schedule indexed by a private level, and a 16-entry
+# tier table indexed by the top four bits of a private score.
+%0 = input "level" [0.0, 15.0] : secret u8
+%1 = lookup %0 [0.0, 5.0, 5.0, 8.0, 12.0, 12.0, 15.0, 20.0, 25.0, 25.0, 30.0, 40.0, 50.0, 65.0, 80.0, 100.0] : secret u8
+%2 = input "score" [0.0, 255.0] : secret u8
+%3 = shr %2 4 : secret u8
+%4 = lookup %3 [9.0, 9.0, 8.0, 8.0, 7.0, 6.0, 6.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 1.0, 1.0, 0.0] : secret u8
+output "fee" = %1
+output "tier" = %4

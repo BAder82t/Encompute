@@ -1,0 +1,1 @@
+{"backends":["openfhe-exact"],"capacity":2,"id":"evaluator-1","logical_cores":8,"memory_bytes":17179869184,"openfhe_version":"1.5.1","profiles":["CKKS"],"receipt_key":"0000000000000000000000000000000000000000000000000000000000000000","url":"http://e:8080"}

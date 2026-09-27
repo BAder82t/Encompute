@@ -1,0 +1,1 @@
+{"owners":["modelco"],"readers":["modelco"],"purposes":["disease-training"],"release":"never","derive":{"gradient":{"release":"aggregate_only","to":["coordinator"]}}}

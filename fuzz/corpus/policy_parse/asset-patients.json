@@ -1,0 +1,1 @@
+{"owners":["hospital-a"],"readers":["hospital-a"],"purposes":["disease-training"],"release":"never","derive":{"gradient":{"release":"aggregate_only","to":["coordinator"]}}}

@@ -1,0 +1,179 @@
+[package]
+name = "encompute-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "cargo-fuzz targets for every Encompute parser (nightly; not a workspace member)"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde = "1.0"
+serde_json = "1.0"
+zeroize = "1.8"
+sha2 = "0.10"
+ed25519-dalek = "2"
+tempfile = "3"
+encompute-ir = { path = "../crates/encompute-ir" }
+encompute-backend = { path = "../crates/encompute-backend" }
+encompute-protocol = { path = "../crates/encompute-protocol" }
+encompute-verification = { path = "../crates/encompute-verification" }
+encompute-attestation = { path = "../crates/encompute-attestation" }
+encompute-trust = { path = "../crates/encompute-trust" }
+encompute-privacy = { path = "../crates/encompute-privacy" }
+encompute-training = { path = "../crates/encompute-training" }
+encompute-secagg = { path = "../crates/encompute-secagg" }
+encompute-planner = { path = "../crates/encompute-planner" }
+encompute-evaluator = { path = "../crates/encompute-evaluator" }
+encompute-control = { path = "../crates/encompute-control" }
+encompute-runtime = { path = "../crates/encompute-runtime" }
+
+# Not part of the main workspace: `cargo +nightly fuzz` builds it alone.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "gen_corpus"
+path = "examples/gen_corpus.rs"
+
+[[bin]]
+name = "eir_parse"
+path = "fuzz_targets/eir_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "artifact_load"
+path = "fuzz_targets/artifact_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope_decode"
+path = "fuzz_targets/envelope_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receipt_parse"
+path = "fuzz_targets/receipt_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proof_parse"
+path = "fuzz_targets/proof_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transcript_parse"
+path = "fuzz_targets/transcript_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trust_bundle"
+path = "fuzz_targets/trust_bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trust_evidence"
+path = "fuzz_targets/trust_evidence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_parse"
+path = "fuzz_targets/policy_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "service_headers"
+path = "fuzz_targets/service_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_envelope"
+path = "fuzz_targets/message_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "job_grant"
+path = "fuzz_targets/job_grant.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sealed_artifact"
+path = "fuzz_targets/sealed_artifact.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tensor_manifest"
+path = "fuzz_targets/tensor_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "privacy_ledger"
+path = "fuzz_targets/privacy_ledger.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_api"
+path = "fuzz_targets/control_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "evaluator_bodies"
+path = "fuzz_targets/evaluator_bodies.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pool_frame"
+path = "fuzz_targets/pool_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attestation_evidence"
+path = "fuzz_targets/attestation_evidence.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,72 @@
+name: fuzz
+
+# Sustained fuzzing of every exposed parser (see fuzz/README.md). Nightly,
+# and on demand. Each target runs for a bounded time; any crash, timeout
+# or out-of-memory input fails the job and is uploaded as an artifact.
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - artifact_load
+          - attestation_evidence
+          - control_api
+          - eir_parse
+          - envelope_decode
+          - evaluator_bodies
+          - job_grant
+          - message_envelope
+          - policy_parse
+          - pool_frame
+          - privacy_ledger
+          - proof_parse
+          - receipt_parse
+          - sealed_artifact
+          - service_headers
+          - tensor_manifest
+          - transcript_parse
+          - trust_bundle
+          - trust_evidence
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: fuzz
+        env:
+          FUZZ_WORK: ${{ github.workspace }}/fuzz/work
+        run: fuzz/run_all.sh "${{ github.event.inputs.seconds || '300' }}" "${{ matrix.target }}"
+      - name: upload findings
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-findings-${{ matrix.target }}
+          path: |
+            fuzz/work/artifacts/${{ matrix.target }}/
+            fuzz/work/${{ matrix.target }}.log
+          if-no-files-found: ignore
+          retention-days: 30
