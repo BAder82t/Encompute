@@ -122,6 +122,23 @@ std::unique_ptr<BinCiphertext> bin_gate(const BinContext& ctx, uint8_t gate,
   if (gate > 5) throw std::runtime_error("unknown BinFHE gate");
   std::lock_guard<std::mutex> g(openfhe_mutex());
   if (!ctx.impl->keys) throw std::runtime_error("no bootstrapping keys loaded");
+  if (a.impl->ct == b.impl->ct) {
+    // OpenFHE refuses a gate whose operands are one ciphertext object
+    // (x & x, x ^ x ...): the identities give the result without a
+    // bootstrap. OR, AND: x; NOR, NAND: NOT x; XOR: 0; XNOR: 1.
+    switch (gate) {
+      case 0:
+      case 1:
+        return wrap(std::make_shared<lbcrypto::LWECiphertextImpl>(*a.impl->ct));
+      case 2:
+      case 3:
+        return wrap(ctx.impl->cc.EvalNOT(a.impl->ct));
+      case 4:
+        return wrap(ctx.impl->cc.EvalConstant(false));
+      default:
+        return wrap(ctx.impl->cc.EvalConstant(true));
+    }
+  }
   return wrap(ctx.impl->cc.EvalBinGate(gates[gate], a.impl->ct, b.impl->ct));
 }
 

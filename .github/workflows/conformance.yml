@@ -102,6 +102,6 @@ jobs:
         env:
           SDK_PYTHON: python3
         run: |
-          python -m venv .venv && . .venv/bin/activate && pip install -q maturin numpy && maturin develop --release
+          python -m venv .venv && . .venv/bin/activate && pip install -q maturin numpy cryptography && maturin develop --release
           SDK_PYTHON=$PWD/.venv/bin/python deploy/docker-compose/smoke.sh
 

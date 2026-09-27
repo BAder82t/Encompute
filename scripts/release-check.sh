@@ -29,8 +29,10 @@ check() {  # check NAME command...
 python_env() {
   [ -x .venv/bin/python ] || python3 -m venv .venv
   .venv/bin/pip install -q maturin pytest numpy &&
-    .venv/bin/pip install -q torch --index-url https://download.pytorch.org/whl/cpu &&
-    .venv/bin/pip install -q "transformers==4.46.3" "peft==0.12.0" &&
+    # The versions the confidential training image pins: a model package
+    # binds them, and the worker refuses packages made with others.
+    .venv/bin/pip install -q -r deploy/confidential-space-training/requirements.txt \
+      --extra-index-url https://download.pytorch.org/whl/cpu &&
     (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" maturin develop -q)
 }
 

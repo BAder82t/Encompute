@@ -92,3 +92,26 @@ fn measure_paramsets() {
         );
     }
 }
+
+/// A gate whose two operands are the same ciphertext (`x & x`, `x ^ x`,
+/// which programs like `x * x` produce): OpenFHE refuses those; the shim
+/// answers by the gate's identities.
+#[test]
+fn gates_on_one_ciphertext_twice() {
+    let client = BinClient::generate("STD128").unwrap();
+    let (refresh, switching) = client.bootstrapping_keys().unwrap();
+    let mut ctx = BinContext::new("STD128").unwrap();
+    ctx.load_keys(&refresh, &switching).unwrap();
+    for x in [false, true] {
+        let c = ctx.load(&client.encrypt_bit(x).unwrap()).unwrap();
+        let dec = |r: encompute_openfhe::binfhe::BinCiphertext| {
+            client.decrypt_bit(&r.store().unwrap()).unwrap()
+        };
+        assert_eq!(dec(ctx.gate(Gate::And, &c, &c).unwrap()), x);
+        assert_eq!(dec(ctx.gate(Gate::Or, &c, &c).unwrap()), x);
+        assert_eq!(dec(ctx.gate(Gate::Nand, &c, &c).unwrap()), !x);
+        assert_eq!(dec(ctx.gate(Gate::Nor, &c, &c).unwrap()), !x);
+        assert!(!dec(ctx.gate(Gate::Xor, &c, &c).unwrap()));
+        assert!(dec(ctx.gate(Gate::Xnor, &c, &c).unwrap()));
+    }
+}

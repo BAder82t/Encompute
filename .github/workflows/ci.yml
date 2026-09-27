@@ -146,11 +146,6 @@ jobs:
         run: |
           cargo build --release -p encompute-evaluator --features openfhe
           ./scripts/audit-evaluator-binary.sh
-      - name: exact demo on OpenFHE exact (separate evaluator process)
-        if: runner.os == 'Linux'
-        run: |
-          cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/openfhe,encompute-evaluator/openfhe
-          ./scripts/exact-demo.sh
       - name: commercial build audit (no TFHE-rs in production artifacts)
         run: |
           cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/openfhe,encompute-evaluator/openfhe
@@ -166,6 +161,11 @@ jobs:
           maturin develop --release --features openfhe
           pytest -q
           python examples/01_ckks_private_inference/semantic_search.py
+      - name: exact demo on OpenFHE exact (separate evaluator process)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/openfhe,encompute-evaluator/openfhe
+          PYTHON=.venv/bin/python ./scripts/exact-demo.sh
       - name: crypto examples (OpenFHE)
         run: |
           cargo build --release --bins --features encompute-cli/openfhe,encompute-evaluator/openfhe -p encompute-cli -p encompute-evaluator

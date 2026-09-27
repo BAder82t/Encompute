@@ -69,11 +69,22 @@ fn db_name(url: &str) -> String {
 /// to the source may be open).
 pub fn backup_database(url: &str, backup: &str) {
     let mut c = postgres::Client::connect(&admin_url(), postgres::NoTls).unwrap();
-    c.batch_execute(&format!(
-        "CREATE DATABASE {backup} TEMPLATE {}",
-        db_name(url)
-    ))
-    .unwrap();
+    let live = db_name(url);
+    // A dropped pool closes its connections asynchronously: end them first.
+    for _ in 0..50 {
+        c.batch_execute(&format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{live}'"
+        ))
+        .unwrap();
+        match c.batch_execute(&format!("CREATE DATABASE {backup} TEMPLATE {live}")) {
+            Ok(()) => return,
+            Err(e) if e.code() == Some(&postgres::error::SqlState::OBJECT_IN_USE) => {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+    panic!("the source database stayed in use");
 }
 
 /// Restores `backup` over `url`'s database (drops it first).
