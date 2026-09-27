@@ -11,7 +11,8 @@
 //!   refused with `411`), stay within the service's limit for that route
 //!   (refused with `413` *before* reading it), and arrive within
 //!   [`Limits::body_timeout`] plus its length at [`Limits::min_body_rate`],
-//!   with no silence longer than [`Limits::idle_timeout`];
+//!   sustaining that rate after the grace period, with no silence longer
+//!   than [`Limits::idle_timeout`];
 //! - one request per connection (`Connection: close`).
 //!
 //! A slow or stalled client therefore holds one connection thread for a
@@ -37,9 +38,11 @@ pub struct Limits {
     pub head_timeout: Duration,
     /// Longest silence while reading a body.
     pub idle_timeout: Duration,
-    /// Time allowed for a body, plus its length at `min_body_rate`.
+    /// Grace period for a body; after it, the body must have arrived at
+    /// `min_body_rate` on average (and all of it by the grace period plus
+    /// its length at that rate).
     pub body_timeout: Duration,
-    /// Bytes per second a body is given (on top of `body_timeout`).
+    /// Bytes per second a body must sustain after `body_timeout`.
     pub min_body_rate: u64,
     /// Writing the response.
     pub write_timeout: Duration,
@@ -502,10 +505,22 @@ fn read_request<H: Handler>(
             return Err(None);
         }
     }
-    let allowance = Duration::from_secs(len as u64 / limits.min_body_rate.max(1));
-    let body_deadline = Instant::now() + limits.body_timeout + allowance;
+    let rate = limits.min_body_rate.max(1);
+    let started = Instant::now();
+    let body_deadline = started + limits.body_timeout + Duration::from_secs(len as u64 / rate);
     body.reserve(len.saturating_sub(body.len()).min(1 << 20));
     while body.len() < len {
+        // After the grace period the body must keep arriving at the
+        // minimum rate on average: a large declared length is no licence
+        // to trickle (and hold this thread for hours).
+        let owed = started
+            .elapsed()
+            .saturating_sub(limits.body_timeout)
+            .as_secs_f64()
+            * rate as f64;
+        if (body.len() as f64) < owed {
+            return Err(Some(Refused::Timeout));
+        }
         let want = (len - body.len()).min(chunk.len());
         match read_some(s, &mut chunk[..want], body_deadline, limits.idle_timeout) {
             Ok(0) => return Err(Some(Refused::Malformed("incomplete body"))),
@@ -617,6 +632,47 @@ mod tests {
             assert!(out.starts_with("HTTP/1.1 408"), "{out}");
         }
         assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_trickled_body_is_cut_despite_a_large_declared_length() {
+        struct Big;
+        impl Handler for Big {
+            fn body_limit(&self, _: &Request) -> usize {
+                1 << 30
+            }
+            fn handle(&self, _: Request) -> Response {
+                Response::new(200, "text/plain", vec![])
+            }
+        }
+        let s = Server::http("127.0.0.1:0").unwrap().with_limits(Limits {
+            body_timeout: Duration::from_millis(500),
+            min_body_rate: 10_000,
+            idle_timeout: Duration::from_secs(5),
+            ..Limits::default()
+        });
+        let a = s.server_addr();
+        std::thread::spawn(move || s.serve(&Big));
+        let t = Instant::now();
+        let mut c = TcpStream::connect(a).unwrap();
+        c.write_all(b"POST /x HTTP/1.1\r\nContent-Length: 100000000\r\n\r\n")
+            .unwrap();
+        // 20 bytes every 100 ms: inside the idle timeout, far below the rate.
+        let mut out = String::new();
+        c.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        for _ in 0..100 {
+            if c.write_all(&[b'x'; 20]).is_err() {
+                break;
+            }
+            let mut buf = [0u8; 256];
+            if let Ok(n) = c.read(&mut buf) {
+                out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                break;
+            }
+        }
+        assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
     }
 
     #[test]
