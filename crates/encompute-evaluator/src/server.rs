@@ -20,7 +20,6 @@
 //! No TLS: terminate TLS at a reverse proxy.
 
 use std::collections::VecDeque;
-use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -28,15 +27,21 @@ use std::time::Instant;
 use encompute_ir::{Code, Error, Result};
 use encompute_protocol::sha256_hex;
 use serde_json::json;
-use tiny_http::{Header, Method, Request, Response, Server};
 
 use encompute_attestation::AttestationRecord;
-use encompute_verification::{EvaluatorSigner, WorkloadAttestationRef};
+use encompute_verification::{http, EvaluatorSigner, WorkloadAttestationRef};
 
 use crate::engine::{Engine, Local};
 use crate::session::{execution_proof, issue_receipt, BackendKind, Backends};
 
 pub const PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Method {
+    Get,
+    Post,
+    Other,
+}
 
 #[derive(Clone, Debug)]
 pub struct Limits {
@@ -108,6 +113,12 @@ fn error_reply(e: &Error) -> Reply {
         Code::WrongProgram => 404,
         Code::Unsupported | Code::DepthExceeded | Code::PrecisionUnreachable => 422,
         Code::Remote => 413,
+        // A job the control plane did not grant (or refused to start).
+        Code::ServiceAuthentication | Code::Unauthenticated => 401,
+        Code::Forbidden => 403,
+        Code::NotFound => 404,
+        Code::Conflict => 409,
+        Code::Scheduling => 503,
         _ => 500,
     };
     Reply {
@@ -358,7 +369,20 @@ impl Evaluator {
     fn job(&self, pid: &str, body: &[u8], grant: Option<&str>) -> Result<Reply> {
         // With a control plane: only granted jobs, started with its consent.
         let granted = match &self.control {
-            Some(c) => Some(c.authorize(grant, pid)?),
+            // An unreachable control plane is not an oversized request.
+            Some(c) => Some(c.authorize(grant, pid).map_err(|e| {
+                if e.code == Code::Remote {
+                    Error::new(
+                        Code::Scheduling,
+                        format!(
+                            "the control plane did not authorize this job: {}",
+                            e.message
+                        ),
+                    )
+                } else {
+                    e
+                }
+            })?),
             None => None,
         };
         let (out, times) = self.engine.execute(pid, body)?;
@@ -423,38 +447,29 @@ impl Evaluator {
         }
     }
 
-    /// Handle one request: read the body within limits, route, respond, log.
-    pub fn handle(&self, mut req: Request) {
+    /// Handle one request (its body already read within limits): route,
+    /// respond, log.
+    pub fn handle(&self, req: http::Request) -> http::Response {
         let id = self.requests.fetch_add(1, Ordering::Relaxed);
         let t = Instant::now();
-        let method = req.method().clone();
-        let path = req.url().split('?').next().unwrap_or("").to_owned();
+        let path = req.path().to_owned();
+        let method = match req.method.as_str() {
+            "GET" => Method::Get,
+            "POST" => Method::Post,
+            _ => Method::Other,
+        };
         let grant = req
-            .headers()
-            .iter()
-            .find(|h| h.field.equiv(encompute_verification::service::H_JOB_GRANT))
-            .map(|h| h.value.as_str().to_owned());
+            .header(encompute_verification::service::H_JOB_GRANT)
+            .map(str::to_owned);
         let limit = self.limit_for(&path);
-        let declared = req.body_length().unwrap_or(0);
-        let mut body = Vec::new();
-        let too_big = || {
+        let body = req.body;
+        let reply = if body.len() > limit {
             error_reply(&Error::new(
                 Code::Remote,
                 format!("request body above the {limit}-byte limit"),
             ))
-        };
-        let reply = if declared > limit {
-            too_big()
         } else {
-            match req
-                .as_reader()
-                .take(limit as u64 + 1)
-                .read_to_end(&mut body)
-            {
-                Ok(_) if body.len() > limit => too_big(),
-                Ok(_) => self.route(&method, &path, &body, grant.as_deref()),
-                Err(e) => error_reply(&Error::new(Code::Remote, format!("reading request: {e}"))),
-            }
+            self.route(&method, &path, &body, grant.as_deref())
         };
         let (status, len) = (reply.status, reply.body.len());
         let ctype = if reply.json {
@@ -464,32 +479,42 @@ impl Evaluator {
         } else {
             "application/octet-stream"
         };
-        let mut resp = Response::from_data(reply.body).with_status_code(status);
-        resp.add_header(Header::from_bytes("Content-Type", ctype).unwrap());
-        resp.add_header(Header::from_bytes("X-Request-Id", id.to_string()).unwrap());
-        let _ = req.respond(resp);
         eprintln!(
-            "req={id} {method} {path} status={status} in={}B out={len}B {:.1}ms",
+            "req={id} {} {path} status={status} in={}B out={len}B {:.1}ms",
+            req.method,
             body.len(),
             t.elapsed().as_secs_f64() * 1e3
         );
+        http::Response::new(status, ctype, reply.body).with_header("X-Request-Id", &id.to_string())
     }
 
-    /// Serve forever on `limits.http_threads` threads.
-    pub fn serve(self, server: Server) {
-        let (me, server) = (Arc::new(self), Arc::new(server));
-        let threads: Vec<_> = (0..me.limits.http_threads.max(1))
-            .map(|_| {
-                let (me, server) = (me.clone(), server.clone());
-                std::thread::spawn(move || {
-                    while let Ok(req) = server.recv() {
-                        me.handle(req);
-                    }
-                })
-            })
-            .collect();
-        for t in threads {
-            let _ = t.join();
+    /// Serve forever on `limits.http_threads` connection threads.
+    pub fn serve(self, server: http::Server) {
+        let limits = http::Limits {
+            threads: self.limits.http_threads.max(1),
+            ..server.limits().clone()
+        };
+        server.with_limits(limits).serve(&self);
+    }
+}
+
+impl http::Handler for Evaluator {
+    fn body_limit(&self, head: &http::Request) -> usize {
+        self.limit_for(head.path())
+    }
+
+    fn handle(&self, req: http::Request) -> http::Response {
+        Evaluator::handle(self, req)
+    }
+
+    /// An oversized body keeps the evaluator's error code (ENC1701).
+    fn refused(&self, why: http::Refused) -> http::Response {
+        match why {
+            http::Refused::TooLarge { .. } => {
+                let r = error_reply(&Error::new(Code::Remote, why.message()));
+                http::Response::new(r.status, "application/json", r.body)
+            }
+            _ => why.response(),
         }
     }
 }

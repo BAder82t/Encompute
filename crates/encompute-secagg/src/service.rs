@@ -15,7 +15,6 @@
 //! served.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +24,7 @@ use serde_json::json;
 use encompute_attestation::AttestationRecord;
 use encompute_ir::confidentiality::PartyId;
 use encompute_ir::{Code, Error, Result};
+use encompute_verification::http;
 
 use crate::protocol::{Inbox, KeysBroadcast, Survivors, UnmaskRequest};
 use crate::round::{
@@ -312,7 +312,7 @@ impl CoordinatorService {
         })
     }
 
-    fn handle(&self, method: &tiny_http::Method, path: &str, body: &[u8]) -> (u16, String) {
+    fn handle(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
         let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
         let err = |e: &Error| {
             let status = match e.code {
@@ -324,13 +324,13 @@ impl CoordinatorService {
             (status, json!(ErrorBody::from(e)).to_string())
         };
         match (method, parts.as_slice()) {
-            (tiny_http::Method::Get, ["v1", "round"]) => (200, json!(*self.offer).to_string()),
-            (tiny_http::Method::Get, ["v1", "status"]) => (200, json!(self.status()).to_string()),
-            (tiny_http::Method::Post, ["v1", what]) => match self.post(what, body) {
+            ("GET", ["v1", "round"]) => (200, json!(*self.offer).to_string()),
+            ("GET", ["v1", "status"]) => (200, json!(self.status()).to_string()),
+            ("POST", ["v1", what]) => match self.post(what, body) {
                 Ok(()) => (200, "{}".into()),
                 Err(e) => err(&e),
             },
-            (tiny_http::Method::Get, ["v1", rest @ ..]) => match self.get(rest) {
+            ("GET", ["v1", rest @ ..]) => match self.get(rest) {
                 Ok(Some(v)) => (200, v.to_string()),
                 Ok(None) => (425, json!({"code": "", "message": "not ready"}).to_string()),
                 Err(e) => err(&e),
@@ -342,60 +342,71 @@ impl CoordinatorService {
         }
     }
 
-    /// Serves HTTP on `server` from a background thread. Messages (POSTs)
+    /// Serves HTTP on `server` from background threads (the server's
+    /// connection threads read each request within its time and size
+    /// limits, so a slow client never holds the round). Messages (POSTs)
     /// are limited to [`POSTS_PER_MINUTE`] per source address; a party
     /// sends five per round.
     ///
     /// Serving does not advance the round: something must call
     /// [`Self::tick`] (or [`Self::run_to_completion`]).
-    pub fn spawn(&self, server: tiny_http::Server) {
-        let me = self.clone();
-        std::thread::spawn(move || {
-            let mut posts: std::collections::HashMap<std::net::IpAddr, (u64, u32)> =
-                std::collections::HashMap::new();
-            for mut req in server.incoming_requests() {
-                let method = req.method().clone();
-                if method == tiny_http::Method::Post {
-                    if let Some(ip) = req.remote_addr().map(|a| a.ip()) {
-                        let minute = encompute_attestation::unix_now() / 60;
-                        if posts.len() > 65_536 {
-                            posts.retain(|_, (m, _)| *m == minute);
-                        }
-                        let w = posts.entry(ip).or_insert((minute, 0));
-                        if w.0 != minute {
-                            *w = (minute, 0);
-                        }
-                        w.1 += 1;
-                        if w.1 > POSTS_PER_MINUTE {
-                            let body = json!({"code": "ENC1701", "message": "too many messages; retry later"});
-                            let _ = req.respond(
-                                tiny_http::Response::from_string(body.to_string())
-                                    .with_status_code(429),
-                            );
-                            continue;
-                        }
-                    }
+    pub fn spawn(&self, server: http::Server) {
+        let h = Http {
+            svc: self.clone(),
+            posts: Mutex::new(std::collections::HashMap::new()),
+        };
+        std::thread::spawn(move || server.serve(&h));
+    }
+}
+
+/// The coordinator's HTTP front.
+struct Http {
+    svc: CoordinatorService,
+    /// Per source address: (minute, POSTs in it).
+    posts: Mutex<std::collections::HashMap<std::net::IpAddr, (u64, u32)>>,
+}
+
+impl http::Handler for Http {
+    fn body_limit(&self, _: &http::Request) -> usize {
+        self.svc.max_body as usize
+    }
+
+    fn handle(&self, req: http::Request) -> http::Response {
+        let json_reply = |status: u16, body: String| {
+            http::Response::new(status, "application/json", body.into_bytes())
+        };
+        if req.method == "POST" {
+            if let Some(ip) = req.remote.map(|a| a.ip()) {
+                let minute = encompute_attestation::unix_now() / 60;
+                let mut posts = self.posts.lock().unwrap_or_else(|p| p.into_inner());
+                if posts.len() > 65_536 {
+                    posts.retain(|_, (m, _)| *m == minute);
                 }
-                let path = req.url().split('?').next().unwrap_or("").to_owned();
-                let mut body = Vec::new();
-                let (status, out) =
-                    match req.as_reader().take(me.max_body + 1).read_to_end(&mut body) {
-                        Ok(_) if body.len() as u64 > me.max_body => (
-                            413,
-                            json!({"code": "ENC1701", "message": "body too large"}).to_string(),
-                        ),
-                        Ok(_) => me.handle(&method, &path, &body),
-                        Err(_) => (400, "{}".into()),
-                    };
-                let h = tiny_http::Header::from_bytes("Content-Type", "application/json")
-                    .expect("header");
-                let _ = req.respond(
-                    tiny_http::Response::from_string(out)
-                        .with_status_code(status)
-                        .with_header(h),
-                );
+                let w = posts.entry(ip).or_insert((minute, 0));
+                if w.0 != minute {
+                    *w = (minute, 0);
+                }
+                w.1 += 1;
+                if w.1 > POSTS_PER_MINUTE {
+                    let body =
+                        json!({"code": "ENC1701", "message": "too many messages; retry later"});
+                    return json_reply(429, body.to_string());
+                }
             }
-        });
+        }
+        let (status, out) = self.svc.handle(&req.method, req.path(), &req.body);
+        json_reply(status, out)
+    }
+
+    /// An oversized body keeps the coordinator's error code (ENC1701).
+    fn refused(&self, why: http::Refused) -> http::Response {
+        match why {
+            http::Refused::TooLarge { .. } => http::Response::json(
+                413,
+                &json!({"code": "ENC1701", "message": "body too large"}),
+            ),
+            _ => why.response(),
+        }
     }
 }
 

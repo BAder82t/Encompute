@@ -393,8 +393,8 @@ fn proof_tampering_fails_closed() {
 /// verifies before decrypting.
 #[test]
 fn remote_verified_execution() {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr());
     let backends = Backends {
         approx: BackendKind::OpenFhe,
         exact: BackendKind::Mock,

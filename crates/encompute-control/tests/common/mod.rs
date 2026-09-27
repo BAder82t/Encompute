@@ -522,3 +522,147 @@ pub fn evaluator_with(
         receipt,
     }
 }
+
+// --- over real HTTP ------------------------------------------------------------
+
+/// Serves `control` over real HTTP on a fresh loopback port, with `limits`.
+pub fn live(
+    control: &Arc<Control>,
+    limits: encompute_verification::http::Limits,
+) -> std::net::SocketAddr {
+    let server = encompute_verification::http::Server::http("127.0.0.1:0")
+        .unwrap()
+        .with_limits(limits);
+    let addr = server.server_addr();
+    let c = control.clone();
+    std::thread::spawn(move || encompute_control::api::serve_on(c, server));
+    addr
+}
+
+/// Headers `who` sends for `method url` with `body`.
+pub fn auth_headers(who: &As, method: &str, url: &str, body: &[u8]) -> Vec<(String, String)> {
+    match who {
+        As::Nobody => vec![],
+        As::User(sub) => vec![("Authorization".into(), format!("Bearer {}", token(sub)))],
+        As::Raw(t) => vec![("Authorization".into(), format!("Bearer {t}"))],
+        As::Service(s) => {
+            let path = url.split('?').next().unwrap();
+            s.sign_request(method, path, "control-plane", &Default::default(), body)
+                .unwrap()
+                .to_pairs()
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect()
+        }
+    }
+}
+
+/// An HTTP client of a live control plane.
+pub struct Client {
+    pub base: String,
+    agent: ureq::Agent,
+}
+
+impl Client {
+    pub fn new(addr: std::net::SocketAddr) -> Self {
+        Self {
+            base: format!("http://{addr}"),
+            agent: ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(30))
+                .build(),
+        }
+    }
+
+    /// Sends raw headers and body: (status, JSON body or null).
+    pub fn raw(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> (u16, Value) {
+        match self.try_raw(method, url, headers, body) {
+            Ok(r) => r,
+            Err(e) => panic!("{method} {url}: {e}"),
+        }
+    }
+
+    /// Like [`Client::raw`]; `Err` when the transport failed.
+    pub fn try_raw(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<(u16, Value), String> {
+        let mut r = self
+            .agent
+            .request(method, &format!("{}{url}", self.base))
+            .set("Content-Type", "application/json");
+        for (k, v) in headers {
+            r = r.set(k, v);
+        }
+        let out = if body.is_empty() {
+            r.call()
+        } else {
+            r.send_bytes(body)
+        };
+        match out {
+            Ok(resp) => Ok((resp.status(), resp.into_json().unwrap_or(Value::Null))),
+            Err(ureq::Error::Status(s, resp)) => Ok((s, resp.into_json().unwrap_or(Value::Null))),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn call_with(
+        &self,
+        who: &As,
+        method: &str,
+        url: &str,
+        body: Option<Value>,
+        extra: &[(&str, &str)],
+    ) -> (u16, Value) {
+        let body = body
+            .map(|b| serde_json::to_vec(&b).unwrap())
+            .unwrap_or_default();
+        let mut h = auth_headers(who, method, url, &body);
+        h.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        self.raw(method, url, &h, &body)
+    }
+
+    pub fn call(&self, who: &As, method: &str, url: &str, body: Option<Value>) -> (u16, Value) {
+        self.call_with(who, method, url, body, &[])
+    }
+
+    /// Calls and asserts a 2xx status.
+    pub fn ok(&self, who: &As, method: &str, url: &str, body: Option<Value>) -> Value {
+        let (s, v) = self.call(who, method, url, body);
+        assert!((200..300).contains(&s), "{method} {url}: {s} {v}");
+        v
+    }
+}
+
+/// Writes `bytes` on a fresh connection and reads the whole reply.
+pub fn raw_exchange(addr: std::net::SocketAddr, bytes: &[u8]) -> String {
+    use std::io::{Read, Write};
+    let mut c = std::net::TcpStream::connect(addr).unwrap();
+    c.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .unwrap();
+    let _ = c.write_all(bytes);
+    let mut out = vec![];
+    let _ = c.read_to_end(&mut out);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The status code of a raw HTTP reply (0 if none).
+pub fn status_of(reply: &str) -> u16 {
+    reply.get(9..12).and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+/// The JSON body of a raw HTTP reply.
+pub fn body_of(reply: &str) -> Value {
+    reply
+        .split_once("\r\n\r\n")
+        .and_then(|(_, b)| serde_json::from_str(b).ok())
+        .unwrap_or(Value::Null)
+}

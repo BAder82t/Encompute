@@ -756,7 +756,7 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 }
                 (c, _, _) => c,
             };
-            let server = tiny_http::Server::http(&listen)
+            let server = encompute_verification::http::Server::http(&listen)
                 .map_err(|e| Error::new(Code::Remote, format!("{listen}: {e}")))?;
             eprintln!(
                 "key broker {} ({:?}) on http://{listen}, trusting: {}",
@@ -773,7 +773,7 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             let path = file.broker.clone();
             encompute_runtime::keybroker::serve_with_control(
                 &Mutex::new(b),
-                &server,
+                server,
                 requests_per_minute,
                 control.as_ref(),
                 &|b| b.save(&path),

@@ -11,8 +11,8 @@ use encompute_ir::{evaluate, Code};
 use encompute_runtime::{sample_inputs, Backends, Mode, Model, Remote};
 
 fn spawn(limits: Limits) -> String {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr());
     std::thread::spawn(move || Evaluator::new(Backends::MOCK, limits).serve(server));
     url
 }

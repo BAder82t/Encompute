@@ -17,8 +17,8 @@ use crate::authz::{
 use crate::control::{load_ledger, Control, Ctx};
 use crate::db::db_err;
 use crate::model::{
-    bad, check_digest, check_name, new_id, ApproveAsset, AssetKind, KeyRef, RegisterAsset, Role,
-    ServiceKind,
+    bad, check_digest, check_name, check_storage_uri, new_id, ApproveAsset, AssetKind, KeyRef,
+    RegisterAsset, Role, ServiceKind,
 };
 use crate::transport::{seal, Scope};
 
@@ -55,7 +55,7 @@ impl Control {
         check_name("asset name", &r.name)?;
         check_digest("digest", &r.digest)?;
         if let Some(u) = &r.storage_uri {
-            check_name("storage_uri", u)?;
+            check_storage_uri(u)?;
         }
         if let Some(k) = &r.key_ref {
             check_name("key_ref.broker", &k.broker)?;
@@ -237,7 +237,9 @@ impl Control {
 
     /// Revokes an asset: no new job may use it, jobs not yet running that
     /// use it fail, and its key broker is told to destroy the key (no new
-    /// key release). Derived assets are found through lineage.
+    /// key release). Derived assets are found through lineage. The
+    /// revocation is anchored before it is acknowledged, so restoring an
+    /// older database cannot silently make the asset usable again.
     pub fn revoke_asset(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         let r = self.db.tx(|t| {
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
@@ -250,81 +252,119 @@ impl Control {
             if a.status == "revoked" {
                 return Ok(json!({"id": id, "status": "revoked", "already": true}));
             }
-            t.execute(
-                "UPDATE assets SET status = 'revoked', revoked_at = now() WHERE id = $1",
-                &[&id],
-            )
-            .map_err(db_err)?;
-            // Jobs that have not started cannot start now. (Rows are locked
-            // before the audit chain: every transaction takes the audit
-            // head last, so no two wait on each other.)
-            let jobs: Vec<(String, String, String)> = t
-                .query(
-                    "SELECT id, state, organization_id FROM jobs
-                      WHERE source_assets ? $1
-                        AND state IN ('created', 'planning', 'planned', 'waiting_for_approval', 'authorized', 'queued')
-                      FOR UPDATE",
-                    &[&id],
-                )
-                .map_err(db_err)?
-                .iter()
-                .map(|r| (r.get(0), r.get(1), r.get(2)))
-                .collect();
-            audit::append(
-                t,
-                ctx.draft("asset.revoked", "asset", id, Outcome::Succeeded).org(&a.organization),
-            )?;
-            for (job, _, org) in &jobs {
-                self.transition_in(t, ctx.actor(), &ctx.request_id, job, crate::model::JobState::Failed, Some("a source asset was revoked"))?;
-                audit::append(
-                    t,
-                    ctx.draft("job.failed", "job", job, Outcome::Failed)
-                        .org(org)
-                        .r#ref("revoked_asset", id),
-                )?;
-            }
-            // Tell the key broker (at least once, idempotent there).
-            if let Some(k) = a.key_ref.clone().and_then(|k| serde_json::from_value::<KeyRef>(k).ok()) {
-                let url: Option<Option<String>> = t
-                    .query_opt(
-                        "SELECT url FROM service_accounts WHERE id = $1 AND kind = 'keybroker' AND status = 'active'",
-                        &[&k.broker],
-                    )
-                    .map_err(db_err)?
-                    .map(|r| r.get(0));
-                if let Some(Some(url)) = url {
-                    let m = seal(
-                        &self.signer,
-                        "asset.revoked",
-                        &k.broker,
-                        Scope {
-                            organization: Some(a.organization.clone()),
-                            ..Scope::default()
-                        },
-                        &json!({"asset": id, "key_ref": k.key_ref, "key_version": k.key_version}),
-                        7 * 24 * 3600,
-                    )?;
-                    t.execute(
-                        "INSERT INTO outbox (message_id, recipient, url, envelope) VALUES ($1, $2, $3, $4)",
-                        &[&m.message_id, &k.broker, &url, &serde_json::to_value(&m).expect("serializable")],
-                    )
-                    .map_err(db_err)?;
-                    audit::append(
-                        t,
-                        ctx.draft("key.revocation.sent", "asset", id, Outcome::Succeeded)
-                            .org(&a.organization)
-                            .r#ref("broker", k.broker.clone())
-                            .r#ref("message", m.message_id.clone()),
-                    )?;
-                }
-            }
-            let failed: Vec<String> = jobs.into_iter().map(|j| j.0).collect();
+            let failed = self.revoke_in(t, ctx.actor(), &ctx.request_id, &a, None)?;
             Ok(json!({"id": id, "status": "revoked", "failed_jobs": failed}))
         })?;
+        // Anchored before acknowledging (a retry, "already", re-anchors).
+        if !self.anchor.snapshot().revoked.contains(id) {
+            self.anchor.update(&self.signer, |x| {
+                x.revoked.insert(id.to_owned());
+            })?;
+        }
         self.metrics
             .inc("encompute_key_release_denied_total", "revoked");
         let _ = self.deliver_outbox();
         Ok(r)
+    }
+
+    /// Revokes `a` in the caller's transaction (authorization done): marks
+    /// it revoked, fails the jobs not yet running that use it, and queues
+    /// the key broker's revocation. Returns the failed jobs. `reason`
+    /// annotates the audit event (recovery re-applying an anchored
+    /// revocation).
+    pub(crate) fn revoke_in(
+        &self,
+        t: &mut postgres::Transaction<'_>,
+        actor: &str,
+        request_id: &str,
+        a: &crate::authz::AssetRow,
+        reason: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let id = a.id.as_str();
+        t.execute(
+            "UPDATE assets SET status = 'revoked', revoked_at = now() WHERE id = $1",
+            &[&id],
+        )
+        .map_err(db_err)?;
+        // Jobs that have not started cannot start now. (Rows are locked
+        // before the audit chain: every transaction takes the audit head
+        // last, so no two wait on each other.)
+        let jobs: Vec<(String, String, String)> = t
+            .query(
+                "SELECT id, state, organization_id FROM jobs
+                  WHERE source_assets ? $1
+                    AND state IN ('created', 'planning', 'planned', 'waiting_for_approval', 'authorized', 'queued')
+                  FOR UPDATE",
+                &[&id],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect();
+        let draft = |action, rtype, rid: &str, outcome| {
+            audit::AuditDraft::new(actor, request_id, action, rtype, rid, outcome)
+        };
+        let mut d = draft("asset.revoked", "asset", id, Outcome::Succeeded).org(&a.organization);
+        if let Some(r) = reason {
+            d = d.r#ref("reason", r.to_owned());
+        }
+        audit::append(t, d)?;
+        for (job, _, org) in &jobs {
+            self.transition_in(
+                t,
+                actor,
+                request_id,
+                job,
+                crate::model::JobState::Failed,
+                Some("a source asset was revoked"),
+            )?;
+            audit::append(
+                t,
+                draft("job.failed", "job", job, Outcome::Failed)
+                    .org(org)
+                    .r#ref("revoked_asset", id),
+            )?;
+        }
+        // Tell the key broker (at least once, idempotent there).
+        if let Some(k) = a
+            .key_ref
+            .clone()
+            .and_then(|k| serde_json::from_value::<KeyRef>(k).ok())
+        {
+            let url: Option<Option<String>> = t
+                .query_opt(
+                    "SELECT url FROM service_accounts WHERE id = $1 AND kind = 'keybroker' AND status = 'active'",
+                    &[&k.broker],
+                )
+                .map_err(db_err)?
+                .map(|r| r.get(0));
+            if let Some(Some(url)) = url {
+                let m = seal(
+                    &self.signer,
+                    "asset.revoked",
+                    &k.broker,
+                    Scope {
+                        organization: Some(a.organization.clone()),
+                        ..Scope::default()
+                    },
+                    &json!({"asset": id, "key_ref": k.key_ref, "key_version": k.key_version}),
+                    7 * 24 * 3600,
+                )?;
+                t.execute(
+                    "INSERT INTO outbox (message_id, recipient, url, envelope) VALUES ($1, $2, $3, $4)",
+                    &[&m.message_id, &k.broker, &url, &serde_json::to_value(&m).expect("serializable")],
+                )
+                .map_err(db_err)?;
+                audit::append(
+                    t,
+                    draft("key.revocation.sent", "asset", id, Outcome::Succeeded)
+                        .org(&a.organization)
+                        .r#ref("broker", k.broker.clone())
+                        .r#ref("message", m.message_id.clone()),
+                )?;
+            }
+        }
+        Ok(jobs.into_iter().map(|j| j.0).collect())
     }
 
     /// Lineage: ancestors and descendants the caller may see; others are

@@ -125,8 +125,8 @@ fn post(agent: &ureq::Agent, url: &str, body: &[u8], grant: Option<&str>) -> Res
 
 #[test]
 fn the_http_server_answers_every_mutated_request() {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().port();
     let ev = Evaluator::new(
         Backends::MOCK,
         Limits {
@@ -213,8 +213,8 @@ fn the_http_server_answers_every_mutated_request() {
 #[test]
 fn huge_declared_content_lengths_are_refused() {
     use std::io::Write;
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().port();
     let ev = Evaluator::new(Backends::MOCK, Limits::default());
     std::thread::spawn(move || ev.serve(server));
     for len in [u64::MAX, 1 << 63, (4 << 30) + 1] {

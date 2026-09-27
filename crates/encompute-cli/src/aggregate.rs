@@ -359,7 +359,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             }
             let round_id = coord.round_id()?;
             let svc = CoordinatorService::new(coord, Duration::from_secs(stage_timeout))?;
-            let server = tiny_http::Server::http(&listen)
+            let server = encompute_verification::http::Server::http(&listen)
                 .map_err(|e| Error::new(Code::Remote, format!("{listen}: {e}")))?;
             svc.spawn(server);
             eprintln!(

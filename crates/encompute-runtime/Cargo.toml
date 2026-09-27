@@ -33,7 +33,6 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "json"] 
 
 [dev-dependencies]
 ed25519-dalek = "2.2"
-tiny_http = "0.12"
 proptest.workspace = true
 ureq = { version = "2.12", default-features = false }
 

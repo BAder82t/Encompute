@@ -22,7 +22,6 @@ sha2 = "0.10"
 getrandom = "0.2"
 zeroize = "1.8"
 ed25519-dalek = "2.2"
-tiny_http = "0.12"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto", "use_pem"] }
 postgres = { version = "0.19", features = ["with-serde_json-1"] }

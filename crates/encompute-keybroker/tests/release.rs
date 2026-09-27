@@ -310,10 +310,10 @@ fn two_party_demo_over_http() {
         let mut b = KeyBroker::new(id, BrokerMode::Development, verifier, dev_store()).unwrap();
         b.add_secret(asset, Some(KeyMaterial::from_bytes(key).unwrap()), policy())
             .unwrap();
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
         let b = Arc::new(Mutex::new(b));
-        std::thread::spawn(move || serve(&b, &server));
+        std::thread::spawn(move || serve(&b, server));
         BrokerClient::new(&url)
     };
     let hospital = start("hospital", "patients", b"patients-key");

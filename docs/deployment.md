@@ -193,8 +193,9 @@ The privacy ledgers (every charged release) live in PostgreSQL, hash-chained,
 with an exclusive lock per ledger: two spends can never both use the last of
 a budget. A duplicate delivery of the same event is charged once.
 
-After every spend, the control plane signs the ledgers' latest roots, and
-the audit chain's root at each checkpoint, into the **state anchor**. The
+After every spend, the control plane signs the ledgers' latest roots, the
+audit chain's root at each checkpoint, and every asset revocation, into the
+**state anchor**. The
 anchor is kept outside the database: on its own volume, or in the customer's
 vault (OpenBao or Vault KV). At every start, the database must extend the
 anchor. If it does not, the control plane refuses to start:
@@ -211,8 +212,11 @@ encompute-control recover --operator NAME
 ```
 
 It **freezes** every rolled-back ledger: the ledger is treated as exhausted,
-so budget the database forgot is never spent again. It records the freeze,
-and any audit gap, in the audit trail.
+so budget the database forgot is never spent again. It re-applies every
+anchored revocation the database forgot (REVOCATION STATE ROLLBACK): the
+asset is revoked again, jobs that had not started fail, and its key broker
+is told again. It records the freeze, the revocations, and any audit gap,
+in the audit trail.
 
 **Back up** ([backup.sh](../deploy/docker-compose/backup.sh)):
 
@@ -224,7 +228,10 @@ and any audit gap, in the audit trail.
 Large encrypted artifacts use object-store replication. **Restore**
 ([restore.sh](../deploy/docker-compose/restore.sh)) puts back an anchor only
 into an empty anchor volume. An existing anchor is authoritative and is never
-replaced by an older one.
+replaced by an older one. The key broker's state is restored the same way, so
+a key destroyed by a revocation after the backup stays destroyed. The backup
+captures the anchor before the database, so a backup taken while the
+deployment runs always restores.
 
 For production, keep the anchor in the customer's vault
 (`ENCOMPUTE_ANCHOR_BAO_ADDR`, which must be https) rather than on a volume

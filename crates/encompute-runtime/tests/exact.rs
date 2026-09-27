@@ -267,8 +267,8 @@ fn exact_bindings_key_program_parameters() {
 
 #[test]
 fn exact_remote_round_trip() {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr());
     std::thread::spawn(move || Evaluator::new(Backends::MOCK, Limits::default()).serve(server));
     let remote = Remote::new(&url);
     let info = remote.info().unwrap();

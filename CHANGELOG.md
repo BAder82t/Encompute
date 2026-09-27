@@ -30,6 +30,31 @@
   variables. Decision records 0007, 0008, 0009, 0011, 0013 and 0020 gained
   dated update notes.
 
+### Release-candidate resilience (tests, hardening, fixes)
+
+- **Bounded HTTP server.** The control plane, evaluator, key broker and
+  SecAgg coordinator serve through `encompute_verification::http`
+  instead of tiny_http: fixed connection threads and a bounded queue
+  (`503` beyond it), head and body deadlines with a minimum body rate
+  (`408`), limits checked before reading (`413`, `431`), Content-Length
+  only (`411` for chunked), one request per connection. A stalled or
+  trickling client no longer holds a worker (or, on the single-threaded
+  key broker and coordinator, the whole service).
+- **Revocations are anchored.** Restoring an older database no longer
+  makes a revoked asset usable again: startup is refused (REVOCATION STATE
+  ROLLBACK) and `recover` re-applies the revocation.
+- **Fixes.** A key release report is recorded once per message; asset
+  storage URIs refuse `..` traversal; a restarted evaluator's running jobs
+  fail instead of staying running; the evaluator answers refused grants
+  with 401/409/503 instead of 500; plain-HTTP OpenBao addresses must be
+  true loopback; `backup.sh` captures the anchor before the database;
+  `restore.sh` keeps a newer key broker state.
+- **Suites.** Network attack suites (control plane, evaluator, key
+  broker), restart and crash suites (control plane process kills,
+  `pg_terminate_backend` mid-transaction, evaluator, key broker and SecAgg
+  coordinator restarts), key lifecycle review tests with OpenBao, and
+  `scripts/release/backup-drill.sh`.
+
 ### OpenFHE performance and hybrid exact optimization
 
 - **Optimized exact circuits.** Exact plans run as a gate circuit:

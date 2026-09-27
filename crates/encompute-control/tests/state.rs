@@ -459,3 +459,133 @@ fn concurrent_policy_approvals_apply_once() {
         .get(0);
     assert_eq!(n, 1);
 }
+
+/// Runs `encompute-control recover` on `env0`'s database and anchor.
+fn recover(env0: &Env0) -> Vec<String> {
+    let db = encompute_control::db::Db::connect(&env0.url).unwrap();
+    let signer =
+        encompute_verification::ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
+    let store =
+        Box::new(encompute_control::anchor::DirAnchor::new(env0.anchor_dir.clone()).unwrap());
+    let cfg = encompute_control::config::Config {
+        env: encompute_control::config::Env::Development,
+        listen: "127.0.0.1:0".into(),
+        service_id: "control-plane".into(),
+        database_url: zeroize::Zeroizing::new(env0.url.clone()),
+        signing_key_file: None,
+        oidc: vec![],
+        dev_token_secret: None,
+        anchor: encompute_control::config::AnchorConfig::Dir(env0.anchor_dir.clone()),
+        audit_checkpoint_every: 5,
+    };
+    let rc = encompute_control::Control::for_recovery(&cfg, db, signer, store).unwrap();
+    rc.recover("operator-1").unwrap()
+}
+
+/// A revocation is anchored: restoring a database backup taken before it
+/// cannot make the asset usable again. Startup is refused (REVOCATION
+/// STATE ROLLBACK); recovery re-applies the revocation (jobs that had not
+/// started fail again, the key broker is told again).
+#[test]
+fn restoring_an_older_backup_cannot_unrevoke_an_asset() {
+    let Some(w) = world() else { return };
+    let kb =
+        encompute_verification::ServiceSigner::from_seed("keybroker-modelco", &[21; 32]).unwrap();
+    w.t.ok(
+        &w.platform,
+        "POST",
+        "/v1/organizations/platform/service-accounts",
+        Some(json!({"id": "keybroker-modelco", "kind": "keybroker",
+                    "public_key": kb.public_key_hex(), "url": "http://kb.internal:8760"})),
+    );
+    let plan = w.plan(EXACT);
+    let (_, j) = w.job(&plan, &[&w.model_b], "before-backup");
+    let job = j["id"].as_str().unwrap().to_owned();
+    let World {
+        t,
+        b_owner,
+        b_dev,
+        model_b,
+        project,
+        ..
+    } = w;
+    let url = t.env0.url.clone();
+    let env0 = t.env0;
+    drop(t.control);
+    let backup = format!("{}_backup", url.rsplit('/').next().unwrap());
+    backup_database(&url, &backup);
+    let t = env0.start().unwrap();
+    let out = t.ok(
+        &b_owner,
+        "POST",
+        &format!("/v1/assets/{model_b}/revoke"),
+        None,
+    );
+    assert_eq!(out["failed_jobs"], json!([job]));
+    assert!(t.control.anchor.snapshot().revoked.contains(&model_b));
+    let env0 = t.env0;
+    drop(t.control);
+
+    // The older database still shows the asset active: refused.
+    restore_database(&backup, &url);
+    let e = env0
+        .start()
+        .err()
+        .expect("an older backup un-revoked an asset silently");
+    assert!(e.message.contains("REVOCATION STATE ROLLBACK"), "{e}");
+    assert!(e.message.contains(&model_b), "{e}");
+
+    // Recovery re-applies it.
+    let notes = recover(&env0);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains(&model_b) && n.contains("re-applied")),
+        "{notes:?}"
+    );
+    let t = env0.start().unwrap();
+    let a = t.ok(&b_owner, "GET", &format!("/v1/assets/{model_b}"), None);
+    assert_eq!(a["status"], "revoked");
+    let v = t.ok(&b_dev, "GET", &format!("/v1/jobs/{job}"), None);
+    assert_eq!(v["state"], "failed", "{v}");
+    let (s, v) = t.call_with(
+        &b_dev,
+        "POST",
+        "/v1/jobs",
+        Some(
+            json!({"project": project, "plan": plan, "purpose": "medical-training",
+                    "source_assets": [model_b], "requested_output": "out"}),
+        ),
+        &[("Idempotency-Key", "after-recovery")],
+    );
+    assert_eq!(s, 409, "{v}");
+    // The broker is told again, and the recovery is on the record.
+    let sent = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM outbox WHERE recipient = 'keybroker-modelco'",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(sent, 1, "the restored database had no revocation message");
+    let mut c = t.control.db.conn().unwrap();
+    let n: i64 = c
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'asset.revoked' AND resource_id = $1
+               AND refs->>'reason' = 'anchored_revocation_reapplied'",
+            &[&model_b],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
+    encompute_control::audit::verify_chain(&mut *c).unwrap();
+    // A second restart is clean.
+    drop(c);
+    let env0 = t.env0;
+    drop(t.control);
+    env0.start().unwrap();
+}

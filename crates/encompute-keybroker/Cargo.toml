@@ -17,7 +17,6 @@ getrandom = "0.2"
 zeroize = "1.8"
 sha2 = "0.10"
 chacha20poly1305 = "0.11"
-tiny_http = "0.12"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 base64 = "0.22"
 

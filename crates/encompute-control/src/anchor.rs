@@ -46,6 +46,10 @@ pub struct StateAnchor {
     /// as exhausted).
     #[serde(default)]
     pub frozen: std::collections::BTreeSet<String>,
+    /// Revoked assets: a restored database must still show them revoked.
+    /// (Omitted while empty, so anchors written before it still verify.)
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub revoked: std::collections::BTreeSet<String>,
     pub signer: String,
     pub signer_public_key: String,
     #[serde(default)]
@@ -61,6 +65,7 @@ impl StateAnchor {
             audit_root: crate::audit::GENESIS.into(),
             ledgers: BTreeMap::new(),
             frozen: Default::default(),
+            revoked: Default::default(),
             signer: signer.id().into(),
             signer_public_key: signer.public_key_hex(),
             signature: String::new(),

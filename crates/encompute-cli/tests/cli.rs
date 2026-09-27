@@ -109,8 +109,8 @@ output \"adult\" = %2
 
 fn serve() -> String {
     use encompute_evaluator::server::{Evaluator, Limits};
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", server.server_addr());
     std::thread::spawn(move || {
         Evaluator::new(encompute_evaluator::Backends::MOCK, Limits::default()).serve(server)
     });

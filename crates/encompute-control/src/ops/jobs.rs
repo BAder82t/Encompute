@@ -1326,6 +1326,39 @@ impl Control {
                     db_err(e)
                 }
             })?;
+            // An evaluator registers when its process starts: a job it was
+            // running and never reported died with the old process. It
+            // fails now (never replayed) rather than staying "running"
+            // forever behind the new process's heartbeats.
+            let lost: Vec<(String, String)> = t
+                .query(
+                    "SELECT id, organization_id FROM jobs
+                      WHERE evaluator_id = $1 AND state = 'running' AND receipt IS NULL
+                      FOR UPDATE",
+                    &[&r.id],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|x| (x.get(0), x.get(1)))
+                .collect();
+            for (job, _) in &lost {
+                self.transition_in(
+                    t,
+                    ctx.actor(),
+                    &ctx.request_id,
+                    job,
+                    JobState::Failed,
+                    Some("the evaluator restarted while running it; not replayed"),
+                )?;
+            }
+            for (job, org) in &lost {
+                audit::append(
+                    t,
+                    ctx.draft("job.failed", "job", job, Outcome::Failed)
+                        .org(org)
+                        .r#ref("reason", "evaluator_restarted"),
+                )?;
+            }
             let mut d = ctx
                 .draft("evaluator.registered", "evaluator", &r.id, Outcome::Succeeded)
                 .org(PLATFORM_ORG)
@@ -1571,7 +1604,25 @@ impl Control {
                 if let Some(reason) = m.payload["reason"].as_str() {
                     d = d.r#ref("reason", reason.to_owned());
                 }
-                self.db.tx(|t| audit::append(t, d.clone()).map(|_| ()))?;
+                // Recorded once: the message ID enters the inbox in the
+                // same transaction as the audit event, so a duplicate
+                // (concurrent, or redelivered after a crash) finds it.
+                let outcome = json!({"recorded": true});
+                let first = self.db.tx(|t| {
+                    let n = t
+                        .execute(
+                            "INSERT INTO inbox (consumer, message_id, outcome) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                            &[&self.service_id, &m.message_id, &outcome],
+                        )
+                        .map_err(db_err)?;
+                    if n > 0 {
+                        audit::append(t, d.clone())?;
+                    }
+                    Ok(n > 0)
+                })?;
+                if !first {
+                    return Ok(json!({"recorded": true, "duplicate": true}));
+                }
                 if !allowed {
                     self.metrics
                         .inc("encompute_key_release_denied_total", "broker");

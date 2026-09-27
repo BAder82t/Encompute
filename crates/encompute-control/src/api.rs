@@ -44,6 +44,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use encompute_ir::{Code, Error, Result};
+use encompute_verification::http;
 use encompute_verification::service::{sha256_hex, ServiceHeaders};
 
 use crate::audit;
@@ -383,64 +384,45 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
     }
 }
 
-/// Serves the API with `workers` threads until the process exits.
+/// Serves the API on `listen` with `workers` × 4 connection threads until
+/// the process exits (see [`encompute_verification::http`] for the limits:
+/// slow or oversized requests are refused before they reach the API).
 pub fn serve(control: Arc<Control>, listen: &str, workers: usize) -> Result<()> {
-    let server = Arc::new(
-        tiny_http::Server::http(listen)
-            .map_err(|e| Error::new(Code::Remote, format!("listen {listen}: {e}")))?,
-    );
-    LogLine::new(&control.service_id, "listening")
-        .field("addr", listen)
-        .emit();
-    let mut handles = vec![];
-    for _ in 0..workers.max(1) {
-        let (s, c) = (server.clone(), control.clone());
-        handles.push(std::thread::spawn(move || {
-            for mut req in s.incoming_requests() {
-                let mut body = vec![];
-                let too_big = req.body_length().is_some_and(|n| n > MAX_BODY);
-                if !too_big {
-                    use std::io::Read;
-                    let _ = req
-                        .as_reader()
-                        .take(MAX_BODY as u64 + 1)
-                        .read_to_end(&mut body);
-                }
-                let r = Request {
-                    method: req.method().as_str().to_owned(),
-                    url: req.url().to_owned(),
-                    headers: req
-                        .headers()
-                        .iter()
-                        .map(|h| {
-                            (
-                                h.field.as_str().as_str().to_owned(),
-                                h.value.as_str().to_owned(),
-                            )
-                        })
-                        .collect(),
-                    body,
-                };
-                let resp = if too_big {
-                    error_response(&bad("request body too large"))
-                } else {
-                    handle(&c, &r)
-                };
-                let h = tiny_http::Header::from_bytes(
-                    &b"Content-Type"[..],
-                    resp.content_type.as_bytes(),
-                )
-                .expect("valid header");
-                let _ = req.respond(
-                    tiny_http::Response::from_data(resp.body)
-                        .with_status_code(resp.status)
-                        .with_header(h),
-                );
-            }
-        }));
-    }
-    for h in handles {
-        let _ = h.join();
-    }
+    let server = http::Server::http(listen)
+        .map_err(|e| Error::new(Code::Remote, format!("listen {listen}: {e}")))?;
+    let limits = http::Limits {
+        threads: workers.max(1) * 4,
+        ..http::Limits::default()
+    };
+    serve_on(control, server.with_limits(limits));
     Ok(())
+}
+
+/// Serves the API on an already bound server (tests choose its limits).
+pub fn serve_on(control: Arc<Control>, server: http::Server) {
+    LogLine::new(&control.service_id, "listening")
+        .field("addr", server.server_addr().to_string())
+        .emit();
+    server.serve(&Api(control));
+}
+
+struct Api(Arc<Control>);
+
+impl http::Handler for Api {
+    fn body_limit(&self, _: &http::Request) -> usize {
+        MAX_BODY
+    }
+
+    fn handle(&self, r: http::Request) -> http::Response {
+        let resp = handle(
+            &self.0,
+            &Request {
+                method: r.method,
+                url: r.url,
+                headers: r.headers,
+                body: r.body,
+            },
+        );
+        http::Response::new(resp.status, resp.content_type, resp.body)
+    }
 }
