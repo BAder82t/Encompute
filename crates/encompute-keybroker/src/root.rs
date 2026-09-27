@@ -270,9 +270,19 @@ impl OpenBaoTransit {
     /// for loopback addresses (local development containers).
     pub fn new(addr: &str, mount: &str, key: &str, token: Zeroizing<String>) -> Result<Self> {
         let addr = addr.trim_end_matches('/').to_owned();
+        // The loopback host must end the authority: `http://127.0.0.1.evil`,
+        // `http://localhost.evil` and `http://127.0.0.1:1@evil` are not
+        // loopback, and would carry the token in plaintext.
+        let authority_ends = |rest: &str| {
+            let port = rest.split('/').next().unwrap_or_default();
+            port.is_empty()
+                || port
+                    .strip_prefix(':')
+                    .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        };
         let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
             .iter()
-            .any(|p| addr.starts_with(p));
+            .any(|p| addr.strip_prefix(p).is_some_and(authority_ends));
         if !addr.starts_with("https://") && !loopback {
             return Err(err(format!(
                 "root key provider address {addr} must use https (plain http only on loopback)"
