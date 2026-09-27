@@ -35,17 +35,54 @@ fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> std::io::Result<(
     w.flush()
 }
 
-fn read_frame(r: &mut impl Read) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+/// Largest frame payload: an evaluation-key upload (at most 4 GiB through
+/// HTTP) plus its program ID, with room to spare.
+pub const MAX_FRAME: u64 = 8 << 30;
+
+/// Reads one frame; `None` at a clean end of stream. The declared length is
+/// untrusted (the peer may be a crashed or compromised process): above
+/// [`MAX_FRAME`] it is refused, and the body buffer grows with the bytes
+/// actually received, so a short stream fails without allocating the
+/// declared size.
+#[doc(hidden)]
+pub fn read_frame(r: &mut impl Read) -> std::io::Result<Option<(u8, Vec<u8>)>> {
     let mut head = [0u8; 9];
     match r.read_exact(&mut head) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let len = u64::from_le_bytes(head[1..].try_into().unwrap()) as usize;
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body)?;
+    let len = u64::from_le_bytes(head[1..].try_into().expect("8 bytes"));
+    if len > MAX_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("worker frame of {len} bytes exceeds {MAX_FRAME}"),
+        ));
+    }
+    let mut body = Vec::new();
+    r.take(len).read_to_end(&mut body)?;
+    if body.len() as u64 != len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "truncated worker frame",
+        ));
+    }
     Ok(Some((head[0], body)))
+}
+
+/// Splits a worker's `EXECUTE` reply: `times_len u32 LE | times (JSON) |
+/// outputs envelope`.
+#[doc(hidden)]
+pub fn split_execute_reply(v: &[u8]) -> Result<(JobTimes, &[u8])> {
+    let malformed = || Error::new(Code::Backend, "malformed worker reply");
+    let n = v
+        .get(..4)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")) as usize)
+        .ok_or_else(malformed)?;
+    let times = v.get(4..4 + n).ok_or_else(malformed)?;
+    let times: JobTimes =
+        serde_json::from_slice(times).map_err(|e| Error::new(Code::Backend, e.to_string()))?;
+    Ok((times, &v[4 + n..]))
 }
 
 fn with_pid(pid: &str, rest: &[u8]) -> Vec<u8> {
@@ -333,10 +370,8 @@ impl Engine for Pool {
         let r = self.call_on(i, EXECUTE, &with_pid(pid, envelope));
         self.release(i);
         let v = r?;
-        let n = u32::from_le_bytes(v[..4].try_into().unwrap()) as usize;
-        let times: JobTimes = serde_json::from_slice(&v[4..4 + n])
-            .map_err(|e| Error::new(Code::Backend, e.to_string()))?;
-        Ok((v[4 + n..].to_vec(), times))
+        let (times, out) = split_execute_reply(&v)?;
+        Ok((out.to_vec(), times))
     }
 
     fn key_cache_stats(&self) -> crate::keycache::CacheStats {
@@ -349,5 +384,73 @@ impl Engine for Pool {
             }
         }
         total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(tag: u8, len: u64, body: &[u8]) -> Vec<u8> {
+        let mut f = vec![tag];
+        f.extend_from_slice(&len.to_le_bytes());
+        f.extend_from_slice(body);
+        f
+    }
+
+    #[test]
+    fn frames_round_trip() {
+        let mut buf = vec![];
+        write_frame(&mut buf, 4, b"pid\npayload").unwrap();
+        write_frame(&mut buf, 0, b"").unwrap();
+        let mut r = buf.as_slice();
+        assert_eq!(
+            read_frame(&mut r).unwrap(),
+            Some((4, b"pid\npayload".to_vec()))
+        );
+        assert_eq!(read_frame(&mut r).unwrap(), Some((0, vec![])));
+        assert_eq!(read_frame(&mut r).unwrap(), None);
+    }
+
+    /// Regression: the declared length was allocated up front, so a frame
+    /// claiming 2^63 bytes aborted the reading process (capacity overflow
+    /// or out of memory) whatever followed.
+    #[test]
+    fn huge_declared_lengths_are_refused_without_allocating() {
+        let t = std::time::Instant::now();
+        for len in [u64::MAX, 1 << 63, MAX_FRAME + 1] {
+            let f = frame(0, len, b"short");
+            let e = read_frame(&mut f.as_slice()).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{len}");
+        }
+        // Within the limit but truncated: an error, and no 8 GiB buffer.
+        let f = frame(0, MAX_FRAME, b"short");
+        let e = read_frame(&mut f.as_slice()).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+        let f = frame(0, 6, b"short");
+        assert!(read_frame(&mut f.as_slice()).is_err());
+        // A truncated header is a clean end of stream.
+        assert_eq!(read_frame(&mut &[1u8, 2, 3][..]).unwrap(), None);
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// Regression: a short `EXECUTE` reply from a worker panicked the
+    /// gateway's request thread (slice out of bounds).
+    #[test]
+    fn malformed_execute_replies_are_errors() {
+        for v in [
+            &b""[..],
+            b"\x01",
+            b"\x05\0\0\0{}",
+            b"\xff\xff\xff\xff{}",
+            b"\x02\0\0\0[]",
+        ] {
+            assert_eq!(split_execute_reply(v).unwrap_err().code, Code::Backend);
+        }
+        let t = serde_json::to_vec(&JobTimes::default()).unwrap();
+        let mut v = (t.len() as u32).to_le_bytes().to_vec();
+        v.extend_from_slice(&t);
+        v.extend_from_slice(b"out");
+        assert_eq!(split_execute_reply(&v).unwrap().1, b"out");
     }
 }
