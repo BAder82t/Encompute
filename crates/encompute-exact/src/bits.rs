@@ -892,3 +892,471 @@ pub fn openfhe_exact_profile() -> crate::ExactProfile {
         parameter_selector_version: "openfhe-exact-v1".into(),
     }
 }
+
+// --- tests of the private bit-level transformations ------------------------------
+
+#[cfg(test)]
+mod tests {
+    //! Constant folding on [`Sig`] bits, and the logarithmic-depth adder and
+    //! comparator against the ripple ones at every width (the public API
+    //! reaches only the widths of exact types and their slices). The
+    //! differential tests on whole programs are in `tests/optimizer.rs`.
+
+    use super::*;
+    use proptest::prelude::{any, prop_assert, prop_assert_eq, TestCaseError};
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+    fn runner(default: u32) -> TestRunner {
+        let cases = std::env::var("ENCOMPUTE_EXACT_PROGRAMS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default);
+        TestRunner::new_with_rng(
+            Config {
+                cases,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+        )
+    }
+
+    fn ev(s: Strategy) -> BitEvaluator<PlainGates> {
+        BitEvaluator::with_strategy(PlainGates, s)
+    }
+
+    fn val(s: &Sig<bool>) -> bool {
+        match s {
+            Sig::Const(v) | Sig::Enc(v) => *v,
+        }
+    }
+
+    fn is_const(s: &Sig<bool>) -> bool {
+        matches!(s, Sig::Const(_))
+    }
+
+    /// The four kinds of bit: public 0/1, encrypted 0/1.
+    fn sigs() -> [Sig<bool>; 4] {
+        [
+            Sig::Const(false),
+            Sig::Const(true),
+            Sig::Enc(false),
+            Sig::Enc(true),
+        ]
+    }
+
+    /// `n` bits of `v`, those in `const_mask` public.
+    fn word_bits(v: u128, n: usize, const_mask: u128) -> Vec<Sig<bool>> {
+        (0..n)
+            .map(|i| {
+                let b = (v >> i) & 1 == 1;
+                if (const_mask >> i) & 1 == 1 {
+                    Sig::Const(b)
+                } else {
+                    Sig::Enc(b)
+                }
+            })
+            .collect()
+    }
+
+    fn value(bits: &[Sig<bool>]) -> u128 {
+        bits.iter()
+            .enumerate()
+            .fold(0, |acc, (i, b)| acc | (u128::from(val(b)) << i))
+    }
+
+    fn mask(n: usize) -> u128 {
+        if n == 128 {
+            u128::MAX
+        } else {
+            (1u128 << n) - 1
+        }
+    }
+
+    // --- constant folding ------------------------------------------------------------
+
+    #[test]
+    fn bit_and_folds_constants() {
+        for a in sigs() {
+            for b in sigs() {
+                let e = ev(Strategy::REFERENCE);
+                let r = e.and(&a, &b).unwrap();
+                assert_eq!(val(&r), val(&a) && val(&b), "{a:?} & {b:?}");
+                let folded = is_const(&a) || is_const(&b);
+                assert_eq!(e.gate_count(), u64::from(!folded), "{a:?} & {b:?}");
+                if a == Sig::Const(false) || b == Sig::Const(false) {
+                    assert_eq!(r, Sig::Const(false));
+                } else if a == Sig::Const(true) {
+                    assert_eq!(r, b, "1 & x = x");
+                } else if b == Sig::Const(true) {
+                    assert_eq!(r, a, "x & 1 = x");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bit_or_folds_constants() {
+        for a in sigs() {
+            for b in sigs() {
+                let e = ev(Strategy::REFERENCE);
+                let r = e.or(&a, &b).unwrap();
+                assert_eq!(val(&r), val(&a) || val(&b), "{a:?} | {b:?}");
+                let folded = is_const(&a) || is_const(&b);
+                assert_eq!(e.gate_count(), u64::from(!folded), "{a:?} | {b:?}");
+                if a == Sig::Const(true) || b == Sig::Const(true) {
+                    assert_eq!(r, Sig::Const(true));
+                } else if a == Sig::Const(false) {
+                    assert_eq!(r, b, "0 | x = x");
+                } else if b == Sig::Const(false) {
+                    assert_eq!(r, a, "x | 0 = x");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bit_xor_folds_constants() {
+        for a in sigs() {
+            for b in sigs() {
+                let e = ev(Strategy::REFERENCE);
+                let r = e.xor(&a, &b).unwrap();
+                assert_eq!(val(&r), val(&a) ^ val(&b), "{a:?} ^ {b:?}");
+                let folded = is_const(&a) || is_const(&b);
+                assert_eq!(e.gate_count(), u64::from(!folded), "{a:?} ^ {b:?}");
+                // Public iff both operands are; x ^ 1 is a (free) NOT of x.
+                assert_eq!(is_const(&r), is_const(&a) && is_const(&b));
+            }
+        }
+    }
+
+    #[test]
+    fn bit_not_folds_constants() {
+        for a in sigs() {
+            let e = ev(Strategy::REFERENCE);
+            let r = e.not(&a).unwrap();
+            assert_eq!(val(&r), !val(&a));
+            assert_eq!(is_const(&r), is_const(&a));
+            assert_eq!(e.gate_count(), 0, "NOT is free");
+        }
+    }
+
+    #[test]
+    fn bit_mux_folds_constants() {
+        for c in sigs() {
+            for a in sigs() {
+                for b in sigs() {
+                    let e = ev(Strategy::REFERENCE);
+                    let r = e.mux(&c, &a, &b).unwrap();
+                    let want = if val(&c) { val(&a) } else { val(&b) };
+                    assert_eq!(val(&r), want, "{c:?} ? {a:?} : {b:?}");
+                    let n = e.gate_count();
+                    match (&c, &a, &b) {
+                        (Sig::Const(true), _, _) => assert_eq!((r, n), (a.clone(), 0)),
+                        (Sig::Const(false), _, _) => assert_eq!((r, n), (b.clone(), 0)),
+                        (_, Sig::Const(true), Sig::Const(false)) => {
+                            assert_eq!((r, n), (c.clone(), 0), "c ? 1 : 0 = c")
+                        }
+                        (_, Sig::Const(false), Sig::Const(true)) => {
+                            assert_eq!((r, n), (e.not(&c).unwrap(), 0), "c ? 0 : 1 = !c")
+                        }
+                        (_, Sig::Const(x), Sig::Const(y)) if x == y => {
+                            assert_eq!((r, n), (Sig::Const(*x), 0))
+                        }
+                        // b ^ (c & (a ^ b)): an XOR with a public bit is free.
+                        (_, Sig::Const(_), _) => assert_eq!(n, 2),
+                        (_, _, Sig::Const(_)) => assert_eq!(n, 1),
+                        _ => assert_eq!(n, 3),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prop_bit_constant_folding() {
+        // Random formulas over public and encrypted bits: the value is the
+        // Boolean one, and an operation with a public operand costs no gate.
+        runner(256)
+            .run(
+                &(
+                    proptest::collection::vec(
+                        (0u8..5, any::<u16>(), any::<u16>(), any::<u16>()),
+                        1..40,
+                    ),
+                    any::<u8>(),
+                ),
+                |(steps, assign)| {
+                    let e = ev(Strategy::REFERENCE);
+                    let mut bits: Vec<Sig<bool>> = vec![Sig::Const(false), Sig::Const(true)];
+                    bits.extend((0..4).map(|i| Sig::Enc((assign >> i) & 1 == 1)));
+                    for (k, i, j, l) in steps {
+                        let pick = |x: u16| bits[x as usize % bits.len()].clone();
+                        let (a, b, c) = (pick(i), pick(j), pick(l));
+                        let before = e.gate_count();
+                        let (r, want, free) = match k {
+                            0 => (
+                                e.and(&a, &b),
+                                val(&a) && val(&b),
+                                is_const(&a) || is_const(&b),
+                            ),
+                            1 => (
+                                e.or(&a, &b),
+                                val(&a) || val(&b),
+                                is_const(&a) || is_const(&b),
+                            ),
+                            2 => (
+                                e.xor(&a, &b),
+                                val(&a) ^ val(&b),
+                                is_const(&a) || is_const(&b),
+                            ),
+                            3 => (e.not(&a), !val(&a), true),
+                            _ => (
+                                e.mux(&c, &a, &b),
+                                if val(&c) { val(&a) } else { val(&b) },
+                                is_const(&c) || (is_const(&a) && is_const(&b)),
+                            ),
+                        };
+                        let r = r.unwrap();
+                        prop_assert_eq!(val(&r), want);
+                        let cost = e.gate_count() - before;
+                        if free {
+                            prop_assert_eq!(cost, 0);
+                        } else {
+                            prop_assert!(cost <= 3);
+                        }
+                        bits.push(r);
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    // --- the Sklansky prefix adder and the tree comparator -------------------------
+
+    /// `prefix_add` and `tree_carry_out` against the ripple circuits and
+    /// the integers, for one width, operands, carry and public-bit masks.
+    fn check_adder_and_comparator(
+        n: usize,
+        a: u128,
+        b: u128,
+        c: bool,
+        ma: u128,
+        mb: u128,
+    ) -> std::result::Result<(), TestCaseError> {
+        let (a, b) = (a & mask(n), b & mask(n));
+        let (x, y) = (word_bits(a, n, ma), word_bits(b, n, mb));
+        let carry = if ma & 1 == 1 {
+            Sig::Const(c)
+        } else {
+            Sig::Enc(c)
+        };
+        let (par, rip) = (ev(Strategy::PARALLEL), ev(Strategy::REFERENCE));
+        let sum = a + b + u128::from(c);
+        let prefix = par.prefix_add(&x, &y, carry.clone()).unwrap();
+        let ripple = rip.add_bits(&x, &y, carry.clone()).unwrap();
+        prop_assert_eq!(prefix.len(), n);
+        prop_assert_eq!(
+            value(&prefix),
+            sum & mask(n),
+            "prefix {} {}+{}+{}",
+            n,
+            a,
+            b,
+            c
+        );
+        prop_assert_eq!(
+            value(&ripple),
+            sum & mask(n),
+            "ripple {} {}+{}+{}",
+            n,
+            a,
+            b,
+            c
+        );
+        let tree = par.tree_carry_out(&x, &y, carry.clone()).unwrap();
+        let chain = rip.carry_out(&x, &y, carry).unwrap();
+        prop_assert_eq!(val(&tree), sum >> n == 1, "tree {} {}+{}+{}", n, a, b, c);
+        prop_assert_eq!(val(&chain), sum >> n == 1, "ripple carry {}", n);
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_add_and_tree_carry_out_match_ripple_exhaustively_to_8_bits() {
+        for n in 1..=8usize {
+            for a in 0..1u128 << n {
+                for b in 0..1u128 << n {
+                    for c in [false, true] {
+                        check_adder_and_comparator(n, a, b, c, 0, 0).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_add_and_tree_carry_out_match_ripple_on_wide_samples() {
+        let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for n in (9..=16).chain([17, 23, 31, 32, 33, 47, 48, 63, 64]) {
+            let m = mask(n);
+            let edges = [
+                0,
+                1,
+                m,
+                m - 1,
+                m >> 1,
+                (m >> 1) + 1,
+                0x5555_5555_5555_5555 & m,
+            ];
+            for &a in &edges {
+                for &b in &edges {
+                    for c in [false, true] {
+                        check_adder_and_comparator(n, a, b, c, 0, 0).unwrap();
+                    }
+                }
+            }
+            for _ in 0..64 {
+                let (a, b, c) = (next() as u128, next() as u128, next() & 1 == 1);
+                check_adder_and_comparator(n, a, b, c, 0, 0).unwrap();
+                // Some bits public: folding inside the prefix network.
+                let (ma, mb) = (next() as u128, next() as u128);
+                check_adder_and_comparator(n, a, b, c, ma, mb).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn prop_prefix_add_and_tree_carry_out_match_ripple() {
+        runner(512)
+            .run(
+                &(
+                    1usize..=64,
+                    any::<u64>(),
+                    any::<u64>(),
+                    any::<bool>(),
+                    any::<u64>(),
+                    any::<u64>(),
+                ),
+                |(n, a, b, c, ma, mb)| {
+                    check_adder_and_comparator(n, a as u128, b as u128, c, ma as u128, mb as u128)
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn prefix_adder_and_tree_comparator_are_used_from_width_4() {
+        // All bits encrypted: gate counts identify the circuit used.
+        let count = |s: Strategy, f: &dyn Fn(&BitEvaluator<PlainGates>)| {
+            let e = ev(s);
+            f(&e);
+            e.gate_count()
+        };
+        for n in 1..=64usize {
+            let (x, y) = (word_bits(0, n, 0), word_bits(mask(n), n, 0));
+            let c = || Sig::Enc(true);
+            let add = |e: &BitEvaluator<PlainGates>| {
+                e.add_bits(&x, &y, c()).unwrap();
+            };
+            let pre = |e: &BitEvaluator<PlainGates>| {
+                e.prefix_add(&x, &y, c()).unwrap();
+            };
+            let cmp = |e: &BitEvaluator<PlainGates>| {
+                e.carry_out(&x, &y, c()).unwrap();
+            };
+            let tree = |e: &BitEvaluator<PlainGates>| {
+                e.tree_carry_out(&x, &y, c()).unwrap();
+            };
+            let (ripple_add, ripple_cmp) = (
+                count(Strategy::REFERENCE, &add),
+                count(Strategy::REFERENCE, &cmp),
+            );
+            let (par_add, par_cmp) = (
+                count(Strategy::PARALLEL, &add),
+                count(Strategy::PARALLEL, &cmp),
+            );
+            if n < 4 {
+                assert_eq!(par_add, ripple_add, "width {n}: ripple adder");
+                assert_eq!(par_cmp, ripple_cmp, "width {n}: ripple comparator");
+            } else {
+                assert_eq!(par_add, count(Strategy::PARALLEL, &pre), "width {n}");
+                assert_eq!(par_cmp, count(Strategy::PARALLEL, &tree), "width {n}");
+                assert_ne!(par_add, ripple_add, "width {n}: a different circuit");
+            }
+            // The reference strategy never uses them.
+            assert_eq!(
+                ripple_add,
+                5 * n as u64 - 3,
+                "width {n}: ripple adder gates"
+            );
+        }
+    }
+
+    /// Gates that compute depths: a bit is the length of its critical path.
+    struct DepthGates;
+
+    impl Gates for DepthGates {
+        type Bit = u32;
+        fn name(&self) -> &'static str {
+            "depth"
+        }
+        fn and(&self, a: &u32, b: &u32) -> Result<u32> {
+            Ok(1 + a.max(b))
+        }
+        fn or(&self, a: &u32, b: &u32) -> Result<u32> {
+            Ok(1 + a.max(b))
+        }
+        fn xor(&self, a: &u32, b: &u32) -> Result<u32> {
+            Ok(1 + a.max(b))
+        }
+        fn not(&self, a: &u32) -> Result<u32> {
+            Ok(*a)
+        }
+        fn constant(&self, _: bool) -> Result<u32> {
+            Ok(0)
+        }
+        fn load(&self, _: Elem, _: &[u8]) -> Result<Vec<u32>> {
+            Err(Error::new(Code::Backend, "no ciphertexts"))
+        }
+        fn store(&self, _: Elem, _: &[u32]) -> Result<Vec<u8>> {
+            Err(Error::new(Code::Backend, "no ciphertexts"))
+        }
+    }
+
+    #[test]
+    fn prefix_adder_and_tree_comparator_have_logarithmic_depth() {
+        for n in [4usize, 8, 16, 32, 64] {
+            let bits = vec![Sig::Enc(0u32); n];
+            let depth = |v: &[Sig<u32>]| {
+                v.iter()
+                    .map(|b| match b {
+                        Sig::Enc(d) => *d,
+                        Sig::Const(_) => 0,
+                    })
+                    .max()
+                    .unwrap()
+            };
+            let log = usize::BITS - n.leading_zeros(); // ceil(log2(n + 1))
+            let par = BitEvaluator::with_strategy(DepthGates, Strategy::PARALLEL);
+            let rip = BitEvaluator::with_strategy(DepthGates, Strategy::REFERENCE);
+            let p = depth(&par.prefix_add(&bits, &bits, Sig::Enc(0)).unwrap());
+            let r = depth(&rip.add_bits(&bits, &bits, Sig::Enc(0)).unwrap());
+            assert!(p <= 2 * log + 2, "prefix adder depth {p} at width {n}");
+            assert!(r >= 2 * n as u32 - 1, "ripple adder depth {r} at width {n}");
+            let t = depth(&[par.tree_carry_out(&bits, &bits, Sig::Enc(0)).unwrap()]);
+            let c = depth(&[rip.carry_out(&bits, &bits, Sig::Enc(0)).unwrap()]);
+            assert!(t <= 2 * log + 1, "tree comparator depth {t} at width {n}");
+            assert!(
+                c >= 2 * n as u32,
+                "ripple comparator depth {c} at width {n}"
+            );
+        }
+    }
+}
