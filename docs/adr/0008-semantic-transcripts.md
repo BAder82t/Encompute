@@ -103,3 +103,13 @@ observer agreement, no runtime values; 25 000 generated programs (12 132
 compiled plans, 72 792 cases) replay exactly against the mock and the
 interpreter; building and hashing a transcript takes ~70 µs for the
 eligibility plan versus ~2 s of TFHE-rs evaluation.
+
+## Update (2026-09)
+
+The decision above stands; some details changed after it was written.
+
+- Receipts are now version 3, not 2. Version 3 keeps `transcript_hash` and
+  adds the optional `attestation` binding. Readers accept version 3 only.
+- Receipts for verified programs carry `VerificationEvidence::Vfhe` (the
+  execution proof's digest) instead of `None`, and the client decrypts
+  through `ClientSession::decrypt_proven`.

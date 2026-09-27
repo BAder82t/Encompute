@@ -139,3 +139,12 @@ It also implements BinFHE: FHEW/TFHE-style Boolean gates with bootstrapping
 - `crates/encompute-evaluator/src/compiled.rs`, `crates/encompute-evaluator/src/session.rs`
 - `crates/encompute-planner/src/planner.rs`
 - `scripts/audit-commercial-build.sh`, `scripts/sbom.py`
+
+## Update (2026-09)
+
+"OpenFHE calls are serialized today" is no longer true. Exact programs now
+run as an optimized circuit, and independent BinFHE gates run concurrently
+on several threads (`ENCOMPUTE_EXACT_WORKERS`, `ENCOMPUTE_EXACT_THREADS`).
+The eligibility example takes about 31 s on one worker and about 8 s on 8.
+Functional bootstrapping was measured and not adopted. See
+`0022-exact-optimization.md` and `docs/benchmarks.md`.

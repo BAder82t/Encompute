@@ -74,7 +74,10 @@ examples/run-all.sh quick
 | `quick` | 01 02 04 06 08 09 10 11 13 14 15 (mock and default-build examples) | about a minute |
 | `standard` | quick, plus 03 07 12 16 17 18 (everything without a cloud account or crypto build) | about 7 minutes |
 | `crypto` | 01 03 05 19 with OpenFHE, OpenFHE exact and verified execution | needs `--features openfhe` / `vfhe-research` |
-| `full` | everything this machine can run, and every attack in 12 | a few minutes |
+| `full` | everything this machine can run, and every attack in 12 | longer than `standard` |
+
+Example 20 is not in any `run-all.sh` mode yet: run it directly with
+`examples/20_openfhe_optimization/run.sh`.
 
 An example that needs something this machine lacks (OpenFHE,
 verified execution, PyTorch) prints `SKIPPED` and the reason instead of

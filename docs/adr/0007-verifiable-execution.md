@@ -73,3 +73,19 @@ IDs, every field tampered, cross-execution and replay refused, malformed
 receipts), `crates/encompute-runtime/tests/receipts.rs` (CKKS and exact,
 local and remote), `crates/encompute-cli/tests/cli.rs`
 (`run --remote`, `verify`, identity pinning).
+
+## Update (2026-09)
+
+The decision above stands; some details changed after it was written.
+
+- Receipts are now version 3 (`RECEIPT_VERSION` in
+  `crates/encompute-verification/src/receipt.rs`). Version 2 added
+  `transcript_hash`; version 3 added the optional `attestation` binding.
+  Readers accept version 3 only.
+- `evidence` is no longer always `VerificationEvidence::None`. For
+  programs compiled with `verification="required"` (research build), it is
+  `VerificationEvidence::Vfhe`, which binds the execution proof by digest
+  (relation, protocol and version, verification key ID, proof digest).
+- The client decrypts through `ClientSession::decrypt_proven`: it verifies
+  the receipt and, when the program requires it, the execution proof,
+  before decrypting. `decrypt_verified` still exists for receipts alone.

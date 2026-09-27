@@ -164,7 +164,8 @@ Trust report            SATISFIED
   records the exact versions. The installed library code itself is
   covered only by the worker image's digest, as in any real deployment.
 - **Only sequence classification with BERT, DistilBERT and RoBERTa** is
-  supported. Causal language models, larger models, quantization and
+  accepted. BERT and DistilBERT are tested end to end; RoBERTa is
+  accepted but not yet tested end to end. Causal language models, larger models, quantization and
   multi-GPU training are not covered yet.
 - **The model configuration is shared** with the hospitals, as metadata.
   The weights are not.

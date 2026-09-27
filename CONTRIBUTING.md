@@ -15,10 +15,22 @@ See the [README](README.md#build). Before sending changes:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --all-targets -- -D warnings
+cargo test                                   # everything except OpenFHE and TFHE-rs
 pytest -q
 ```
+
+With OpenFHE installed (`./scripts/install-openfhe.sh`), also run the
+production build's tests:
+
+```sh
+cargo test --workspace --features encompute-runtime/openfhe,encompute-evaluator/openfhe,encompute-cli/openfhe
+```
+
+Do not use `--all-features`: it enables the research features
+(`research-tfhe-rs`, `vfhe-research`) and test-only features. Test those
+separately, as the README's Build section shows. `scripts/release-check.sh`
+runs every check from a clean checkout.
 
 A user-visible feature is done when it has an implementation, tests, docs
 and a runnable example:
@@ -35,4 +47,6 @@ open (for example, secure aggregation hides each contribution but not what
 the aggregate reveals; that needs differential privacy).
 
 Design decisions are recorded in [docs/adr/](docs/adr/). Changes that
-affect them should update or add an ADR.
+affect them should update or add a decision record. Refer to decision
+records by file in developer documentation; in user-facing text (README,
+examples, error messages), explain the reason in words instead.

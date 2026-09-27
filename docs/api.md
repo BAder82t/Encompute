@@ -6,7 +6,9 @@ The stable external contract of `encompute-control`. JSON over HTTPS
 SDK (`encompute.Client`) are clients of this API.
 
 Only this contract is stable. Internal Rust types are not. A breaking change
-goes to `/v2`; `/v1` keeps its meaning.
+goes to `/v2`; `/v1` keeps its meaning. API v1 is frozen for the 0.3
+release: what that means, and the deprecation policy, are in
+[api-stability.md](api-stability.md).
 
 ## Authentication
 
@@ -18,9 +20,9 @@ Every `/v1` route except `/v1/info` needs one of:
 - A service signature: the headers `Encompute-Sender`,
   `Encompute-Recipient`, `Encompute-Timestamp`, `Encompute-Nonce`,
   `Encompute-Bind` and `Encompute-Signature`. They carry an Ed25519
-  signature over the method, the path, the SHA-256 of the body, the sender
-  and recipient, the timestamp (±300 s), a single-use nonce, and the bound
-  IDs (`encompute_verification::service`).
+  signature over the method, the path (not the query string), the SHA-256
+  of the body, the sender and recipient, the timestamp (±300 s), a
+  single-use nonce, and the bound IDs (`encompute_verification::service`).
 
 Development tokens (issuer `encompute-development`) work only when the
 control plane is not in production mode.
@@ -66,6 +68,7 @@ service messages by their message ID.
 | `POST /v1/organizations/{id}/users` | organization admins. `{issuer, subject, email?, roles: [...]}` |
 | `POST /v1/organizations/{id}/service-accounts` | organization admins; platform services in `platform`. `{id, kind, public_key, roles?, url?}` |
 | `POST /v1/organizations/{id}/service-accounts/{sa}/disable` | organization or security admins |
+| `POST /v1/organizations/{id}/key-rotations` | organization or security admins. `{provider, key_ref, old_version, new_version}`: records a root-key rotation (`encompute keys rotate-root`) in the audit trail. The new version must be newer |
 
 Roles: `organization_admin`, `security_admin`, `data_owner`, `model_owner`,
 `ml_developer`, `auditor`, `operator`. Service kinds: `evaluator`, `secagg`,
@@ -122,10 +125,10 @@ never contains key material. `privacy_budget` is
 
 | | |
 |---|---|
-| `GET /v1/privacy/{asset}` | owners and auditors. Budget, spent epsilon and delta, entries, root, frozen |
+| `GET /v1/privacy/{asset}` | the owner's data owners, auditors, organization admins and security admins. Budget, spent epsilon and delta, entries, root, frozen |
 | `GET /v1/privacy/{asset}/ledger` | auditors and data owners. The full hash-chained ledger |
-| `POST /v1/privacy/{asset}/events` | Data owners, and SecAgg services the owner authorized for this asset. A privacy event (reserve or commit): race-safe, idempotent, anchored before the reply |
-| `POST /v1/privacy/{asset}/spenders` | Owners. `{service}`: authorizes a SecAgg service to record privacy events for this asset |
+| `POST /v1/privacy/{asset}/events` | the owner's data owners and operators, and SecAgg services the owner authorized for this asset. A privacy event (reserve or commit): race-safe, idempotent, anchored before the reply |
+| `POST /v1/privacy/{asset}/spenders` | the owner's data owners and organization admins. `{service}`: authorizes an active SecAgg service to record privacy events for this asset |
 
 ### Audit and messages
 
