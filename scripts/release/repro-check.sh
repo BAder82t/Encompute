@@ -4,7 +4,7 @@
 # (scripts/release/env.sh), and compares their SHA-256 digests.
 #
 #   scripts/release/repro-check.sh                 # CLI, no OpenFHE (fast)
-#   scripts/release/repro-check.sh --openfhe       # CLI and evaluator with OpenFHE
+#   scripts/release/repro-check.sh --openfhe       # the three release binaries, with OpenFHE
 #   scripts/release/repro-check.sh --packages "encompute-cli encompute-control"
 #
 # Exit status: 0 when every binary is byte-identical, 1 otherwise. A
@@ -18,7 +18,7 @@ FEATURES=""
 KEEP=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --openfhe) PACKAGES="encompute-cli encompute-evaluator"
+    --openfhe) PACKAGES="encompute-cli encompute-evaluator encompute-control"
                FEATURES="encompute-cli/openfhe,encompute-evaluator/openfhe" ;;
     --packages) PACKAGES="$2"; shift ;;
     --features) FEATURES="$2"; shift ;;
