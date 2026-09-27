@@ -14,9 +14,14 @@ set -euo pipefail
 cd "$(dirname "$0")"
 DIR="${1:?usage: backup.sh DIR}"
 mkdir -p "$DIR"; chmod 700 "$DIR"
-docker compose exec -T postgres pg_dump -U encompute --clean --if-exists encompute > "$DIR/db.sql"
 vol() { docker run --rm -v "encompute_$1:/v:ro" -v "$(cd "$DIR" && pwd):/b" alpine tar -C /v -cf "/b/$1.tar" .; }
-vol anchor; vol broker; vol evaluator
+# The anchor BEFORE the database: spending commits to the database before it
+# is anchored, so a dump taken after the anchor always extends it. The other
+# order lets a spend (or an audit checkpoint) land between the two, and the
+# backup restores as a rollback that only `recover` (freezing) gets past.
+vol anchor
+docker compose exec -T postgres pg_dump -U encompute --clean --if-exists encompute > "$DIR/db.sql"
+vol broker; vol evaluator
 chmod 600 "$DIR"/*
 ( cd "$DIR" && shasum -a 256 db.sql anchor.tar broker.tar evaluator.tar > SHA256SUMS )
 echo "backup in $DIR: $(wc -c < "$DIR/db.sql" | tr -d ' ') bytes of database, anchor, broker, evaluator identity"
