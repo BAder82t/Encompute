@@ -14,7 +14,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 DIR="${1:?usage: backup.sh DIR}"
 mkdir -p "$DIR"; chmod 700 "$DIR"
-vol() { docker run --rm -v "encompute_$1:/v:ro" -v "$(cd "$DIR" && pwd):/b" alpine tar -C /v -cf "/b/$1.tar" .; }
+# Streamed to the host, so the files belong to the operator, not to the
+# container's root (which the chmod below could not change on Linux).
+vol() { docker run --rm -v "encompute_$1:/v:ro" alpine tar -C /v -cf - . > "$DIR/$1.tar"; }
 # The anchor BEFORE the database: spending commits to the database before it
 # is anchored, so a dump taken after the anchor always extends it. The other
 # order lets a spend (or an audit checkpoint) land between the two, and the
