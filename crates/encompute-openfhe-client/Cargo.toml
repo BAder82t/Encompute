@@ -15,6 +15,10 @@ encompute-openfhe.workspace = true
 encompute-openfhe-exact.workspace = true
 encompute-exact.workspace = true
 getrandom = "0.2"
+# Research CI only (`research-tfhe-rs`): the differential gate also runs
+# TFHE-rs. Never enabled in production builds (Zama's patent license).
+encompute-tfhe = { workspace = true, optional = true }
+encompute-tfhe-client = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
@@ -23,6 +27,14 @@ serde_json.workspace = true
 
 [build-dependencies]
 cxx-build.workspace = true
+
+[features]
+research-tfhe-rs = [
+    "dep:encompute-tfhe",
+    "dep:encompute-tfhe-client",
+    "encompute-tfhe/research-tfhe-rs",
+    "encompute-tfhe-client/research-tfhe-rs",
+]
 
 [lints]
 workspace = true
