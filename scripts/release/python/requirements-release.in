@@ -1,0 +1,9 @@
+# The Python dependencies of a release: the SDK wheel and its extras (test,
+# torch, huggingface). Compiled into constraints.txt (with hashes, for
+# Linux x86_64 and CPython 3.11, the platform of the release images) by
+# scripts/release/lock-python.sh. The ML pins come from the confidential
+# training image, whose model packages bind the major.minor versions of
+# torch, transformers and peft: keep the two in step.
+-r ../../../deploy/confidential-space-training/requirements.txt
+maturin==1.7.4
+pytest>=8,<9
