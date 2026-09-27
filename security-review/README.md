@@ -106,7 +106,7 @@ The canonical boundary diagram is in the
 
 Every security claim is an invariant `INV-nnn` in
 [`crates/encompute-assurance/src/catalog.rs`](../crates/encompute-assurance/src/catalog.rs)
-(104 entries). Each has up to four kinds of evidence: positive, negative,
+(124 entries). Each has up to four kinds of evidence: positive, negative,
 adversarial and end-to-end. Evidence is an assurance check in that crate
 or a reference to an existing test or script, and the report fails if a
 referenced test no longer exists. The matrix and the known gaps are in
@@ -128,6 +128,7 @@ referenced test no longer exists. The matrix and the known gaps are in
 | OpenFHE exact | INV-149 to INV-155 |
 | Enterprise deployment (control plane) | INV-156 to INV-165 |
 | Exact optimization, backend selection, key cache | INV-166 to INV-171 |
+| Release-candidate hardening: malformed input, network attacks, restarts, backups, key lifecycle, security fixes, migration, differential gate, optimizer tests | INV-172 to INV-191 |
 
 Run the report:
 

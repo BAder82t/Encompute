@@ -1,7 +1,8 @@
 # Encompute 0.3.0-rc.1: release notes (draft)
 
-**Status: draft.** This is the first release candidate of 0.3.0. It is
-under independent security review. Features are frozen; only fixes go in
+**Status: draft.** This is the first release candidate of 0.3.0: the frozen
+target for independent security review ([security-review/](../security-review/)).
+No independent review has been completed yet. Features are frozen; only fixes go in
 before 0.3.0.
 
 Encompute compiles ordinary Python into encrypted computation, and lets
@@ -86,7 +87,7 @@ The full list is in the [CHANGELOG](../CHANGELOG.md). In short:
 - **Enterprise control plane**: organizations, OIDC, service identities,
   tenant isolation, jobs, scheduling, durable privacy state with a signed
   anchor, audit trail, API v1, Docker Compose deployment.
-- **Assurance suite**: 104 security invariants, a release gate in CI.
+- **Assurance suite**: 124 security invariants, a release gate in CI.
 - **Examples**: 20 runnable examples, each with its threat model.
 - **TFHE-rs** is isolated to research builds, and a commercial build audit
   proves it is absent from production builds.
@@ -144,7 +145,7 @@ The full statements are in the [threat model](threat-model.md) and
 - **The control plane is trusted for coordination, not for trust
   decisions.** A compromised control plane can deny service, but cannot
   decrypt, release keys without attestation or forge receipts.
-- **No formal proof of the whole system.** The assurance suite tests 104
+- **No formal proof of the whole system.** The assurance suite tests 124
   invariants; it does not prove the system secure.
 
 ## How do I upgrade?

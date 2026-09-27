@@ -14,7 +14,9 @@ bad() { row "$1" "FAIL: $2"; status=1; }
 tc="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
 if ! echo "$tc" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then bad "Rust toolchain" "rust-toolchain.toml channel '$tc' is not an exact version"
 else
-  off="$(grep -ho 'dtolnay/rust-toolchain@[0-9.a-z]*' .github/workflows/*.yml | sort -u | grep -v "@$tc\$" || true)"
+  # fuzz.yml is exempt: cargo-fuzz needs a nightly compiler, and fuzzing
+  # builds no release artifact.
+  off="$(grep -ho 'dtolnay/rust-toolchain@[0-9.a-z]*' $(ls .github/workflows/*.yml | grep -v '/fuzz.yml$') | sort -u | grep -v "@$tc\$" || true)"
   dk="$(grep -h '^FROM rust:' Dockerfile.* | grep -v "rust:$tc-" || true)"
   if [ -n "$off" ]; then bad "Rust toolchain" "workflows use $off (want $tc)"
   elif [ -n "$dk" ]; then bad "Rust toolchain" "Dockerfiles use $dk (want rust:$tc-*)"

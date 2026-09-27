@@ -71,7 +71,7 @@ Check            execution_receipt_mutation           pass  80 cases
 Check            planner_adversarial                  pass  13 cases
 Check            planner_plan_id_binding              pass  576 cases
 Check            secagg_coordinator_sees_no_input     pass  5 cases
-Invariants       104, 104 satisfied
+Invariants       124, 124 satisfied
 Tracked gaps     INV-010, INV-053, INV-061, INV-065, INV-070, INV-071, INV-081, INV-101, INV-103, INV-111, INV-114
 Scope            Testing shows the documented invariants held for the tested cases, modes and boundaries; it does not prove the system secure.
 
