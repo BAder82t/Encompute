@@ -26,8 +26,8 @@ use zeroize::Zeroizing;
 
 use encompute_attestation::{
     check_freshness, seal_grant, unix_now, AttestationChallenge, AttestationEvidence,
-    AttestationPolicy, EncryptedKeyGrant, GrantHeader, Security, VerifiedWorkload, Verifier,
-    WorkloadSession, GRANT_VERSION,
+    AttestationPolicy, EncryptedKeyGrant, GrantHeader, GrantSigner, Security, VerifiedWorkload,
+    Verifier, WorkloadSession, GRANT_VERSION,
 };
 use encompute_ir::{Code, Error, Result};
 
@@ -155,7 +155,15 @@ pub struct BrokerState {
     /// The one organization this broker serves (set once).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
+    /// The key grants are signed with, wrapped like the asset keys
+    /// (created when missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_signing_key: Option<StoredKey>,
 }
+
+/// The wrap context of the grant-signing key: not a valid asset ID, so it
+/// never collides with an asset key's.
+const GRANT_KEY_CONTEXT: &str = "#grant-signing-key";
 
 /// An attested session as the broker recorded it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +187,7 @@ pub struct KeyBroker {
     store: Box<dyn SecretStore>,
     sessions: BTreeMap<String, Session>,
     clock: Box<dyn Fn() -> u64 + Send>,
+    grant_signer: GrantSigner,
 }
 
 fn check_broker_id(id: &str) -> Result<()> {
@@ -226,6 +235,7 @@ impl KeyBroker {
                 secrets: BTreeMap::new(),
                 challenges: Vec::new(),
                 organization: None,
+                grant_signing_key: None,
             },
             verifier,
             store,
@@ -233,8 +243,9 @@ impl KeyBroker {
     }
 
     /// Reopens a broker; `store` must be the one its keys were stored with.
+    /// A state without a grant-signing key gets one (saved with the state).
     pub fn from_state(
-        state: BrokerState,
+        mut state: BrokerState,
         verifier: Verifier,
         store: Box<dyn SecretStore>,
     ) -> Result<Self> {
@@ -261,13 +272,41 @@ impl KeyBroker {
                 ),
             ));
         }
+        let broker_id = state.broker_id.clone();
+        let ctx = KeyContext {
+            broker_id: &broker_id,
+            asset_id: GRANT_KEY_CONTEXT,
+            version: 0,
+        };
+        let grant_signer = match &state.grant_signing_key {
+            Some(k) => {
+                let seed: [u8; 32] = store
+                    .unwrap_for_release(&ctx, k)?
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| err(Code::KeyRelease, "the grant-signing key is 32 bytes"))?;
+                GrantSigner::from_seed(&Zeroizing::new(seed))
+            }
+            None => {
+                let g = GrantSigner::generate()?;
+                state.grant_signing_key =
+                    Some(store.wrap(&ctx, &KeyMaterial::from_bytes(g.seed().as_slice())?)?);
+                g
+            }
+        };
         Ok(Self {
             state,
             verifier,
             store,
             sessions: BTreeMap::new(),
             clock: Box::new(unix_now),
+            grant_signer,
         })
+    }
+
+    /// The hex Ed25519 key this broker signs grants with: workloads pin it.
+    pub fn grant_public_key(&self) -> String {
+        self.grant_signer.public_key_hex()
     }
 
     fn wrap(&self, asset_id: &str, version: u64, key: &KeyMaterial) -> Result<StoredKey> {
@@ -490,6 +529,18 @@ impl KeyBroker {
             ));
         }
         let broker_id = self.state.broker_id.clone();
+        let grant_signing_key = match &self.state.grant_signing_key {
+            Some(k) => Some(store.rotate(
+                &KeyContext {
+                    broker_id: &broker_id,
+                    asset_id: GRANT_KEY_CONTEXT,
+                    version: 0,
+                },
+                k,
+                self.store.as_ref(),
+            )?),
+            None => None,
+        };
         let mut secrets = self.state.secrets.clone();
         for (asset_id, s) in secrets.iter_mut() {
             for (v, kv) in s.versions.iter_mut() {
@@ -502,6 +553,7 @@ impl KeyBroker {
             }
         }
         self.state.secrets = secrets;
+        self.state.grant_signing_key = grant_signing_key;
         self.state.store = store.name().into();
         self.state.kek_id = store.key_id();
         self.store = store;
@@ -645,6 +697,7 @@ impl KeyBroker {
             binding_hash: s.info.session.clone(),
             attestation_digest: s.info.attestation_digest.clone(),
             expires_at: s.info.expires_at,
+            broker_public_key: self.grant_signer.public_key_hex(),
         };
         let key = self.store.unwrap_for_release(
             &KeyContext {
@@ -654,7 +707,7 @@ impl KeyBroker {
             },
             &current.key,
         )?;
-        seal_grant(header, b, key.as_bytes())
+        seal_grant(header, b, key.as_bytes(), &self.grant_signer)
     }
 
     /// Verify and release in one step (debug CLI).

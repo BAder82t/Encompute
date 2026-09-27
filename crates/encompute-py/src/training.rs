@@ -177,10 +177,9 @@ pub fn acquire_session_keys(
     };
     let signer = EvaluatorSigner::from_seed(&seed);
     let session = WorkloadSession::new(&signer.identity());
-    let requests: Vec<_> = assets
-        .iter()
-        .map(|a| (BrokerClient::new(broker), a.clone()))
-        .collect();
+    // `URL#KEY` pins the broker's grant-signing key.
+    let broker = BrokerClient::parse(broker).map_err(err)?;
+    let requests: Vec<_> = assets.iter().map(|a| (broker.clone(), a.clone())).collect();
     let got = acquire_keys(
         att.as_ref(),
         &session,
@@ -316,10 +315,9 @@ pub fn acquire_training_keys(
     let attester = MockHardware::from_seed(&seed32(mock_seed)?).attester(image);
     let signer = EvaluatorSigner::from_seed(&seed32(identity)?);
     let session = WorkloadSession::new(&signer.identity());
-    let requests: Vec<_> = assets
-        .iter()
-        .map(|a| (BrokerClient::new(broker), a.clone()))
-        .collect();
+    // `URL#KEY` pins the broker's grant-signing key.
+    let broker = BrokerClient::parse(broker).map_err(err)?;
+    let requests: Vec<_> = assets.iter().map(|a| (broker.clone(), a.clone())).collect();
     let got = acquire_keys(
         &attester,
         &session,

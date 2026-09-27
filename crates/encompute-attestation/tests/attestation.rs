@@ -4,8 +4,8 @@ use encompute_attestation::gcp::{ConfidentialSpaceProvider, ISSUER, PROVIDER};
 use encompute_attestation::mock::{MockHardware, MockProvider};
 use encompute_attestation::{
     seal_grant, AttestationChallenge, AttestationEvidence, AttestationPolicy, AttestationRecord,
-    Attester, DebugPolicy, GrantHeader, Security, TcbStatus, TeeKind, Verifier, WorkloadBinding,
-    WorkloadSession, EVIDENCE_VERSION, GRANT_VERSION,
+    Attester, DebugPolicy, EncryptedKeyGrant, GrantHeader, GrantSigner, Security, TcbStatus,
+    TeeKind, Verifier, WorkloadBinding, WorkloadSession, EVIDENCE_VERSION, GRANT_VERSION,
 };
 use encompute_ir::Code;
 use encompute_verification::EvaluatorSigner;
@@ -260,9 +260,12 @@ fn grants_open_only_in_their_session() {
         binding_hash: b.nonce().unwrap(),
         attestation_digest: "00".repeat(32),
         expires_at: NOW + 300,
+        broker_public_key: String::new(),
     };
     let key = [42u8; 32];
-    let g = seal_grant(header, &b, &key).unwrap();
+    let broker = GrantSigner::from_seed(&[8; 32]);
+    let g = seal_grant(header, &b, &key, &broker).unwrap();
+    assert_eq!(g.header.broker_public_key, broker.public_key_hex());
     assert!(!serde_json::to_string(&g)
         .unwrap()
         .contains(&"2a".repeat(32)));
@@ -278,6 +281,66 @@ fn grants_open_only_in_their_session() {
     let mut t = g.clone();
     t.header.session_id = other.session_id();
     assert_eq!(other.open(&t).unwrap_err().code, Code::KeyRelease);
+}
+
+/// HPKE base mode does not authenticate the sender: grants are signed by
+/// the broker, and unsigned (version 1) or altered grants are refused.
+#[test]
+fn grants_are_signed_by_the_broker() {
+    let w = world();
+    let b = w.binding();
+    let header = GrantHeader {
+        version: GRANT_VERSION,
+        broker_id: "hospital".into(),
+        asset_id: "patients".into(),
+        key_version: 1,
+        policy_id: Some(POLICY.into()),
+        execution_spec_id: SPEC.into(),
+        session_id: WorkloadSession::session_id_of(&b).unwrap(),
+        binding_hash: b.nonce().unwrap(),
+        attestation_digest: "00".repeat(32),
+        expires_at: NOW + 300,
+        broker_public_key: String::new(),
+    };
+    let broker = GrantSigner::from_seed(&[8; 32]);
+    let g = seal_grant(header.clone(), &b, &[42; 32], &broker).unwrap();
+    g.verify_signature().unwrap();
+    // An attacker on the path seals its own key to the session public key
+    // (which the binding carries), leaving the signature out.
+    let forged = seal_grant(
+        header.clone(),
+        &b,
+        &[66; 32],
+        &GrantSigner::from_seed(&[1; 32]),
+    )
+    .unwrap();
+    let mut unsigned = forged.clone();
+    unsigned.signature = String::new();
+    assert_eq!(
+        w.session.open(&unsigned).unwrap_err().code,
+        Code::KeyRelease
+    );
+    // ...or keeps the honest broker's key and signature on another sealing.
+    let mut spliced = forged.clone();
+    spliced.header.broker_public_key = broker.public_key_hex();
+    spliced.signature = g.signature.clone();
+    assert_eq!(w.session.open(&spliced).unwrap_err().code, Code::KeyRelease);
+    let mut spliced = g.clone();
+    spliced.ciphertext = forged.ciphertext.clone();
+    spliced.encapsulated_key = forged.encapsulated_key.clone();
+    assert_eq!(w.session.open(&spliced).unwrap_err().code, Code::KeyRelease);
+    // A version 1 grant (unsigned, from an old broker) fails closed.
+    let mut old: serde_json::Value = serde_json::to_value(&g).unwrap();
+    old["header"]["version"] = 1.into();
+    old["header"]
+        .as_object_mut()
+        .unwrap()
+        .remove("broker_public_key");
+    old.as_object_mut().unwrap().remove("signature");
+    let old: EncryptedKeyGrant = serde_json::from_value(old).unwrap();
+    let e = w.session.open(&old).unwrap_err();
+    assert_eq!(e.code, Code::KeyRelease);
+    assert!(e.message.contains("version 1"), "{e}");
 }
 
 // ---- Confidential Space -------------------------------------------------

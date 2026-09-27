@@ -29,7 +29,9 @@ mod record;
 mod util;
 
 pub use binding::{AttestationChallenge, WorkloadBinding, BINDING_VERSION};
-pub use grant::{seal_grant, EncryptedKeyGrant, GrantHeader, WorkloadSession, GRANT_VERSION};
+pub use grant::{
+    seal_grant, EncryptedKeyGrant, GrantHeader, GrantSigner, WorkloadSession, GRANT_VERSION,
+};
 pub use policy::{
     AttestationPolicy, DebugPolicy, Security, TcbStatus, TeeKind, VerifiedGpu, VerifiedWorkload,
     POLICY_VERSION,

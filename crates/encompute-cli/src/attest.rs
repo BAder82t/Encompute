@@ -601,7 +601,7 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             let v = b.add_secret(&asset, key, read_policy(&policy)?)?;
             b.save(&file.broker)?;
             println!(
-                "{:<20}{asset}\n{:<20}{v}\n{:<20}{} ({})",
+                "{:<20}{asset}\n{:<20}{v}\n{:<20}{} ({})\n{:<20}{}",
                 "Asset",
                 "Key version",
                 "Broker",
@@ -609,7 +609,9 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 match b.mode() {
                     BrokerMode::Production => "production",
                     BrokerMode::Development => "DEVELOPMENT",
-                }
+                },
+                "Grant key",
+                b.grant_public_key()
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -736,6 +738,8 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             file,
         } => {
             let mut b = open_broker(&file, Some(&trust))?;
+            // Keeps a grant-signing key created for an older state file.
+            b.save(&file.broker)?;
             let control = match std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY") {
                 Ok(key) => {
                     // A broker serves one organization; revocations name it.
@@ -781,6 +785,10 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 b.id(),
                 b.mode(),
                 trust.verifier(Some(b.id()))?.providers().join(", ")
+            );
+            eprintln!(
+                "grant signing key {} (workloads pin it: ASSET@URL#KEY)",
+                b.grant_public_key()
             );
             if let Some(c) = &control {
                 eprintln!(
@@ -849,7 +857,9 @@ pub enum WorkloadCmd {
         /// Backend of the execution spec (mock, openfhe, tfhe-rs).
         #[arg(long, default_value = "openfhe")]
         backend: String,
-        /// `ASSET@URL`, once per asset.
+        /// `ASSET@URL` or `ASSET@URL#BROKER_KEY`, once per asset. BROKER_KEY
+        /// pins the broker's grant-signing key (as `keys serve` prints it):
+        /// without it, a grant is checked only against the key it names.
         #[arg(long = "key", required = true)]
         keys: Vec<String>,
         /// The evaluator identity (created if missing), shared with
@@ -951,9 +961,12 @@ pub fn workload(cmd: WorkloadCmd) -> Result<ExitCode> {
         .iter()
         .map(|k| {
             let (asset, url) = k.split_once('@').ok_or_else(|| {
-                Error::new(Code::BadInput, format!("--key {k}: expected ASSET@URL"))
+                Error::new(
+                    Code::BadInput,
+                    format!("--key {k}: expected ASSET@URL[#BROKER_KEY]"),
+                )
             })?;
-            Ok((BrokerClient::new(url), asset.to_owned()))
+            Ok((BrokerClient::parse(url)?, asset.to_owned()))
         })
         .collect::<Result<Vec<_>>>()?;
     let signer = identity(&id_path)?;

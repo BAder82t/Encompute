@@ -494,8 +494,116 @@ fn revoke_destroys_and_rewrap_rotates() {
     let g = b.release_key(&info.session, "patients").unwrap();
     assert_eq!(g.header.key_version, 2);
     assert_eq!(s.session.open(&g).unwrap().len(), 32);
+    // The grant-signing key moved with the asset keys.
+    assert_eq!(b.grant_public_key(), s.broker.grant_public_key());
+    assert_eq!(g.header.broker_public_key, b.grant_public_key());
     // A production broker cannot move keys back to plaintext.
     let mut prod = KeyBroker::new("p", BrokerMode::Production, verifier(), kek_store(3)).unwrap();
     assert_eq!(prod.rewrap(dev_store()).unwrap_err().code, Code::KeyRelease);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Without TLS, a host on the path relays attestation to the real broker
+/// and answers the release itself, sealing a key of its choosing to the
+/// session key (HPKE base mode does not authenticate the sender). Grants
+/// are signed by the broker: a pinned workload refuses the substitute, and
+/// no workload accepts an unsigned one.
+#[test]
+fn a_substituted_grant_is_refused() {
+    use encompute_attestation::{seal_grant, EncryptedKeyGrant, GrantSigner};
+    let verifier = Verifier::new().with(MockProvider::new(&hw().public_key()).unwrap());
+    let mut b = KeyBroker::new("hospital", BrokerMode::Development, verifier, dev_store()).unwrap();
+    b.add_secret(
+        "patients",
+        Some(KeyMaterial::from_bytes(b"patients-key").unwrap()),
+        policy(),
+    )
+    .unwrap();
+    let pinned = b.grant_public_key();
+    let server = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+    let real = format!("http://{}", server.server_addr());
+    let b = Arc::new(Mutex::new(b));
+    std::thread::spawn(move || serve(&b, server));
+
+    // The attacker: relays everything, then substitutes the grant, signed
+    // by its own key or not at all.
+    struct Mitm {
+        real: String,
+        sign: bool,
+        binding: Mutex<Option<encompute_attestation::WorkloadBinding>>,
+    }
+    impl encompute_verification::http::Handler for Mitm {
+        fn body_limit(&self, _: &encompute_verification::http::Request) -> usize {
+            1 << 20
+        }
+        fn handle(
+            &self,
+            req: encompute_verification::http::Request,
+        ) -> encompute_verification::http::Response {
+            let path = req.path().to_owned();
+            if path == "/v1/attest" {
+                *self.binding.lock().unwrap() =
+                    Some(AttestationEvidence::from_bytes(&req.body).unwrap().binding);
+            }
+            let reply = ureq::post(&format!("{}{path}", self.real))
+                .send_bytes(&req.body)
+                .unwrap()
+                .into_string()
+                .unwrap();
+            let reply = if path == "/v1/release" {
+                let g: EncryptedKeyGrant = serde_json::from_str(&reply).unwrap();
+                let evil = GrantSigner::from_seed(&[66; 32]);
+                let mut f = seal_grant(
+                    g.header,
+                    self.binding.lock().unwrap().as_ref().unwrap(),
+                    b"attacker-chosen-key",
+                    &evil,
+                )
+                .unwrap();
+                if !self.sign {
+                    f.header.version = 1;
+                    f.header.broker_public_key = String::new();
+                    f.signature = String::new();
+                }
+                serde_json::to_string(&f).unwrap()
+            } else {
+                reply
+            };
+            encompute_verification::http::Response::new(200, "application/json", reply.into())
+        }
+    }
+    let mitm = |sign: bool| {
+        let proxy = encompute_verification::http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", proxy.server_addr());
+        let m = Mitm {
+            real: real.clone(),
+            sign,
+            binding: Mutex::new(None),
+        };
+        std::thread::spawn(move || proxy.serve(&m));
+        url
+    };
+    let session = WorkloadSession::new(&EvaluatorSigner::generate().unwrap().identity());
+    let acquire = |client: BrokerClient| {
+        acquire_keys(
+            &hw().attester(IMAGE),
+            &session,
+            SPEC,
+            Some(POLICY),
+            ARTIFACT,
+            &[(client, "patients".to_string())],
+        )
+    };
+    // Signed by the attacker: refused when the broker's key is pinned.
+    let url = mitm(true);
+    let e = acquire(BrokerClient::parse(&format!("{url}#{pinned}")).unwrap()).unwrap_err();
+    assert_eq!(e.code, Code::KeyRelease, "{e}");
+    // Unsigned (an old-style grant): refused, pinned or not.
+    let url = mitm(false);
+    let e = acquire(BrokerClient::new(&url)).unwrap_err();
+    assert_eq!(e.code, Code::KeyRelease, "{e}");
+    // The honest broker, pinned.
+    let got = acquire(BrokerClient::parse(&format!("{real}#{pinned}")).unwrap()).unwrap();
+    assert_eq!(got[0].key.as_slice(), b"patients-key");
+    assert!(BrokerClient::parse(&format!("{real}#nothex")).is_err());
 }
