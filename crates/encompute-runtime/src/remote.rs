@@ -124,13 +124,17 @@ impl Remote {
         EvaluatorIdentity::from_public_key_hex(key)
     }
 
+    /// Uploads carry the grant too: an evaluator managed by a control
+    /// plane accepts programs and keys only with one.
     fn post(&self, path: &str, body: &[u8]) -> Result<Value> {
-        self.agent
+        let mut r = self
+            .agent
             .post(&self.url(path))
-            .set("Content-Type", "application/octet-stream")
-            .send_bytes(body)
-            .map_err(remote_err)
-            .and_then(read_json)
+            .set("Content-Type", "application/octet-stream");
+        if let Some(g) = &self.grant {
+            r = r.set(encompute_verification::service::H_JOB_GRANT, g);
+        }
+        r.send_bytes(body).map_err(remote_err).and_then(read_json)
     }
 
     /// Upload the program if the evaluator does not have it.

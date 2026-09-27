@@ -159,6 +159,31 @@ impl ControlLink {
         self.draining.load(Ordering::SeqCst)
     }
 
+    /// Checks the grant a program or key upload carries: signed by the
+    /// pinned control plane, for this evaluator and `program_id` (when
+    /// known before compiling), unexpired. Unlike a job it neither spends
+    /// the grant nor starts anything.
+    pub fn authorize_upload(
+        &self,
+        grant_header: Option<&str>,
+        program_id: Option<&str>,
+    ) -> Result<JobGrant> {
+        let h = grant_header.ok_or_else(|| {
+            Error::new(
+                Code::ServiceAuthentication,
+                "this evaluator accepts programs and keys only with a job grant from its control plane",
+            )
+        })?;
+        let g = JobGrant::from_header(h)?;
+        g.verify(
+            &self.control_key,
+            self.me.id(),
+            program_id.unwrap_or(&g.program_id),
+            now(),
+        )?;
+        Ok(g)
+    }
+
     /// Checks a job's grant and asks the control plane to start it. Fails
     /// closed: no grant, a bad grant, a used grant, a draining evaluator or
     /// an unreachable control plane all refuse the job.

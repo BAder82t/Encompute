@@ -278,6 +278,12 @@ Evaluator resource limits:
 | `ENCOMPUTE_EXACT_WORKERS` | at most this many of them per job (default: cores, at most 8) |
 | `ENCOMPUTE_KEY_CACHE_BYTES` | bound on cached evaluation keys, counted as the uploaded envelope bytes (default 4 GiB). Least recently used keys are evicted; a job in progress keeps its keys until it ends; an evicted key is reported missing and the client uploads it again. With worker processes, each worker has this bound |
 | `ENCOMPUTE_EXACT_EXECUTION` | `reference` runs exact programs instruction by instruction (the correctness oracle) instead of the optimized circuit. For diagnosis only: results are identical, it is slower |
+| `ENCOMPUTE_MAX_KEY_BYTES` | largest evaluation-key upload (default 4 GiB, sized for bootstrapping keys; lower it where keys are smaller) |
+| `ENCOMPUTE_MAX_PROGRAM_BYTES`, `ENCOMPUTE_MAX_INPUT_BYTES` | largest program upload (default 64 MiB) and inputs envelope (default 256 MiB) |
+
+With a control plane configured, an evaluator accepts program and key
+uploads only with the job's grant, as it does jobs; without one (local
+development) uploads need none. Job IDs are 128-bit random.
 
 OpenFHE exact keys do not depend on the program, so one upload serves every
 exact program on that evaluator. They are still usable only by programs the
