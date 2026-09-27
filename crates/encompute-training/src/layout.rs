@@ -82,13 +82,17 @@ impl AdapterLayout {
                     e.module, e.parameter, e.dtype
                 )));
             }
-            offset += n;
+            offset = offset
+                .checked_add(n)
+                .ok_or_else(|| bad("layout offsets overflow"))?;
         }
         Ok(())
     }
 
     pub fn parameters(&self) -> u64 {
-        self.entries.last().map_or(0, |e| e.offset + e.length)
+        self.entries
+            .last()
+            .map_or(0, |e| e.offset.saturating_add(e.length))
     }
 
     /// `SHA256("encompute.adapter-layout.v1" || canonical layout)`.
@@ -146,7 +150,9 @@ pub fn tensor_manifest(bytes: &[u8]) -> Result<Vec<TensorEntry>> {
                 e.name
             )));
         }
-        offset += e.length;
+        offset = offset
+            .checked_add(e.length)
+            .ok_or_else(|| bad("tensor offsets overflow"))?;
     }
     if offset != body {
         return Err(bad("the tensor file's body is truncated or padded"));
