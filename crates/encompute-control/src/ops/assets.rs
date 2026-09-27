@@ -476,10 +476,6 @@ impl Control {
         Ok(serde_json::to_value(&view).expect("serializable"))
     }
 
-    /// Records a privacy event (a reservation before a noisy release, or
-    /// its commit). Race-safe (the ledger row is locked), idempotent (the
-    /// same event again returns the stored entry), and anchored before it
-    /// returns: committed spending is never forgotten.
     /// The owner authorizes a SecAgg service to record privacy events for
     /// its asset (the only way a platform service may spend its budget).
     pub fn authorize_privacy_spender(
@@ -534,6 +530,10 @@ impl Control {
         })
     }
 
+    /// Records a privacy event (a reservation before a noisy release, or
+    /// its commit). Race-safe (the ledger row is locked), idempotent (the
+    /// same event again returns the stored entry), and anchored before it
+    /// returns: committed spending is never forgotten.
     pub fn privacy_spend(&self, ctx: &Ctx, asset: &str, event: PrivacyEvent) -> Result<Value> {
         let res = self.db.tx(|t| {
             let row = t

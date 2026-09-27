@@ -368,8 +368,6 @@ impl KeyBroker {
         Ok(v)
     }
 
-    /// Revokes a version (default: the current one). A revoked current key
-    /// is never released; rotate to release again.
     /// Revokes every version of `asset_id` (a control plane's revocation):
     /// idempotent, returns the versions revoked now.
     pub fn revoke_all(&mut self, asset_id: &str) -> Result<Vec<u64>> {
@@ -389,6 +387,8 @@ impl KeyBroker {
         Ok(versions)
     }
 
+    /// Revokes a version (default: the current one). A revoked current key
+    /// is never released; rotate to release again.
     pub fn revoke(&mut self, asset_id: &str, version: Option<u64>) -> Result<u64> {
         let broker_id = self.state.broker_id.clone();
         let s = self
