@@ -296,10 +296,7 @@ fn is_token(s: &str) -> bool {
 type Head = (String, String, Vec<(String, String)>);
 
 /// Parses the head.
-fn parse_head(
-    head: &[u8],
-    max_headers: usize,
-) -> Result<Head, Refused> {
+fn parse_head(head: &[u8], max_headers: usize) -> Result<Head, Refused> {
     let text = std::str::from_utf8(head).map_err(|_| Refused::Malformed("non-UTF-8 head"))?;
     let mut lines = text.split("\r\n");
     let line = lines.next().unwrap_or("");

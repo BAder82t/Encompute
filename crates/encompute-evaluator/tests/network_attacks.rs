@@ -177,15 +177,15 @@ fn unknown_and_traversing_references_are_not_found() {
         format!("/v1/programs/{pid}/keys/..%2f..%2fkeys"),
         "/v1/programs/../../etc/passwd".to_owned(),
     ] {
-        let r = raw(
-            addr,
-            format!("GET {path} HTTP/1.1\r\n\r\n").as_bytes(),
-        );
+        let r = raw(addr, format!("GET {path} HTTP/1.1\r\n\r\n").as_bytes());
         assert_eq!(status(&r), 404, "{path}: {r}");
     }
     // Only origin-form targets are served.
     assert_eq!(
-        status(&raw(addr, b"GET http://evil.example/v1/info HTTP/1.1\r\n\r\n")),
+        status(&raw(
+            addr,
+            b"GET http://evil.example/v1/info HTTP/1.1\r\n\r\n"
+        )),
         400
     );
 }

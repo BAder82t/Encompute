@@ -166,7 +166,12 @@ fn bytes(m: &MessageEnvelope) -> Vec<u8> {
 }
 
 fn refused(r: (u16, Value), status: u16, code: &str, what: &str) -> Value {
-    assert_eq!((r.0, r.1["code"].as_str()), (status, Some(code)), "{what}: {}", r.1);
+    assert_eq!(
+        (r.0, r.1["code"].as_str()),
+        (status, Some(code)),
+        "{what}: {}",
+        r.1
+    );
     r.1
 }
 
@@ -188,7 +193,12 @@ fn control_messages_are_authenticated_fresh_and_applied_once() {
     let body = bytes(&m);
     let auth = "ENC2607";
 
-    refused(post(addr, "/v1/messages", &[], &body), 403, auth, "unsigned");
+    refused(
+        post(addr, "/v1/messages", &[], &body),
+        403,
+        auth,
+        "unsigned",
+    );
     let mallory = ServiceSigner::from_seed("control-plane", &[43; 32]).unwrap();
     refused(
         post(addr, "/v1/messages", &signed(&mallory, &body), &body),
@@ -204,7 +214,12 @@ fn control_messages_are_authenticated_fresh_and_applied_once() {
         "another service",
     );
     refused(
-        post(addr, "/v1/messages", &signed_at(&cp, "keybroker-b", &body, now()), &body),
+        post(
+            addr,
+            "/v1/messages",
+            &signed_at(&cp, "keybroker-b", &body, now()),
+            &body,
+        ),
         403,
         auth,
         "addressed to another broker",
@@ -224,7 +239,12 @@ fn control_messages_are_authenticated_fresh_and_applied_once() {
             *v = format!("{}{}", if v.starts_with('0') { "1" } else { "0" }, &v[1..]);
         }
     }
-    refused(post(addr, "/v1/messages", &h, &body), 403, auth, "flipped signature");
+    refused(
+        post(addr, "/v1/messages", &h, &body),
+        403,
+        auth,
+        "flipped signature",
+    );
     // A validly signed request carrying a tampered, expired or misaddressed
     // message.
     let mut x = m.clone();
@@ -272,7 +292,12 @@ fn control_messages_are_authenticated_fresh_and_applied_once() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["revoked_versions"], json!([1]));
     assert_eq!(stored_form(&state), "destroyed");
-    let v = refused(post(addr, "/v1/messages", &h, &body), 403, auth, "replayed request");
+    let v = refused(
+        post(addr, "/v1/messages", &h, &body),
+        403,
+        auth,
+        "replayed request",
+    );
     assert!(v["message"].as_str().unwrap().contains("replayed"), "{v}");
     for _ in 0..3 {
         let (s, v) = post(addr, "/v1/messages", &signed(&cp, &body), &body);
@@ -383,7 +408,12 @@ fn oversized_malformed_and_unauthenticated_requests_are_refused() {
         "unknown field",
     );
     assert_ne!(post(addr, "/v1/attest", &[], b"garbage evidence").0, 200);
-    refused(post(addr, "/v1/keys", &[], b"{}"), 400, "ENC1701", "no endpoint");
+    refused(
+        post(addr, "/v1/keys", &[], b"{}"),
+        400,
+        "ENC1701",
+        "no endpoint",
+    );
     let (s, v) = match ureq::get(&format!("http://{addr}/v1/release")).call() {
         Err(ureq::Error::Status(s, r)) => (s, r.into_json::<Value>().unwrap()),
         other => panic!("{other:?}"),
