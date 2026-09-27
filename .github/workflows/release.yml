@@ -117,8 +117,7 @@ jobs:
           .venv/bin/pip install --require-hashes --no-deps -r "$RUNNER_TEMP/maturin.txt"
           . scripts/release/env.sh "$PWD/target"
           export OPENFHE_ROOT="$PWD/.deps/openfhe"
-          AUDIT=(); [ "$RUNNER_OS" = Linux ] && AUDIT=(--auditwheel repair)
-          .venv/bin/maturin build --release --locked --features openfhe "${AUDIT[@]}" \
+          .venv/bin/maturin build --release --locked --features openfhe --auditwheel repair \
             -m crates/encompute-py/Cargo.toml -o wheels
           ls -l wheels
       - name: commercial dependency audit (binaries and wheel)

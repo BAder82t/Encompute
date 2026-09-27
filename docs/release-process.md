@@ -348,6 +348,30 @@ arm64, Apple clang 21:
   images are identified by the digests recorded in the release, not rebuilt.
 - **Linux vs. macOS.** Different targets; never expected to match.
 
+## Known issues (0.3 release candidates)
+
+- **macOS: OpenMP.** The macOS binaries built with OpenFHE link Homebrew's
+  `libomp` by absolute path (`/opt/homebrew/opt/libomp/lib/libomp.dylib`), so
+  they need `brew install libomp`. The release wheel bundles its `libomp`
+  (`maturin --auditwheel repair`), but that is a second OpenMP runtime next
+  to PyTorch's bundled `libomp`; a process that uses both (the OpenFHE SDK and
+  `encompute.torch`) crashes in PyTorch's first parallel operator (seen in
+  `test_confidential_job.py`: segmentation fault in `layer_norm`).
+  `OMP_NUM_THREADS=1` avoids it at a performance cost. Release check runs
+  the encrypted examples in a separate environment without PyTorch
+  (`target/release-check-venv`). A fix (bundling one runtime with
+  `delocate`, or linking OpenFHE against PyTorch's) is outside the freeze;
+  until then the macOS wheel should be documented as "OpenFHE or PyTorch,
+  not both in one process", or not shipped.
+- **Flaky capability probe in the examples.** `examples/lib.sh` `has()` runs
+  `"$E" info | grep -q ...` under `pipefail`; when `grep -q` exits first, the
+  CLI gets a broken pipe and the probe reports the feature as missing
+  (measured: 21 of 300 probes). A required example is then "skipped" and the
+  row fails. Fix: `grep "^$1 *yes" >/dev/null` (read all input). Until it
+  lands, rerun a row that fails with "required, but skipped".
+- **Linux binaries need glibc 2.39** (built on Ubuntu 24.04). The images
+  are unaffected (built on Debian 12 inside the image).
+
 ## What stays manual
 
 - Approving `security/exceptions.toml` and signing the OpenFHE review.

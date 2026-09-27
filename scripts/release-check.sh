@@ -122,9 +122,26 @@ python_env() {
     # binds them, and the worker refuses packages made with others.
     .venv/bin/pip install -q -r deploy/confidential-space-training/requirements.txt \
       --extra-index-url https://download.pytorch.org/whl/cpu &&
-    # With OpenFHE when it is installed: the encrypted examples need it.
-    (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH"
-     if [ -n "$RELEASE_FEATURES" ]; then maturin develop -q --release --features openfhe; else maturin develop -q; fi)
+    (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" maturin develop -q)
+}
+# The release wheel (with OpenFHE when it is installed), built once, and a
+# separate environment with it and without PyTorch for the encrypted
+# examples. (On macOS, OpenFHE's libomp and PyTorch's own libomp in one
+# process crash: docs/release-process.md, "Known issues".)
+release_wheel() {
+  [ -f "$LOG/.release-wheel" ] && return 0
+  local f=()
+  [ -z "$RELEASE_FEATURES" ] || f=(--features openfhe)
+  rm -rf target/release-check-wheels
+  (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" \
+    maturin build -q --release --locked ${f[@]+"${f[@]}"} -m crates/encompute-py/Cargo.toml -o target/release-check-wheels) &&
+    touch "$LOG/.release-wheel"
+}
+openfhe_sdk() {
+  release_wheel || return 1
+  [ -x target/release-check-venv/bin/python ] || python3 -m venv target/release-check-venv
+  target/release-check-venv/bin/pip install -q numpy pytest cryptography &&
+    target/release-check-venv/bin/pip install -q --force-reinstall --no-deps target/release-check-wheels/*.whl
 }
 # The release binaries (CLI, evaluator, control plane), with OpenFHE when it
 # is installed; built once, shared by the rows below.
@@ -149,7 +166,7 @@ example() {  # example NN [BIN]
   done < "$dir/expected.txt"
 }
 pytest_() { "$PY" -m pytest -q "$@"; }
-export -f python_env release_bins example pytest_ logf
+export -f python_env release_bins release_wheel openfhe_sdk example pytest_ logf
 export LOG RELEASE_FEATURES PY
 
 [ "$LIST" = 1 ] && printf '%-28s%s\n' "ROW" "COMMAND"
@@ -163,15 +180,16 @@ check "Python SDK" bash -c 'python_env && pytest_ python/tests \
 
 # --- OpenFHE ---------------------------------------------------------------------
 if [ "$OPENFHE" = 1 ]; then
-  check "OpenFHE CKKS" bash -c 'release_bins &&
+  check "OpenFHE CKKS" bash -c 'release_bins && openfhe_sdk &&
     cargo test -q --release -p encompute-runtime --features openfhe --test openfhe &&
-    BIN=target/release EXAMPLES_REQUIRE="01 03 19" examples/run-all.sh crypto'
+    PYTHON="$PWD/target/release-check-venv/bin/python" BIN=target/release EXAMPLES_REQUIRE="01 03 19" examples/run-all.sh crypto'
   check "OpenFHE Exact" cargo test -q --release -p encompute-openfhe-client -p encompute-openfhe-exact
   check "optimized/reference diff" bash -c 'cargo test -q --release -p encompute-exact --test circuit &&
-    release_bins && example 20 target/release | grep -q "reference=.* optimized=.* MATCH"'
+    release_bins && openfhe_sdk &&
+    PYTHON="$PWD/target/release-check-venv/bin/python" example 20 target/release | grep -q "reference=.* optimized=.* MATCH"'
   check "remote execution" bash -c 'cargo test -q -p encompute-runtime --test network &&
     cargo test -q --release -p encompute-runtime --features openfhe --test openfhe_exact &&
-    release_bins && PYTHON="$PY" scripts/exact-demo.sh'
+    release_bins && openfhe_sdk && PYTHON="$PWD/target/release-check-venv/bin/python" scripts/exact-demo.sh'
 else
   skip "OpenFHE CKKS" "$NO_OPENFHE"
   skip "OpenFHE Exact" "$NO_OPENFHE"
@@ -216,10 +234,10 @@ E2E_DONE=""; COMPOSE_DONE=""
 if [ -x scripts/release/backup-drill.sh ]; then
   check "backup/restore" scripts/release/backup-drill.sh
 elif [ "$E2E_READY" = 1 ]; then
-  check "backup/restore" bash -c 'release_bins && SDK_PYTHON="$PY" TOOL_PYTHON="$PY" scripts/enterprise-e2e.sh'
+  check "backup/restore" bash -c 'release_bins && openfhe_sdk && SDK_PYTHON="$PWD/target/release-check-venv/bin/python" TOOL_PYTHON="$PWD/target/release-check-venv/bin/python" scripts/enterprise-e2e.sh'
   E2E_DONE="backup/restore"
 elif [ "$COMPOSE_READY" = 1 ]; then
-  check "backup/restore" bash -c 'release_bins && SDK_PYTHON="$PY" TOOL_PYTHON="$PY" deploy/docker-compose/smoke.sh'
+  check "backup/restore" bash -c 'release_bins && openfhe_sdk && SDK_PYTHON="$PWD/target/release-check-venv/bin/python" TOOL_PYTHON="$PWD/target/release-check-venv/bin/python" deploy/docker-compose/smoke.sh'
   COMPOSE_DONE="backup/restore"
 else
   skip "backup/restore" "scripts/release/backup-drill.sh not present yet; the enterprise E2E needs OpenFHE, the services and pg_dump/psql; the Compose smoke test needs docker and the :dev images"
@@ -230,7 +248,7 @@ if [ -n "$E2E_DONE" ]; then
     else record "Enterprise E2E" "same run as $E2E_DONE"; fi
   fi
 elif [ "$E2E_READY" = 1 ]; then
-  check "Enterprise E2E" bash -c 'release_bins && SDK_PYTHON="$PY" TOOL_PYTHON="$PY" scripts/enterprise-e2e.sh'
+  check "Enterprise E2E" bash -c 'release_bins && openfhe_sdk && SDK_PYTHON="$PWD/target/release-check-venv/bin/python" TOOL_PYTHON="$PWD/target/release-check-venv/bin/python" scripts/enterprise-e2e.sh'
 else
   skip "Enterprise E2E" "needs OpenFHE, ENCOMPUTE_TEST_* (or ENCOMPUTE_E2E_DATABASE_URL, BAO_ADDR, BAO_TOKEN), pg_dump, psql"
 fi
@@ -240,7 +258,7 @@ if [ -n "$COMPOSE_DONE" ]; then
     else record "Compose deployment" "same run as $COMPOSE_DONE"; fi
   fi
 elif [ "$COMPOSE_READY" = 1 ]; then
-  check "Compose deployment" bash -c 'release_bins && SDK_PYTHON="$PY" TOOL_PYTHON="$PY" deploy/docker-compose/smoke.sh'
+  check "Compose deployment" bash -c 'release_bins && openfhe_sdk && SDK_PYTHON="$PWD/target/release-check-venv/bin/python" TOOL_PYTHON="$PWD/target/release-check-venv/bin/python" deploy/docker-compose/smoke.sh'
 else
   skip "Compose deployment" "build the images: deploy/docker-compose/README.md"
 fi
@@ -253,11 +271,7 @@ commercial() {
   release_bins || return 1
   local w="${WHEEL:-}"
   if [ -z "$w" ]; then
-    local f=()
-    [ -z "$RELEASE_FEATURES" ] || f=(--features openfhe)
-    rm -rf target/release-check-wheels
-    (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" \
-      maturin build -q --release --locked ${f[@]+"${f[@]}"} -m crates/encompute-py/Cargo.toml -o target/release-check-wheels) || return 1
+    release_wheel || return 1
     w="$(ls target/release-check-wheels/*.whl | head -n 1)"
   fi
   WHEEL="$w" IMAGES="${IMAGES:-}" scripts/audit-commercial-build.sh target/release

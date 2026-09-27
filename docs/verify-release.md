@@ -32,7 +32,7 @@ ISSUER=https://token.actions.githubusercontent.com
 |---|---|
 | `encompute-$V-source.tar.gz` | `git archive` of the tagged commit |
 | `encompute-$V-linux-x86_64.tar.gz` | `encompute`, `encompute-evaluator`, `encompute-control`, built with OpenFHE (glibc 2.39 or later: Ubuntu 24.04, Debian 13) |
-| `encompute-$V-macos-arm64.tar.gz` | the same for macOS 11+ on Apple silicon |
+| `encompute-$V-macos-arm64.tar.gz` | the same for macOS 11+ on Apple silicon (needs `brew install libomp`) |
 | `encompute-$V-*.whl` | the Python SDK (`encompute`), with OpenFHE |
 | `*.cdx.json` | a CycloneDX SBOM for each binary, wheel and image |
 | `encompute-$V-images.txt` | the container images, by digest |
