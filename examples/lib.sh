@@ -42,7 +42,9 @@ need_python() {
 
 # has openfhe | openfhe-exact | tfhe-rs | verified-execution
 has() {
-  "$E" info 2>/dev/null | grep -q "^$1 *yes"
+  # grep -q would close the pipe early, and under pipefail the CLI's broken
+  # pipe would read as "not available".
+  "$E" info 2>/dev/null | grep "^$1 *yes" >/dev/null
 }
 
 need() {
