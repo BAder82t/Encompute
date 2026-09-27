@@ -143,7 +143,8 @@ in the database, and stores the nonce in `request_nonces` (primary key
 
 Notes:
 
-- `path` is the URL without the query string.
+- `path` is the URL path with its query parameters sorted into a canonical
+  form (unchanged when there is no query).
 - `bind` is informational. Recipients authorize from the method, path,
   body and the authenticated sender, never from `bind`.
 - Service accounts are registered by an `organization_admin`; evaluator and

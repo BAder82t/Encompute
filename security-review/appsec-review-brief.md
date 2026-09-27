@@ -232,7 +232,7 @@ single-use nonce; job grants come from the pinned control-plane key
 (INV-156, INV-158, INV-163).
 
 **Where.** `crates/encompute-verification/src/service.rs` (statement:
-method, path without query string, sender, recipient, timestamp, nonce,
+method, path with its canonical query string, sender, recipient, timestamp, nonce,
 `bind`, body hash; ±300 s; message envelopes; job grants),
 `crates/encompute-control/src/authn.rs` (nonce store in PostgreSQL),
 `ops/tenancy.rs` (service-account registration and disabling),
@@ -248,8 +248,8 @@ set, consent to start), `crates/encompute-keybroker/src/server.rs`
 
 **Questions.**
 
-1. The signature does not cover the query string. Which routes take
-   security-relevant query parameters?
+1. The signature covers the path with its query parameters sorted into a
+   canonical form. Can two different requests share a canonical target?
 2. `bind` is informational. Is any authorization decision made from it
    anywhere?
 3. There is no service-key rotation endpoint. What is the recovery path

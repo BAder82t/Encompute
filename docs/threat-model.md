@@ -406,8 +406,6 @@ deployment.
 - Confidentiality of anything sent over plain HTTP: bearer tokens,
   metadata, and ciphertexts (ciphertexts leak nothing about values, but
   their size and timing are visible).
-- **The query string is not signed.** Service request signatures cover the
-  path without the query string (`crates/encompute-control/src/api.rs`).
 - The key broker keeps its replay cache for control-plane messages in
   memory, so it is empty after a restart.
 - The first contact with an evaluator when the client pins its key on first

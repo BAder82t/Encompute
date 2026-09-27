@@ -20,7 +20,7 @@ Every `/v1` route except `/v1/info` needs one of:
 - A service signature: the headers `Encompute-Sender`,
   `Encompute-Recipient`, `Encompute-Timestamp`, `Encompute-Nonce`,
   `Encompute-Bind` and `Encompute-Signature`. They carry an Ed25519
-  signature over the method, the path (not the query string), the SHA-256
+  signature over the method, the path with its canonical (sorted) query string, the SHA-256
   of the body, the sender and recipient, the timestamp (±300 s), a
   single-use nonce, and the bound IDs (`encompute_verification::service`).
 

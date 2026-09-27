@@ -98,7 +98,7 @@ maturin develop --release --features openfhe
 | Python SDK (`encompute`) | **Supported** | Compile, run, test, explain, policies, planner, `Project`, `Client`. CI tests Python 3.11 and 3.12. The package declares 3.9 or later; 3.9 and 3.10 are not tested. See [api-stability.md](api-stability.md) for which names are stable. |
 | `encompute.torch` | **Supported** | Needs the `torch` or `huggingface` extra. |
 | `encompute` CLI | **Supported** | Development-only flags (`--development`, `--mock-root`, `attest mock-root`, `attest simulate-launcher`, `plan --allow-development`) are unsupported in production. |
-| Assurance suite (`assurance-report`) | **Supported** (release gate) | Not published. 104 invariants. |
+| Assurance suite (`assurance-report`) | **Supported** (release gate) | Not published. 124 invariants. |
 
 ## Platforms
 

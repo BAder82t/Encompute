@@ -54,15 +54,12 @@ a cryptographic party in a program's policy (`hospital-a`).
 each key broker, each SecAgg coordinator, and any automation. A service signs
 every request and message. The signature covers:
 
-- the method, the path (without the query string) and a hash of the
-  body;
+- the method, the path with its query string (parameters sorted into a
+  canonical form) and a hash of the body;
 - the sender and the recipient;
 - a timestamp;
 - a nonce (a replayed request is refused);
 - the IDs the request is about.
-
-The query string is not signed. Do not rely on query parameters for
-anything a relayed request must not change.
 
 A source IP address, a hostname or a private network is never treated as an
 identity. The signatures stay valid through proxies and brokers.

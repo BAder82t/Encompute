@@ -125,8 +125,6 @@ Related: [support matrix](docs/support-matrix.md),
   deployment provides none. The control plane connects to PostgreSQL
   without TLS. Terminate TLS in front of every service and keep the
   database on a private network.
-- **Service signatures do not cover the query string.** They bind the
-  method, the path and the body hash, among other fields.
 - **The newest audit events are only hash-chained.** Events after the last
   signed checkpoint (every 100 events by default) are covered by an
   unkeyed hash chain until the next checkpoint.
