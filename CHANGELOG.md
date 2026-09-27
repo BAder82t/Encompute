@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Release candidate documentation
+
+- **Support matrix** (`docs/support-matrix.md`): the one authoritative
+  list of what is supported, a supported subset, experimental, research
+  only or unsupported, including unsupported combinations and platforms.
+  The README's status table summarizes it.
+- **Known limitations** (`KNOWN_LIMITATIONS.md`), **performance**
+  (`docs/performance.md`, measured numbers only), **artifact
+  compatibility** (`docs/compatibility.md`), **API stability**
+  (`docs/api-stability.md`: Control Plane API v1 is frozen, with a
+  deprecation policy) and the draft **release notes** for 0.3.0-rc.1
+  (`docs/release-notes-rc.md`).
+- `SECURITY.md`: supported releases, response targets, disclosure policy
+  and scope.
+- Drift fixed: CLI help no longer names TFHE-rs as a default backend;
+  `docs/api.md` lists `POST /v1/organizations/{id}/key-rotations`; example
+  13 shows the current catalog (104 invariants, 15 checks); example 19
+  uses the measured gate times; CONTRIBUTING no longer asks for
+  `--all-features`; decision-record numbers removed from user-facing
+  text.
+- `docs/deployment.md` states what the code does today: signatures do not
+  cover the query string; TLS and database network security are the
+  operator's job; privacy-spending roles; the audit chain's unanchored
+  tail; ID conflicts; environment-variable fallbacks for secrets; the
+  CLI coordinator's direct (non-outbox) reports; missing configuration
+  variables. Decision records 0007, 0008, 0009, 0011, 0013 and 0020 gained
+  dated update notes.
+
 ### OpenFHE performance and hybrid exact optimization
 
 - **Optimized exact circuits.** Exact plans run as a gate circuit:
@@ -36,7 +64,7 @@
   adopted (`scripts/lut-measure.sh`).
 - **Scheduling.** Evaluators register a machine profile. The control plane
   estimates completion time from gate counts and the queue.
-- **Example 20** (`examples/20_openfhe_optimization`); ADR-022;
+- **Example 20** (`examples/20_openfhe_optimization`); a [decision record](docs/adr/0022-exact-optimization.md);
   invariants INV-166 to INV-171.
 
 ### Enterprise deployment foundation
@@ -99,7 +127,7 @@
     - revocation;
     - a canary scan of logs, the database, audit output and metrics.
   - Invariants INV-156 to INV-165.
-- **Documentation.** ADR-021, docs/deployment.md, docs/api.md. Error codes
+- **Documentation.** A [decision record](docs/adr/0021-enterprise-deployment.md), docs/deployment.md, docs/api.md. Error codes
   ENC2601–ENC2607.
 
 ### Commercial exact execution on OpenFHE
@@ -152,7 +180,7 @@
   selection.
 - Benchmarks: gate counts per operation and width; about 62 ms per gate;
   524 MiB of evaluation keys (docs/benchmarks.md).
-- ADR-020.
+- A [decision record](docs/adr/0020-openfhe-exact.md).
 
 ### Confidential training on Google Confidential Space
 
@@ -197,7 +225,7 @@
   `keys serve --requests-per-minute`; `trust init --attestation-policy`.
 - **DP-SGD**: the gradient-path probe's tolerance is relative to the
   gradient's scale (see the benchmarks).
-- ADR-019; INV-143–INV-148 (81 invariants). The live GCP run is pending a
+- A [decision record](docs/adr/0019-confidential-space-training.md); INV-143–INV-148 (81 invariants). The live GCP run is pending a
   project.
 
 ### Hugging Face Transformers + PEFT
@@ -242,7 +270,7 @@
     previously missed, and `test_huggingface.py`.
   - Examples 15–17 are required.
   - `examples/17_huggingface_peft` runs with 22 attacks failing closed.
-- ADR-018; INV-136–INV-142 (75 invariants).
+- A [decision record](docs/adr/0018-huggingface-peft.md); INV-136–INV-142 (75 invariants).
 
 ### Patient-level differential privacy (DP-SGD)
 
@@ -290,8 +318,8 @@
 
 ### Confidential PyTorch fine-tuning
 
-- **Real PyTorch LoRA fine-tuning, protected end to end** (ADR-016, new
-  crate `encompute-training`, `encompute.torch`):
+- **Real PyTorch LoRA fine-tuning, protected end to end** (new crate
+  `encompute-training`, `encompute.torch`):
   `Project.finetune(model=, data=, method="lora", privacy=,
   verification=)` plans the run, attests each participant's training
   worker, releases the model key only to it, trains LoRA locally with
@@ -359,7 +387,7 @@
 ### Planner
 
 - **Declare trust requirements; Encompute chooses the mechanisms**
-  (ADR-015, new crate `encompute-planner`): requirements derived from the
+  (new crate `encompute-planner`): requirements derived from the
   confidentiality policy (hide from parties and the compute host,
   aggregate-only, purpose, privacy budgets, participants, correctness,
   attestation, region), profiles `standard`/`strong`/`maximum` that only
@@ -384,7 +412,7 @@
 
 ### Trust graph
 
-- **One verifiable record of a collaboration** (ADR-014, new crate
+- **One verifiable record of a collaboration** (new crate
   `encompute-trust`): parties, assets, programs, policies, owner
   authorizations and revocations, aggregation rounds, aggregates, privacy
   releases, attestations and executions in one content-addressed bundle,
@@ -414,7 +442,7 @@
 
 ### Differential privacy
 
-- **Privacy budgets per asset** (ADR-013): `privacy unit "patient"
+- **Privacy budgets per asset**: `privacy unit "patient"
   epsilon 3.0 delta 1e-6` (Python `asset(..., privacy="strong",
   unit="patient")` or `DP(epsilon, delta)`), with named levels
   `standard`, `strong` and `maximum`.
@@ -445,7 +473,7 @@
 
 ### Multi-party secure aggregation
 
-- **Aggregation boundaries** (ADR-012). `aggregate "out" sum|mean minimum
+- **Aggregation boundaries**. `aggregate "out" sum|mean minimum
   N colluding C clip [lo, hi] scale S modulus M` (Python
   `secure_aggregate(...)`)
   declares that an output is a sum of one input per party, released only by
@@ -461,7 +489,7 @@
   are tolerated down to it. Aggregation specs (`encagg1:`) and rounds
   (`encround1:`) bind every message; signed `AggregationReceipt`s record
   contributors, dropouts, commitments, attestations and the aggregate
-  commitment. Optional attested contributors (ADR-011).
+  commitment. Optional attested contributors.
 - Aggregation programs never run on a single evaluator (ENC1905).
 - Each contribution carries signed metadata: RoundID, AssetID, PolicyID,
   ExecutionSpecID, codec ID, shape, protocol keys and attestation. The
@@ -478,7 +506,7 @@
 
 ### Attested confidential compute
 
-- **Policy-gated key release** (ADR-011). Asset keys are released only to a
+- **Policy-gated key release**. Asset keys are released only to a
   workload whose fresh hardware attestation binds the approved execution
   spec, `PolicyId`, artifact digest, evaluator receipt key and an ephemeral
   session key, and satisfies the asset's `AttestationPolicy` (TEE, image
@@ -504,7 +532,7 @@
 
 ### Confidentiality IR
 
-- **Parties, assets and policies** in the IR (ADR-010): owners, readers,
+- **Parties, assets and policies** in the IR: owners, readers,
   purposes, release (`never`, `owner_only`, `allowed_parties`,
   `aggregate_only`, `public`), and owner-permitted derivations; secret
   inputs bind to assets; outputs are sealed, revealed to a party, or public.
@@ -530,7 +558,7 @@
   `ExecutionProof` (relation `FheEvaluationV1`, protocol `reexecution-v1`)
   bound in the signed receipt; the client re-executes over the committed
   request with its evaluation keys and decrypts only on a byte-for-byte
-  match. Sound, not succinct (ADR-009). Research feature `vfhe-research`
+  match. Sound, not succinct. Research feature `vfhe-research`
   (crate `encompute-vfhe`).
 - **Malicious evaluator caught.** Random, replayed, skipped, substituted
   and mutated results, each with a valid signed receipt, are rejected by
@@ -543,7 +571,7 @@
   negotiation, `GET /v1/jobs/{j}/proof`.
 - **CLI.** `run --remote` prints `VERIFIED PRIVATE EXECUTION` only after the
   proof verifies and saves `proof.bin`; `verify --proof --evaluation-keys`.
-- Research findings recorded in ADR-009: Fherret binds no output ciphertext
+- Research findings recorded in a [decision record](docs/adr/0009-vfhe-proof-backend.md): Fherret binds no output ciphertext
   and has no license; ZHE's published analysis had a bug; TFHE-rs
   evaluation is not byte-reproducible; OpenFHE BGV is.
 - Cost (loan pre-check, M3 Max): evaluation 24 ms, verification 65 ms,
@@ -554,7 +582,7 @@
 - **Semantic transcripts.** Every exact plan maps deterministically to a
   `SemanticTranscript` (stable numeric opcodes, typed canonical constants,
   plan-local registers, inputs without values) with a stable hash
-  (`enctrace1:…`), bound to the execution spec (ADR-008).
+  (`enctrace1:…`), bound to the execution spec.
 - **Receipts v2** bind the transcript hash; clients compute it from their
   own plan and refuse a mismatch (ENC1702). `verification.json` stores the
   transcript version and hash; `encompute audit` checks it.
@@ -589,7 +617,7 @@
   receipts and prints `RECEIPT VERIFIED` / `EXECUTION PROOF NOT PRESENT`.
 - **Proof hooks.** `ExecutionObserver` on exact plans (structure only, never
   values) and the `VerificationBackend` interface (`NoProofBackend`).
-- Canonical JSON and domain separation: ADR-007.
+- Canonical JSON and domain separation: see the [decision record](docs/adr/0007-verifiable-execution.md).
 - Exact tests: 10 000+ random programs on the mock; TFHE-rs on every
   operation at the boundaries of all eight integer widths and on random
   programs; benchmark example `exact_ops`.
@@ -602,12 +630,12 @@ Exact private computation: integers and Booleans, computed exactly.
   `+ - *`, comparisons, logic, shifts, min/max, select, lookup tables, casts and
   division by public constants. Integer range analysis proves no operation
   overflows; a possible overflow is a compile error (ENC1303). Exact values
-  at the API are integers within ±2^53 (ADR-006).
+  at the API are integers within ±2^53.
 - **Python.** `secret[u8, 0:120]` … `secret[i64, lo:hi]`, `secret[bool_]`;
   `+ - *`, `< <= > >= == !=`, `& | ^ ~`, `<< >>`, `//` and `%` by constants,
   `encompute.select`, `minimum`, `maximum`, `lookup`, `cast`. Results come
   back as `int` and `bool`.
-- **One compiler, two schemes (ADR-006).** The program's types choose the
+- **One compiler, two schemes.** The program's types choose the
   lowering: approximate programs → CKKS, exact programs → a
   backend-independent `ExactPlan` (validated before it runs). Mixed programs
   are refused until 0.4.
@@ -640,7 +668,7 @@ only the client decrypts.
   with ENC16xx codes.
 - **Evaluator service.** `encompute-evaluator serve` (HTTP): program upload,
   one-time evaluation-key registration, jobs. `--workers N` runs worker
-  processes with crash restart and replay (ADR-005). Container image:
+  processes with crash restart and replay. Container image:
   `Dockerfile.evaluator`.
 - **CLI.** `keys generate`, `serve`, `run --remote --keys`, `audit`,
   `explain --measure` (measured bytes, time, memory, error, ranking).

@@ -71,7 +71,7 @@ Check            execution_receipt_mutation           pass  80 cases
 Check            planner_adversarial                  pass  13 cases
 Check            planner_plan_id_binding              pass  576 cases
 Check            secagg_coordinator_sees_no_input     pass  5 cases
-Invariants       52, 52 satisfied
+Invariants       104, 104 satisfied
 Tracked gaps     INV-010, INV-053, INV-061, INV-065, INV-070, INV-071, INV-081, INV-101, INV-103, INV-111, INV-114
 Scope            Testing shows the documented invariants held for the tested cases, modes and boundaries; it does not prove the system secure.
 
@@ -110,7 +110,7 @@ every cited file is then missing and every invariant is reported violated.
   verified execution; TFHE-rs in research CI).
 - Nothing here establishes the security of the cryptography itself or of
   TEE hardware, or covers properties no invariant states.
-- This example runs six of the fourteen checks, at quick scale.
+- This example runs six of the fifteen checks, at quick scale.
 - `--only` with a misspelled check name runs nothing and still prints the
   passing verdict (exit 0). Read the per-check `ok` lines, not only the
   last line.

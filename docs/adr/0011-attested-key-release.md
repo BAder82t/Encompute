@@ -174,3 +174,22 @@ approved execution spec and policy, in an approved TEE, for a fresh session.
 - `crates/encompute-cli/tests/cli.rs` (`attestation_and_key_release`).
 - `deploy/confidential-space/`: the image, entrypoint and deploy script for
   the real Confidential Space run.
+
+## Update (2026-09)
+
+The decision above stands; the key broker has grown since.
+
+- **Key storage.** The broker no longer keeps keys in a plaintext local
+  file in production. Keys are wrapped by a key-encryption key (KEK)
+  through a `SecretStore`. The KEK comes from a local KEK file
+  (`--kek`) or is itself wrapped by the organization's root key in OpenBao
+  or Vault Transit (`--root-key openbao:MOUNT/KEY`). Production brokers
+  refuse the plaintext development store.
+- **Operations.** Besides challenge, attestation, release, rotation and
+  revocation: `keys rewrap` (a new KEK), `keys rotate-root` (a new root
+  key version; asset keys unchanged), revocation as a signed message from
+  the control plane, and a per-IP request rate limit
+  (`keys serve --requests-per-minute`).
+- **Training.** Confidential fine-tuning with DP-SGD also attests the
+  contributing training workers: their attestation policy binds the digest
+  of the training code (`code_digest` in `encompute.torch.finetune`).

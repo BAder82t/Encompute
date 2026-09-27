@@ -12,7 +12,7 @@ Python raises `encompute.EncomputeError` with `.code` and `.message`.
 | ENC1005 | frontend, IR | Operation not supported on secrets (indexing, iteration, non-integer powers, secret matrices, `select` without an encrypted bool condition, programs mixing approximate and exact values) | See the message for the version that adds it |
 | ENC1101 | frontend, IR | Secret input has no declared range, or `lo >= hi` | `secret[float, lo:hi]` / `secret[Tensor[n], lo:hi]` |
 | ENC1102 | runtime | Input missing, wrong length, unknown, or outside its declared range | Fix the input; ranges are part of the security and precision contract |
-| ENC1201 | compiler | Multiplicative depth exceeds the largest 128-bit parameter set (N = 2^16) without bootstrapping | Reduce chained multiplications or approximation degree; bootstrapping arrives in 0.2 |
+| ENC1201 | compiler | Multiplicative depth exceeds the largest 128-bit parameter set (N = 2^16) without bootstrapping | Reduce chained multiplications or approximation degree. CKKS bootstrapping is not supported yet |
 | ENC1202 | compiler | Precision unreachable: scale above 59 bits, first modulus above 60 bits, unbounded range, or a sigmoid needing degree > 127 | Relax `precision` or narrow input ranges |
 | ENC1301 | frontend, IR | Type error: shape mismatch, public-only computation, output not depending on a secret, bad constant | See message |
 | ENC1302 | IR parser | Malformed `.eir` text (message includes the line) | — |

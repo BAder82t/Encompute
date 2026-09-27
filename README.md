@@ -40,29 +40,35 @@ revealing what each needs to keep private: confidentiality policies are
 enforced by attested key release, secure aggregation and differential
 privacy, and every step leaves verifiable evidence.
 
-**Status: unreleased work on `main`** (last release: v0.2.0). See the
-[changelog](CHANGELOG.md), [benchmarks](docs/benchmarks.md),
-[decision records](docs/adr/), [threat model](docs/threat-model.md) and
-[error codes](docs/errors.md).
+**Status: release candidate 0.3.0-rc.1, under independent security
+review** (last release: v0.2.0). What you can rely on is in the
+[support matrix](docs/support-matrix.md); what Encompute does not do is in
+[known limitations](KNOWN_LIMITATIONS.md). See also the
+[release notes](docs/release-notes-rc.md), [changelog](CHANGELOG.md),
+[performance](docs/performance.md), [compatibility](docs/compatibility.md),
+[API stability](docs/api-stability.md), [threat model](docs/threat-model.md),
+[cryptography](docs/cryptography.md) and [error codes](docs/errors.md).
 
-| Area | State |
+| Area | Status |
 |---|---|
-| Approximate programs (CKKS, OpenFHE) | working, end to end, local and remote |
-| Exact programs (integers, Booleans) | working end to end, local and remote, on OpenFHE exact (BinFHE), the production exact backend, as an optimized circuit with parallel gates (1.7x to 9.4x faster than the reference lowering with 8 workers on the benchmark corpus, results identical); arithmetic-only programs selected for OpenFHE BGV by calibrated cost; TFHE-rs only in research builds |
-| Client/evaluator split over HTTP, worker processes | working |
-| Signed execution receipts | working, CKKS and exact |
-| Semantic transcripts (the statement a proof must satisfy) | working, exact programs |
-| Proof of correct execution | research build: re-execution proofs on OpenFHE BGV for a small exact subset (sound, not succinct) |
-| Confidentiality policies (parties, assets, purposes, release) | checked at compile time, bound into execution identity, and enforced at run time by the mechanisms below |
-| Attested key release (TEE attestation, policy-gated keys) | working: Google Confidential Space and a development mock; the live Confidential Space run needs a GCP project |
-| Secure aggregation (`aggregate_only`) | working: Bonawitz et al., malicious-coordinator variant, dropouts, signed aggregation receipts |
-| Differential privacy (budgets, ledger, receipts) | working: discrete Gaussian on secure aggregates, zCDP accounting, tamper-evident ledgers, owner-side enforcement |
-| Trust graph (authorizations, revocation, lineage, one trust report) | working: owner-signed program approvals, revocation reach, a report rebuilt from evidence and checked against verifier-supplied keys |
-| Planner (declare requirements, get mechanisms) | working: requirements from policies, selection among existing mechanisms, PLANNING FAILED instead of weakening, independent validator, PlanId bound into rounds and the trust report |
-| Confidential fine-tuning (PyTorch, LoRA) | working: attested training workers, model keys gated by attestation, secure aggregation and DP of LoRA updates, sealed adapters and checkpoints, adapter lineage and export control; organization-level DP or patient-level DP-SGD; Hugging Face Transformers + PEFT (development attestation on one machine) |
-| Commercial dependency boundary | audited: no TFHE-rs in the dependency graph, SBOM, binaries, wheel or container of a production build (`scripts/audit-commercial-build.sh`) |
-| Enterprise deployment (control plane) | working, production mode: organizations, OIDC users and signed service identities, roles, tenant isolation, projects, asset registry, plans, idempotent jobs, capability-aware scheduling, PostgreSQL with versioned migrations, anchored privacy ledgers and audit trail, customer-managed root keys (OpenBao/Vault Transit), API v1, CLI and Python SDK over it, Docker Compose deployment with backup and restore ([docs/deployment.md](docs/deployment.md)) |
-| Assurance (security invariants under attack) | 104 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Approximate programs on OpenFHE CKKS | **Supported** (production) |
+| Exact programs on OpenFHE exact (BinFHE) | **Supported** (production): optimized circuits, parallel gates |
+| Exact programs on OpenFHE BGV | **Supported subset**: arithmetic-only `u8`/`u16`/`bool` programs, chosen by calibrated cost |
+| TFHE-rs | **Research only** (`research-tfhe-rs`); production builds refuse it |
+| Remote evaluator, worker processes | **Supported**, single node |
+| Signed execution receipts | **Supported** (signed claims, not proofs) |
+| Verified execution (execution proofs) | **Research only** (`vfhe-research`): re-execution on BGV, small exact subset |
+| Confidentiality policies, planner, trust graph | **Supported** |
+| Secure aggregation | **Supported** |
+| Differential privacy: organization level, patient-level DP-SGD | **Supported** |
+| PyTorch LoRA; Hugging Face Transformers + PEFT | **Supported subset**: sequence classification with BERT or DistilBERT |
+| Attested key release on Google Confidential Space | **Experimental**: rehearsed locally and in CI, live GCP run pending. The mock is for development only |
+| Control plane: PostgreSQL, OIDC, OpenBao/Vault BYOK, API v1 (frozen) | **Supported** |
+| Docker Compose deployment | **Supported**; its bundled OpenBao runs in development mode |
+| Python SDK | **Supported** |
+| Platforms | Linux x86_64 and macOS arm64 **supported**; Linux arm64 **experimental** |
+| Assurance | 104 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Commercial dependency boundary | Audited: no TFHE-rs in the dependency graph, SBOM, binaries, wheel or container of a production build (`scripts/audit-commercial-build.sh`) |
 
 ## Start here
 
@@ -92,7 +98,8 @@ examples/run-all.sh quick
 `secret[i8, lo:hi]` … `secret[i64, lo:hi]` and `secret[bool_]` (exact).
 Using a secret in `if`, `print`, `int()` or as a divisor is a compile-time
 error with a stable code, not a silent leak. Exact values at the API are
-integers within ±2^53 (ADR-006).
+integers within ±2^53, because values cross the API as
+64-bit floats.
 
 **Operations.**
 - Approximate: `+ - *`, `sum`, `dot`, public-matrix `@`, `poly`, `sigmoid`,
@@ -106,7 +113,7 @@ Chebyshev approximation of `sigmoid` to the requested precision, parameters
 checked against the HE Standard 128-bit table); exact programs lower to a
 backend-independent plan, with integer range analysis proving that no
 operation overflows (a possible overflow is ENC1303). Programs mixing both
-kinds are refused until hybrid execution (0.4+).
+kinds are refused: one encrypted scheme per program.
 
 **Runtime.** `clear`, `mock` and `encrypted` modes. Client and evaluator
 are separate roles talking only through versioned, checksummed envelopes
@@ -119,17 +126,19 @@ results: within the precision for approximate programs, exactly (matches
 and mismatches, boundary values first) for exact ones.
 
 **Backends.**
-- OpenFHE v1.5.1, statically linked: CKKS for approximate programs;
-  **OpenFHE exact** (BinFHE, STD128, one ciphertext per bit, bootstrapped
-  gates) for exact programs, run as an optimized circuit with parallel
-  gates; BGV for verified exact programs, and for unverified programs whose
-  operations are all in the BGV subset when it is estimated no slower.
+- **OpenFHE CKKS: production.** OpenFHE v1.5.1, statically linked, for
+  approximate programs.
+- **OpenFHE exact: production.** OpenFHE BinFHE (STD128, one ciphertext
+  per bit, bootstrapped gates) for exact programs, run as an optimized
+  circuit with parallel gates. OpenFHE BGV runs verified exact programs,
+  and unverified programs whose operations are all in the BGV subset when
+  it is estimated no slower.
+- **TFHE-rs: research only.** TFHE-rs 1.8.1, behind the off-by-default
+  `research-tfhe-rs` feature, for research and differential testing only:
+  Zama requires a patent license for commercial use of its technology.
+  Production builds cannot select it (BACKEND UNAVAILABLE), and
+  `scripts/audit-commercial-build.sh` checks that none of it is linked.
 - A plaintext mock for both kinds, for development and tests.
-- TFHE-rs 1.8.1, behind the off-by-default `research-tfhe-rs` feature, for
-  research and differential testing only: Zama requires a patent license
-  for commercial use of its technology. Production builds cannot select it
-  (BACKEND UNAVAILABLE), and `scripts/audit-commercial-build.sh` checks that
-  none of it is linked.
 
 ## Verification
 
@@ -164,7 +173,7 @@ own evaluation keys, and decrypts only if the response matches byte for
 byte: no proof, no decryption. A malicious evaluator returning a random,
 replayed, skipped, substituted or mutated result, even with a valid signed
 receipt, is rejected. This proof is sound but not succinct: verifying costs
-about one evaluation (ADR-009). A succinct proof is next.
+about one evaluation. A succinct proof is next.
 
 ```python
 @encompute.compile(verification="required")
@@ -181,7 +190,7 @@ re-checks a saved result.
 
 Programs can say who owns each input, who may learn what, what the
 computation is for, and how results may be released; Encompute derives the
-policy of every value and rejects illegal flows at compile time (ADR-010).
+policy of every value and rejects illegal flows at compile time.
 
 ```python
 from encompute import Party, asset, confidential, secret, Tensor
@@ -208,7 +217,7 @@ enforces who may run the program.
 ## Secure aggregation
 
 Several parties contribute private vectors; only the aggregate is released,
-and only if enough parties took part (ADR-012). An `aggregate_only` asset
+and only if enough parties took part. An `aggregate_only` asset
 can reach its recipient only through this boundary.
 
 ```python
@@ -235,17 +244,18 @@ encompute aggregate join fedavg.encompute --parties parties.json --coordinator U
 The protocol is Bonawitz et al.'s secure aggregation (malicious-coordinator
 variant): the coordinator sees masked vectors only, even if it colludes
 with up to the declared `colluding` parties; dropouts are tolerated down to
-the threshold; every message is signed and bound to its round.
-Quantization is explicit and checked for overflow at compile time. `--state`
-records each round a party joins; a failed round is not rejoined, but
-replaced by a new one. Secure
+the threshold. Every party's message is signed and bound to its round;
+the coordinator's own broadcasts are not signed, and its signed aggregation
+receipt binds the round's outcome. Quantization is explicit and checked for
+overflow at compile time. `--state` records each round a party joins; a
+failed round is not rejoined, but replaced by a new one. Secure
 aggregation hides contributions, not what the aggregate reveals: that needs
 differential privacy.
 
 ## Differential privacy
 
 Secure aggregation hides each party's contribution; differential privacy
-limits what the released aggregates reveal, across every round (ADR-013).
+limits what the released aggregates reveal, across every round.
 Budgets belong to assets; the compiler finds every release of a budgeted
 asset and requires a mechanism; the runtime charges each release to a
 tamper-evident ledger and refuses releases over budget.
@@ -270,7 +280,7 @@ workload ran, and execution proofs say it computed correctly.
 
 Declare who owns what, who must not see it, what may be released and
 whether results must be verifiable; Encompute chooses the mechanisms, or
-refuses (ADR-015).
+refuses.
 
 ```python
 project = encompute.Project("medical-training",
@@ -370,7 +380,7 @@ training; Encompute supplies the confidentiality, privacy and evidence. See
 ## Trust graph
 
 Every mechanism leaves evidence; the trust graph joins it into one bundle
-and answers one question: can I trust what happened to my data (ADR-014)?
+and answers one question: can I trust what happened to my data?
 Owners sign approvals of the program itself, and can revoke an asset,
 which lists everything derived from it.
 
@@ -390,15 +400,15 @@ SATISFIED.
 
 Owners release asset keys only to a workload that proves, with hardware
 attestation, that it runs the approved artifact under the approved
-execution spec and policy, in an approved TEE, for a fresh session
-(ADR-011). The key is sealed to a session key generated inside the TEE: the
-cloud operator relays it but cannot open it.
+execution spec and policy, in an approved TEE, for a fresh session. The
+key is sealed to a session key generated inside the TEE: the cloud
+operator relays it but cannot open it.
 
 ```sh
 # Owner: an attestation policy for the artifact, and a protected key.
 encompute attest policy model.encompute --image sha256:… --tee intel_tdx > policy.json
 encompute keys protect --asset weights --policy policy.json --broker-id https://broker.modelco.example
-encompute keys serve --jwks google --listen 0.0.0.0:8760
+encompute keys serve --jwks google --listen 0.0.0.0:8760   # behind a TLS proxy
 
 # Workload, inside Confidential Space: attest, receive, serve.
 encompute workload keys model.encompute --key weights@https://broker.modelco.example --identity eval.id
@@ -482,18 +492,26 @@ encompute privacy explain step.encompute        # confidentiality graph
 ```sh
 cargo build --release --features openfhe -p encompute-cli -p encompute-evaluator
 encompute keys generate score.encompute -o score.keys          # secret.key stays here
-encompute-evaluator serve score.encompute --listen 0.0.0.0:8750 --identity evaluator.key
-encompute run score.encompute --remote http://EVALUATOR:8750 --keys score.keys --input x=... \
+encompute-evaluator serve score.encompute --listen 127.0.0.1:8750 --identity evaluator.key
+# a TLS proxy on the evaluator host forwards https://EVALUATOR to 127.0.0.1:8750
+encompute run score.encompute --remote https://EVALUATOR --keys score.keys --input x=... \
   --save-receipt result.receipt.json --save-envelopes exchange/
 encompute verify result.receipt.json --model score.encompute \
   --request exchange/request.bin --response exchange/response.bin --trust-evaluator KEY
 ```
 
-`verify` exits 0 only when every binding was checked (trusted key, artifact,
-backend, transcript, request and response), 3 when some were not, and 1
-when any check fails. The evaluator speaks plain HTTP: put a TLS proxy in
-front of it. `scripts/audit-evaluator-binary.sh` checks that the evaluator
-binary contains no Encompute key-generation, encryption or decryption code.
+`verify` exits 0 when the signature verifies against a trusted evaluator
+key and the artifact, request and response bindings were checked; 3 when
+some of them were not given (the signature is valid, the rest unchecked);
+1 when a check fails; and 2 on an error such as a missing file or a bad
+argument. An attestation the receipt binds is checked only with
+`--attestation` and `--attestation-policy`, and exit 0 does not require
+it. The evaluator speaks plain HTTP: keep it on `127.0.0.1` or a private
+network behind a TLS proxy, as above. `--listen 0.0.0.0:…` exposes it
+unencrypted on every interface. On one machine, `--remote
+http://127.0.0.1:8750` works without a proxy.
+`scripts/audit-evaluator-binary.sh` checks that the evaluator binary
+contains no Encompute key-generation, encryption or decryption code.
 
 ## Layout
 
@@ -543,8 +561,12 @@ binary contains no Encompute key-generation, encryption or decryption code.
 - ✓ Enterprise deployment foundation: control plane, OIDC and service
   identities, tenant isolation, customer-managed keys, durable privacy
   state, audit, API v1, Compose deployment.
-- → OpenFHE performance and hybrid optimization: parallel gate evaluation,
-  multi-bit (functional) bootstrapping, BGV/BinFHE where worthwhile.
+- ✓ OpenFHE performance and hybrid optimization: optimized circuits,
+  parallel gate evaluation, BGV or BinFHE per program by calibrated cost.
+  Functional bootstrapping was measured and not adopted.
+- → Release candidate 0.3.0 and an independent security review.
+- → `encompute migrate` for artifact formats
+  ([docs/compatibility.md](docs/compatibility.md)).
 - → Multi-machine orchestration.
 - → A message-broker adapter, if needed; then Kubernetes.
 - → Commercial UI.

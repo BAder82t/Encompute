@@ -35,7 +35,7 @@ secret key and trusts its own artifact.
 
 ```text
 client (alice)                                  evaluator (openfhe-exact)
-compile → keys generate ─ eval.keys (524 MiB) ─► holds evaluation keys only
+compile → keys generate ─ eval.keys (525 MiB) ─► holds evaluation keys only
 age, income, debt, risk ─ encrypt bit by bit ─► gates on ciphertexts
 eligible ◄───────── decrypt ◄──── encrypted Boolean + signed receipt
 ```
@@ -62,9 +62,11 @@ BIN=target/release examples/19_openfhe_exact/run.sh
 ```
 
 The run takes about two minutes on one machine. Key generation takes about
-7 seconds per client. Each gate costs about 60 ms, and the eligibility rule
-needs a few hundred gates, so one remote run takes about 30 seconds. The
-evaluation keys are 524 MiB per client. Without the `openfhe` build, the
+7 seconds per client. Each gate costs 54 to 62 ms on one core (measured
+several times, see [docs/benchmarks.md](../../docs/benchmarks.md)). The
+optimized eligibility rule needs 381 gates: about 31 seconds on one
+thread, about 8 seconds with 8 workers. The evaluation keys are about
+525 MiB per client. Without the `openfhe` build, the
 script prints `SKIPPED`.
 
 ## Expected output
@@ -133,8 +135,8 @@ encrypted answer again, and only alice can decrypt it.
 - The checksums detect accidents, not forgeries. Integrity against a
   network attacker comes from the key, program and parameter bindings, and
   from the receipt, which binds the exact request and response bytes.
-- Evaluation is slow: about 60 ms per gate on one core. The evaluation keys
-  are large (524 MiB).
+- Evaluation is slow: 54 to 62 ms per gate on one core. The evaluation
+  keys are large (about 525 MiB).
 - Ciphertext sizes, gate counts and timings are visible to the evaluator.
   They depend on the program and input types, not on the values.
 - Input ranges are checked by the client before encryption; the evaluator

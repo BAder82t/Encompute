@@ -141,3 +141,11 @@ evaluation keys, 769 KiB; request 1027 KiB, response 514 KiB.
 Open: cross-platform byte reproducibility of OpenFHE BGV (Linux vs macOS,
 HEXL/NATIVE_SIZE builds) is argued from the source, not yet tested against
 shared fixtures; the succinct zkVM proof is next. The re-execution backend stays as the reference verifier against which succinct proof systems are differential-tested.
+
+## Update (2026-09)
+
+The first subset, as implemented, is broader than listed in the
+recommendation above: `u8`, `u16` and `bool`; addition, subtraction and
+multiplication (by constants and between ciphertexts); constants; and
+`& | ^ ~` on Booleans. Anything else is refused at compile time with
+ENC1801. The succinct zkVM proof has not been built yet.

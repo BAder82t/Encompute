@@ -54,15 +54,24 @@ a cryptographic party in a program's policy (`hospital-a`).
 each key broker, each SecAgg coordinator, and any automation. A service signs
 every request and message. The signature covers:
 
-- the method, the path and a hash of the body;
+- the method, the path (without the query string) and a hash of the
+  body;
 - the sender and the recipient;
 - a timestamp;
 - a nonce (a replayed request is refused);
 - the IDs the request is about.
 
+The query string is not signed. Do not rely on query parameters for
+anything a relayed request must not change.
+
 A source IP address, a hostname or a private network is never treated as an
-identity. TLS (a proxy or load balancer in front of each service) protects
-traffic in transit. The signatures stay valid through proxies and brokers.
+identity. The signatures stay valid through proxies and brokers.
+
+**TLS is the operator's job.** No Encompute service terminates TLS, and the
+Docker Compose deployment provides none. Put a TLS proxy or load balancer in
+front of every service. The control plane connects to PostgreSQL without
+TLS: keep the database on a private network that only the control plane can
+reach.
 
 **Roles** (per organization):
 
@@ -70,10 +79,10 @@ traffic in transit. The signatures stay valid through proxies and brokers.
 |---|---|
 | `organization_admin` | Add users and automation accounts, add collaborators to its projects, create projects. |
 | `security_admin` | Propose and approve policies (a different admin must approve), disable service accounts, revoke assets. |
-| `data_owner`, `model_owner` | Register their organization's assets, approve them for a project and purpose, revoke them, spend privacy budget. |
+| `data_owner`, `model_owner` | Register their organization's assets (datasets for data owners; models, adapters and checkpoints for model owners), approve them for a project and purpose, revoke them. Data owners also read and export privacy ledgers, record privacy spending, and authorize SecAgg services to spend. |
 | `ml_developer` | Create projects, plan and submit jobs, complete jobs with their receipts. |
 | `auditor` | Read the audit trail and privacy ledgers. |
-| `operator` | Platform operators: drain evaluators, checkpoint the audit trail. |
+| `operator` | Platform operators: drain evaluators, checkpoint the audit trail. An organization's operators may also record privacy spending for its assets. |
 
 Fine-grained rules about data (who may learn what, for which purpose) stay
 in each program's confidentiality policy. The roles only decide who may act
@@ -85,9 +94,12 @@ resources, plus what an explicit collaboration grants:
 - project membership, added by the project owner's admins;
 - an asset's approval for a project and purpose, given by its owner.
 
-Anything else is reported as not found (ENC2603), so other tenants' IDs do
-not even confirm that a resource exists. Platform admins create
-organizations and register platform services, but cannot read tenant data.
+Anything else is reported as not found (ENC2603), so looking up another
+tenant's ID does not confirm that the resource exists. Uniqueness conflicts
+are the exception: registering an ID that is already taken fails with
+ENC2604, which does reveal that the ID exists. Do not put secrets in IDs or
+names. Platform admins create organizations and register platform
+services, but cannot read tenant data.
 
 ## Jobs
 
@@ -232,30 +244,46 @@ Audit events carry identifiers only. A value that looks like a payload is
 refused.
 
 The events form a hash chain. Signed checkpoints anchor the chain, so an
-edited, deleted or reordered event is detected. Auditors read their own
-organization's events (`GET /v1/audit`, `encompute audit list`).
+edited, deleted or reordered event before the last checkpoint is detected.
+Events after the last checkpoint are covered only by the unkeyed hash chain
+until the next checkpoint (every `ENCOMPUTE_AUDIT_CHECKPOINT_EVERY` events,
+default 100): someone who can write the database could rewrite that tail
+undetected. Auditors read their own organization's events
+(`GET /v1/audit`, `encompute audit list`).
 
 ## Configuration
 
-Everything comes from the environment. Secrets come from mounted files
-(`*_FILE`): never from command-line arguments, never from config files in a
-repository.
+Everything comes from the environment. Secrets should come from mounted
+files (`*_FILE`), never from command-line arguments, and never from config
+files in a repository.
+
+Some secrets also accept the plain environment variable when the `_FILE`
+variable is not set, and production mode accepts that too:
+`ENCOMPUTE_DATABASE_URL` and `ENCOMPUTE_ANCHOR_BAO_TOKEN` for the control
+plane, and `BAO_TOKEN` or `VAULT_TOKEN` for key brokers. Prefer the file:
+environment variables are visible to anyone who can inspect the process.
+Signing keys (`ENCOMPUTE_SIGNING_KEY_FILE`, `ENCOMPUTE_SERVICE_KEY_FILE`)
+are read from files only.
 
 | Variable | |
 |---|---|
 | `ENCOMPUTE_ENV` | `production` fails closed (below); default `development` |
 | `ENCOMPUTE_LISTEN` | default `127.0.0.1:8770` |
+| `ENCOMPUTE_SERVICE_ID` | the control plane's service ID (default `control-plane`) |
+| `ENCOMPUTE_WORKERS` | HTTP worker threads (default 8) |
 | `ENCOMPUTE_DATABASE_URL_FILE` | PostgreSQL URL (a secret) |
 | `ENCOMPUTE_SIGNING_KEY_FILE` | the control plane's Ed25519 seed (a secret) |
 | `ENCOMPUTE_OIDC_ISSUER`, `ENCOMPUTE_OIDC_AUDIENCE` | the identity provider |
 | `ENCOMPUTE_OIDC_JWKS_URL` / `_FILE` | its key set (default: `{issuer}/.well-known/jwks.json`) |
 | `ENCOMPUTE_ANCHOR_DIR` or `ENCOMPUTE_ANCHOR_BAO_ADDR` (+ `_MOUNT`, `_PATH`, `_TOKEN_FILE`) | the state anchor |
 | `ENCOMPUTE_AUDIT_CHECKPOINT_EVERY` | events between signed checkpoints (default 100) |
+| `ENCOMPUTE_DEV_TOKEN_SECRET` / `_FILE` | development tokens only; production mode refuses to start when it is set |
 
 Evaluators take `ENCOMPUTE_CONTROL_URL` and `ENCOMPUTE_CONTROL_PUBLIC_KEY`
-(the pinned control-plane key). They also take `ENCOMPUTE_SERVICE_ID`,
-`ENCOMPUTE_SERVICE_KEY_FILE`, `ENCOMPUTE_ADVERTISE_URL` and
-`ENCOMPUTE_CAPACITY`. At registration an evaluator also sends its machine
+(the pinned control-plane key), and `ENCOMPUTE_CONTROL_ID` (the control
+plane's service ID, default `control-plane`; the CLI reads it too). They
+also take `ENCOMPUTE_SERVICE_ID`, `ENCOMPUTE_SERVICE_KEY_FILE`,
+`ENCOMPUTE_ADVERTISE_URL` and `ENCOMPUTE_CAPACITY`. At registration an evaluator also sends its machine
 profile, which is used only for scheduling. It detects its logical cores,
 CPU model and memory (Linux `/proc`, macOS `sysctl`). It takes
 `ENCOMPUTE_EXACT_WORKERS` (threads per job, default the core count, at
@@ -333,7 +361,10 @@ anyway:
 - large data travels as a URI and a digest, never inline.
 
 HTTP delivery (with retries from an outbox) is built in; a queue adapter
-implements the same interface.
+implements the same interface. One exception: the CLI's SecAgg coordinator
+(`encompute aggregate serve` with a control plane) sends its privacy events
+and round reports directly, without an outbox. If the control plane is
+unreachable, that send fails and is not retried later.
 
 ## Commands
 

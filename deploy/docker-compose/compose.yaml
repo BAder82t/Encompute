@@ -2,7 +2,7 @@
 # an OpenFHE evaluator, a key broker whose KEK is wrapped by an OpenBao root
 # key, and (profile "secagg") a secure-aggregation coordinator.
 #
-#   ./init.sh            secrets (mode 0600) and .env (public keys, OIDC)
+#   ./init.sh            secrets/ (mode 0700; files 0644) and .env (public keys, OIDC)
 #   docker compose up -d
 #
 # Production mode: OIDC identities only, secrets from files, no development

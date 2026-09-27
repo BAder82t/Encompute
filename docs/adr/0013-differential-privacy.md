@@ -222,3 +222,12 @@ per-release latency.
 - **`python/tests/test_privacy.py`**, and
   **`examples/09_differential_privacy/`**: 12 rounds permitted, the 13th
   denied.
+
+## Update (2026-09)
+
+Section 5 says there is no sampling amplification. That is still true for
+organization-level releases on secure aggregates. Patient-level DP-SGD,
+added later, samples patients with Poisson sampling and uses a Rényi DP
+accountant for Poisson-sampled releases (`rdp-poisson-zw2019`), which does
+account for sampling. The sampling rate is part of `DpMechanism` and of the
+`PrivacyPolicyId`. See `0017-patient-level-dp.md`.

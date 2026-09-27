@@ -77,7 +77,8 @@ enum Cmd {
     Transcript {
         model: PathBuf,
         /// Backend of the execution spec (default: the artifact's target:
-        /// openfhe for BGV, tfhe-rs otherwise; mock runs use `--backend mock`).
+        /// openfhe-exact for BinFHE, openfhe for BGV; mock runs use
+        /// `--backend mock`).
         #[arg(long)]
         backend: Option<String>,
         /// Canonical JSON instead of the listing.
@@ -101,8 +102,9 @@ enum Cmd {
         /// Evaluator public key (hex) you trust.
         #[arg(long)]
         trust_evaluator: Option<String>,
-        /// The backend you expected (mock, openfhe, tfhe-rs). Default: from
-        /// the request envelope, which you made; never from the receipt.
+        /// The backend you expected (mock, openfhe, openfhe-exact; tfhe-rs in
+        /// research builds only). Default: from the request envelope, which
+        /// you made; never from the receipt.
         #[arg(long)]
         backend: Option<String>,
         /// Execution proof (`proof.bin` from --save-envelopes): verified by
@@ -176,7 +178,8 @@ enum Cmd {
         model: PathBuf,
         #[arg(long, default_value = "127.0.0.1:8750")]
         listen: String,
-        /// mock, openfhe or tfhe-rs (default: real cryptography where built).
+        /// mock, openfhe or openfhe-exact; tfhe-rs in research builds only
+        /// (default: real cryptography where built).
         #[arg(long)]
         backend: Vec<String>,
     },
