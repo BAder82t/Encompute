@@ -100,8 +100,11 @@ pub struct CircuitStats {
     pub dead_gates: u64,
 }
 
-/// A lowered, optimized program for a bit-level backend.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A lowered, optimized program for a bit-level backend. Serialized only
+/// for reports: it is not deserializable, because its levels are derived
+/// when it is built (`build`, `optimize`) and a circuit without them could
+/// not be executed.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Circuit {
     pub optimizer_version: u32,
     pub strategy: Strategy,
