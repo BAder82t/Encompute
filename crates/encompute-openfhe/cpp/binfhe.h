@@ -42,6 +42,15 @@ rust::Vec<uint8_t> bin_store(const BinCiphertext& ct);
 // A two-input gate: 0 OR, 1 AND, 2 NOR, 3 NAND, 4 XOR, 5 XNOR (bootstrapped).
 std::unique_ptr<BinCiphertext> bin_gate(const BinContext& ctx, uint8_t gate,
                                         const BinCiphertext& a, const BinCiphertext& b);
+// The same gate without the global OpenFHE mutex, for evaluating independent
+// gates concurrently. Only after the keys are loaded, and never while the
+// context is being modified (the Rust side guarantees both); EvalBinGate
+// reads the context and keys and writes only its own output.
+std::unique_ptr<BinCiphertext> bin_gate_concurrent(const BinContext& ctx, uint8_t gate,
+                                                   const BinCiphertext& a, const BinCiphertext& b);
+// Prepares the calling thread to evaluate gates alongside others: OpenMP
+// inside OpenFHE uses one thread there (nested parallelism only slows it).
+void bin_worker_init();
 // NOT (no bootstrapping).
 std::unique_ptr<BinCiphertext> bin_not(const BinContext& ctx, const BinCiphertext& a);
 // A trivial encryption of a public bit.

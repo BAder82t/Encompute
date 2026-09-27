@@ -5,6 +5,7 @@
 
 pub mod bgv;
 pub mod bits;
+pub mod circuit;
 mod exec;
 mod lower;
 mod plan;

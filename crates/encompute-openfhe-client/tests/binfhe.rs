@@ -115,3 +115,72 @@ fn gates_on_one_ciphertext_twice() {
         assert!(dec(ctx.gate(Gate::Xnor, &c, &c).unwrap()));
     }
 }
+
+/// Concurrent gates: throughput by thread count, and every result equal to
+/// the plaintext truth (run with --ignored --nocapture).
+#[test]
+#[ignore]
+fn measure_concurrent_gates() {
+    use std::sync::Arc;
+    let client = BinClient::generate("STD128").unwrap();
+    let (refresh, switching) = client.bootstrapping_keys().unwrap();
+    let mut ctx = BinContext::new("STD128").unwrap();
+    ctx.load_keys(&refresh, &switching).unwrap();
+    let ctx = Arc::new(ctx);
+    let bits: Vec<bool> = (0..64).map(|i| (i * 7 + 3) % 5 < 2).collect();
+    let cts: Arc<Vec<_>> = Arc::new(
+        bits.iter()
+            .map(|b| ctx.load(&client.encrypt_bit(*b).unwrap()).unwrap())
+            .collect(),
+    );
+    ctx.gate(Gate::And, &cts[0], &cts[1]).unwrap();
+    let n = 64;
+    for threads in [1usize, 2, 4, 8] {
+        let t = std::time::Instant::now();
+        let per = n / threads;
+        let outs: Vec<(usize, Vec<encompute_openfhe::binfhe::BinCiphertext>)> =
+            std::thread::scope(|s| {
+                (0..threads)
+                    .map(|w| {
+                        let (ctx, cts) = (ctx.clone(), cts.clone());
+                        s.spawn(move || {
+                            encompute_openfhe::binfhe::worker_init();
+                            let mut v = vec![];
+                            for i in w * per..(w + 1) * per {
+                                let g = [Gate::And, Gate::Or, Gate::Xor, Gate::Nand][i % 4];
+                                v.push(
+                                    ctx.gate_concurrent(g, &cts[i], &cts[(i + 1) % 64]).unwrap(),
+                                );
+                            }
+                            (w, v)
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect()
+            });
+        let secs = t.elapsed().as_secs_f64();
+        for (w, v) in outs {
+            for (k, c) in v.iter().enumerate() {
+                let i = w * per + k;
+                let (a, b) = (bits[i], bits[(i + 1) % 64]);
+                let want = match i % 4 {
+                    0 => a & b,
+                    1 => a | b,
+                    2 => a ^ b,
+                    _ => !(a & b),
+                };
+                assert_eq!(
+                    client.decrypt_bit(&c.store().unwrap()).unwrap(),
+                    want,
+                    "gate {i}"
+                );
+            }
+        }
+        eprintln!(
+            "{threads} threads: {n} gates in {secs:.2}s = {:.1} ms/gate",
+            secs * 1000.0 / n as f64
+        );
+    }
+}

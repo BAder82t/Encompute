@@ -400,6 +400,31 @@ pub struct EvaluatorSession {
     transcript_hash: Option<String>,
     kind: BackendKind,
     keys: HashMap<String, Keyed>,
+    /// Exact programs on a bit-level backend: the optimized execution plan
+    /// (a gate DAG), unless the reference execution is configured.
+    circuit: Option<std::sync::Arc<encompute_exact::circuit::Circuit>>,
+}
+
+/// Whether exact programs run instruction by instruction on the reference
+/// circuits (`ENCOMPUTE_EXACT_EXECUTION=reference`), not optimized.
+pub fn reference_execution() -> bool {
+    std::env::var("ENCOMPUTE_EXACT_EXECUTION").as_deref() == Ok("reference")
+}
+
+/// The declared ranges of `program`'s inputs, in plan order.
+pub fn input_ranges(
+    program: &Program,
+    plan: &ExactPlan,
+) -> Vec<Option<encompute_exact::circuit::Interval>> {
+    plan.inputs
+        .iter()
+        .map(|i| {
+            program
+                .inputs()
+                .find(|(_, n, _, _)| *n == i.name)
+                .map(|(_, _, _, r)| (r.lo.ceil() as i128, r.hi.floor() as i128))
+        })
+        .collect()
 }
 
 /// Timing of one [`EvaluatorSession::execute`] call.
@@ -424,6 +449,16 @@ impl EvaluatorSession {
         let ids = Ids::of(&program, &compiled);
         let spec = execution_spec(&ids, &compiled, kind);
         let transcript_hash = transcript_for(&compiled, &spec).map(|t| t.id().hex());
+        let circuit = match (kind, compiled.exact()) {
+            (BackendKind::OpenFheExact, Some(e)) if !reference_execution() => {
+                Some(std::sync::Arc::new(encompute_exact::circuit::optimize(
+                    &e.plan,
+                    &input_ranges(&program, &e.plan),
+                    crate::budget::job_workers() as u32,
+                )?))
+            }
+            _ => None,
+        };
         Ok(Self {
             program,
             compiled,
@@ -432,6 +467,7 @@ impl EvaluatorSession {
             transcript_hash,
             kind,
             keys: HashMap::new(),
+            circuit,
         })
     }
 
@@ -544,9 +580,15 @@ impl EvaluatorSession {
         Ok(key_id)
     }
 
-    /// Execute an inputs envelope; returns the outputs envelope.
+    /// The optimized execution plan, if this session runs one.
+    pub fn circuit(&self) -> Option<&encompute_exact::circuit::Circuit> {
+        self.circuit.as_deref()
+    }
+
+    /// Execute an inputs envelope; returns the outputs envelope. Exact
+    /// programs on OpenFHE exact run their optimized circuit.
     pub fn execute(&self, bytes: &[u8]) -> Result<(Vec<u8>, ExecTimes)> {
-        self.execute_observed(bytes, &mut NoopObserver)
+        self.execute_with(bytes, &mut NoopObserver, true)
     }
 
     /// [`EvaluatorSession::execute`], reporting each step of an exact plan
@@ -556,6 +598,18 @@ impl EvaluatorSession {
         bytes: &[u8],
         observer: &mut dyn ExecutionObserver,
     ) -> Result<(Vec<u8>, ExecTimes)> {
+        // Observers follow the plan instruction by instruction: the
+        // reference execution.
+        self.execute_with(bytes, observer, false)
+    }
+
+    fn execute_with(
+        &self,
+        bytes: &[u8],
+        observer: &mut dyn ExecutionObserver,
+        optimized: bool,
+    ) -> Result<(Vec<u8>, ExecTimes)> {
+        let _ = optimized; // only bit-level backends have an optimized path
         let env = Envelope::decode(bytes)?;
         let mut expect = self.expect(Kind::Inputs, None);
         expect.program_id = Some(&self.ids.program_id);
@@ -596,9 +650,33 @@ impl EvaluatorSession {
                 run_exact(ev, &e.plan, &items, &self.context(), observer)?
             }
             #[cfg(feature = "openfhe")]
-            (Keyed::OpenFheExact(ev), CompiledProgram::Exact(e)) => {
-                run_exact(ev.as_ref(), &e.plan, &items, &self.context(), observer)?
-            }
+            (Keyed::OpenFheExact(ev), CompiledProgram::Exact(e)) => match &self.circuit {
+                Some(c) if optimized => {
+                    let permit = crate::budget::acquire(crate::budget::job_workers());
+                    let t = Instant::now();
+                    let inputs: Vec<(encompute_ir::Elem, &[u8])> = e
+                        .plan
+                        .inputs
+                        .iter()
+                        .zip(&items)
+                        .map(|(i, (_, b))| (i.elem, *b))
+                        .collect();
+                    let outs = ev.gates.run_circuit(c, &inputs, permit.threads)?;
+                    let times = ExecTimes {
+                        evaluate: t.elapsed(),
+                        ..ExecTimes::default()
+                    };
+                    let named = e
+                        .plan
+                        .outputs
+                        .iter()
+                        .zip(outs)
+                        .map(|(o, b)| (o.name.clone(), b))
+                        .collect();
+                    (named, times)
+                }
+                _ => run_exact(ev.as_ref(), &e.plan, &items, &self.context(), observer)?,
+            },
             _ => unreachable!("keys are registered for this session's program"),
         };
         let (backend, backend_version) = self.kind.label();

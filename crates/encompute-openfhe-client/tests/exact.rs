@@ -366,3 +366,109 @@ fn transcripts_are_backend_independent() {
     assert_eq!(a, on_mock.into_transcript().unwrap());
     assert_eq!(a, semantic_transcript(&c.plan, &ctx.spec_id));
 }
+
+/// The optimized execution plan (range-aware, simplified, parallel gate
+/// DAG) on real OpenFHE equals the reference execution, the clear
+/// interpreter and the mock, for 1..8 workers, repeatedly (concurrency must
+/// never change a result).
+#[test]
+fn optimized_circuits_equal_reference_on_openfhe() {
+    use encompute_exact::circuit::optimize;
+    let (client, ev) = setup();
+    let ranges = |p: &Program, plan: &encompute_exact::ExactPlan| -> Vec<Option<(i128, i128)>> {
+        plan.inputs
+            .iter()
+            .map(|i| {
+                p.inputs()
+                    .find(|(_, n, _, _)| *n == i.name)
+                    .map(|(_, _, _, r)| (r.lo.ceil() as i128, r.hi.floor() as i128))
+            })
+            .collect()
+    };
+    let programs: Vec<(Program, Vec<Inputs>)> = vec![
+        (
+            approve(),
+            vec![
+                [
+                    ("age", 31.0),
+                    ("income", 120_000.0),
+                    ("debt", 21_000.0),
+                    ("risk", 400.0),
+                ],
+                [
+                    ("age", 17.0),
+                    ("income", 90_000.0),
+                    ("debt", 1_000.0),
+                    ("risk", 100.0),
+                ],
+            ]
+            .into_iter()
+            .map(|c| {
+                c.into_iter()
+                    .map(|(k, v)| (k.to_owned(), vec![v]))
+                    .collect()
+            })
+            .collect(),
+        ),
+        (
+            narrow(Elem::I8),
+            vec![[("x", -4.0), ("y", 3.0)]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), vec![v]))
+                .collect()],
+        ),
+    ];
+    for (p, cases) in programs {
+        let c = compile(&p).unwrap();
+        let rg = ranges(&p, &c.plan);
+        for inputs in cases {
+            let want = evaluate(&p, &inputs).unwrap();
+            let t = std::time::Instant::now();
+            let reference = run(&client, &ev, &p, &inputs);
+            let ref_secs = t.elapsed().as_secs_f64();
+            assert_eq!(reference, want, "reference {}", p.name());
+            assert_eq!(mock(&p, &inputs), want);
+            let enc: Vec<Vec<u8>> = c
+                .plan
+                .inputs
+                .iter()
+                .map(|i| client.encrypt(i.elem, inputs[&i.name][0] as i128).unwrap())
+                .collect();
+            let refs: Vec<(Elem, &[u8])> = c
+                .plan
+                .inputs
+                .iter()
+                .zip(&enc)
+                .map(|(i, b)| (i.elem, b.as_slice()))
+                .collect();
+            for workers in [2usize, 8, 8] {
+                let circuit = optimize(&c.plan, &rg, workers as u32).unwrap();
+                let t = std::time::Instant::now();
+                let outs = ev.gates.run_circuit(&circuit, &refs, workers).unwrap();
+                let secs = t.elapsed().as_secs_f64();
+                let got: Inputs = c
+                    .plan
+                    .outputs
+                    .iter()
+                    .zip(&outs)
+                    .map(|(o, b)| {
+                        (
+                            o.name.clone(),
+                            vec![client.decrypt(o.elem, b).unwrap() as f64],
+                        )
+                    })
+                    .collect();
+                assert_eq!(got, want, "optimized {} with {workers} workers", p.name());
+                eprintln!(
+                    "{}: reference {} gates {ref_secs:.1}s; optimized ({:?}) {} gates, depth {}, {workers} workers {secs:.1}s ({:.1}x)",
+                    p.name(),
+                    ev.gate_count(),
+                    circuit.strategy,
+                    circuit.stats.gates,
+                    circuit.stats.depth,
+                    ref_secs / secs
+                );
+            }
+        }
+    }
+}

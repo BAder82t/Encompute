@@ -8,7 +8,15 @@
 #include "common.h"
 #include "encompute-openfhe/src/binfhe.rs.h"
 
+// OpenMP's runtime, when OpenFHE was built with it (weak: absent otherwise).
+extern "C" void omp_set_num_threads(int) __attribute__((weak));
+
 namespace encompute_openfhe {
+
+void bin_worker_init() {
+  if (omp_set_num_threads) omp_set_num_threads(1);
+}
+
 
 using lbcrypto::BinFHEContext;
 using lbcrypto::LWECiphertext;
@@ -140,6 +148,36 @@ std::unique_ptr<BinCiphertext> bin_gate(const BinContext& ctx, uint8_t gate,
     }
   }
   return wrap(ctx.impl->cc.EvalBinGate(gates[gate], a.impl->ct, b.impl->ct));
+}
+
+std::unique_ptr<BinCiphertext> bin_gate_concurrent(const BinContext& ctx, uint8_t gate,
+                                                   const BinCiphertext& a, const BinCiphertext& b) {
+  static const lbcrypto::BINGATE gates[] = {lbcrypto::OR,  lbcrypto::AND, lbcrypto::NOR,
+                                            lbcrypto::NAND, lbcrypto::XOR, lbcrypto::XNOR};
+  if (gate > 5) throw std::runtime_error("unknown BinFHE gate");
+  if (!ctx.impl->keys) throw std::runtime_error("no bootstrapping keys loaded");
+  if (a.impl->ct == b.impl->ct) {
+    // One ciphertext object twice: OpenFHE refuses it; the identities
+    // answer (these calls lock, as they may touch shared state).
+    std::lock_guard<std::mutex> g(openfhe_mutex());
+    switch (gate) {
+      case 0:
+      case 1:
+        return wrap(std::make_shared<lbcrypto::LWECiphertextImpl>(*a.impl->ct));
+      case 2:
+      case 3:
+        return wrap(ctx.impl->cc.EvalNOT(a.impl->ct));
+      case 4:
+        return wrap(ctx.impl->cc.EvalConstant(false));
+      default:
+        return wrap(ctx.impl->cc.EvalConstant(true));
+    }
+  }
+  auto out = ctx.impl->cc.EvalBinGate(gates[gate], a.impl->ct, b.impl->ct);
+  // Wrapping allocates only; the destructor of the wrapper still locks.
+  auto i = std::make_unique<BinCiphertextImpl>();
+  i->ct = std::move(out);
+  return std::make_unique<BinCiphertext>(std::move(i));
 }
 
 std::unique_ptr<BinCiphertext> bin_not(const BinContext& ctx, const BinCiphertext& a) {

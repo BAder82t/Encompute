@@ -255,6 +255,58 @@ impl Gates for OpenFheGates {
     }
 }
 
+impl encompute_exact::circuit::CircuitGates for OpenFheGates {
+    type Bit = BinCiphertext;
+
+    fn gate(
+        &self,
+        op: encompute_exact::circuit::GateOp,
+        a: &BinCiphertext,
+        b: &BinCiphertext,
+    ) -> Result<BinCiphertext> {
+        use encompute_exact::circuit::GateOp;
+        let g = match op {
+            GateOp::And => Gate::And,
+            GateOp::Or => Gate::Or,
+            GateOp::Xor => Gate::Xor,
+        };
+        self.ctx.gate_concurrent(g, a, b)
+    }
+    fn not(&self, a: &BinCiphertext) -> Result<BinCiphertext> {
+        self.ctx.not(a)
+    }
+    fn constant(&self, v: bool) -> Result<BinCiphertext> {
+        self.ctx.constant(v)
+    }
+    fn init_worker(&self) {
+        encompute_openfhe::binfhe::worker_init();
+    }
+}
+
+impl OpenFheGates {
+    /// Runs an optimized circuit: loads each input ciphertext (checked like
+    /// every load: parameters, key, type), evaluates the gate DAG with at
+    /// most `workers` threads, and seals the outputs.
+    pub fn run_circuit(
+        &self,
+        circuit: &encompute_exact::circuit::Circuit,
+        inputs: &[(Elem, &[u8])],
+        workers: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        let bits: Vec<Vec<BinCiphertext>> = inputs
+            .iter()
+            .map(|(e, b)| Gates::load(self, *e, b))
+            .collect::<Result<_>>()?;
+        let out = encompute_exact::circuit::execute(circuit, self, &bits, workers)?;
+        circuit
+            .outputs
+            .iter()
+            .zip(out)
+            .map(|(w, b)| Gates::store(self, w.elem, &b))
+            .collect()
+    }
+}
+
 /// The OpenFHE exact evaluator: exact plans as BinFHE gate circuits.
 pub type OpenFheExactEvaluator = BitEvaluator<OpenFheGates>;
 

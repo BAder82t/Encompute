@@ -47,7 +47,7 @@ pub trait Gates {
 }
 
 /// A bit: a public constant, or encrypted.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sig<B> {
     Const(bool),
     Enc(B),
@@ -55,6 +55,9 @@ pub enum Sig<B> {
 
 /// A quotient and a remainder.
 type QuotRem<T> = (T, T);
+
+/// A (generate, propagate) pair of a bit range.
+type GenProp<B> = (Sig<B>, Sig<B>);
 
 /// An encrypted value: its type and its bits, least significant first.
 #[derive(Clone, Debug)]
@@ -111,16 +114,71 @@ pub const CAPABILITIES: &[(&str, &str, &str)] = &[
     ("cast", "all exact types", "yes (no gates)"),
 ];
 
+/// How integer circuits are built. Every strategy computes the same bits;
+/// they trade gate count against depth (the critical path, which bounds
+/// parallel execution).
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct Strategy {
+    pub adder: Adder,
+    pub comparator: Comparator,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Adder {
+    /// Ripple carry: fewest gates, depth linear in the width (reference).
+    #[default]
+    Ripple,
+    /// Sklansky parallel prefix: more gates, depth logarithmic.
+    Prefix,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Comparator {
+    /// The carry chain of `a + ~b + 1` (reference).
+    #[default]
+    Ripple,
+    /// A balanced tree of (generate, propagate) pairs: logarithmic depth.
+    Tree,
+}
+
+impl Strategy {
+    /// The reference circuits (the original lowering).
+    pub const REFERENCE: Strategy = Strategy {
+        adder: Adder::Ripple,
+        comparator: Comparator::Ripple,
+    };
+    /// Logarithmic-depth circuits, for parallel execution.
+    pub const PARALLEL: Strategy = Strategy {
+        adder: Adder::Prefix,
+        comparator: Comparator::Tree,
+    };
+}
+
 /// Runs exact plans on a gate library, counting bootstrapped gates.
 pub struct BitEvaluator<G: Gates> {
     pub gates: G,
+    pub strategy: Strategy,
     count: Cell<u64>,
 }
 
 impl<G: Gates> BitEvaluator<G> {
     pub fn new(gates: G) -> Self {
+        Self::with_strategy(gates, Strategy::REFERENCE)
+    }
+
+    pub fn with_strategy(gates: G, strategy: Strategy) -> Self {
         Self {
             gates,
+            strategy,
             count: Cell::new(0),
         }
     }
@@ -209,6 +267,79 @@ impl<G: Gates> BitEvaluator<G> {
         w.bits.last().expect("a word has bits")
     }
 
+    /// `(G_hi, P_hi) ∘ (G_lo, P_lo)`: the generate/propagate pair of two
+    /// adjacent bit ranges (associative).
+    #[allow(clippy::type_complexity)]
+    fn combine(
+        &self,
+        hi: &(Sig<G::Bit>, Sig<G::Bit>),
+        lo: &(Sig<G::Bit>, Sig<G::Bit>),
+    ) -> Result<(Sig<G::Bit>, Sig<G::Bit>)> {
+        let t = self.and(&hi.1, &lo.0)?;
+        Ok((self.or(&hi.0, &t)?, self.and(&hi.1, &lo.1)?))
+    }
+
+    /// Sklansky parallel-prefix addition: the same sum, logarithmic depth.
+    fn prefix_add(
+        &self,
+        a: &[Sig<G::Bit>],
+        b: &[Sig<G::Bit>],
+        carry: Sig<G::Bit>,
+    ) -> Result<Vec<Sig<G::Bit>>> {
+        let n = a.len();
+        let p: Vec<Sig<G::Bit>> = (0..n)
+            .map(|i| self.xor(&a[i], &b[i]))
+            .collect::<Result<_>>()?;
+        // Element 0 is the carry-in; element i + 1 is bit i. Prefix k (the
+        // combination of elements 0..=k) generates the carry into bit k.
+        let mut e: Vec<GenProp<G::Bit>> = Vec::with_capacity(n);
+        e.push((carry, Sig::Const(false)));
+        for i in 0..n.saturating_sub(1) {
+            e.push((self.and(&a[i], &b[i])?, p[i].clone()));
+        }
+        let len = e.len();
+        let mut d = 0;
+        while (1usize << d) < len {
+            let prev = e.clone();
+            for i in 0..len {
+                if (i >> d) & 1 == 1 {
+                    let j = ((i >> d) << d) - 1;
+                    e[i] = self.combine(&prev[i], &prev[j])?;
+                }
+            }
+            d += 1;
+        }
+        (0..n).map(|i| self.xor(&p[i], &e[i].0)).collect()
+    }
+
+    /// The carry out of `a + b + carry` by a balanced tree of
+    /// (generate, propagate) pairs: logarithmic depth.
+    fn tree_carry_out(
+        &self,
+        a: &[Sig<G::Bit>],
+        b: &[Sig<G::Bit>],
+        carry: Sig<G::Bit>,
+    ) -> Result<Sig<G::Bit>> {
+        let mut level: Vec<GenProp<G::Bit>> = Vec::with_capacity(a.len() + 1);
+        level.push((carry, Sig::Const(false)));
+        for i in 0..a.len() {
+            level.push((self.and(&a[i], &b[i])?, self.xor(&a[i], &b[i])?));
+        }
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            for pair in level.chunks(2) {
+                next.push(if pair.len() == 2 {
+                    // pair[1] is the higher range.
+                    self.combine(&pair[1], &pair[0])?
+                } else {
+                    pair[0].clone()
+                });
+            }
+            level = next;
+        }
+        Ok(level.pop().expect("one pair").0)
+    }
+
     /// `a + b + carry`, `bits.len()` wide (wrapping; the range is proven).
     fn add_bits(
         &self,
@@ -217,6 +348,9 @@ impl<G: Gates> BitEvaluator<G> {
         mut carry: Sig<G::Bit>,
     ) -> Result<Vec<Sig<G::Bit>>> {
         let n = a.len();
+        if self.strategy.adder == Adder::Prefix && n >= 4 {
+            return self.prefix_add(a, b, carry);
+        }
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let t = self.xor(&a[i], &b[i])?;
@@ -239,6 +373,9 @@ impl<G: Gates> BitEvaluator<G> {
         b: &[Sig<G::Bit>],
         mut carry: Sig<G::Bit>,
     ) -> Result<Sig<G::Bit>> {
+        if self.strategy.comparator == Comparator::Tree && a.len() >= 4 {
+            return self.tree_carry_out(a, b, carry);
+        }
         for i in 0..a.len() {
             let t = self.xor(&a[i], &b[i])?;
             let g = self.and(&a[i], &b[i])?;

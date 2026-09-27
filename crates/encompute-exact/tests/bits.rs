@@ -5,7 +5,7 @@
 
 use encompute_backend::ExactClient;
 use encompute_backend::{ExactEvaluator, PlainExactClient, PlainExactEvaluator};
-use encompute_exact::bits::{plain_value, plain_word, BitEvaluator, PlainGates, Word};
+use encompute_exact::bits::{plain_value, plain_word, BitEvaluator, PlainGates, Strategy, Word};
 use encompute_ir::{CmpOp, Elem, LogicOp};
 
 struct Ref {
@@ -33,8 +33,21 @@ impl Ref {
 
 type W = Word<bool>;
 
+thread_local! {
+    static STRATEGY: std::cell::Cell<Strategy> = const { std::cell::Cell::new(Strategy::REFERENCE) };
+}
+
 fn bits() -> BitEvaluator<PlainGates> {
-    BitEvaluator::new(PlainGates)
+    BitEvaluator::with_strategy(PlainGates, STRATEGY.with(|s| s.get()))
+}
+
+/// Runs a test under the reference circuits and the parallel ones: every
+/// strategy must compute the same bits.
+fn each_strategy(f: impl Fn()) {
+    for s in [Strategy::REFERENCE, Strategy::PARALLEL] {
+        STRATEGY.with(|c| c.set(s));
+        f();
+    }
 }
 
 /// Compares a binary operation on every pair of `e` (or a sample).
@@ -246,6 +259,10 @@ fn check_binary_ops(e: Elem, values: &[i128]) {
 
 #[test]
 fn eight_bit_operations_are_exhaustively_exact() {
+    each_strategy(eight_bit_operations_are_exhaustively_exact_body);
+}
+
+fn eight_bit_operations_are_exhaustively_exact_body() {
     for e in [Elem::U8, Elem::I8] {
         check_binary_ops(e, &all(e));
     }
@@ -253,6 +270,10 @@ fn eight_bit_operations_are_exhaustively_exact() {
 
 #[test]
 fn wider_operations_agree_on_samples() {
+    each_strategy(wider_operations_agree_on_samples_body);
+}
+
+fn wider_operations_agree_on_samples_body() {
     for e in [
         Elem::U16,
         Elem::I16,
@@ -267,6 +288,10 @@ fn wider_operations_agree_on_samples() {
 
 #[test]
 fn unary_operations_shifts_casts_select_and_lookup() {
+    each_strategy(unary_operations_shifts_casts_select_and_lookup_body);
+}
+
+fn unary_operations_shifts_casts_select_and_lookup_body() {
     let rf = Ref::new();
     let ev = bits();
     for e in Elem::EXACT {
@@ -338,6 +363,10 @@ fn unary_operations_shifts_casts_select_and_lookup() {
 
 #[test]
 fn bool_logic_truth_tables() {
+    each_strategy(bool_logic_truth_tables_body);
+}
+
+fn bool_logic_truth_tables_body() {
     let ev = bits();
     for a in [0, 1] {
         for b in [0, 1] {

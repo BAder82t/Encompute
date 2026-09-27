@@ -27,7 +27,14 @@ mod ffi {
             a: &BinCiphertext,
             b: &BinCiphertext,
         ) -> Result<UniquePtr<BinCiphertext>>;
+        fn bin_gate_concurrent(
+            ctx: &BinContext,
+            gate: u8,
+            a: &BinCiphertext,
+            b: &BinCiphertext,
+        ) -> Result<UniquePtr<BinCiphertext>>;
         fn bin_not(ctx: &BinContext, a: &BinCiphertext) -> Result<UniquePtr<BinCiphertext>>;
+        fn bin_worker_init();
         fn bin_constant(ctx: &BinContext, value: bool) -> Result<UniquePtr<BinCiphertext>>;
         fn bin_clone(ct: &BinCiphertext) -> Result<UniquePtr<BinCiphertext>>;
     }
@@ -43,6 +50,12 @@ fn err(e: cxx::Exception) -> Error {
         Code::Backend
     };
     Error::new(code, format!("OpenFHE BinFHE: {m}"))
+}
+
+/// Prepares the calling thread to evaluate gates concurrently with others
+/// (OpenFHE's internal OpenMP parallelism set to one thread there).
+pub fn worker_init() {
+    ffi::bin_worker_init();
 }
 
 /// A two-input bootstrapped gate.
@@ -107,6 +120,23 @@ impl BinContext {
     pub fn gate(&self, g: Gate, a: &BinCiphertext, b: &BinCiphertext) -> Result<BinCiphertext> {
         Ok(BinCiphertext {
             inner: ffi::bin_gate(&self.inner, g as u8, &a.inner, &b.inner).map_err(err)?,
+        })
+    }
+
+    /// The gate without the global OpenFHE lock, so independent gates can
+    /// run on several threads. Safe because `&self` excludes `load_keys`
+    /// (`&mut self`) for as long as any gate runs, and keys must already be
+    /// loaded (checked); concurrency is validated by stress tests against the
+    /// serial path.
+    pub fn gate_concurrent(
+        &self,
+        g: Gate,
+        a: &BinCiphertext,
+        b: &BinCiphertext,
+    ) -> Result<BinCiphertext> {
+        Ok(BinCiphertext {
+            inner: ffi::bin_gate_concurrent(&self.inner, g as u8, &a.inner, &b.inner)
+                .map_err(err)?,
         })
     }
 
