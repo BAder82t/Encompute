@@ -132,6 +132,10 @@ pub struct ProtectedSecret {
     pub key_version: u64,
     pub release_policy: AttestationPolicy,
     pub versions: BTreeMap<u64, KeyVersion>,
+    /// The organization the key was protected for: a control plane's
+    /// revocation for another organization never touches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
 }
 
 /// What a broker persists: its identity, mode, secrets and open
@@ -148,6 +152,9 @@ pub struct BrokerState {
     pub secrets: BTreeMap<String, ProtectedSecret>,
     #[serde(default)]
     pub challenges: Vec<AttestationChallenge>,
+    /// The one organization this broker serves (set once).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
 }
 
 /// An attested session as the broker recorded it.
@@ -218,6 +225,7 @@ impl KeyBroker {
                 kek_id: store.key_id(),
                 secrets: BTreeMap::new(),
                 challenges: Vec::new(),
+                organization: None,
             },
             verifier,
             store,
@@ -299,6 +307,34 @@ impl KeyBroker {
         (self.clock)()
     }
 
+    /// The organization this broker serves, if set.
+    pub fn organization(&self) -> Option<&str> {
+        self.state.organization.as_deref()
+    }
+
+    /// Sets the one organization this broker serves. It is set once: a
+    /// broker holding one organization's keys never switches to another.
+    /// Keys protected before it was set are recorded for it (the operator
+    /// asserts the broker serves this organization).
+    pub fn set_organization(&mut self, organization: &str) -> Result<()> {
+        check_broker_id(organization)?;
+        match self.state.organization.as_deref() {
+            Some(o) if o == organization => Ok(()),
+            Some(o) => Err(err(
+                Code::KeyRelease,
+                format!("this broker serves organization {o:?}, not {organization:?}"),
+            )),
+            None => {
+                self.state.organization = Some(organization.to_owned());
+                for s in self.state.secrets.values_mut() {
+                    s.organization
+                        .get_or_insert_with(|| organization.to_owned());
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Protects `key` (or a fresh random key) for `asset_id` under `policy`.
     /// Returns the key version.
     pub fn add_secret(
@@ -340,6 +376,7 @@ impl KeyBroker {
                     },
                 )]
                 .into(),
+                organization: self.state.organization.clone(),
             },
         );
         Ok(1)
@@ -368,8 +405,30 @@ impl KeyBroker {
         Ok(v)
     }
 
-    /// Revokes every version of `asset_id` (a control plane's revocation):
-    /// idempotent, returns the versions revoked now.
+    /// A control plane's revocation on behalf of `organization`: revokes
+    /// every version of `asset_id` only if this broker serves that
+    /// organization and recorded the key for it. Idempotent; returns the
+    /// versions revoked now.
+    pub fn revoke_for(&mut self, organization: &str, asset_id: &str) -> Result<Vec<u64>> {
+        if self.state.organization.as_deref() != Some(organization) {
+            return Err(err(
+                Code::ServiceAuthentication,
+                format!(
+                    "this broker does not serve organization {organization:?}; no key was revoked"
+                ),
+            ));
+        }
+        match self.state.secrets.get(asset_id) {
+            Some(s) if s.organization.as_deref() == Some(organization) => self.revoke_all(asset_id),
+            _ => Err(err(
+                Code::KeyRelease,
+                format!("no key for asset {asset_id} of organization {organization}"),
+            )),
+        }
+    }
+
+    /// Revokes every version of `asset_id`: idempotent, returns the
+    /// versions revoked now.
     pub fn revoke_all(&mut self, asset_id: &str) -> Result<Vec<u64>> {
         let versions: Vec<u64> = self
             .state

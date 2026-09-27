@@ -391,8 +391,10 @@ pub struct BrokerFile {
     /// BAO_TOKEN_FILE from the environment) or `development:FILE`.
     #[arg(long, conflicts_with = "kek")]
     pub root_key: Option<String>,
-    /// The organization the root key belongs to (bound into the wrap).
-    #[arg(long, requires = "root_key")]
+    /// The organization this broker serves (set once, recorded with every
+    /// key): the root key's owner, and the only organization whose
+    /// revocations are accepted.
+    #[arg(long)]
     pub organization: Option<String>,
     /// Where the root-wrapped KEK is kept (not secret).
     #[arg(long, default_value = "kek.wrapped.json")]
@@ -527,7 +529,8 @@ pub enum BrokerCmd {
     },
     /// Serve challenges, attestation and key release over HTTP. With
     /// ENCOMPUTE_CONTROL_PUBLIC_KEY and ENCOMPUTE_SERVICE_ID set, also accept
-    /// revocations from that control plane.
+    /// revocations from that control plane, for the one organization this
+    /// broker serves (--organization).
     Serve {
         #[arg(long, default_value = "127.0.0.1:8760")]
         listen: String,
@@ -588,6 +591,9 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 };
                 KeyBroker::new(&id, mode, Verifier::new(), file.store()?)?
             };
+            if let Some(org) = &file.organization {
+                b.set_organization(org)?;
+            }
             let key = match &key_file {
                 Some(p) => Some(KeyMaterial::from_bytes(&zeroize::Zeroizing::new(read(p)?))?),
                 None => None,
@@ -729,16 +735,28 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             trust,
             file,
         } => {
-            let b = open_broker(&file, Some(&trust))?;
+            let mut b = open_broker(&file, Some(&trust))?;
             let control = match std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY") {
-                Ok(key) => Some(encompute_runtime::keybroker::ControlChannel::new(
-                    &std::env::var("ENCOMPUTE_SERVICE_ID").map_err(|_| {
-                        Error::new(Code::InsecureConfiguration, "set ENCOMPUTE_SERVICE_ID")
-                    })?,
-                    &std::env::var("ENCOMPUTE_CONTROL_ID")
-                        .unwrap_or_else(|_| "control-plane".into()),
-                    &key,
-                )),
+                Ok(key) => {
+                    // A broker serves one organization; revocations name it.
+                    let org = file.organization.as_deref().ok_or_else(|| {
+                        Error::new(
+                            Code::InsecureConfiguration,
+                            "a broker accepting revocations serves one organization: pass --organization",
+                        )
+                    })?;
+                    b.set_organization(org)?;
+                    b.save(&file.broker)?;
+                    Some(encompute_runtime::keybroker::ControlChannel::new(
+                        &std::env::var("ENCOMPUTE_SERVICE_ID").map_err(|_| {
+                            Error::new(Code::InsecureConfiguration, "set ENCOMPUTE_SERVICE_ID")
+                        })?,
+                        &std::env::var("ENCOMPUTE_CONTROL_ID")
+                            .unwrap_or_else(|_| "control-plane".into()),
+                        &key,
+                        org,
+                    ))
+                }
                 Err(_) => None,
             };
             // Report key releases to the control plane (audit trail).
@@ -766,8 +784,8 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             );
             if let Some(c) = &control {
                 eprintln!(
-                    "accepting revocations from control plane {} as {}",
-                    c.control_id, c.me
+                    "accepting revocations for {} from control plane {} as {}",
+                    c.organization, c.control_id, c.me
                 );
             }
             let path = file.broker.clone();

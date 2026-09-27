@@ -111,3 +111,72 @@ fn key_releases_and_rotations_are_audited() {
     assert_eq!(rot["refs"]["new_version"], "2");
     assert!(rot["actor"].as_str().unwrap().starts_with("usr_"));
 }
+
+/// Tenant A cannot point an asset at tenant B's broker key and revoke it:
+/// the key reference is refused, and every revocation names the owner's
+/// organization in the signed envelope (the broker checks it).
+#[test]
+fn cross_tenant_key_ref_cannot_be_registered_or_revoked() {
+    let Some(w) = world() else { return };
+    let t = &w.t;
+    let kb =
+        encompute_verification::ServiceSigner::from_seed("keybroker-modelco", &[41; 32]).unwrap();
+    t.ok(
+        &w.platform,
+        "POST",
+        "/v1/organizations/platform/service-accounts",
+        Some(json!({"id": "keybroker-modelco", "kind": "keybroker", "public_key": kb.public_key_hex(),
+                    "url": "http://keybroker-modelco.internal:8760"})),
+    );
+    let key_ref = json!({"broker": "keybroker-modelco", "provider": "openbao-transit",
+                         "key_ref": "model-7", "key_version": 1});
+    // hospital-a registers a dataset naming modelco's key...
+    let (s, v) = t.call(
+        &w.a_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": "hospital-a", "kind": "dataset", "name": "decoy",
+                    "digest": "c".repeat(64), "key_ref": key_ref}),
+        ),
+    );
+    assert_eq!(s, 409, "another organization's key reference: {v}");
+    // ...so it has no asset whose revocation reaches modelco's broker.
+    let assets = t.ok(&w.a_owner, "GET", "/v1/assets", None);
+    for a in assets.as_array().unwrap() {
+        if a["organization"] == "hospital-a" && !a["key_ref"].is_null() {
+            let (s, _) = t.call(
+                &w.a_owner,
+                "POST",
+                &format!("/v1/assets/{}/revoke", a["id"].as_str().unwrap()),
+                None,
+            );
+            assert!((200..300).contains(&s));
+        }
+    }
+    assert!(
+        t.transport.drain().is_empty(),
+        "no revocation of modelco's key was sent on hospital-a's behalf"
+    );
+    // modelco may register another asset on its own key.
+    t.ok(
+        &w.b_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": "modelco", "kind": "checkpoint", "name": "model-7-ckpt",
+                    "digest": "d".repeat(64), "key_ref": key_ref}),
+        ),
+    );
+    // The owner's revocation names its organization, signed.
+    t.ok(
+        &w.b_owner,
+        "POST",
+        &format!("/v1/assets/{}/revoke", w.model_b),
+        None,
+    );
+    let sent = t.transport.drain();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1.kind, "asset.revoked");
+    assert_eq!(sent[0].1.organization.as_deref(), Some("modelco"));
+}

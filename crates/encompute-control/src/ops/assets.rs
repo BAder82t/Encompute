@@ -84,6 +84,30 @@ impl Control {
                 1 => roots.into_iter().next().expect("one"),
                 _ => id.clone(),
             };
+            // A broker key belongs to one organization: another
+            // organization's asset naming it could have it revoked. (The
+            // advisory lock serializes concurrent registrations of the
+            // same key; it is taken before the audit head.)
+            if let Some(k) = &r.key_ref {
+                t.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+                    &[&k.broker, &k.key_ref],
+                )
+                .map_err(db_err)?;
+                let taken = t
+                    .query_opt(
+                        "SELECT 1 FROM assets WHERE key_ref->>'broker' = $1 AND key_ref->>'key_ref' = $2
+                            AND organization_id <> $3 LIMIT 1",
+                        &[&k.broker, &k.key_ref, &r.organization],
+                    )
+                    .map_err(db_err)?;
+                if taken.is_some() {
+                    return Err(conflict(format!(
+                        "key {} at broker {} belongs to another organization",
+                        k.key_ref, k.broker
+                    )));
+                }
+            }
             t.execute(
                 "INSERT INTO assets (id, organization_id, kind, name, digest, size_bytes, media_type,
                      storage_uri, policy, lineage_root, parents, key_ref, status, created_by)
