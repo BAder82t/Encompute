@@ -1378,6 +1378,7 @@ pub fn verify_aggregation_receipt(
             "the spec requires every contributor to be attested",
         ));
     }
+    verify_release_privacy(receipt, spec, aggregate)?;
     if let Some(a) = aggregate {
         let receipt_id = receipt.id()?;
         if aggregate_commitment(&m.round_id, &a.encoded_sum) != m.aggregate_commitment
@@ -1396,6 +1397,57 @@ pub fn verify_aggregation_receipt(
                 "the aggregate's values are not its committed sum decoded: they were edited".into(),
             );
         }
+    }
+    Ok(())
+}
+
+/// Under a DP plan, the receipt must carry exactly one valid privacy
+/// receipt per budgeted contributor, signed by the round's coordinator and
+/// bound to this round, output, policies, mechanism and ledger event, all
+/// for one output (with the aggregate in hand: its released values).
+/// Budgeted assets released without a DP plan fail closed too.
+fn verify_release_privacy(
+    receipt: &AggregationReceipt,
+    spec: &AggregationSpec,
+    aggregate: Option<&AggregateAsset>,
+) -> Result<()> {
+    let m = &receipt.manifest;
+    let plan = &spec.plan;
+    let err = |msg: &str| Err(Error::new(Code::PrivacyMechanism, msg.to_owned()));
+    let Some(release) = plan.release_spec(
+        &m.round_id,
+        spec.training_execution_spec_id.as_deref(),
+        &m.contributors,
+    )?
+    else {
+        if plan.recipient != OutputRelease::Sealed
+            && plan.participants.iter().any(|p| p.budget.is_some())
+        {
+            return err("the plan releases privacy-budgeted assets without differential privacy");
+        }
+        return Ok(());
+    };
+    let want: BTreeSet<&str> = release
+        .charged
+        .iter()
+        .map(|c| c.asset_id.as_str())
+        .collect();
+    let got: BTreeSet<&str> = m.privacy.iter().map(|r| r.asset_id.as_str()).collect();
+    if want != got || m.privacy.len() != want.len() {
+        return err(
+            "the DP plan requires one privacy receipt per budgeted contributor: the receipt's \
+             privacy receipts are missing or do not match",
+        );
+    }
+    let noisy = aggregate.map(|a| a.encoded_sum.as_slice());
+    for r in &m.privacy {
+        release.check_receipt(r, &receipt.coordinator_key, noisy)?;
+    }
+    if m.privacy
+        .windows(2)
+        .any(|w| w[0].output_commitment != w[1].output_commitment)
+    {
+        return err("the privacy receipts commit to different outputs");
     }
     Ok(())
 }
