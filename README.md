@@ -500,11 +500,12 @@ encompute verify result.receipt.json --model score.encompute \
   --request exchange/request.bin --response exchange/response.bin --trust-evaluator KEY
 ```
 
-`verify` exits 0 when the signature verifies against a trusted evaluator
-key and the artifact, request and response bindings were checked; 3 when
-some of them were not given (the signature is valid, the rest unchecked);
-1 when a check fails; and 2 on an error such as a missing file or a bad
-argument. An attestation the receipt binds is checked only with
+`verify` exits 0 only when every binding was checked (the trusted
+evaluator key, the artifact, the backend, the transcript, the evidence
+kind, the key ID, the request and the response) and any proof the receipt
+names was verified; 3 when some bindings were not supplied or a named
+proof was not checked (a `NOT CHECKED:` line lists them); 1 when any
+check fails; and 2 on an error such as a missing file or a bad argument. An attestation the receipt binds is checked only with
 `--attestation` and `--attestation-policy`, and exit 0 does not require
 it. The evaluator speaks plain HTTP: keep it on `127.0.0.1` or a private
 network behind a TLS proxy, as above. `--listen 0.0.0.0:…` exposes it
