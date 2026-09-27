@@ -232,7 +232,9 @@ if command -v docker >/dev/null 2>&1 && docker image inspect encompute-evaluator
    [ "$OPENFHE" = 1 ]; then COMPOSE_READY=1; fi
 E2E_DONE=""; COMPOSE_DONE=""
 if [ -x scripts/release/backup-drill.sh ]; then
-  check "backup/restore" scripts/release/backup-drill.sh
+  # The drill's OIDC test issuer needs `cryptography`: use the release-check
+  # environment, not whatever python3 the machine has.
+  check "backup/restore" bash -c 'openfhe_sdk && TOOL_PYTHON="$PWD/target/release-check-venv/bin/python" scripts/release/backup-drill.sh'
 elif [ "$E2E_READY" = 1 ]; then
   check "backup/restore" bash -c 'release_bins && openfhe_sdk && SDK_PYTHON="$PWD/target/release-check-venv/bin/python" TOOL_PYTHON="$PWD/target/release-check-venv/bin/python" scripts/enterprise-e2e.sh'
   E2E_DONE="backup/restore"
