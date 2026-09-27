@@ -3,6 +3,8 @@
 set -euo pipefail
 
 OPENFHE_VERSION="v1.5.1"
+# The commit the tag must resolve to: a moved tag fails the install.
+OPENFHE_COMMIT="1306d14f8c26bb6150d3e6ad54f28dfe1007689e"
 # Static libraries: binaries and the Python extension need no rpath setup.
 BUILD_ID="$OPENFHE_VERSION-static-3"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,6 +19,11 @@ fi
 
 rm -rf "$SRC"
 git clone --depth 1 --branch "$OPENFHE_VERSION" https://github.com/openfheorg/openfhe-development.git "$SRC"
+got="$(git -C "$SRC" rev-parse HEAD)"
+if [ "$got" != "$OPENFHE_COMMIT" ]; then
+  echo "OpenFHE $OPENFHE_VERSION resolved to $got, expected $OPENFHE_COMMIT: refusing to build" >&2
+  exit 1
+fi
 
 CMAKE_ARGS=(
   -DCMAKE_BUILD_TYPE=Release

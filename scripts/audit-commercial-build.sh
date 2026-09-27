@@ -4,8 +4,10 @@
 # no other research-only dependency. Checks, for the production feature set:
 #   1. the Rust dependency graph (cargo tree) and a CycloneDX SBOM;
 #   2. the CLI, evaluator and control-plane binaries (symbols, dynamic libraries);
-#   3. the Python extension (and a wheel, with WHEEL=path);
-#   4. the production container (with IMAGE=tag, if docker is available).
+#   3. the Python extension (and wheels, with WHEEL=path or WHEELS="a b"),
+#      including the wheel's native symbols;
+#   4. the production containers (IMAGE=tag or IMAGES="a b"; needs docker),
+#      including the symbols of their binaries.
 # Documentation strings naming TFHE-rs are allowed; code is not.
 #
 #   scripts/audit-commercial-build.sh [target/release]
@@ -17,7 +19,7 @@ FEATURES="encompute-cli/openfhe,encompute-evaluator/openfhe,encompute-py/openfhe
 BANNED='^(tfhe|tfhe-[a-z0-9-]+|concrete[a-z0-9-]*|zama[a-z0-9-]*)$'
 SYMBOLS='_ZN4tfhe|_ZN[0-9]+tfhe_(fft|ntt|csprng|versionable|zk_pok|cuda)|[0-9]tfhe[0-9]'
 status=0
-row() { printf '%-32s%s\n' "$1" "$2"; }
+row() { printf '%-46s %s\n' "$1" "$2"; }
 fail() { row "$1" "FAIL: $2"; status=1; }
 
 # 1. Dependency graph and SBOM.
@@ -47,11 +49,13 @@ else fail "SBOM (CycloneDX)" "could not generate"; fi
 scan() {  # scan NAME FILE
   local f="$2"
   if [ ! -f "$f" ]; then row "$1" "SKIPPED (no $f)"; return; fi
-  local n
+  local n total
+  total="$( (nm "$f" 2>/dev/null || true) | wc -l | tr -d ' ')"
   n="$( (nm "$f" 2>/dev/null || true) | grep -cE "$SYMBOLS" || true)"
   local libs
   libs="$( (otool -L "$f" 2>/dev/null || ldd "$f" 2>/dev/null || true) | grep -ciE 'tfhe|zama' || true)"
   if [ "$n" != "0" ] || [ "$libs" != "0" ]; then fail "$1" "$n TFHE-rs symbols, $libs libraries"
+  elif [ "$total" = "0" ]; then row "$1" "PASS (libraries only: no symbols this nm can read)"
   else row "$1" "PASS (no TFHE-rs symbols or libraries)"; fi
 }
 scan "encompute (CLI)" "$BIN/encompute"
@@ -60,23 +64,45 @@ scan "encompute-control" "$BIN/encompute-control"
 EXT="$(python3 -c 'import encompute._native as n; print(n.__file__)' 2>/dev/null || true)"
 scan "Python extension" "${EXT:-/nonexistent}"
 
-# 3. A wheel.
-if [ -n "${WHEEL:-}" ]; then
-  if unzip -l "$WHEEL" | grep -qiE 'tfhe|zama'; then fail "Python wheel" "TFHE-rs files in $WHEEL"
-  else row "Python wheel" "PASS ($(basename "$WHEEL"))"; fi
-else
-  row "Python wheel" "SKIPPED (set WHEEL=path to a built wheel)"
-fi
+# 3. Wheels (WHEEL=path, or several in WHEELS="a b"): file names, then the
+# native extension's symbols.
+for w in ${WHEEL:-} ${WHEELS:-}; do
+  if [ ! -f "$w" ]; then fail "Python wheel" "no such file: $w"; continue; fi
+  if unzip -l "$w" | grep -qiE 'tfhe|zama'; then fail "Python wheel" "TFHE-rs files in $w"; continue; fi
+  wd="$(mktemp -d)"
+  unzip -q "$w" -d "$wd"
+  so="$(find "$wd" -name '_native*' \( -name '*.so' -o -name '*.pyd' -o -name '*.dylib' \) | head -n 1)"
+  if [ -n "$so" ]; then scan "wheel $(basename "$w")" "$so"
+  else fail "Python wheel" "no native extension in $w"; fi
+  rm -rf "$wd"
+done
+[ -n "${WHEEL:-}${WHEELS:-}" ] || row "Python wheel" "SKIPPED (set WHEEL=path to a built wheel)"
 
-# 4. The production container.
-if [ -n "${IMAGE:-}" ] && command -v docker >/dev/null 2>&1; then
-  if docker run --rm --entrypoint sh "$IMAGE" -c \
+# 4. Production containers (IMAGE=tag, or several in IMAGES="a b"): Python
+# packages and file names inside, then the symbols of every binary in
+# /usr/local/bin.
+for img in ${IMAGE:-} ${IMAGES:-}; do
+  if ! command -v docker >/dev/null 2>&1; then fail "container $img" "docker unavailable"; continue; fi
+  if docker run --rm --entrypoint sh "$img" -c \
       "pip list 2>/dev/null | grep -iE 'tfhe|zama'; find / -xdev -iname '*tfhe*' -not -path '/proc/*' 2>/dev/null | grep -v encompute/ | head -5" | grep -q .; then
-    fail "container $IMAGE" "TFHE-rs files or packages"
-  else row "container $IMAGE" "PASS"; fi
-else
-  row "container" "SKIPPED (set IMAGE=tag)"
-fi
+    fail "container $img" "TFHE-rs files or packages"
+    continue
+  fi
+  cd_="$(mktemp -d)"
+  before=$status; status=0
+  cid="$(docker create "$img" 2>/dev/null)"
+  if [ -n "$cid" ] && docker cp "$cid:/usr/local/bin/." "$cd_/" >/dev/null 2>&1 &&
+     [ -n "$(ls -A "$cd_")" ]; then
+    for b in "$cd_"/*; do [ -f "$b" ] && scan "container $img: $(basename "$b")" "$b"; done
+  else
+    fail "container $img" "could not copy its binaries out of /usr/local/bin (docker create/cp)"
+  fi
+  [ -z "$cid" ] || docker rm "$cid" >/dev/null 2>&1
+  rm -rf "$cd_"
+  [ $status -eq 0 ] && row "container $img" "PASS (no TFHE-rs packages, files or symbols)"
+  [ $before -eq 0 ] || status=$before
+done
+[ -n "${IMAGE:-}${IMAGES:-}" ] || row "container" "SKIPPED (set IMAGE=tag or IMAGES=\"a b\")"
 
 echo
 [ $status -eq 0 ] && echo "COMMERCIAL BUILD AUDIT PASSED: TFHE-rs contamination NONE" ||

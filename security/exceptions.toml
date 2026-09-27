@@ -1,0 +1,226 @@
+# Vulnerability exceptions for a release (docs/release-process.md, "Severity
+# policy"). Read by scripts/release/vuln_policy.py:
+#
+#   * Critical/High pass only with status = "not_affected" and a VEX
+#     justification: the vulnerable code is not present or cannot be reached.
+#   * Medium passes with status = "accepted_risk" or "not_affected".
+#   * Every entry has a reason and an expiry at most 183 days away; an
+#     expired entry blocks the release again.
+#   * `id` matches the finding's ID or any alias (CVE, GHSA, PYSEC, RUSTSEC);
+#     `package` is the package name as the scanner reports it.
+#
+# Entries are proposed by whoever runs the scan and take effect only once
+# approved: set `approved_by` below (or on an entry). Until then the
+# "security scans" row of scripts/release-check.sh reports FAIL.
+
+[approval]
+approved_by = ""          # the release manager's GitHub handle, after review
+approved_on = ""          # YYYY-MM-DD
+
+# --- Rust --------------------------------------------------------------------------
+
+[[exception]]
+id = "RUSTSEC-2023-0071"
+package = "rsa"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """Marvin timing side channel in RSA *private-key* operations. `rsa` \
+comes in through jsonwebtoken, which production uses only to verify RS256 \
+Confidential Space tokens with Google's public keys; only tests sign. No fixed \
+release exists. Also ignored in deny.toml."""
+expires = 2026-12-31
+
+# --- Python: PyTorch 2.3.1 (pinned by the confidential training image) --------------
+# Encompute never calls torch.load, torch.jit, torch.compile/Inductor,
+# torch.export or torch.distributed: models are rebuilt from Transformers
+# configurations and weights are read from safetensors (python/encompute/torch).
+# Upgrading torch changes the model package binding (major.minor) and the
+# training image digest; it is planned after 0.3 (docs/release-process.md).
+
+[[exception]]
+id = ["CVE-2025-32434", "CVE-2026-24747"]
+package = "torch"
+severity = "critical"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """RCE through torch.load (weights_only bypasses). Encompute never \
+calls torch.load: weights are safetensors only, and pickled weights are \
+refused at import (encompute.torch.hf, _check_files)."""
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2024-48063"
+package = "torch"
+severity = "critical"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """torch.distributed.rpc RemoteModule deserialization (disputed). \
+Encompute uses no torch.distributed; workers exchange sealed updates through \
+its own secure aggregation."""
+expires = 2026-12-31
+
+[[exception]]
+id = ["CVE-2025-55553", "CVE-2025-55557", "CVE-2025-55558", "CVE-2025-55560", "CVE-2026-4538", "CVE-2025-3000", "CVE-2025-2148"]
+package = "torch"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """Crashes in torch.compile/Inductor, proxy_tensor (FX tracing), \
+the pt2 (torch.export) loader, torch.jit.script and the profiler. None is \
+used: training runs eager PyTorch on Transformers-native BERT, DistilBERT \
+and RoBERTa models."""
+expires = 2026-12-31
+
+[[exception]]
+id = ["CVE-2025-55551", "CVE-2025-55552", "CVE-2025-55554", "CVE-2025-2998", "CVE-2025-2999", "CVE-2025-3730", "CVE-2025-2953", "CVE-2025-46148", "CVE-2025-3001", "CVE-2025-2149"]
+package = "torch"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """Local crashes or wrong results in operators the supported models \
+never call: linalg.lu, rot90 with randn_like, nan_to_num, rnn \
+pad_packed_sequence/unpack_sequence, lstm_cell, ctc_loss, mkldnn_max_pool2d, \
+PairwiseDistance, quantized sigmoid. The architectures are fixed \
+(encompute-training hf::SUPPORTED) and their operators are attention, linear, \
+layer norm, GELU and embedding."""
+expires = 2026-12-31
+
+# --- Python: Transformers 4.46.3 (pinned; the model package binds 4.46) --------------
+
+[[exception]]
+id = "CVE-2026-4372"
+package = "transformers"
+severity = "critical"
+status = "not_affected"
+justification = "vulnerable_code_not_present"
+reason = """`_attn_implementation_internal` naming a Hub repository whose \
+kernel code is downloaded and run. 4.46.3 has no Hub kernel loading: \
+_autoset_attn_implementation accepts only eager, sdpa and flash_attention_2 \
+and raises otherwise (checked in the installed source). Encompute also \
+passes attn_implementation="eager", loads with local_files_only=True, and \
+the training image sets HF_HUB_OFFLINE=1. Follow-up: hf::check_config should \
+refuse `_attn_implementation*` keys before transformers moves to 5.x."""
+expires = 2026-12-31
+
+[[exception]]
+id = ["CVE-2024-11392", "CVE-2024-11393", "CVE-2024-11394", "CVE-2025-14920", "CVE-2025-14921", "CVE-2025-14924", "CVE-2025-14930"]
+package = "transformers"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """Pickle deserialization in the MobileViTV2, MaskFormer, Trax, \
+Perceiver, Transformer-XL, Megatron-GPT2 and GLM4 code paths. Only BERT, \
+DistilBERT and RoBERTa are accepted (hf::check_config), weights are \
+safetensors only (use_safetensors=True), and pickled files are refused at \
+import."""
+expires = 2026-12-31
+
+[[exception]]
+id = ["CVE-2025-14926", "CVE-2025-14927", "CVE-2025-14928", "CVE-2025-14929"]
+package = "transformers"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """Code injection in the SEW, SEW-D, HuBERT and X-CLIP checkpoint \
+conversion scripts. Encompute never runs a conversion script."""
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-5241"
+package = "transformers"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_present"
+reason = """LightGlue loading path of transformers 5.2.0; LightGlue does not \
+exist in 4.46.3, and trust_remote_code is refused by Encompute."""
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-9856"
+package = "transformers"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_present"
+reason = """chat_template keys used as file names by save_pretrained. In \
+4.46.3 chat templates are written inside tokenizer_config.json, not as \
+separate files (tokenization_utils_base.save_pretrained); Encompute calls \
+save_pretrained only on tokenizers it builds itself (demo models)."""
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-1839"
+package = "transformers"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """Trainer._load_rng_state calls torch.load. Encompute does not use \
+the Trainer class; its training loop is its own (encompute.torch.finetune)."""
+expires = 2026-12-31
+
+[[exception]]
+id = ["CVE-2024-12720", "CVE-2025-1194", "CVE-2025-2099", "CVE-2025-3933", "CVE-2025-5197", "CVE-2025-6638", "CVE-2025-6051", "CVE-2025-6921", "CVE-2025-3264"]
+package = "transformers"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """ReDoS in the Nougat, GPT-NeoX-Japanese and Marian tokenizers, \
+Donut's token2json, testing_utils, TF weight-name conversion, the TF \
+AdamWeightDecay optimizer, the SpeechT5 number normalizer and remote-code \
+import scanning (get_imports; trust_remote_code is refused). None is used by \
+BERT-family sequence classification."""
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-3263"
+package = "transformers"
+severity = "medium"
+status = "accepted_risk"
+reason = """ReDoS in get_configuration_file on a crafted `configuration_files` \
+list in config.json: a denial of service while the model owner imports its \
+own repository (outside any confidential workload). Workers rebuild models \
+with AutoConfig.for_model, which does not call it. Fixed in 4.51; upgrade \
+planned after 0.3."""
+expires = 2026-12-31
+
+# --- Python: other ----------------------------------------------------------------
+
+[[exception]]
+id = "CVE-2026-69112"
+package = "accelerate"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = """Path traversal in load_checkpoint_in_model / \
+load_checkpoint_and_dispatch. Encompute calls neither; a sharded index is \
+also checked (hf::check_index) to name only the package's own files. No \
+fixed release exists."""
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-71176"
+package = "pytest"
+severity = "medium"
+status = "accepted_risk"
+reason = """Predictable /tmp/pytest-of-{user} directories on multi-user \
+hosts. pytest is a test tool, not shipped in the wheel or any image; release \
+builds run on single-tenant ephemeral runners. Fixed in 9.0.3; the bump is \
+left for after the RC (it drops Python 3.9, which pyproject still allows)."""
+expires = 2026-12-31
+
+# --- Containers (Debian 12 base) -------------------------------------------------
+# Debian packages with no fixed version in the distribution are reported,
+# not blocking (docs/release-process.md). Fixed ones must be fixed by a
+# refreshed base digest or listed here.
+
+[[exception]]
+id = "DLA-4792-1"
+package = "tzdata"
+severity = "unknown"
+status = "not_affected"
+justification = "vulnerable_code_cannot_be_controlled_by_adversary"
+reason = """A time-zone data update (2026b to 2026c), not a code flaw; the \
+current debian:bookworm-slim digest still ships 2026b. The services log and \
+compare times in UTC and take no security decision on local time rules. \
+Refresh the base digest when Debian publishes it."""
+expires = 2026-12-31

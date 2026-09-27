@@ -4,12 +4,12 @@
 #
 #   docker build -f Dockerfile.services -t encompute-services .
 
-FROM rust:1.98-bookworm AS build
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p encompute-cli
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10003 encompute \
  && mkdir -p /var/lib/encompute && chown encompute /var/lib/encompute

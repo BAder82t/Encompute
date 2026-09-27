@@ -116,6 +116,47 @@ jobs:
           name: assurance-report
           path: assurance-report.*
 
+  # Supply chain: cargo-deny (licenses, the TFHE-rs ban, sources, advisories)
+  # blocks; the vulnerability scans (cargo-audit, pip-audit, trivy on the
+  # control-plane and services images) are reported here and enforced by the
+  # release workflow's severity policy (docs/release-process.md).
+  supply-chain:
+    name: supply chain (cargo-deny, vulnerability and license scans)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-deny,cargo-audit
+      - run: cargo deny check advisories bans licenses sources
+      - run: scripts/release/check-pins.sh
+      - name: scanners
+        env:
+          TRIVY_VERSION: "0.74.0"
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt"
+          sha256sum --check --ignore-missing "trivy_${TRIVY_VERSION}_checksums.txt"
+          sudo tar -xzf "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" -C /usr/local/bin trivy
+          python3 -m pip install -q --user "pip-audit==2.10.0"
+      - name: images (no OpenFHE build needed)
+        run: |
+          docker build -q -f Dockerfile.control -t encompute-control:ci .
+          docker build -q -f Dockerfile.services -t encompute-services:ci .
+      - name: scans (reported; the release enforces the policy)
+        continue-on-error: true
+        run: IMAGES="encompute-control:ci encompute-services:ci" scripts/release/scan.sh
+      - if: always()
+        run: |
+          [ -f target/release-scan/policy.txt ] && { echo '```'; tail -n 40 target/release-scan/policy.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: supply-chain-reports
+          path: target/release-scan/
+
   openfhe:
     name: openfhe ${{ matrix.os }}
     strategy:

@@ -1,0 +1,29 @@
+# OpenFHE has no advisory database that the scanners read (it is a C++
+# library built from source, not a package). Before every release someone
+# checks the sources below by hand for the pinned version and records it
+# here; scripts/release/scan.sh fails when the review is for another
+# version, older than 90 days, or unsigned. docs/release-process.md,
+# "OpenFHE".
+
+version = "v1.5.1"
+commit = "1306d14f8c26bb6150d3e6ad54f28dfe1007689e"
+reviewed_by = ""        # GitHub handle of the reviewer
+reviewed_on = ""        # YYYY-MM-DD
+
+# Where to look, every time:
+sources = [
+    "https://github.com/openfheorg/openfhe-development/security/advisories",
+    "https://nvd.nist.gov/vuln/search?query=OpenFHE",
+    "https://github.com/openfheorg/openfhe-development/releases",
+    "https://github.com/openfheorg/openfhe-development/issues?q=label%3Asecurity",
+    "https://openfhe.discourse.group/",
+]
+
+# Known CVEs and whether the pinned version is affected. Pre-filled from
+# the GitHub advisory API (none published) and an NVD keyword search on
+# 2026-09-27; the reviewer confirms or corrects before signing.
+[[cve]]
+id = "CVE-2024-56430"
+summary = "NULL pointer dereference in BinFHEContext::EvalFloor (OpenFHE through 1.2.3)"
+affected = false
+note = "affects 1.2.3 and earlier (the pin is v1.5.1); Encompute does not call EvalFloor (grep crates/)"
