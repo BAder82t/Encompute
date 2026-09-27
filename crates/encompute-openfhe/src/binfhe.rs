@@ -80,8 +80,12 @@ pub struct BinCiphertext {
 }
 
 // SAFETY: every shim function, including the wrappers' destructors, holds
-// the global OpenFHE mutex (cpp/common.h), so the objects may move between
-// threads and be shared by reference.
+// the global OpenFHE mutex (cpp/common.h), except `bin_gate_concurrent`.
+// That one evaluates a gate without it: it reads the context and the
+// bootstrapping keys, which are immutable once loaded, and two input
+// ciphertexts, and allocates a fresh output; key loading takes `&mut self`
+// and so cannot run concurrently. So the objects may move between threads
+// and be shared by reference.
 #[allow(unsafe_code)]
 unsafe impl Send for BinContext {}
 #[allow(unsafe_code)]

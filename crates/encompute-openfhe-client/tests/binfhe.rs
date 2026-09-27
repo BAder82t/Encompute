@@ -96,6 +96,16 @@ fn measure_paramsets() {
 /// A gate whose two operands are the same ciphertext (`x & x`, `x ^ x`,
 /// which programs like `x * x` produce): OpenFHE refuses those; the shim
 /// answers by the gate's identities.
+/// The vetted profile's claims ("128-bit", "2^-135 per gate") are OpenFHE's
+/// published STD128 set; this pins the context to that set's LWE
+/// parameters (binfhecontext.cpp, OpenFHE 1.5.1: n = 556, q = 2048), so a
+/// different OpenFHE build or parameter table cannot silently change them.
+#[test]
+fn std128_context_has_the_vetted_lwe_parameters() {
+    let ctx = BinContext::new("STD128").unwrap();
+    assert_eq!(ctx.lwe().unwrap(), (556, 2048));
+}
+
 #[test]
 fn gates_on_one_ciphertext_twice() {
     let client = BinClient::generate("STD128").unwrap();
