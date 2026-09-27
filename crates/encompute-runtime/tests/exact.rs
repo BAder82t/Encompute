@@ -158,7 +158,7 @@ fn schemes_do_not_cross() {
     let exact = approve();
     let ex = Model::compile(exact.clone()).unwrap();
     let ex_client = ex.new_client(Mode::Mock).unwrap();
-    let mut ex_eval = EvaluatorSession::new(exact.clone(), BackendKind::Mock).unwrap();
+    let ex_eval = EvaluatorSession::new(exact.clone(), BackendKind::Mock).unwrap();
     ex_eval
         .register_keys(ex_client.evaluation_keys().unwrap())
         .unwrap();
@@ -212,7 +212,7 @@ fn exact_bindings_key_program_parameters() {
     let p = approve();
     let m = Model::compile(p.clone()).unwrap();
     let client = m.new_client(Mode::Mock).unwrap();
-    let mut ev = EvaluatorSession::new(p.clone(), BackendKind::Mock).unwrap();
+    let ev = EvaluatorSession::new(p.clone(), BackendKind::Mock).unwrap();
     ev.register_keys(client.evaluation_keys().unwrap()).unwrap();
     let x = inputs(40.0, 5e5, 1e3, 10.0);
     let request = client.encrypt(&p, &x).unwrap();
@@ -233,7 +233,7 @@ fn exact_bindings_key_program_parameters() {
     // Another program (a different threshold).
     let p2 = Program::to_string(&p).replace("[18.0]", "[21.0]");
     let p2 = encompute_ir::parse(&p2).unwrap();
-    let mut ev2 = EvaluatorSession::new(p2, BackendKind::Mock).unwrap();
+    let ev2 = EvaluatorSession::new(p2, BackendKind::Mock).unwrap();
     ev2.register_keys(client.evaluation_keys().unwrap())
         .unwrap();
     assert_eq!(ev2.execute(&request).unwrap_err().code, Code::WrongProgram);

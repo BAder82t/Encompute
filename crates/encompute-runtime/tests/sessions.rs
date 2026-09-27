@@ -58,7 +58,7 @@ fn round_trip_and_rejections() {
 
     // Keys registered for another program's evaluator are refused if the
     // parameter set differs.
-    let mut ev3 = EvaluatorSession::new(p3, BackendKind::Mock).unwrap();
+    let ev3 = EvaluatorSession::new(p3, BackendKind::Mock).unwrap();
     assert_eq!(
         ev3.register_keys(client.evaluation_keys().unwrap())
             .unwrap_err()

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use encompute_backend::{
@@ -385,8 +384,52 @@ enum Keyed {
     TfheRs(encompute_tfhe::tfhe_rs::TfheRsEvaluator),
     #[cfg(feature = "openfhe")]
     Bgv(encompute_openfhe::BgvEvaluator),
+    /// Shared: concurrent jobs run their circuits on the same keys.
     #[cfg(feature = "openfhe")]
-    OpenFheExact(Box<encompute_openfhe_exact::OpenFheExactEvaluator>),
+    OpenFheExact(std::sync::Arc<encompute_openfhe_exact::OpenFheGates>),
+}
+
+/// A job's hold on its keys. OpenFHE exact keys are shared read-only, so
+/// concurrent jobs do not wait for each other; other backends run one job
+/// at a time per key.
+enum Held<'a> {
+    #[cfg(feature = "openfhe")]
+    Shared(Keyed),
+    Locked(std::sync::MutexGuard<'a, Keyed>),
+}
+
+impl<'a> Held<'a> {
+    fn of(entry: &'a std::sync::Mutex<Keyed>) -> Self {
+        let guard = entry.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(feature = "openfhe")]
+        if let Keyed::OpenFheExact(g) = &*guard {
+            return Held::Shared(Keyed::OpenFheExact(g.clone()));
+        }
+        Held::Locked(guard)
+    }
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = Keyed;
+    fn deref(&self) -> &Keyed {
+        match self {
+            #[cfg(feature = "openfhe")]
+            Held::Shared(k) => k,
+            Held::Locked(g) => g,
+        }
+    }
+}
+
+/// This process's evaluation-key cache counters.
+pub fn key_cache_stats() -> crate::keycache::CacheStats {
+    key_cache().stats()
+}
+
+/// This process's evaluation keys (see [`crate::keycache`]).
+fn key_cache() -> &'static crate::keycache::KeyCache<std::sync::Mutex<Keyed>> {
+    static C: std::sync::OnceLock<crate::keycache::KeyCache<std::sync::Mutex<Keyed>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| crate::keycache::KeyCache::new(crate::keycache::max_bytes_from_env()))
 }
 
 /// One compiled program, the evaluation keys registered for it, and nothing
@@ -399,7 +442,10 @@ pub struct EvaluatorSession {
     /// Exact programs: hash of the semantic transcript receipts bind.
     transcript_hash: Option<String>,
     kind: BackendKind,
-    keys: HashMap<String, Keyed>,
+    /// The key IDs registered with this session. The loaded keys live in the
+    /// process cache (shared, bounded); a session only uses keys registered
+    /// with it.
+    registered: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Exact programs on a bit-level backend: the optimized execution plan
     /// (a gate DAG), unless the reference execution is configured.
     circuit: Option<std::sync::Arc<encompute_exact::circuit::Circuit>>,
@@ -466,7 +512,7 @@ impl EvaluatorSession {
             spec,
             transcript_hash,
             kind,
-            keys: HashMap::new(),
+            registered: Default::default(),
             circuit,
         })
     }
@@ -509,8 +555,27 @@ impl EvaluatorSession {
         )
     }
 
+    /// Where this session's keys live in the cache: OpenFHE exact keys do
+    /// not depend on the program (shared by all programs); other backends'
+    /// keys are specific to the program's parameters.
+    fn cache_key(&self, key_id: &str) -> crate::keycache::CacheKey {
+        crate::keycache::CacheKey {
+            backend: self.kind.name(),
+            scope: if self.kind == BackendKind::OpenFheExact {
+                String::new()
+            } else {
+                self.ids.program_id.clone()
+            },
+            key_id: key_id.to_owned(),
+        }
+    }
+
     pub fn has_key(&self, key_id: &str) -> bool {
-        self.keys.contains_key(key_id)
+        self.registered().contains(key_id) && key_cache().contains(&self.cache_key(key_id))
+    }
+
+    fn registered(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<String>> {
+        self.registered.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn expect(&self, kind: Kind, program_id: Option<&'static str>) -> Expect<'_> {
@@ -528,7 +593,7 @@ impl EvaluatorSession {
 
     /// Register an evaluation-keys envelope. Returns its key ID. Registering
     /// the same keys twice is a no-op.
-    pub fn register_keys(&mut self, bytes: &[u8]) -> Result<String> {
+    pub fn register_keys(&self, bytes: &[u8]) -> Result<String> {
         let env = open(bytes, &self.expect(Kind::EvaluationKeys, None))?;
         let key_id = sha256_hex(&env.payload);
         if env.header.key_id.as_deref() != Some(key_id.as_str()) {
@@ -537,47 +602,49 @@ impl EvaluatorSession {
                 "key ID does not match the key material",
             ));
         }
-        if self.keys.contains_key(&key_id) {
-            return Ok(key_id);
-        }
-        let keyed = match (&self.compiled, self.kind) {
+        key_cache().get_or_load(self.cache_key(&key_id), bytes.len() as u64, || {
+            self.load_keys(&env.payload).map(std::sync::Mutex::new)
+        })?;
+        self.registered().insert(key_id.clone());
+        Ok(key_id)
+    }
+
+    fn load_keys(&self, payload: &[u8]) -> Result<Keyed> {
+        Ok(match (&self.compiled, self.kind) {
             (CompiledProgram::Approx(c), BackendKind::Mock) => Keyed::Mock(MockEvaluator::new(
                 &c.params,
-                &env.payload,
+                payload,
                 MockConfig::default(),
             )?),
             #[cfg(feature = "openfhe")]
             (CompiledProgram::Approx(c), BackendKind::OpenFhe) => {
                 let mut ev = encompute_openfhe::OpenFheEvaluator::new(&c.params)?;
-                ev.load_keys(&env.payload)?;
+                ev.load_keys(payload)?;
                 Keyed::OpenFhe(ev)
             }
             (CompiledProgram::Exact(_), BackendKind::Mock) => {
-                Keyed::ExactMock(PlainExactEvaluator::new(&env.payload)?)
+                Keyed::ExactMock(PlainExactEvaluator::new(payload)?)
             }
             #[cfg(feature = "openfhe")]
             (CompiledProgram::Exact(e), BackendKind::OpenFhe) => {
                 let mut ev = encompute_openfhe::BgvEvaluator::new(
                     encompute_exact::bgv::mult_depth(&e.plan),
                 )?;
-                ev.load_keys(&env.payload)?;
+                ev.load_keys(payload)?;
                 Keyed::Bgv(ev)
             }
             #[cfg(feature = "research-tfhe-rs")]
             (CompiledProgram::Exact(_), BackendKind::TfheRs) => {
-                Keyed::TfheRs(encompute_tfhe::tfhe_rs::TfheRsEvaluator::new(&env.payload)?)
+                Keyed::TfheRs(encompute_tfhe::tfhe_rs::TfheRsEvaluator::new(payload)?)
             }
             #[cfg(feature = "openfhe")]
             (CompiledProgram::Exact(e), BackendKind::OpenFheExact) => {
-                Keyed::OpenFheExact(Box::new(encompute_openfhe_exact::evaluator(
-                    &e.profile,
-                    &env.payload,
-                )?))
+                Keyed::OpenFheExact(std::sync::Arc::new(
+                    encompute_openfhe_exact::OpenFheGates::new(&e.profile, payload)?,
+                ))
             }
             _ => unreachable!("backend checked in new()"),
-        };
-        self.keys.insert(key_id.clone(), keyed);
-        Ok(key_id)
+        })
     }
 
     /// The optimized execution plan, if this session runs one.
@@ -619,12 +686,19 @@ impl EvaluatorSession {
             .key_id
             .clone()
             .ok_or_else(|| Error::new(Code::WrongKey, "inputs carry no key ID"))?;
-        let keyed = self.keys.get(&key_id).ok_or_else(|| {
-            Error::new(
-                Code::WrongKey,
-                "no evaluation keys are registered for this key ID",
-            )
-        })?;
+        let entry = self
+            .registered()
+            .contains(&key_id)
+            .then(|| key_cache().get(&self.cache_key(&key_id)))
+            .flatten()
+            .ok_or_else(|| {
+                Error::new(
+                    Code::WrongKey,
+                    "no evaluation keys are registered for this key ID",
+                )
+            })?;
+        let held = Held::of(&entry);
+        let keyed: &Keyed = &held;
         let items = env.items();
         let names: Vec<&str> = items.iter().map(|(n, _)| *n).collect();
         let want = self.compiled.input_names();
@@ -650,7 +724,7 @@ impl EvaluatorSession {
                 run_exact(ev, &e.plan, &items, &self.context(), observer)?
             }
             #[cfg(feature = "openfhe")]
-            (Keyed::OpenFheExact(ev), CompiledProgram::Exact(e)) => match &self.circuit {
+            (Keyed::OpenFheExact(gates), CompiledProgram::Exact(e)) => match &self.circuit {
                 Some(c) if optimized => {
                     let permit = crate::budget::acquire(crate::budget::job_workers());
                     let t = Instant::now();
@@ -661,7 +735,7 @@ impl EvaluatorSession {
                         .zip(&items)
                         .map(|(i, (_, b))| (i.elem, *b))
                         .collect();
-                    let outs = ev.gates.run_circuit(c, &inputs, permit.threads)?;
+                    let outs = gates.run_circuit(c, &inputs, permit.threads)?;
                     let times = ExecTimes {
                         evaluate: t.elapsed(),
                         ..ExecTimes::default()
@@ -675,7 +749,10 @@ impl EvaluatorSession {
                         .collect();
                     (named, times)
                 }
-                _ => run_exact(ev.as_ref(), &e.plan, &items, &self.context(), observer)?,
+                _ => {
+                    let ev = encompute_exact::bits::BitEvaluator::new(gates.clone());
+                    run_exact(&ev, &e.plan, &items, &self.context(), observer)?
+                }
             },
             _ => unreachable!("keys are registered for this session's program"),
         };

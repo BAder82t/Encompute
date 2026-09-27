@@ -83,7 +83,7 @@ pub fn mock_sessions(
     client_params: Option<&CkksParams>,
     seed: u64,
 ) -> (ClientSession, EvaluatorSession) {
-    let mut ev = EvaluatorSession::new(p.clone(), BackendKind::Mock).unwrap();
+    let ev = EvaluatorSession::new(p.clone(), BackendKind::Mock).unwrap();
     let mut c = ev.compiled().clone();
     if let (Some(params), CompiledProgram::Approx(a)) = (client_params, &mut c) {
         a.params = params.clone();
@@ -96,7 +96,7 @@ pub fn mock_sessions(
 /// Client and evaluator sessions for `p` on OpenFHE, keys registered.
 #[cfg(feature = "openfhe")]
 pub fn openfhe_sessions(p: &Program) -> (ClientSession, EvaluatorSession) {
-    let mut ev = EvaluatorSession::new(p.clone(), BackendKind::OpenFhe).unwrap();
+    let ev = EvaluatorSession::new(p.clone(), BackendKind::OpenFhe).unwrap();
     let client =
         ClientSession::generate(ev.ids().clone(), ev.compiled(), BackendKind::OpenFhe, 0).unwrap();
     ev.register_keys(client.evaluation_keys().unwrap()).unwrap();

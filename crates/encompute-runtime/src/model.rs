@@ -240,7 +240,7 @@ impl Model {
 
     fn new_session(&self, mode: Mode) -> Result<Session> {
         let client = self.new_client(mode)?;
-        let mut evaluator = EvaluatorSession::new(self.program.clone(), client.kind())?;
+        let evaluator = EvaluatorSession::new(self.program.clone(), client.kind())?;
         evaluator.register_keys(client.evaluation_keys().expect("fresh client"))?;
         Ok(Session {
             client,

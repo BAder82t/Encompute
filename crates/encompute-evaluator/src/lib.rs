@@ -11,6 +11,7 @@ mod compiled;
 pub mod control;
 pub mod engine;
 mod exec;
+pub mod keycache;
 pub mod pool;
 pub mod server;
 mod session;

@@ -24,6 +24,18 @@ pub struct ProgramInfo {
     /// The program requires an execution proof (`verification required`).
     #[serde(default)]
     pub proof_required: bool,
+    /// Exact programs run as an optimized circuit: the optimizer that built
+    /// it. Provenance only: program, plan and transcript IDs do not depend
+    /// on it, and results equal the reference execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer: Option<OptimizerInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct OptimizerInfo {
+    pub version: u32,
+    pub strategy: encompute_exact::bits::Strategy,
+    pub stats: encompute_exact::circuit::CircuitStats,
 }
 
 /// Timings of one job, in milliseconds.
@@ -73,17 +85,20 @@ pub trait Engine: Send + Sync {
     fn has_key(&self, program_id: &str, key_id: &str) -> Result<bool>;
     fn register_keys(&self, program_id: &str, envelope: &[u8]) -> Result<String>;
     fn execute(&self, program_id: &str, envelope: &[u8]) -> Result<(Vec<u8>, JobTimes)>;
+    /// Evaluation-key cache counters (summed over worker processes).
+    fn key_cache_stats(&self) -> crate::keycache::CacheStats;
 }
 
 pub fn unknown_program() -> Error {
     Error::new(Code::WrongProgram, "program not loaded on this evaluator")
 }
 
-/// Sessions in this process. Jobs run one at a time (OpenFHE is serialized
-/// per process anyway).
+/// Sessions in this process. The session table is locked only to find a
+/// session, never during a job: jobs run concurrently (within the exact
+/// thread budget; OpenFHE CKKS and BGV calls stay serialized inside).
 pub struct Local {
     backends: Backends,
-    sessions: Mutex<HashMap<String, EvaluatorSession>>,
+    sessions: Mutex<HashMap<String, std::sync::Arc<EvaluatorSession>>>,
 }
 
 impl Local {
@@ -92,6 +107,17 @@ impl Local {
             backends,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+impl Local {
+    fn session(&self, pid: &str) -> Result<std::sync::Arc<EvaluatorSession>> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(pid)
+            .cloned()
+            .ok_or_else(unknown_program)
     }
 }
 
@@ -105,6 +131,11 @@ fn info(s: &EvaluatorSession) -> ProgramInfo {
         spec: s.spec().clone(),
         transcript_hash: s.transcript_hash().map(str::to_owned),
         proof_required: s.compiled().proof_required(),
+        optimizer: s.circuit().map(|c| OptimizerInfo {
+            version: c.optimizer_version,
+            strategy: c.strategy,
+            stats: c.stats.clone(),
+        }),
     }
 }
 
@@ -125,12 +156,18 @@ impl Engine for Local {
             .lock()
             .unwrap()
             .entry(i.program_id.clone())
-            .or_insert(session);
+            .or_insert_with(|| std::sync::Arc::new(session));
         Ok(i)
     }
 
     fn programs(&self) -> Vec<ProgramInfo> {
-        let mut v: Vec<_> = self.sessions.lock().unwrap().values().map(info).collect();
+        let mut v: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| info(s))
+            .collect();
         v.sort_by(|a, b| a.program_id.cmp(&b.program_id));
         v
     }
@@ -141,15 +178,15 @@ impl Engine for Local {
     }
 
     fn register_keys(&self, pid: &str, envelope: &[u8]) -> Result<String> {
-        let mut s = self.sessions.lock().unwrap();
-        s.get_mut(pid)
-            .ok_or_else(unknown_program)?
-            .register_keys(envelope)
+        self.session(pid)?.register_keys(envelope)
     }
 
     fn execute(&self, pid: &str, envelope: &[u8]) -> Result<(Vec<u8>, JobTimes)> {
-        let s = self.sessions.lock().unwrap();
-        let (out, t) = s.get(pid).ok_or_else(unknown_program)?.execute(envelope)?;
+        let (out, t) = self.session(pid)?.execute(envelope)?;
         Ok((out, t.into()))
+    }
+
+    fn key_cache_stats(&self) -> crate::keycache::CacheStats {
+        crate::session::key_cache_stats()
     }
 }

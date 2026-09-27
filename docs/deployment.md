@@ -263,6 +263,20 @@ most 8) and `ENCOMPUTE_BENCHMARK_PROFILE` (the calibrated cost profile it
 was benchmarked under, for example `openfhe-1.5.1/apple-m3-max`). Key
 brokers and SecAgg coordinators take the same service identity variables.
 
+Evaluator resource limits:
+
+| Variable | |
+|---|---|
+| `ENCOMPUTE_EXACT_THREADS` | gate threads for all exact jobs of the process together (default: logical cores). A job waits for threads rather than oversubscribing the machine |
+| `ENCOMPUTE_EXACT_WORKERS` | at most this many of them per job (default: cores, at most 8) |
+| `ENCOMPUTE_KEY_CACHE_BYTES` | bound on cached evaluation keys, counted as the uploaded envelope bytes (default 4 GiB). Least recently used keys are evicted; a job in progress keeps its keys until it ends; an evicted key is reported missing and the client uploads it again. With worker processes, each worker has this bound |
+| `ENCOMPUTE_EXACT_EXECUTION` | `reference` runs exact programs instruction by instruction (the correctness oracle) instead of the optimized circuit. For diagnosis only: results are identical, it is slower |
+
+OpenFHE exact keys do not depend on the program, so one upload serves every
+exact program on that evaluator. They are still usable only by programs the
+client registered them for, and a ciphertext only ever runs under the key its
+envelope is bound to.
+
 **Production mode refuses:**
 
 - development tokens;
@@ -289,6 +303,9 @@ Every refusal is ENC2605.
   - SecAgg round durations.
 
   Labels are closed sets: never identifiers or values.
+- **Evaluator metrics.** Evaluators also serve `GET /metrics`: requests,
+  jobs, and the evaluation-key cache (hits, misses, loads, load seconds,
+  evictions, bytes, entries and the bound). No labels, no key IDs.
 - **Logs.** One JSON object per line, with the service and the request,
   job, project and organization IDs where they apply. Logs never include
   request bodies, tokens, keys or payloads.

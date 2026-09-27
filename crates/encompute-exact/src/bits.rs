@@ -163,6 +163,34 @@ impl Strategy {
     };
 }
 
+impl<G: Gates> Gates for std::sync::Arc<G> {
+    type Bit = G::Bit;
+    fn name(&self) -> &'static str {
+        (**self).name()
+    }
+    fn and(&self, a: &G::Bit, b: &G::Bit) -> Result<G::Bit> {
+        (**self).and(a, b)
+    }
+    fn or(&self, a: &G::Bit, b: &G::Bit) -> Result<G::Bit> {
+        (**self).or(a, b)
+    }
+    fn xor(&self, a: &G::Bit, b: &G::Bit) -> Result<G::Bit> {
+        (**self).xor(a, b)
+    }
+    fn not(&self, a: &G::Bit) -> Result<G::Bit> {
+        (**self).not(a)
+    }
+    fn constant(&self, v: bool) -> Result<G::Bit> {
+        (**self).constant(v)
+    }
+    fn load(&self, elem: Elem, bytes: &[u8]) -> Result<Vec<G::Bit>> {
+        (**self).load(elem, bytes)
+    }
+    fn store(&self, elem: Elem, bits: &[G::Bit]) -> Result<Vec<u8>> {
+        (**self).store(elem, bits)
+    }
+}
+
 /// Runs exact plans on a gate library, counting bootstrapped gates.
 pub struct BitEvaluator<G: Gates> {
     pub gates: G,

@@ -365,3 +365,93 @@ fn folding_simplification_cse_and_range_width() {
         assert!(optimize(&wc.plan, &[None, None], 8).unwrap().rounds(8) <= r.rounds(8));
     }
 }
+
+/// The optimizer narrows widths only by the declared input ranges, which
+/// the client enforces before encrypting, and only for plans that passed
+/// overflow analysis: it never makes a refused program or input run.
+#[test]
+fn optimization_cannot_bypass_range_or_overflow_validation() {
+    // A possible overflow is refused before any circuit exists.
+    let mut b = Builder::new("o", 1e-3).unwrap();
+    let x = b.input_exact("x", Elem::U16, None).unwrap();
+    let y = b.mul(x, x).unwrap();
+    b.output("y", y).unwrap();
+    assert_eq!(
+        compile(&b.finish().unwrap()).unwrap_err().code,
+        encompute_ir::Code::Overflow
+    );
+
+    // The same multiplication fits once ranges bound it; the optimizer's
+    // ranges are the declared ones, and a value outside them is refused
+    // before encryption.
+    let mut b = Builder::new("r", 1e-3).unwrap();
+    let x = b
+        .input_exact("x", Elem::U16, Some(Range::new(0.0, 200.0)))
+        .unwrap();
+    let y = b.mul(x, x).unwrap();
+    b.output("y", y).unwrap();
+    let p = b.finish().unwrap();
+    let plan = compile(&p).unwrap().plan;
+    assert_eq!(input_ranges(&p, &plan), vec![Some((0, 200))]);
+    let inputs = |v: f64| Inputs::from([("x".to_owned(), vec![v])]);
+    for bad in [-1.0, 201.0, 65535.0] {
+        assert_eq!(
+            encompute_ir::check_inputs(&p, &inputs(bad))
+                .unwrap_err()
+                .code,
+            encompute_ir::Code::BadInput,
+            "{bad}"
+        );
+    }
+    // Every admitted value, including both bounds, matches the reference.
+    for workers in [1usize, 8] {
+        let c = optimize(&plan, &input_ranges(&p, &plan), workers as u32).unwrap();
+        for v in 0..=200 {
+            let v = v as f64;
+            assert_eq!(
+                run(&p, &c, &inputs(v), workers),
+                evaluate(&p, &inputs(v)).unwrap(),
+                "x = {v}"
+            );
+        }
+    }
+}
+
+/// Building and scheduling are deterministic: the same plan, ranges and
+/// worker count give the same circuit, and repeated parallel runs give the
+/// same bits.
+#[test]
+fn parallel_scheduling_is_deterministic() {
+    let p = {
+        let mut b = Builder::new("d", 1e-3).unwrap();
+        let x = b
+            .input_exact("x", Elem::I16, Some(Range::new(-150.0, 150.0)))
+            .unwrap();
+        let y = b
+            .input_exact("y", Elem::I16, Some(Range::new(-150.0, 150.0)))
+            .unwrap();
+        let s = b.add(x, y).unwrap();
+        let m = b.mul(x, y).unwrap();
+        let lt = b.cmp(CmpOp::Lt, s, m).unwrap();
+        b.output("s", s).unwrap();
+        b.output("m", m).unwrap();
+        b.output("lt", lt).unwrap();
+        b.finish().unwrap()
+    };
+    let plan = compile(&p).unwrap().plan;
+    let ranges = input_ranges(&p, &plan);
+    for workers in [1, 2, 8, 16] {
+        let a = serde_json::to_string(&optimize(&plan, &ranges, workers).unwrap()).unwrap();
+        let b = serde_json::to_string(&optimize(&plan, &ranges, workers).unwrap()).unwrap();
+        assert_eq!(a, b, "{workers} workers");
+    }
+    let c = optimize(&plan, &ranges, 8).unwrap();
+    let inputs = Inputs::from([
+        ("x".to_owned(), vec![-149.0]),
+        ("y".to_owned(), vec![123.0]),
+    ]);
+    let want = evaluate(&p, &inputs).unwrap();
+    for _ in 0..50 {
+        assert_eq!(run(&p, &c, &inputs, 8), want);
+    }
+}

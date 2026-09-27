@@ -21,6 +21,8 @@ use crate::session::Backends;
 const ADD_PROGRAM: u8 = 1;
 const REGISTER_KEYS: u8 = 3;
 const EXECUTE: u8 = 4;
+const HAS_KEY: u8 = 5;
+const KEY_CACHE_STATS: u8 = 6;
 
 fn io(e: std::io::Error) -> Error {
     Error::new(Code::Backend, format!("worker I/O: {e}"))
@@ -80,6 +82,13 @@ pub fn run_worker(backends: Backends) -> std::io::Result<()> {
                 let (pid, env) = split_pid(&payload)?;
                 Ok(engine.register_keys(pid, env)?.into_bytes())
             }
+            HAS_KEY => {
+                let (pid, kid) = split_pid(&payload)?;
+                let kid =
+                    std::str::from_utf8(kid).map_err(|_| Error::new(Code::Parse, "not UTF-8"))?;
+                Ok(vec![engine.has_key(pid, kid)? as u8])
+            }
+            KEY_CACHE_STATS => Ok(serde_json::to_vec(&engine.key_cache_stats()).unwrap()),
             EXECUTE => {
                 let (pid, env) = split_pid(&payload)?;
                 let (out, times) = engine.execute(pid, env)?;
@@ -144,7 +153,9 @@ pub struct Pool {
     freed: Condvar,
     /// Replayed into restarted workers.
     programs: Mutex<Vec<(ProgramInfo, String)>>,
-    keys: Mutex<Vec<(String, String, Vec<u8>)>>,
+    /// Registered key envelopes, replayed into restarted workers. Bounded
+    /// like the workers' caches: a key evicted here is uploaded again.
+    keys: crate::keycache::KeyCache<(String, Vec<u8>)>,
 }
 
 impl Pool {
@@ -160,7 +171,7 @@ impl Pool {
             free: Mutex::new((0..n.max(1)).collect()),
             freed: Condvar::new(),
             programs: Mutex::new(vec![]),
-            keys: Mutex::new(vec![]),
+            keys: crate::keycache::KeyCache::new(crate::keycache::max_bytes_from_env()),
         };
         for w in &pool.workers {
             *w.lock().unwrap() = Some(pool.spawn()?);
@@ -203,7 +214,8 @@ impl Pool {
         for (_, eir) in self.programs.lock().unwrap().iter() {
             w.call(ADD_PROGRAM, eir.as_bytes())?;
         }
-        for (pid, _, env) in self.keys.lock().unwrap().iter() {
+        for e in self.keys.values() {
+            let (pid, env) = &*e;
             w.call(REGISTER_KEYS, &with_pid(pid, env))?;
         }
         Ok(w)
@@ -292,21 +304,27 @@ impl Engine for Pool {
         {
             return Err(unknown_program());
         }
-        Ok(self
-            .keys
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(p, k, _)| p == pid && k == kid))
+        // Workers evict independently: the key is present only if every
+        // worker still holds it (the client then uploads it again).
+        for i in 0..self.workers.len() {
+            if self.call_on(i, HAS_KEY, &with_pid(pid, kid.as_bytes()))? != [1] {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn register_keys(&self, pid: &str, envelope: &[u8]) -> Result<String> {
         let kid = String::from_utf8(self.broadcast(REGISTER_KEYS, &with_pid(pid, envelope))?)
             .map_err(|_| Error::new(Code::Backend, "bad key ID from worker"))?;
-        let mut keys = self.keys.lock().unwrap();
-        if !keys.iter().any(|(p, k, _)| p == pid && *k == kid) {
-            keys.push((pid.to_owned(), kid.clone(), envelope.to_vec()));
-        }
+        let key = crate::keycache::CacheKey {
+            backend: "replay",
+            scope: pid.to_owned(),
+            key_id: kid.clone(),
+        };
+        self.keys.get_or_load(key, envelope.len() as u64, || {
+            Ok((pid.to_owned(), envelope.to_vec()))
+        })?;
         Ok(kid)
     }
 
@@ -319,5 +337,17 @@ impl Engine for Pool {
         let times: JobTimes = serde_json::from_slice(&v[4..4 + n])
             .map_err(|e| Error::new(Code::Backend, e.to_string()))?;
         Ok((v[4 + n..].to_vec(), times))
+    }
+
+    fn key_cache_stats(&self) -> crate::keycache::CacheStats {
+        let mut total = crate::keycache::CacheStats::default();
+        for i in 0..self.workers.len() {
+            if let Ok(s) = self.call_on(i, KEY_CACHE_STATS, &[]).and_then(|v| {
+                serde_json::from_slice(&v).map_err(|e| Error::new(Code::Backend, e.to_string()))
+            }) {
+                total += s;
+            }
+        }
+        total
     }
 }

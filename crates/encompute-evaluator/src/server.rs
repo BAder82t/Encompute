@@ -222,10 +222,86 @@ impl Evaluator {
         })
     }
 
+    /// Prometheus text format: counters only, no identifiers or key
+    /// material. Expose it internally.
+    fn metrics(&self) -> String {
+        let c = self.engine.key_cache_stats();
+        let mut out = String::new();
+        let mut m = |name: &str, kind: &str, help: &str, v: String| {
+            out += &format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {v}\n");
+        };
+        m(
+            "encompute_evaluator_requests_total",
+            "counter",
+            "HTTP requests.",
+            self.requests.load(Ordering::Relaxed).to_string(),
+        );
+        m(
+            "encompute_evaluator_jobs_total",
+            "counter",
+            "Jobs executed.",
+            self.jobs.load(Ordering::Relaxed).to_string(),
+        );
+        m(
+            "encompute_key_cache_hits_total",
+            "counter",
+            "Evaluation-key cache hits.",
+            c.hits.to_string(),
+        );
+        m(
+            "encompute_key_cache_misses_total",
+            "counter",
+            "Evaluation-key cache misses.",
+            c.misses.to_string(),
+        );
+        m(
+            "encompute_key_cache_loads_total",
+            "counter",
+            "Evaluation keys deserialized.",
+            c.loads.to_string(),
+        );
+        m(
+            "encompute_key_cache_load_seconds_total",
+            "counter",
+            "Time spent deserializing evaluation keys.",
+            format!("{:.6}", c.load_seconds),
+        );
+        m(
+            "encompute_key_cache_evictions_total",
+            "counter",
+            "Evaluation keys evicted to stay within the bound.",
+            c.evictions.to_string(),
+        );
+        m(
+            "encompute_key_cache_bytes",
+            "gauge",
+            "Serialized evaluation-key bytes held.",
+            c.bytes.to_string(),
+        );
+        m(
+            "encompute_key_cache_entries",
+            "gauge",
+            "Evaluation-key sets held.",
+            c.entries.to_string(),
+        );
+        m(
+            "encompute_key_cache_max_bytes",
+            "gauge",
+            "The configured bound (ENCOMPUTE_KEY_CACHE_BYTES).",
+            crate::keycache::max_bytes_from_env().to_string(),
+        );
+        out
+    }
+
     fn route(&self, method: &Method, path: &str, body: &[u8], grant: Option<&str>) -> Reply {
         let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
         let r = match (method, parts.as_slice()) {
             (Method::Get, ["v1", "info"]) => Ok(ok_json(self.info())),
+            (Method::Get, ["metrics"]) => Ok(Reply {
+                status: 200,
+                body: self.metrics().into_bytes(),
+                json: false,
+            }),
             (Method::Get, ["v1", "attestation"]) => match &self.attestation {
                 Some(a) => Ok(Reply {
                     status: 200,
@@ -333,6 +409,7 @@ impl Evaluator {
             "execution_id": receipt.receipt.execution_id,
             "receipt": receipt_json,
             "proof": proof.is_some(),
+            "optimizer": info.optimizer,
         })))
     }
 
@@ -382,6 +459,8 @@ impl Evaluator {
         let (status, len) = (reply.status, reply.body.len());
         let ctype = if reply.json {
             "application/json"
+        } else if path == "/metrics" {
+            "text/plain; version=0.0.4"
         } else {
             "application/octet-stream"
         };

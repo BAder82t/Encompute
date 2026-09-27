@@ -66,7 +66,7 @@ fn setup(verification: Verification) -> Setup {
         Verification::Receipt => (Mode::Mock, BackendKind::Mock),
     };
     let client = m.new_client(mode).unwrap();
-    let mut ev = EvaluatorSession::new(program.clone(), kind).unwrap();
+    let ev = EvaluatorSession::new(program.clone(), kind).unwrap();
     ev.register_keys(client.evaluation_keys().unwrap()).unwrap();
     Setup {
         program,
@@ -183,7 +183,7 @@ fn malicious_evaluator_is_caught() {
     // Another program on the same inputs (a different threshold), and the
     // plan with its last operations skipped, relabelled as this program.
     let other = |p: Program| {
-        let mut ev = EvaluatorSession::new(p, BackendKind::OpenFhe).unwrap();
+        let ev = EvaluatorSession::new(p, BackendKind::OpenFhe).unwrap();
         ev.register_keys(s.client.evaluation_keys().unwrap())
             .unwrap();
         let req = relabel(&request, items(&request));
