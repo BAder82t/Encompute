@@ -18,6 +18,10 @@ pub struct ExactProgram {
     /// `verification required`: the plan targets the proof-capable OpenFHE
     /// BGV backend (ADR-009).
     pub proof_required: bool,
+    /// How an unverified program's backend was selected (BGV or BinFHE, by
+    /// estimated cost); `None` for verified programs (always BGV), an
+    /// explicit BinFHE request and research backends.
+    pub selection: Option<crate::cost::ExactSelection>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -69,25 +73,33 @@ pub fn compile_program(program: &Program) -> Result<CompiledProgram> {
         Semantics::Approximate => CompiledProgram::Approx(encompute_ckks::compile(program)?),
         Semantics::Exact => {
             let c = encompute_exact::compile(program)?;
-            let profile = if required {
+            let (profile, selection) = if required {
                 check_coverage(&c.plan)?;
-                encompute_exact::bgv::profile(&c.plan)
+                (encompute_exact::bgv::profile(&c.plan), None)
             } else {
-                // Exact programs run on OpenFHE (BinFHE). TFHE-rs is a
-                // research backend, never chosen by default.
-                let profile = exact_profile()?;
-                if profile.backend == encompute_exact::bits::OPENFHE_EXACT_BACKEND {
-                    // Outside the capability matrix: refused here, not at
-                    // key generation or on the evaluator.
-                    encompute_exact::bits::check_capabilities(&c.plan)?;
+                match exact_choice()? {
+                    // The whole program runs on OpenFHE BGV (receipts, no
+                    // proofs) when it is in the BGV subset and estimated no
+                    // slower there, else on OpenFHE BinFHE. TFHE-rs is a
+                    // research backend, never chosen by default.
+                    ExactChoice::Auto => {
+                        let sel = crate::cost::select_exact_scheme(&c.plan);
+                        let profile = match sel.scheme {
+                            crate::cost::ExactScheme::Bgv => encompute_exact::bgv::profile(&c.plan),
+                            crate::cost::ExactScheme::BinFhe => binfhe_profile(&c.plan)?,
+                        };
+                        (profile, Some(sel))
+                    }
+                    ExactChoice::BinFhe => (binfhe_profile(&c.plan)?, None),
+                    ExactChoice::Research(profile) => (profile, None),
                 }
-                profile
             };
             CompiledProgram::Exact(ExactProgram {
                 plan: c.plan,
                 privacy: c.privacy,
                 profile,
                 proof_required: required,
+                selection,
             })
         }
     })
@@ -96,14 +108,35 @@ pub fn compile_program(program: &Program) -> Result<CompiledProgram> {
 /// Selects TFHE-rs for exact programs, in research builds only.
 pub const RESEARCH_EXACT_BACKEND_ENV: &str = "ENCOMPUTE_RESEARCH_EXACT_BACKEND";
 
-/// The profile unverified exact programs compile to: OpenFHE exact, unless
-/// a research build is asked (`ENCOMPUTE_RESEARCH_EXACT_BACKEND=tfhe-rs`)
-/// for TFHE-rs. A production build refuses that request instead of
-/// ignoring it.
-fn exact_profile() -> Result<encompute_exact::ExactProfile> {
+/// The OpenFHE BinFHE profile, for a plan inside its capability matrix
+/// (refused here, not at key generation or on the evaluator).
+fn binfhe_profile(plan: &ExactPlan) -> Result<ExactProfile> {
+    encompute_exact::bits::check_capabilities(plan)?;
+    Ok(encompute_exact::bits::openfhe_exact_profile())
+}
+
+enum ExactChoice {
+    /// OpenFHE BGV or BinFHE, selected per program by estimated cost.
+    Auto,
+    /// OpenFHE BinFHE, asked for explicitly.
+    BinFhe,
+    /// A research backend.
+    Research(ExactProfile),
+}
+
+/// The backend unverified exact programs compile to: OpenFHE (BGV or
+/// BinFHE, selected per program), OpenFHE BinFHE when asked for explicitly
+/// (`ENCOMPUTE_RESEARCH_EXACT_BACKEND=openfhe-exact`, which runs every
+/// program), or TFHE-rs when a research build is asked
+/// (`ENCOMPUTE_RESEARCH_EXACT_BACKEND=tfhe-rs`). A production build
+/// refuses that request instead of ignoring it.
+fn exact_choice() -> Result<ExactChoice> {
     match std::env::var(RESEARCH_EXACT_BACKEND_ENV).as_deref() {
-        Err(_) | Ok("") | Ok("openfhe-exact") => Ok(encompute_exact::bits::openfhe_exact_profile()),
-        Ok("tfhe-rs") if cfg!(feature = "research-tfhe-rs") => Ok(encompute_exact::research::tfhe_rs_profile()),
+        Err(_) | Ok("") => Ok(ExactChoice::Auto),
+        Ok("openfhe-exact") => Ok(ExactChoice::BinFhe),
+        Ok("tfhe-rs") if cfg!(feature = "research-tfhe-rs") => Ok(ExactChoice::Research(
+            encompute_exact::research::tfhe_rs_profile(),
+        )),
         Ok("tfhe-rs") => Err(Error::new(
             Code::Backend,
             "BACKEND UNAVAILABLE: TFHE-rs is available only in research builds (the \
@@ -116,9 +149,31 @@ fn exact_profile() -> Result<encompute_exact::ExactProfile> {
     }
 }
 
+/// The calibrated estimates `(binfhe_ms, bgv_ms)` an unverified exact
+/// `plan` is selected by (planner facts): BGV's is `None` when the plan is
+/// outside the BGV subset or BinFHE was asked for explicitly, so the
+/// planner selects what [`compile_program`] compiles to.
+pub fn exact_estimates(plan: &ExactPlan) -> (Option<u64>, Option<u64>) {
+    let (binfhe, bgv) = crate::cost::estimates(plan);
+    match exact_choice() {
+        Ok(ExactChoice::Auto) => (binfhe, bgv),
+        _ => (binfhe, None),
+    }
+}
+
 /// Whether execution proofs cover every instruction of `plan`.
 pub fn proof_coverable(plan: &ExactPlan) -> bool {
     check_coverage(plan).is_ok()
+}
+
+/// The first operation of `plan` outside the BGV subset (which is what
+/// execution proofs cover), in words; `None` when every one is inside.
+pub(crate) fn bgv_unsupported(plan: &ExactPlan) -> Option<String> {
+    let caps = encompute_exact::bgv::capabilities();
+    // Coverage depends on the plan only, not on the spec.
+    let t = encompute_exact::semantic_transcript(plan, &"0".repeat(64));
+    caps.first_unsupported(&t)
+        .map(|e| format!("{} on {} (instruction {})", e.op, e.ty, e.index))
 }
 
 /// Fail unless the proof backend covers every instruction of `plan`.
