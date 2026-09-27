@@ -384,20 +384,27 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 asset.values.len()
             );
             println!("{:<16}{}", "Receipt", receipt.display());
-            if std::env::var("ENCOMPUTE_CONTROL_URL").is_ok() {
-                let n = report_to_control(
+            let reported = if std::env::var("ENCOMPUTE_CONTROL_URL").is_ok() {
+                report_to_control(
                     &round_id,
                     ledger.as_deref(),
                     &control_assets,
                     started.elapsed().as_millis() as u64,
-                )?;
-                println!(
-                    "{:<16}{n} privacy events reported to the control plane",
-                    "Control plane"
-                );
-            }
-            // Let participants collect the receipt before exiting.
+                )
+                .map(|n| {
+                    println!(
+                        "{:<16}{n} privacy events reported to the control plane",
+                        "Control plane"
+                    )
+                })
+            } else {
+                Ok(())
+            };
+            // Let participants collect the receipt before exiting, even when
+            // reporting failed: the aggregate is already released, and they
+            // need the receipt to verify it.
             std::thread::sleep(Duration::from_secs(2));
+            reported?;
             Ok(ExitCode::SUCCESS)
         }
         AggregateCmd::CoordinatorPolicy {
