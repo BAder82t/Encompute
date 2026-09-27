@@ -665,6 +665,112 @@ fn killed_control_plane_process_recovers_every_time() {
     let _ = std::fs::remove_file(&key_file);
 }
 
+fn register_again(w: &World) {
+    w.t.ok(
+        &w.evaluator.service,
+        "POST",
+        "/v1/evaluators",
+        Some(
+            json!({"id": "evaluator-1", "url": "http://evaluator-1.internal:8750",
+                "receipt_key": w.evaluator.receipt.identity().public_key_hex(),
+                "backends": ["openfhe", "openfhe-exact"],
+                "profiles": ["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"],
+                "openfhe_version": "1.5.1", "capacity": 4}),
+        ),
+    );
+}
+
+/// The evaluator restarts at a random point of each job (before starting
+/// it, while running it, after reporting its receipt). Every job ends:
+/// started later and succeeded, failed without replay, or completed by its
+/// client. None runs twice or stays running.
+#[test]
+fn evaluator_restarts_at_random_points_leave_no_job_behind() {
+    let Some(w) = world() else { return };
+    let mut rng = Rng::new("evaluator_restarts");
+    let t = &w.t;
+    let plan = w.plan(EXACT);
+    let (req, resp) = (b"request".to_vec(), b"response".to_vec());
+    let r = receipt(&w.evaluator, &req, &resp);
+    for i in 0..6 * scale() {
+        let id = w.job(&plan, &[], &format!("ev-{i}")).1["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let at = rng.below(3);
+        let start = || {
+            t.call(
+                &w.evaluator.service,
+                "POST",
+                &format!("/v1/jobs/{id}/start"),
+                None,
+            )
+        };
+        let report = || {
+            t.ok(
+                &w.evaluator.service,
+                "POST",
+                &format!("/v1/jobs/{id}/receipt"),
+                Some(json!({"receipt": r})),
+            )
+        };
+        let complete = || {
+            t.ok(
+                &w.b_dev,
+                "POST",
+                &format!("/v1/jobs/{id}/complete"),
+                Some(
+                    json!({"receipt": r, "request_commitment": request_commitment(&req),
+                        "output_commitment": output_commitment(&resp), "key_id": KEY_ID}),
+                ),
+            )["state"]
+                .clone()
+        };
+        if at >= 1 {
+            assert_eq!(start().0, 200);
+        }
+        if at >= 2 {
+            report();
+        }
+        register_again(&w); // the evaluator process restarted here
+        let want = match at {
+            0 => {
+                // Never started: the new process starts it (once) and runs it.
+                assert_eq!(start().0, 200);
+                assert_eq!(start().0, 409);
+                report();
+                complete()
+            }
+            // Lost with the old process: failed, and never started again.
+            1 => {
+                assert_eq!(start().0, 409);
+                json!("failed")
+            }
+            // Already reported: the client completes it.
+            _ => complete(),
+        };
+        let v = t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{id}"), None);
+        assert_eq!(v["state"], want, "restart at point {at}: {v}");
+        assert!(
+            v["state"] == "succeeded" || v["state"] == "failed",
+            "stuck: {v}"
+        );
+        assert_transitions_legal(&w, &id);
+        let started: i64 = t
+            .control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT count(*) FROM job_transitions WHERE job_id = $1 AND to_state = 'running'",
+                &[&id],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(started, 1, "started {started} times");
+    }
+}
+
 /// An evaluator that restarts while running a job (its process, and the
 /// job with it, is gone) registers again: the job fails, never replayed,
 /// instead of staying "running" forever behind the new process's
