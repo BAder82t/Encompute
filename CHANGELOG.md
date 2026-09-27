@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Release candidate hardening
+
+- **Security fixes** (findings ENC-SF-2026-001 to 031 in
+  `docs/security-findings.md`): key revocations bound to the owning
+  organization; broker-signed key grants; the query string signed in
+  service requests; service messages applied once, transactionally;
+  evaluator uploads need a job grant under a control plane, and job IDs
+  are random; key files 0600 after every write; the Python client pins
+  evaluator keys; DP aggregation receipts require bound privacy receipts;
+  privacy spend reserved at the control plane before any release; the
+  training privacy policy bound into attestation; offline `verify` checks
+  the evidence kind and exits 0 only when every binding was checked;
+  DP-SGD sampling from the OS CSPRNG.
+- **Fuzzing.** Fuzz smoke tests for every parser, cargo-fuzz targets with a
+  seed corpus and a nightly workflow (`fuzz/run_all.sh`). Fixed: unbounded
+  worker frames, panics on out-of-range sampling rates and short worker
+  replies, overflowing tensor offsets and launcher chunk sizes, unbounded
+  ledger reads, clock-skew overflow.
+- **Network attacks.** A bounded HTTP server for every service, with
+  attack suites for slow, oversized, malformed, replayed and duplicated
+  requests over real HTTP.
+- **Restarts and backups.** Crash, connection-loss and restart suites for
+  the control plane, evaluator, key broker and SecAgg coordinator;
+  anchored revocations; a backup and restore drill
+  (`scripts/release/backup-drill.sh`).
+- **Correctness gates.** An OpenFHE differential gate (clear, mock,
+  optimized and reference agree bit for bit;
+  `scripts/release/differential-gate.sh`), unit, property and differential
+  tests for every optimizer transformation, and a soak harness
+  (`scripts/release/soak.sh`).
+- **`encompute migrate`** checks and upgrades persistent artifacts; unknown
+  and future versions fail closed, and signed evidence is never rewritten.
+- **Release tooling.** Pinned inputs and reproducible-build checks,
+  per-artifact CycloneDX SBOMs, vulnerability and license scans with a
+  severity policy, and a signed release workflow that creates a draft
+  GitHub release.
+- **Assurance.** Invariants INV-172 to INV-191; INV-132, INV-153 and
+  INV-171 extended or reworded.
+
 ### Release candidate documentation
 
 - **Support matrix** (`docs/support-matrix.md`): the one authoritative
