@@ -272,7 +272,7 @@ fn coordinator_restart_never_reruns_a_round_or_releases_twice() {
         // Restarted on the same sequence: every party refuses it, so the
         // round is neither re-run with other survivors nor released twice.
         let again = coordinator(&m, seq, &dir).and_then(|mut c| run(&mut c, &mut parties, 6));
-        let e = again.err().expect("a crashed round ran again");
+        let e = again.expect_err("a crashed round ran again");
         assert_eq!(e.code, encompute_ir::Code::AggregationBinding, "{e}");
         assert!(e.message.contains("replay"), "{e}");
         check_ledgers(&dir, &released);
