@@ -1326,6 +1326,39 @@ impl Control {
                     db_err(e)
                 }
             })?;
+            // An evaluator registers when its process starts: a job it was
+            // running and never reported died with the old process. It
+            // fails now (never replayed) rather than staying "running"
+            // forever behind the new process's heartbeats.
+            let lost: Vec<(String, String)> = t
+                .query(
+                    "SELECT id, organization_id FROM jobs
+                      WHERE evaluator_id = $1 AND state = 'running' AND receipt IS NULL
+                      FOR UPDATE",
+                    &[&r.id],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|x| (x.get(0), x.get(1)))
+                .collect();
+            for (job, _) in &lost {
+                self.transition_in(
+                    t,
+                    ctx.actor(),
+                    &ctx.request_id,
+                    job,
+                    JobState::Failed,
+                    Some("the evaluator restarted while running it; not replayed"),
+                )?;
+            }
+            for (job, org) in &lost {
+                audit::append(
+                    t,
+                    ctx.draft("job.failed", "job", job, Outcome::Failed)
+                        .org(org)
+                        .r#ref("reason", "evaluator_restarted"),
+                )?;
+            }
             let mut d = ctx
                 .draft("evaluator.registered", "evaluator", &r.id, Outcome::Succeeded)
                 .org(PLATFORM_ORG)
