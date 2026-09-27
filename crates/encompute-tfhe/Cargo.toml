@@ -3,6 +3,7 @@ name = "encompute-tfhe"
 description = "TFHE-rs implementation of Encompute's exact evaluator (research use only)"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

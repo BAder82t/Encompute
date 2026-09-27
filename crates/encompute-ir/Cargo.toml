@@ -3,6 +3,7 @@ name = "encompute-ir"
 description = "Encompute intermediate representation"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

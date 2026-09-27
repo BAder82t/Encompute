@@ -6,7 +6,9 @@
                        kek="broker.kek", workdir="run")
     # stage prep["jobs"][party]["job"], the sealed assets and run the image in
     # Confidential Space (deploy/confidential-space-training), or rehearse:
-    result = job.run_local(prep)
+    with job.Local(prep) as local:
+        local.start_launcher(prep["image"])
+        local.run_worker(prep["jobs"][party]["job"])
 
 ``prepare`` plans the run for an attested TEE (Intel TDX on Confidential
 Space) and writes production artifacts:
@@ -17,7 +19,7 @@ Space) and writes production artifacts:
 - the sealed model, adapter and datasets;
 - one job descriptor per participant (public commitments only).
 
-``run_local`` rehearses the job on this machine, in production mode except
+``Local`` rehearses the job on this machine, in production mode except
 for the hardware: the broker verifies Confidential Space tokens, but they
 come from a simulated launcher signed with a test key (the broker trusts
 only that key's JWKS). It proves the orchestration, not the hardware.

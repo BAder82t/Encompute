@@ -3,6 +3,7 @@ name = "encompute-runtime"
 description = "Encompute executor, differential testing and compiled artifacts"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

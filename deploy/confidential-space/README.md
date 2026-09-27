@@ -2,7 +2,7 @@
 
 This demo runs an Encompute workload in a Confidential Space VM. The workload
 attests to a key broker and receives a protected test key sealed to its
-session. A modified image receives nothing (ADR-011).
+session. A modified image receives nothing: the key broker releases keys only to the attested image digest.
 
 ```text
 owner machine                          Google Cloud

@@ -3,6 +3,7 @@ name = "encompute-secagg"
 description = "Secure aggregation (Bonawitz et al. SecAgg) bound to Encompute policies, rounds and receipts"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

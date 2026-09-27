@@ -3,6 +3,7 @@ name = "encompute-evaluator"
 description = "Encompute evaluator: runs compiled plans on encrypted inputs; holds no secret key"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

@@ -3,6 +3,7 @@ name = "encompute-training"
 description = "Confidential fine-tuning: training specifications, sealed models, datasets and checkpoints, adapter lineage and export control"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

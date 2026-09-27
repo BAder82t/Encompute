@@ -3,6 +3,7 @@ name = "encompute-planner"
 description = "The Encompute planner: derives trust requirements from declared policies and selects the protection mechanisms that satisfy them"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

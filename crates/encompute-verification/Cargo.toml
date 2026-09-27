@@ -3,6 +3,7 @@ name = "encompute-verification"
 description = "Execution identity and signed execution receipts for Encompute (no FHE dependency)"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

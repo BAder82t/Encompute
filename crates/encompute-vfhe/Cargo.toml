@@ -3,6 +3,7 @@ name = "encompute-vfhe"
 description = "Verifiable-FHE proof backends for Encompute (research): re-execution on OpenFHE BGV"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

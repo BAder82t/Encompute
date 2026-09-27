@@ -689,7 +689,7 @@ class Secret:
         if isinstance(o, Secret):
             raise _err(
                 "ENC1002",
-                "division by a secret value is not supported in v0.1; divide by public values only",
+                "division by a secret value is not supported; divide by public values only",
             )
         o = _to_list(o)
         if isinstance(o, (int, float)):
@@ -851,10 +851,10 @@ class Secret:
         return self._n
 
     def __getitem__(self, _: Any) -> Any:
-        raise _err("ENC1005", "indexing or slicing a secret vector is not supported in v0.1")
+        raise _err("ENC1005", "indexing or slicing a secret vector is not supported")
 
     def __iter__(self) -> Any:
-        raise _err("ENC1005", "iterating over a secret vector is not supported in v0.1")
+        raise _err("ENC1005", "iterating over a secret vector is not supported")
 
 
 # --- functions ----------------------------------------------------------------
@@ -902,7 +902,7 @@ def matvec(m: Any, x: Any) -> Secret:
     """Public matrix (rows × cols) times a secret vector of length cols."""
     x = _secret_arg("matvec", x)
     if isinstance(m, Secret):
-        raise _err("ENC1005", "matvec needs a public matrix in v0.1")
+        raise _err("ENC1005", "matvec needs a public matrix")
     i, kind, dims = x._g.constant(m)
     if kind != "matrix":
         raise _err("ENC1301", "matvec needs a 2-D public matrix")

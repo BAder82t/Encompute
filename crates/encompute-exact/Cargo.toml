@@ -3,6 +3,7 @@ name = "encompute-exact"
 description = "Backend-independent exact (integer/Boolean) plans, lowering and evaluation for Encompute"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

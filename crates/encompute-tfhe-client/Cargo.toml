@@ -3,6 +3,7 @@ name = "encompute-tfhe-client"
 description = "TFHE-rs client for Encompute exact programs: keys, encryption, decryption (research use only)"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

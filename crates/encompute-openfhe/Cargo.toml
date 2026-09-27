@@ -3,6 +3,7 @@ name = "encompute-openfhe"
 description = "OpenFHE CKKS backend for Encompute"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 links = "OPENFHEpke"

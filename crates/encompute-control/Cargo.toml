@@ -3,6 +3,7 @@ name = "encompute-control"
 description = "Encompute control plane: organizations, projects, assets, plans, jobs, audit"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

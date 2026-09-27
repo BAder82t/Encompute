@@ -3,6 +3,7 @@ name = "encompute-trust"
 description = "The Encompute trust graph: assets, policies, authorizations, lineage and evidence in one verifiable graph"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 

@@ -3,6 +3,7 @@ name = "encompute-keybroker"
 description = "Policy-gated key release to attested Encompute workloads"
 version.workspace = true
 edition.workspace = true
+publish = false
 rust-version.workspace = true
 license.workspace = true
 
