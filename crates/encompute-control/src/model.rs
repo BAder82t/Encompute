@@ -50,6 +50,29 @@ pub fn check_name(what: &str, s: &str) -> Result<()> {
     Ok(())
 }
 
+/// An artifact's storage URI (metadata the control plane never
+/// dereferences, but clients may): printable, no whitespace or
+/// backslashes, and no `..` path segment, even percent-encoded, so it
+/// cannot point a consumer outside the location it names.
+pub fn check_storage_uri(s: &str) -> Result<()> {
+    check_name("storage_uri", s)?;
+    let decoded = s
+        .replace("%2e", ".")
+        .replace("%2E", ".")
+        .replace("%2f", "/")
+        .replace("%2F", "/")
+        .replace("%5c", "\\")
+        .replace("%5C", "\\");
+    if decoded.chars().any(|c| c.is_whitespace() || c == '\\')
+        || decoded.split('/').any(|seg| seg == "..")
+    {
+        return Err(bad(
+            "storage_uri must not contain whitespace, backslashes or '..' path segments",
+        ));
+    }
+    Ok(())
+}
+
 /// Lowercase hex SHA-256 digests.
 pub fn check_digest(what: &str, s: &str) -> Result<()> {
     let h = s.strip_prefix("sha256:").unwrap_or(s);

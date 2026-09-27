@@ -17,8 +17,8 @@ use crate::authz::{
 use crate::control::{load_ledger, Control, Ctx};
 use crate::db::db_err;
 use crate::model::{
-    bad, check_digest, check_name, new_id, ApproveAsset, AssetKind, KeyRef, RegisterAsset, Role,
-    ServiceKind,
+    bad, check_digest, check_name, check_storage_uri, new_id, ApproveAsset, AssetKind, KeyRef,
+    RegisterAsset, Role, ServiceKind,
 };
 use crate::transport::{seal, Scope};
 
@@ -55,7 +55,7 @@ impl Control {
         check_name("asset name", &r.name)?;
         check_digest("digest", &r.digest)?;
         if let Some(u) = &r.storage_uri {
-            check_name("storage_uri", u)?;
+            check_storage_uri(u)?;
         }
         if let Some(k) = &r.key_ref {
             check_name("key_ref.broker", &k.broker)?;
