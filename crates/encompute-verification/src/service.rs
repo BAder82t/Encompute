@@ -515,7 +515,7 @@ pub fn open(m: &MessageEnvelope, sender_public_key: &str, me: &str, now: u64) ->
     if now > m.expires_at {
         return Err(auth("expired message"));
     }
-    if m.created_at > now + MAX_CLOCK_SKEW_SECS {
+    if m.created_at > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
         return Err(auth("message from the future"));
     }
     if sha256_hex(&canonical_json(&m.payload)?) != m.payload_digest {
