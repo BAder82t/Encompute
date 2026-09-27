@@ -14,6 +14,13 @@ commitments, and rebuilds the trust report from them.
 
 Credentials: ``token=`` (an OIDC token from your identity provider),
 ``ENCOMPUTE_TOKEN``, or the login saved by ``encompute login``.
+
+Evaluator keys: the control plane says which evaluator runs a job and
+which receipt key it signs with. Pin the evaluator keys you trust with
+``trusted_evaluators=`` (hex Ed25519 receipt keys) or
+``ENCOMPUTE_TRUSTED_EVALUATORS`` (comma-separated): a job scheduled on any
+other key is refused before inputs are sent. Without a pin, the key the
+control plane names is accepted, with a warning.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
 
@@ -57,7 +65,14 @@ def _eir(program: Any) -> str:
 class Client:
     """A connection to an Encompute control plane."""
 
-    def __init__(self, url: Optional[str] = None, token: Optional[str] = None, *, timeout: float = 60.0):
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        token: Optional[str] = None,
+        *,
+        timeout: float = 60.0,
+        trusted_evaluators: Optional[Iterable[str]] = None,
+    ):
         saved = _saved_login()
         self.url = (url or os.environ.get("ENCOMPUTE_CONTROL_URL") or saved.get("url") or "").rstrip("/")
         if not self.url:
@@ -66,6 +81,29 @@ class Client:
         if not self._token:
             raise ControlError("ENC2601", "no credentials: pass token= or run `encompute login`")
         self.timeout = timeout
+        if trusted_evaluators is None:
+            env = os.environ.get("ENCOMPUTE_TRUSTED_EVALUATORS", "")
+            trusted_evaluators = [k for k in env.replace(",", " ").split() if k]
+        self.trusted_evaluators = frozenset(k.strip().lower() for k in trusted_evaluators)
+
+    def check_evaluator(self, receipt_key: str) -> None:
+        """Refuses an evaluator receipt key outside the pinned set (if one
+        is configured); without a pin, warns that the control plane chose
+        the key."""
+        if self.trusted_evaluators:
+            if str(receipt_key).lower() not in self.trusted_evaluators:
+                raise ControlError(
+                    "ENC2607",
+                    f"the control plane scheduled evaluator key {receipt_key}, which is not "
+                    "among the trusted evaluators",
+                )
+            return
+        warnings.warn(
+            "the evaluator's receipt key comes from the control plane and is not pinned: "
+            "pass trusted_evaluators= (or set ENCOMPUTE_TRUSTED_EVALUATORS)",
+            UserWarning,
+            stacklevel=3,
+        )
 
     def __repr__(self) -> str:
         return f"<encompute.Client {self.url}>"
@@ -277,6 +315,9 @@ class Project:
         if job.state != "queued":
             raise ControlError("ENC2604", f"job {job.id} is {job.state}: {job.data.get('error')}")
         d = job.data
+        # Before any input leaves: the receipt key is the control plane's
+        # word unless pinned here.
+        self._client.check_evaluator(d["evaluator_receipt_key"])
         got = json.loads(
             _call(
                 model._native.run_remote_json,

@@ -230,9 +230,9 @@ impl T {
             }
             As::Raw(t) => headers.push(("Authorization".into(), format!("Bearer {t}"))),
             As::Service(s) => {
-                let path = url.split('?').next().unwrap();
+                // The whole target: the query is signed.
                 let h = s
-                    .sign_request(method, path, "control-plane", &Default::default(), &body)
+                    .sign_request(method, url, "control-plane", &Default::default(), &body)
                     .unwrap();
                 for (k, v) in h.to_pairs() {
                     headers.push((k.into(), v));

@@ -718,6 +718,36 @@ fn credentials_are_checked() {
     assert!(String::from_utf8_lossy(&again.body).contains("replayed"));
 }
 
+/// The query string is signed: a signed service request whose query was
+/// altered on the way (e.g. another page, filter or limit) is refused.
+#[test]
+fn signed_service_requests_bind_the_query() {
+    let Some(w) = world() else { return };
+    let signer = &w.evaluator.signer;
+    let send = |signed: &str, sent: &str| {
+        let h = signer
+            .sign_request("GET", signed, "control-plane", &Default::default(), b"")
+            .unwrap();
+        let r = encompute_control::api::Request {
+            method: "GET".into(),
+            url: sent.into(),
+            headers: h
+                .to_pairs()
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect(),
+            body: vec![],
+        };
+        encompute_control::api::handle(&w.t.control, &r).status
+    };
+    assert_eq!(send("/v1/whoami?limit=1", "/v1/whoami?limit=1"), 200);
+    // The same parameters in another order are the same query.
+    assert_eq!(send("/v1/whoami?a=1&b=2", "/v1/whoami?b=2&a=1"), 200);
+    assert_eq!(send("/v1/whoami?limit=1", "/v1/whoami?limit=1000"), 401);
+    assert_eq!(send("/v1/whoami", "/v1/whoami?limit=1000"), 401);
+    assert_eq!(send("/v1/whoami?limit=1", "/v1/whoami"), 401);
+}
+
 /// A test identity provider (ES256), keys generated at run time.
 struct Idp {
     key: p256::SecretKey,

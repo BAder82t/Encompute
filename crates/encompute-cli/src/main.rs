@@ -906,14 +906,52 @@ fn trusted_evaluator(
         return EvaluatorIdentity::from_public_key_hex(hex.trim());
     }
     let announced = remote.evaluator_identity()?;
-    std::fs::write(&pin, format!("{}\n", announced.public_key_hex()))
-        .map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", pin.display())))?;
+    // Public: readable by all, whatever the umask.
+    let io = |e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", pin.display()));
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&pin).map_err(io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o644))
+                .map_err(io)?;
+        }
+        f.write_all(format!("{}\n", announced.public_key_hex()).as_bytes())
+            .map_err(io)?;
+    }
     eprintln!(
         "trusting evaluator enc-eval:{} on first use (pinned in {})",
         announced.evaluator_id(),
         pin.display()
     );
+    if plain_http_to_remote_host(remote.base_url()) {
+        eprintln!(
+            "warning: the evaluator key was pinned over plain HTTP to another host: anyone on \
+             the path could have substituted it. Compare it with the evaluator's operator, or \
+             pass --trust-evaluator."
+        );
+    }
     Ok(announced)
+}
+
+/// Plain `http://` to a host other than loopback.
+fn plain_http_to_remote_host(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Userinfo is not the host.
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host_port.split(':').next().unwrap_or(""),
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    !loopback
 }
 
 fn short(s: &str) -> &str {
@@ -1373,9 +1411,16 @@ fn write_keys(dir: &Path, client: &ClientSession) -> Result<()> {
     }
     use std::io::Write;
     let envelope = client.secret_key_envelope()?;
-    opts.open(&secret)
-        .and_then(|mut f| f.write_all(&envelope))
-        .map_err(io)?;
+    let mut f = opts.open(&secret).map_err(io)?;
+    // The mode above applies only to a new file: an existing secret.key
+    // keeps its own, so set it before writing the key.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(io)?;
+    }
+    f.write_all(&envelope).map_err(io)?;
     let keys = client
         .evaluation_keys()
         .expect("fresh client has evaluation keys");
@@ -1427,4 +1472,30 @@ fn parse_inputs(args: &[String], file: Option<&Path>) -> Result<Inputs> {
         inputs.insert(k.to_owned(), vals);
     }
     Ok(inputs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_http_to_remote_host as warned;
+
+    #[test]
+    fn pinning_over_plain_http_to_another_host_is_warned() {
+        for quiet in [
+            "https://eval.example",
+            "http://127.0.0.1:8750",
+            "http://localhost:8750/",
+            "http://[::1]:8750",
+        ] {
+            assert!(!warned(quiet), "{quiet}");
+        }
+        for loud in [
+            "http://eval.example:8750",
+            "http://10.0.0.5:8750",
+            "http://localhost.evil.net",
+            "http://127.0.0.1@evil.net",
+            "http://[::2]:8750",
+        ] {
+            assert!(warned(loud), "{loud}");
+        }
+    }
 }

@@ -42,6 +42,8 @@ fn broker() -> KeyBroker {
         Box::new(DevelopmentFileStore),
     )
     .unwrap();
+    // A broker serves one organization; revocations name it.
+    b.set_organization("hospital").unwrap();
     let mut p = AttestationPolicy::new(SPEC, Some(POLICY));
     p.allowed_tee = vec![TeeKind::Mock];
     p.allowed_images = vec![IMAGE.into()];
@@ -80,7 +82,7 @@ fn start_from(state: PathBuf, limits: Limits) -> SocketAddr {
     let b = KeyBroker::load(&state, verifier, Box::new(DevelopmentFileStore)).unwrap();
     let server = Server::http("127.0.0.1:0").unwrap().with_limits(limits);
     let addr = server.server_addr();
-    let ch = ControlChannel::new(ME, "control-plane", &control().public_key_hex());
+    let ch = ControlChannel::new(ME, "control-plane", &control().public_key_hex(), "hospital");
     std::thread::spawn(move || {
         let b = Mutex::new(b);
         serve_with_control(&b, server, 10_000, Some(&ch), &|b| b.save(&state))
@@ -154,7 +156,10 @@ fn revocation(by: &ServiceSigner, to: &str) -> MessageEnvelope {
         by,
         "asset.revoked",
         to,
-        Scope::default(),
+        Scope {
+            organization: Some("hospital".into()),
+            ..Scope::default()
+        },
         &json!({"asset": "ast_1", "key_ref": "patients", "key_version": 1}),
         3600,
     )

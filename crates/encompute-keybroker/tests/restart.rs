@@ -63,6 +63,8 @@ fn new_state(path: &Path) {
         Box::new(DevelopmentFileStore),
     )
     .unwrap();
+    // A broker serves one organization; revocations name it.
+    b.set_organization("hospital").unwrap();
     let mut p = AttestationPolicy::new(SPEC, Some(POLICY));
     p.allowed_tee = vec![TeeKind::Mock];
     p.allowed_images = vec![IMAGE.into()];
@@ -80,7 +82,7 @@ fn start(path: &Path, fail_persist: &'static AtomicBool) -> BrokerClient {
     let url = format!("http://{}", server.server_addr());
     let path = path.to_owned();
     std::thread::spawn(move || {
-        let ch = ControlChannel::new(ME, "control-plane", &control().public_key_hex());
+        let ch = ControlChannel::new(ME, "control-plane", &control().public_key_hex(), "hospital");
         let b = Mutex::new(b);
         serve_with_control(&b, server, 10_000, Some(&ch), &|b| {
             if fail_persist.swap(false, Ordering::SeqCst) {
@@ -147,7 +149,10 @@ fn an_unpersisted_revocation_is_not_acknowledged_and_is_applied_on_redelivery() 
         &cp,
         "asset.revoked",
         ME,
-        Scope::default(),
+        Scope {
+            organization: Some("hospital".into()),
+            ..Scope::default()
+        },
         &json!({"asset": "ast_1", "key_ref": "patients", "key_version": 1}),
         3600,
     )

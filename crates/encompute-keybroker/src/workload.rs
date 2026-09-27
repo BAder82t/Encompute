@@ -36,6 +36,7 @@ pub fn acquire_keys(
     requests: &[(BrokerClient, String)],
 ) -> Result<Vec<AcquiredKey>> {
     let mut out = Vec::new();
+    let mut warned = std::collections::BTreeSet::new();
     // Broker URL -> (its session, the evidence that opened it).
     let mut sessions: std::collections::BTreeMap<String, (String, AttestationRecord)> =
         std::collections::BTreeMap::new();
@@ -59,6 +60,30 @@ pub fn acquire_keys(
         }
         let (broker_session, record) = &sessions[broker.url()];
         let grant = broker.release(broker_session, asset_id)?;
+        // The grant is signed (checked when it is opened); only a pinned
+        // key says the signer is the intended broker.
+        match broker.pinned_key() {
+            Some(k) if grant.header.broker_public_key != k => {
+                return Err(Error::new(
+                    Code::KeyRelease,
+                    format!(
+                        "the key grant from {} is not signed by the pinned broker key",
+                        broker.url()
+                    ),
+                ));
+            }
+            Some(_) => {}
+            None if !warned.contains(broker.url()) => {
+                warned.insert(broker.url().to_owned());
+                eprintln!(
+                    "warning: broker {} is not pinned: a grant is checked only against the key it names \
+                     (pin it with URL#{})",
+                    broker.url(),
+                    grant.header.broker_public_key
+                );
+            }
+            None => {}
+        }
         if &grant.header.asset_id != asset_id || grant.header.execution_spec_id != execution_spec_id
         {
             return Err(Error::new(

@@ -1,5 +1,6 @@
 use std::fmt;
 
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hpke::aead::ChaCha20Poly1305;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
@@ -14,7 +15,43 @@ use encompute_verification::EvaluatorIdentity;
 use crate::binding::{AttestationChallenge, WorkloadBinding, BINDING_VERSION};
 use crate::util::{check_hex, err, hex, tagged, GRANT_INFO, SESSION};
 
-pub const GRANT_VERSION: u32 = 1;
+/// Version 2: grants are signed by the broker (version 1 grants were not,
+/// and are refused).
+pub const GRANT_VERSION: u32 = 2;
+
+/// Domain of the broker's signature over a grant.
+const GRANT_SIGNATURE: &str = "encompute.key-grant-signature.v2";
+
+/// The broker's grant-signing key (Ed25519). HPKE base mode does not
+/// authenticate the sender: without this signature anyone on the path
+/// could seal a key of their choosing to the session.
+pub struct GrantSigner(SigningKey);
+
+impl GrantSigner {
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        Self(SigningKey::from_bytes(seed))
+    }
+
+    pub fn generate() -> Result<Self> {
+        let seed = Zeroizing::new(crate::util::random32(Code::KeyRelease)?);
+        Ok(Self::from_seed(&seed))
+    }
+
+    pub fn seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.0.to_bytes())
+    }
+
+    /// Hex Ed25519 public key: what workloads pin.
+    pub fn public_key_hex(&self) -> String {
+        hex(self.0.verifying_key().as_bytes())
+    }
+}
+
+impl fmt::Debug for GrantSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GrantSigner({})", self.public_key_hex())
+    }
+}
 
 type SessionKem = X25519HkdfSha256;
 
@@ -37,11 +74,14 @@ pub struct GrantHeader {
     /// Digest of the attestation evidence.
     pub attestation_digest: String,
     pub expires_at: u64,
+    /// Hex Ed25519 key of the broker that signed the grant.
+    #[serde(default)]
+    pub broker_public_key: String,
 }
 
 /// An asset key sealed (HPKE base mode, X25519-HKDF-SHA256,
-/// ChaCha20-Poly1305) to an attested session key. Carries no key material
-/// in the clear.
+/// ChaCha20-Poly1305) to an attested session key, and signed by the
+/// broker. Carries no key material in the clear.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncryptedKeyGrant {
@@ -50,14 +90,63 @@ pub struct EncryptedKeyGrant {
     pub encapsulated_key: String,
     /// Sealed asset key, hex.
     pub ciphertext: String,
+    /// The broker's Ed25519 signature (hex) over the header, encapsulated
+    /// key and ciphertext.
+    #[serde(default)]
+    pub signature: String,
 }
 
-/// Seals `key` to the session key in `binding` (the broker side).
+#[derive(Serialize)]
+struct SignedGrant<'a> {
+    header: &'a GrantHeader,
+    encapsulated_key: &'a str,
+    ciphertext: &'a str,
+}
+
+impl EncryptedKeyGrant {
+    fn signed_digest(&self) -> Result<crate::util::Digest32> {
+        let statement = SignedGrant {
+            header: &self.header,
+            encapsulated_key: &self.encapsulated_key,
+            ciphertext: &self.ciphertext,
+        };
+        Ok(tagged(GRANT_SIGNATURE, &canonical_json(&statement)?))
+    }
+
+    /// Checks the version and the signature by the broker key the header
+    /// names. Whether that key is the expected broker's is the caller's
+    /// check (a pinned key).
+    pub fn verify_signature(&self) -> Result<()> {
+        let c = Code::KeyRelease;
+        if self.header.version != GRANT_VERSION {
+            return Err(err(
+                c,
+                format!(
+                    "key grant version {}: only signed grants (version {GRANT_VERSION}) are accepted; upgrade the key broker",
+                    self.header.version
+                ),
+            ));
+        }
+        let pk: [u8; 32] = check_hex(c, "broker key", &self.header.broker_public_key, 32)?
+            .try_into()
+            .expect("32 bytes");
+        let pk = VerifyingKey::from_bytes(&pk).map_err(|_| err(c, "malformed broker key"))?;
+        let sig = check_hex(c, "grant signature", &self.signature, 64)?;
+        let sig = Signature::from_slice(&sig).map_err(|_| err(c, "malformed grant signature"))?;
+        pk.verify_strict(&self.signed_digest()?, &sig)
+            .map_err(|_| err(c, "the key grant's broker signature is invalid"))
+    }
+}
+
+/// Seals `key` to the session key in `binding` and signs the grant (the
+/// broker side).
 pub fn seal_grant(
-    header: GrantHeader,
+    mut header: GrantHeader,
     binding: &WorkloadBinding,
     key: &[u8],
+    signer: &GrantSigner,
 ) -> Result<EncryptedKeyGrant> {
+    header.broker_public_key = signer.public_key_hex();
     let pk_bytes = check_hex(
         Code::KeyRelease,
         "session key",
@@ -75,11 +164,14 @@ pub fn seal_grant(
         &aad,
     )
     .map_err(|e| err(Code::KeyRelease, format!("sealing the key grant: {e}")))?;
-    Ok(EncryptedKeyGrant {
+    let mut g = EncryptedKeyGrant {
         header,
         encapsulated_key: hex(&enc.to_bytes()),
         ciphertext: hex(&ct),
-    })
+        signature: String::new(),
+    };
+    g.signature = hex(&signer.0.sign(&g.signed_digest()?).to_bytes());
+    Ok(g)
 }
 
 /// A workload session: the evaluator's identity plus an ephemeral HPKE key
@@ -151,8 +243,10 @@ impl WorkloadSession {
         }
     }
 
-    /// Opens a grant sealed to this session.
+    /// Opens a grant sealed to this session, after checking its broker
+    /// signature ([`EncryptedKeyGrant::verify_signature`]).
     pub fn open(&self, grant: &EncryptedKeyGrant) -> Result<Zeroizing<Vec<u8>>> {
+        grant.verify_signature()?;
         if grant.header.session_id != self.session_id() {
             return Err(err(
                 Code::KeyRelease,

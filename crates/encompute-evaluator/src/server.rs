@@ -3,9 +3,9 @@
 //! | Method | Path | Body → Response |
 //! |---|---|---|
 //! | GET  | /v1/info | → protocol, versions, loaded programs |
-//! | POST | /v1/programs | `.eir` text → `{program_id}` |
+//! | POST | /v1/programs | `.eir` text → `{program_id}` (job grant with a control plane) |
 //! | GET  | /v1/programs/{p}/keys/{k} | → 200 if registered, else 404 |
-//! | POST | /v1/programs/{p}/keys | evaluation-keys envelope → `{key_id}` |
+//! | POST | /v1/programs/{p}/keys | evaluation-keys envelope → `{key_id}` (job grant with a control plane) |
 //! | POST | /v1/programs/{p}/jobs | inputs envelope → `{job_id, timings, receipt}` |
 //! | GET  | /v1/jobs/{j}/result | → outputs envelope |
 //! | GET  | /v1/jobs/{j}/receipt | → signed execution receipt (canonical JSON) |
@@ -16,6 +16,16 @@
 //! binding the execution spec, key, and the exact request and response
 //! bytes. A receipt is a signed claim, not a proof of correct execution.
 //!
+//! With a control plane ([`Evaluator::with_control`]), program and key
+//! uploads carry the job's grant (`Encompute-Job-Grant`), as jobs do;
+//! without one (local development) they need none. Job IDs are 128-bit
+//! random: a result is fetched by its unguessable ID.
+//!
+//! Upload limits (bytes, environment, read by [`Limits::from_env`]):
+//! `ENCOMPUTE_MAX_PROGRAM_BYTES` (default 64 MiB), `ENCOMPUTE_MAX_KEY_BYTES`
+//! (default 4 GiB: bootstrapping keys are large; lower it where they are
+//! not), `ENCOMPUTE_MAX_INPUT_BYTES` (default 256 MiB).
+//!
 //! Errors are `{"code": "ENC…", "message": …}`. Logs never contain payloads.
 //! No TLS: terminate TLS at a reverse proxy.
 
@@ -25,7 +35,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use encompute_ir::{Code, Error, Result};
-use encompute_protocol::sha256_hex;
 use serde_json::json;
 
 use encompute_attestation::AttestationRecord;
@@ -66,6 +75,26 @@ impl Default for Limits {
             kept_results: 64,
             http_threads: 8,
         }
+    }
+}
+
+impl Limits {
+    /// The defaults, with the upload limits from `ENCOMPUTE_MAX_PROGRAM_BYTES`,
+    /// `ENCOMPUTE_MAX_KEY_BYTES` and `ENCOMPUTE_MAX_INPUT_BYTES`.
+    pub fn from_env() -> Result<Self> {
+        let mut l = Self::default();
+        for (var, field) in [
+            ("ENCOMPUTE_MAX_PROGRAM_BYTES", &mut l.max_program),
+            ("ENCOMPUTE_MAX_KEY_BYTES", &mut l.max_keys),
+            ("ENCOMPUTE_MAX_INPUT_BYTES", &mut l.max_inputs),
+        ] {
+            if let Ok(v) = std::env::var(var) {
+                *field = v.trim().parse().map_err(|_| {
+                    Error::new(Code::BadInput, format!("{var} is a byte count, not {v:?}"))
+                })?;
+            }
+        }
+        Ok(l)
     }
 }
 
@@ -321,10 +350,7 @@ impl Evaluator {
                 }),
                 None => return not_found("attestation"),
             },
-            (Method::Post, ["v1", "programs"]) => std::str::from_utf8(body)
-                .map_err(|_| Error::new(Code::Parse, "program must be UTF-8 .eir text"))
-                .and_then(|t| self.engine.add_program(t))
-                .map(|i| ok_json(json!({ "program_id": i.program_id }))),
+            (Method::Post, ["v1", "programs"]) => self.add_uploaded_program(body, grant),
             (Method::Get, ["v1", "programs", pid, "keys", kid]) => {
                 match self.engine.has_key(pid, kid) {
                     Ok(true) => Ok(ok_json(json!({ "key_id": kid }))),
@@ -333,8 +359,8 @@ impl Evaluator {
                 }
             }
             (Method::Post, ["v1", "programs", pid, "keys"]) => self
-                .engine
-                .register_keys(pid, body)
+                .authorize_upload(grant, Some(pid))
+                .and_then(|_| self.engine.register_keys(pid, body))
                 .map(|k| ok_json(json!({ "key_id": k }))),
             (Method::Post, ["v1", "programs", pid, "jobs"]) => self.job(pid, body, grant),
             (Method::Get, ["v1", "jobs", jid, what @ ("result" | "receipt" | "proof")]) => {
@@ -363,6 +389,27 @@ impl Evaluator {
             _ => return not_found("route"),
         };
         r.unwrap_or_else(|e| error_reply(&e))
+    }
+
+    /// With a control plane, an upload needs a grant for this evaluator.
+    fn authorize_upload(&self, grant: Option<&str>, program_id: Option<&str>) -> Result<()> {
+        match &self.control {
+            Some(c) => c.authorize_upload(grant, program_id).map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
+    fn add_uploaded_program(&self, body: &[u8], grant: Option<&str>) -> Result<Reply> {
+        // The program ID is known only once compiled: the grant is checked
+        // first, then must name the program compiled.
+        self.authorize_upload(grant, None)?;
+        let text = std::str::from_utf8(body)
+            .map_err(|_| Error::new(Code::Parse, "program must be UTF-8 .eir text"))?;
+        let i = self.engine.add_program(text)?;
+        if let Some(c) = &self.control {
+            c.authorize_upload(grant, Some(&i.program_id))?;
+        }
+        Ok(ok_json(json!({ "program_id": i.program_id })))
     }
 
     /// Execute, then sign a receipt over the exact request and response.
@@ -418,9 +465,12 @@ impl Evaluator {
             let ms = times.evaluate as u64;
             c.completed(g, &receipt_json, ms);
         }
-        let n = self.jobs.fetch_add(1, Ordering::Relaxed);
-        let tail = &out[out.len().saturating_sub(32)..];
-        let job = sha256_hex(&[&n.to_le_bytes()[..], tail].concat())[..32].to_owned();
+        self.jobs.fetch_add(1, Ordering::Relaxed);
+        // 128 random bits: whoever has the ID can fetch the result.
+        let mut r = [0u8; 16];
+        getrandom::getrandom(&mut r)
+            .map_err(|e| Error::new(Code::Remote, format!("no randomness: {e}")))?;
+        let job = encompute_verification::hex(&r);
         let mut results = self.results.lock().unwrap_or_else(|p| p.into_inner());
         results.push_back((job.clone(), out, receipt.to_bytes()?, proof_bytes));
         while results.len() > self.limits.kept_results {

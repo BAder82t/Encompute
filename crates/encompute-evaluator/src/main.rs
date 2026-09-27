@@ -190,7 +190,14 @@ fn serve(
     };
     let evaluator_id = signer.identity().evaluator_id();
     let receipt_key = signer.identity().public_key_hex();
-    let mut ev = Evaluator::with_engine(engine, Limits::default(), workers, signer);
+    let limits = match Limits::from_env() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut ev = Evaluator::with_engine(engine, limits, workers, signer);
     if let Some(path) = attestation {
         let record = std::fs::read(path)
             .map_err(|e| format!("{path}: {e}"))

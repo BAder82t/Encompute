@@ -104,6 +104,9 @@ pub struct ControlChannel {
     pub me: String,
     pub control_id: String,
     pub control_key: String,
+    /// The one organization this broker serves: revocations for any other
+    /// organization are refused.
+    pub organization: String,
     /// Nonces seen, with their timestamps; pruned past the skew window
     /// (older requests are refused by their timestamp anyway).
     seen: Mutex<std::collections::HashMap<String, u64>>,
@@ -113,11 +116,12 @@ pub struct ControlChannel {
 }
 
 impl ControlChannel {
-    pub fn new(me: &str, control_id: &str, control_key: &str) -> Self {
+    pub fn new(me: &str, control_id: &str, control_key: &str, organization: &str) -> Self {
         Self {
             me: me.into(),
             control_id: control_id.into(),
             control_key: control_key.into(),
+            organization: organization.into(),
             seen: Mutex::new(Default::default()),
             reporter: None,
         }
@@ -220,9 +224,21 @@ impl ControlChannel {
                 let asset = m.payload["key_ref"]
                     .as_str()
                     .ok_or_else(|| Error::new(Code::BadInput, "asset.revoked names no key"))?;
-                let revoked = match b.revoke_all(asset) {
+                // The organization is in the signed envelope: a revocation
+                // for another organization's asset never destroys this
+                // organization's keys, whatever key_ref it names.
+                if m.organization.as_deref() != Some(self.organization.as_str()) {
+                    return Err(Error::new(
+                        Code::ServiceAuthentication,
+                        format!(
+                            "asset.revoked is for organization {:?}; this broker serves {:?}",
+                            m.organization, self.organization
+                        ),
+                    ));
+                }
+                let revoked = match b.revoke_for(&self.organization, asset) {
                     Ok(v) => v,
-                    // Not held here: nothing to release, nothing to revoke.
+                    // Not held here for this organization: nothing to revoke.
                     Err(e) if e.code == Code::KeyRelease => vec![],
                     Err(e) => return Err(e),
                 };

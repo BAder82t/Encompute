@@ -13,6 +13,8 @@ use crate::SessionInfo;
 pub struct BrokerClient {
     url: String,
     agent: ureq::Agent,
+    /// The broker's grant-signing key (hex), if pinned.
+    pinned_key: Option<String>,
 }
 
 impl BrokerClient {
@@ -22,11 +24,41 @@ impl BrokerClient {
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(30))
                 .build(),
+            pinned_key: None,
         }
+    }
+
+    /// `URL` or `URL#KEY`: KEY pins the broker's grant-signing key (hex
+    /// Ed25519, as `keys serve` prints it).
+    pub fn parse(spec: &str) -> Result<Self> {
+        match spec.split_once('#') {
+            None => Ok(Self::new(spec)),
+            Some((url, key)) => Self::new(url).with_pinned_key(key),
+        }
+    }
+
+    /// Accepts grants only signed by `key` (hex Ed25519).
+    pub fn with_pinned_key(mut self, key: &str) -> Result<Self> {
+        let ok = key.len() == 64
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !ok {
+            return Err(Error::new(
+                Code::BadInput,
+                format!("broker key {key:?} is not 64 lowercase hex characters"),
+            ));
+        }
+        self.pinned_key = Some(key.to_owned());
+        Ok(self)
     }
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    pub fn pinned_key(&self) -> Option<&str> {
+        self.pinned_key.as_deref()
     }
 
     fn post<T: DeserializeOwned>(&self, path: &str, body: &[u8]) -> Result<T> {

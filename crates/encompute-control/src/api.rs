@@ -200,7 +200,8 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
                 authorization: authorization.as_deref(),
                 service,
                 method: &r.method,
-                path,
+                // The whole target: the query is signed too.
+                path: &r.url,
                 body: &r.body,
             },
         )

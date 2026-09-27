@@ -8,9 +8,11 @@
 //!   recipient, organization, project, job and round where relevant;
 //! - it expires;
 //! - its payload is bound by digest;
-//! - consumers apply each message ID once (the `inbox` table, in the same
-//!   transaction as the message's effect), so a duplicate never counts
-//!   twice.
+//! - consumers apply each message ID once (the `inbox` row is inserted
+//!   first, in the same transaction as the message's effect: a concurrent
+//!   duplicate waits on it, then finds it), so a duplicate never counts
+//!   twice. Privacy events are applied once by their event ID, under the
+//!   ledger row's lock.
 //!
 //! Large immutable data (ciphertexts, evaluation keys, models) never travels
 //! in messages: a payload names an artifact URI and its digest.
