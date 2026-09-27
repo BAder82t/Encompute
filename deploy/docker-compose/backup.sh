@@ -15,7 +15,9 @@ cd "$(dirname "$0")"
 DIR="${1:?usage: backup.sh DIR}"
 mkdir -p "$DIR"; chmod 700 "$DIR"
 docker compose exec -T postgres pg_dump -U encompute --clean --if-exists encompute > "$DIR/db.sql"
-vol() { docker run --rm -v "encompute_$1:/v:ro" -v "$(cd "$DIR" && pwd):/b" alpine tar -C /v -cf "/b/$1.tar" .; }
+# Streamed to the host, so the files belong to the operator, not to the
+# container's root (which the chmod below could not change on Linux).
+vol() { docker run --rm -v "encompute_$1:/v:ro" alpine tar -C /v -cf - . > "$DIR/$1.tar"; }
 vol anchor; vol broker; vol evaluator
 chmod 600 "$DIR"/*
 ( cd "$DIR" && shasum -a 256 db.sql anchor.tar broker.tar evaluator.tar > SHA256SUMS )
