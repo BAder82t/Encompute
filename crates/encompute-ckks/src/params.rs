@@ -109,7 +109,7 @@ pub fn select_params(depth: u32, max_abs: f64, precision: f64, slots: usize) -> 
             format!(
                 "depth {depth} needs log2(QP) ≈ {log_qp} bits with {slots} slots; the largest \
                  128-bit parameter set (N = 65536) allows 1747. Reduce the depth (lower-degree \
-                 approximations, fewer chained multiplications) — bootstrapping arrives in 0.2"
+                 approximations, fewer chained multiplications); CKKS bootstrapping is not supported"
             ),
         ));
     };

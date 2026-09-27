@@ -11,8 +11,10 @@
 namespace encompute_openfhe {
 
 // OpenFHE v1.5.1 is not safe to call from several threads at once, even on
-// separate contexts (ADR-001). Every OpenFHE call, including destruction of
-// OpenFHE objects, holds this lock. It is not recursive.
+// separate contexts. Every OpenFHE call, including destruction of OpenFHE
+// objects, holds this lock, with one exception: bin_gate_concurrent
+// evaluates BinFHE gates without it, reading only immutable, loaded keys
+// (see binfhe.cc). It is not recursive.
 std::mutex& openfhe_mutex();
 
 // CKKS context for Encompute's parameters (FLEXIBLEAUTO, HYBRID, ternary,
