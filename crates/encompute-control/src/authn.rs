@@ -151,6 +151,7 @@ pub struct Credentials<'a> {
     pub authorization: Option<&'a str>,
     pub service: Option<ServiceHeaders>,
     pub method: &'a str,
+    /// The request target, query included (signed service requests bind it).
     pub path: &'a str,
     pub body: &'a [u8],
 }

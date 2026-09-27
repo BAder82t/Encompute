@@ -8,7 +8,7 @@
 //! signatures stay valid through proxies and message brokers, which are not
 //! trusted for confidentiality or correctness.
 //!
-//! A signed request binds: the method and path, the sender and recipient
+//! A signed request binds: the method, path and query, the sender and recipient
 //! service IDs, a timestamp, a random nonce (the recipient refuses a nonce
 //! twice), the SHA-256 of the body, and the security-relevant IDs the
 //! request is about (organization, project, plan, job...).
@@ -61,6 +61,23 @@ pub fn check_service_id(id: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The request target as signed: the path, then `?` and the query's
+/// `&`-separated parameters in byte order (empty ones dropped), exactly as
+/// sent otherwise. Without a query, the path alone.
+pub fn canonical_target(target: &str) -> String {
+    match target.split_once('?') {
+        None => target.to_owned(),
+        Some((path, query)) => {
+            let mut params: Vec<&str> = query.split('&').filter(|p| !p.is_empty()).collect();
+            if params.is_empty() {
+                return path.to_owned();
+            }
+            params.sort_unstable();
+            format!("{path}?{}", params.join("&"))
+        }
+    }
 }
 
 /// A service's signing key and ID.
@@ -122,7 +139,8 @@ impl ServiceSigner {
         Ok(hex(&self.key.sign(&d).to_bytes()))
     }
 
-    /// Headers for a signed request to `recipient`.
+    /// Headers for a signed request to `recipient`. `path` is the request
+    /// target, query included: the query is signed.
     pub fn sign_request(
         &self,
         method: &str,
@@ -196,7 +214,8 @@ pub struct ServiceHeaders {
 #[derive(Serialize)]
 struct RequestStatement<'a> {
     method: &'a str,
-    path: &'a str,
+    /// [`canonical_target`] of the request target.
+    path: String,
     sender: &'a str,
     recipient: &'a str,
     timestamp: u64,
@@ -221,7 +240,7 @@ impl ServiceHeaders {
     ) -> RequestStatement<'a> {
         RequestStatement {
             method,
-            path,
+            path: canonical_target(path),
             sender: &self.sender,
             recipient: &self.recipient,
             timestamp: self.timestamp,
@@ -270,7 +289,8 @@ impl ServiceHeaders {
         }))
     }
 
-    /// Checks the signature by `public_key`, that this service is the
+    /// Checks the signature by `public_key` over `method`, the request
+    /// target `path` (query included) and `body`, that this service is the
     /// recipient, and the timestamp. The caller must also refuse a nonce it
     /// has seen (within the skew window).
     pub fn verify(
@@ -610,6 +630,36 @@ mod tests {
         bad(&h, "POST", "/v1/messages", b"{ }", "control-plane", t);
         bad(&h, "POST", "/v1/messages", b"{}", "keybroker-a", t);
         bad(&h, "POST", "/v1/messages", b"{}", "control-plane", t + 301);
+        bad(&h, "POST", "/v1/messages?x=1", b"{}", "control-plane", t);
+        // The query is signed (parameters in any order).
+        let q = s
+            .sign_request(
+                "GET",
+                "/v1/audit?limit=10&after=5",
+                "control-plane",
+                &bind,
+                b"",
+            )
+            .unwrap();
+        q.verify(
+            &pk,
+            "GET",
+            "/v1/audit?after=5&limit=10",
+            b"",
+            "control-plane",
+            t,
+        )
+        .unwrap();
+        bad(
+            &q,
+            "GET",
+            "/v1/audit?limit=1000&after=5",
+            b"",
+            "control-plane",
+            t,
+        );
+        bad(&q, "GET", "/v1/audit?limit=10", b"", "control-plane", t);
+        bad(&q, "GET", "/v1/audit", b"", "control-plane", t);
         let mut other = h.clone();
         other.bind.insert("job".into(), "job_2".into());
         bad(&other, "POST", "/v1/messages", b"{}", "control-plane", t);
