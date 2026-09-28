@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### After 0.3.0-rc.3
+
+- **Fine-tuning resume after a coordinator crash.** Every aggregation
+  attempt gets a new, strictly increasing SecAgg sequence, recorded with its
+  training round before the coordinator starts; a resumed round no longer
+  reuses a sequence the parties already joined (refused as a replay).
+- **Security response targets:** critical issues get a 7-day mitigation
+  target, high issues 30 days.
+- **Python 3.11 or later** is required. CI runs the whole SDK suite on 3.11.
+
 ### Release candidate hardening
 
 - **Security fixes** (findings ENC-SF-2026-001 to 031 in

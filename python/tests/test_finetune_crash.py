@@ -57,6 +57,9 @@ POINTS = [
     ("after-local-training", False),      # a hospital worker dies before contributing
     ("after-contribution", False),        # ... after contributing
     ("kill-coordinator", False),          # the aggregation coordinator is killed mid-round
+    # ... killed after every party joined the round: the resumed round must
+    # use a new SecAgg sequence (the parties refuse a joined one as a replay).
+    ("kill-coordinator-after-join", False),
     ("after-aggregate-release", False),   # the orchestrator dies after the DP release
     ("after-adapter-write", False),       # ... after sealing the provisional adapter
     ("before-checkpoint-write", False),
