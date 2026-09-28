@@ -133,6 +133,15 @@ labels_t = {
 for k, v in result.timings.items():
     print(f"  {labels_t.get(k, k):<58}{v:.2f}")
 result.close()
-ok = result.satisfied and after > before + 0.1 and diff < 1e-4
+checks = {
+    "trust report satisfied": result.satisfied,
+    f"accuracy gain above 0.1 ({before:.3f} -> {after:.3f})": after > before + 0.1,
+    f"PEFT logits within 1e-4 ({diff:.1e})": diff < 1e-4,
+}
+ok = all(checks.values())
+# Printed last, so a truncated log still shows which check failed.
+for name, passed in checks.items():
+    if not passed:
+        print(f"CHECK FAILED: {name}")
 print("\nRESULT\n" + ("CONFIDENTIAL HUGGING FACE FINE-TUNING VERIFIED" if ok else "FAILED"))
 sys.exit(0 if ok else 1)
