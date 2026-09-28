@@ -15,10 +15,10 @@ release; each one takes a few seconds.
 
 You need `sha256sum` (or `shasum` on macOS), [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
 2.4 or later, and the [GitHub CLI](https://cli.github.com/) 2.49 or later.
-The examples use `v0.3.0-rc.2`; replace it with the release you verify.
+The examples use `v0.3.0-rc.3`; replace it with the release you verify.
 
 ```sh
-TAG=v0.3.0-rc.2
+TAG=v0.3.0-rc.3
 V=${TAG#v}
 REPO=BAder82t/Encompute
 # The only identity allowed to sign a release: the release workflow, on a tag.

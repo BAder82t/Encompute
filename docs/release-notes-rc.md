@@ -1,4 +1,4 @@
-# Encompute 0.3.0-rc.2: release notes (draft)
+# Encompute 0.3.0-rc.3: release notes (draft)
 
 **Status: draft.** This is the first release candidate of 0.3.0: the frozen
 target for independent security review ([security-review/](../security-review/)).

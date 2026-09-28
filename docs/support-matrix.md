@@ -1,7 +1,7 @@
 # Support matrix
 
 This is the one authoritative list of what Encompute supports, for release
-0.3.0 (release candidate `0.3.0-rc.2`). The README's status table is a
+0.3.0 (release candidate `0.3.0-rc.3`). The README's status table is a
 summary of this page. If they disagree, this page wins, and the README is a
 bug.
 

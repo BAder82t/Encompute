@@ -1,9 +1,17 @@
 # Changelog
 
-## 0.3.0-rc.2 — 2026-09-28
+## 0.3.0-rc.3 — 2026-09-28
 
-The first published release candidate. 0.3.0-rc.1 was tagged but never
-released: its release workflow failed before signing (below).
+The first published release candidate. 0.3.0-rc.1 and 0.3.0-rc.2 were
+tagged but never released: their release workflows failed before signing
+(fixes below and under rc.2).
+
+- **Tests:** restoring a control-plane test database closes its sessions
+  and drops it in one step (`DROP ... WITH (FORCE)`); a reconnecting pool
+  could make the restore fail.
+- **Example 17** names the check that failed as its last output lines.
+
+## 0.3.0-rc.2 — 2026-09-28 (tagged, not released)
 
 - **Release check:** the backup drill runs with the release-check Python
   environment; on the release runner the system `python3` lacked
