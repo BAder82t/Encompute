@@ -91,13 +91,25 @@ pub fn backup_database(url: &str, backup: &str) {
 pub fn restore_database(backup: &str, url: &str) {
     let mut c = postgres::Client::connect(&admin_url(), postgres::NoTls).unwrap();
     let live = db_name(url);
-    c.batch_execute(&format!(
-        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{live}'"
-    ))
-    .unwrap();
-    c.batch_execute(&format!("DROP DATABASE {live}")).unwrap();
-    c.batch_execute(&format!("CREATE DATABASE {live} TEMPLATE {backup}"))
+    // FORCE terminates the remaining sessions atomically (a pool connection
+    // can reconnect between a separate terminate and the drop).
+    c.batch_execute(&format!("DROP DATABASE IF EXISTS {live} WITH (FORCE)"))
         .unwrap();
+    // The template must have no sessions either; retry as for backups.
+    for _ in 0..50 {
+        c.batch_execute(&format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{backup}'"
+        ))
+        .unwrap();
+        match c.batch_execute(&format!("CREATE DATABASE {live} TEMPLATE {backup}")) {
+            Ok(()) => return,
+            Err(e) if e.code() == Some(&postgres::error::SqlState::OBJECT_IN_USE) => {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            }
+            Err(e) => panic!("restoring {backup}: {e}"),
+        }
+    }
+    panic!("the backup database stayed in use");
 }
 
 pub fn tmp_dir(tag: &str) -> PathBuf {
