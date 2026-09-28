@@ -40,9 +40,11 @@ revealing what each needs to keep private: confidentiality policies are
 enforced by attested key release, secure aggregation and differential
 privacy, and every step leaves verifiable evidence.
 
-**Status: preparing release candidate 0.3.0-rc.1, the frozen target for
-independent security review; no review has been completed yet** (last
-release: v0.2.0). What you can rely on is in the
+**Status: release candidate
+[0.3.0-rc.3](https://github.com/BAder82t/Encompute/releases/tag/v0.3.0-rc.3)
+is published (a pre-release, the frozen target for independent security
+review; no review has been completed yet). The last stable release is
+v0.2.0. This branch is development; the candidate is on `release/0.3`.** What you can rely on is in the
 [support matrix](docs/support-matrix.md); what Encompute does not do is in
 [known limitations](KNOWN_LIMITATIONS.md). See also the
 [release notes](docs/release-notes-rc.md), [changelog](CHANGELOG.md),
