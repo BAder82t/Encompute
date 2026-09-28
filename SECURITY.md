@@ -37,8 +37,12 @@ Please include:
 |---|---|
 | Acknowledgement | within 3 business days |
 | First assessment (valid or not, severity) | within 10 business days |
-| Fix or mitigation for a confirmed critical or high issue | within 30 days |
+| Mitigation for a confirmed critical issue | within 7 days; the final fix as soon as practical |
+| Fix or mitigation for a confirmed high issue | within 30 days |
 | Fix for a confirmed medium or low issue | in a following release |
+
+These are targets for a solo-maintained project, not contractual service
+levels.
 
 We keep you informed until the issue is closed. Tell us if you want credit
 in the release notes.
