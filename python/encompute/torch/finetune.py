@@ -148,10 +148,31 @@ def code_digest(factory: str) -> str:
 # --- run state ----------------------------------------------------------------
 
 
+def _attempts(mc: Path) -> dict:
+    """The aggregation attempts of this run: every coordinator start gets a
+    new, strictly increasing SecAgg sequence (parties refuse a sequence they
+    already joined, as a replay), recorded with its training round before
+    the coordinator starts. Runs from before this record use sequence =
+    round."""
+    f = mc / "attempts.json"
+    return json.loads(f.read_text()) if f.exists() else {"last_sequence": 0, "rounds": {}}
+
+
+def _start_attempt(mc: Path, r: int) -> int:
+    """Durably allocates the SecAgg sequence for an attempt at round `r`."""
+    a = _attempts(mc)
+    seq = max(a["last_sequence"], r - 1) + 1
+    a["last_sequence"] = seq
+    a["rounds"][str(seq)] = r
+    _write_atomic(mc / "attempts.json", json.dumps(a, sort_keys=True).encode())
+    return seq
+
+
 def _bundle_state(mc: Path, spec_id: str) -> Tuple[Dict[int, dict], Dict[int, str]]:
     """Accepted adapters by round (their signed records), and every released
-    round's aggregation round ID by sequence, from the trust bundle."""
+    round's aggregation round ID by training round, from the trust bundle."""
     b = json.loads((mc / "trust.json").read_text())
+    seq_round = {int(k): v for k, v in _attempts(mc)["rounds"].items()}
     accepted, released = {}, {}
     for key, node in b["nodes"].items():
         ev = node.get("evidence") or {}
@@ -161,7 +182,8 @@ def _bundle_state(mc: Path, spec_id: str) -> Tuple[Dict[int, dict], Dict[int, st
                 accepted[rec["round"]] = rec
         if key.startswith("round:") and ev.get("type") == "aggregation_receipt":
             m = ev["value"]["manifest"]
-            released[m["round"]["sequence"]] = m["round_id"]
+            seq = m["round"]["sequence"]
+            released[seq_round.get(seq, seq)] = m["round_id"]
     return accepted, released
 
 
@@ -936,9 +958,11 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
         while done < cfg.rounds:
             t = time.perf_counter()
             port = _port()
+            seq = _start_attempt(mc, r)
             serve = [cli, "aggregate", "serve", "training.encompute", "--parties", parties,
                      "--plan", "plan.json", "--key", "coord.key", "--listen",
-                     f"127.0.0.1:{port}", "--stage-timeout", "30", "--sequence", str(r),
+                     f"127.0.0.1:{port}", "--stage-timeout", "30",
+                     "--sequence", str(seq),
                      "--ledger", "ledgers", "--out", f"update-{r}.json",
                      "--receipt", f"receipt-{r}.json", "--trust-bundle", "trust.json"]
             if st["attested_coord"]:
@@ -961,8 +985,19 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                                           "seed": cfg.seed * 1000 + r * 10 + i,
                                           "coordinator": f"http://127.0.0.1:{port}"}) + "\n")
                 p.stdin.flush()
-            if os.environ.get("ENCOMPUTE_TRAINING_FAILPOINT") == "kill-coordinator":
+            fp = os.environ.get("ENCOMPUTE_TRAINING_FAILPOINT")
+            if fp == "kill-coordinator":
                 time.sleep(0.3)
+                cp.send_signal(signal.SIGKILL)
+            elif fp == "kill-coordinator-after-join":
+                # Deterministically after every party recorded this round's
+                # sequence as joined: a resume must not reuse it.
+                states = [W / d["owner"] / "round.state" for d, _ in workers]
+                deadline = time.time() + 60
+                while time.time() < deadline and not all(
+                        f.exists() and f'"sequence":{seq}' in f.read_text().replace(" ", "")
+                        for f in states):
+                    time.sleep(0.05)
                 cp.send_signal(signal.SIGKILL)
             replies = []
             for d, p in workers:

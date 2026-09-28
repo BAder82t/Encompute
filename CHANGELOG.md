@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased (0.3.0-rc.4)
+
+- **Fine-tuning resume after a coordinator crash.** Every aggregation
+  attempt now gets a new, strictly increasing SecAgg sequence, recorded
+  with its training round before the coordinator starts. Resuming after a
+  coordinator was killed once the parties had joined its round reused the
+  sequence, which the parties refused as a replay. Nothing was released or
+  charged; the run just could not continue.
+- **Security response targets:** critical issues get a 7-day mitigation
+  target, high issues 30 days.
+- **Python 3.11 or later** is required (3.9 is end of life; 3.10 reaches it
+  in October 2026). CI runs the whole SDK suite on 3.11.
+
 ## 0.3.0-rc.3 — 2026-09-28
 
 The first published release candidate. 0.3.0-rc.1 and 0.3.0-rc.2 were
