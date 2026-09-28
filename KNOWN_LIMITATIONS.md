@@ -217,5 +217,4 @@ Related: [support matrix](docs/support-matrix.md),
   [docs/compatibility.md](docs/compatibility.md).
 - **Database migrations are forward only.** To downgrade, restore a backup
   taken before the upgrade.
-- **Python 3.9 and 3.10** are declared but not tested. CI tests 3.11 and
-  3.12.
+- **Python 3.11 or later** is required. CI tests 3.11 and 3.12.

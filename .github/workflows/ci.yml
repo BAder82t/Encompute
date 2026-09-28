@@ -22,6 +22,26 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # The oldest supported Python (requires-python in pyproject.toml): the
+  # whole SDK suite, as the other jobs run it on 3.12.
+  python-minimum:
+    name: python 3.11 (minimum supported)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: cargo build --bins
+      - run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin numpy pytest cryptography
+          maturin develop
+          pytest -q python/tests
+
   # Every example that needs no cloud account or crypto build, checked
   # against its expected output.
   examples-smoke:
