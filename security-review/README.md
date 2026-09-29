@@ -4,7 +4,7 @@ Start here. This page should make a reviewer productive within an hour:
 what Encompute is, what it trusts, where the code is, how to build and
 test it, and how to attack it.
 
-Encompute is pre-release software (version 0.3.0-rc.3, on the `release/0.3`
+Encompute is pre-release software (version 0.3.0-rc.4, on the `release/0.3`
 branch). The review targets the release candidate under
 a feature freeze: documentation, tests and hardening only.
 

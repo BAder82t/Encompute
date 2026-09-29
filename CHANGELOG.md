@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.3.0-rc.4)
+## 0.3.0-rc.4 — 2026-09-29
 
 - **Fine-tuning resume after a coordinator crash.** Every aggregation
   attempt now gets a new, strictly increasing SecAgg sequence, recorded

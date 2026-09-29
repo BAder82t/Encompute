@@ -1,6 +1,6 @@
-# Encompute 0.3.0-rc.4: release notes (draft)
+# Encompute 0.3.0-rc.4: release notes
 
-**Status: draft.** This is the second published release candidate of
+This is the second published release candidate of
 0.3.0. The independent security review of 0.3.0-rc.3
 ([security-review/](../security-review/)) has been completed: it and a
 follow-up review of the fixes reported 62 findings, ENC-SF-2026-033 to

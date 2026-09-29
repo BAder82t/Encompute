@@ -40,7 +40,7 @@ revealing what each needs to keep private: confidentiality policies are
 enforced by attested key release, secure aggregation and differential
 privacy, and every step leaves verifiable evidence.
 
-**Status: release candidate 0.3.0-rc.3, the frozen target for
+**Status: release candidate 0.3.0-rc.4, the frozen target for
 independent security review. The first review has reported; its findings
 and their fixes, some partial, are in
 [docs/security-findings.md](docs/security-findings.md)** (last release:
