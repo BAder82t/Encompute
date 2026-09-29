@@ -295,6 +295,24 @@ impl G {
         )
     }
 
+    /// An authorization proposed, approved by a data owner and a security
+    /// admin, and signed under `k`: (row ID, AuthorizationId).
+    fn activated(&self, purpose: &str, version: &str, k: &SigningKey) -> (String, String) {
+        let v = self.t.ok(
+            &self.tax_owner,
+            "POST",
+            "/v1/authorizations",
+            Some(json!({"body": self.body(purpose, version)})),
+        );
+        let id = v["id"].as_str().unwrap().to_owned();
+        assert_eq!(self.approve(&self.tax_owner, &id, "data_owner").0, 200);
+        let (_, v) = self.approve(&self.tax_sec1, &id, "security_admin");
+        assert_eq!(v["status"], "approved", "{v}");
+        let (s, v) = self.upload(&self.tax_sec1, &id, self.to_sign(&id), k);
+        assert_eq!(s, 200, "{v}");
+        (id, v["authorization_id"].as_str().unwrap().to_owned())
+    }
+
     /// A purpose, accepted by tax under `k`, and a version: what an
     /// authorization needs.
     fn ready(&self, k: &SigningKey) -> (String, String) {
@@ -953,6 +971,287 @@ fn jobs_in_governed_projects_are_refused_until_enforcement_ships() {
         ),
         "ENC2701",
     );
+}
+
+/// Waits until the clock has passed second `t`.
+fn after(t: u64) {
+    while now() <= t {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn usable_code(g: &G, authorization: &str, at: u64) -> Option<&'static str> {
+    g.t.control
+        .authorization_usable_at(authorization, at)
+        .err()
+        .map(|e| e.code.as_str())
+}
+
+#[test]
+fn an_approved_authorization_is_immutable_evidence() {
+    let Some(g) = gov_world() else { return };
+    let k = key(1);
+    let (purpose, version) = g.ready(&k);
+    let body = g.body(&purpose, &version);
+    let v = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/authorizations",
+        Some(json!({"body": body})),
+    );
+    let id = v["id"].as_str().unwrap().to_owned();
+    assert_eq!(g.approve(&g.tax_owner, &id, "data_owner").0, 200);
+    let (_, v) = g.approve(&g.tax_sec1, &id, "security_admin");
+    assert_eq!(v["status"], "approved", "{v}");
+    let doc = g.to_sign(&id);
+
+    // Its quorum met, its approvals are closed: another approver, however
+    // entitled, changes nothing.
+    refused(g.approve(&g.tax_owner2, &id, "data_owner"), "ENC2604");
+    refused(g.approve(&g.tax_sec2, &id, "security_admin"), "ENC2604");
+    assert_eq!(g.to_sign(&id), doc);
+
+    // The database refuses it too, even to its owner: no approval is
+    // added, removed or edited, no recipient changes, and it is not
+    // proposed again.
+    let mut c = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    let closed = |e: postgres::Error| {
+        let m = db_msg(&e);
+        assert!(m.contains("immutable"), "{m}");
+    };
+    closed(
+        c.execute(
+            "INSERT INTO authorization_approvals (authorization_row, approver_id, idp_issuer,
+                     approver_subject, role, statement_digest, evidence)
+             VALUES ($1, 'usr_x', 'https://idp.example', 'mallory', 'data_owner', 'x', '{}')",
+            &[&id],
+        )
+        .unwrap_err(),
+    );
+    closed(
+        c.execute(
+            "DELETE FROM authorization_approvals WHERE authorization_row = $1",
+            &[&id],
+        )
+        .unwrap_err(),
+    );
+    closed(
+        c.execute(
+            "UPDATE authorization_approvals SET role = 'security_admin' WHERE authorization_row = $1",
+            &[&id],
+        )
+        .unwrap_err(),
+    );
+    closed(
+        c.execute(
+            "INSERT INTO authorization_recipients (authorization_row, organization_id) VALUES ($1, 'other-co')",
+            &[&id],
+        )
+        .unwrap_err(),
+    );
+    let e = c
+        .execute(
+            "UPDATE authorizations SET status = 'proposed' WHERE id = $1",
+            &[&id],
+        )
+        .unwrap_err();
+    assert!(db_msg(&e).contains("not proposed again"), "{e}");
+
+    // Signed, it stays closed.
+    let (s, v) = g.upload(&g.tax_sec1, &id, doc.clone(), &k);
+    assert_eq!(s, 200, "{v}");
+    refused(g.approve(&g.tax_sec2, &id, "security_admin"), "ENC2604");
+    closed(
+        c.execute(
+            "DELETE FROM authorization_approvals WHERE authorization_row = $1",
+            &[&id],
+        )
+        .unwrap_err(),
+    );
+    // A change of meaning is a new authorization, with its own four eyes.
+    let mut narrower = body.clone();
+    narrower.valid_until -= 60;
+    let v = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/authorizations",
+        Some(json!({"body": narrower})),
+    );
+    assert_ne!(v["id"], json!(id));
+    assert_eq!(v["status"], "proposed");
+    // Withdrawal is a state transition of its own, not an edit.
+    let v = g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{id}/revoke"),
+        Some(json!({"reason": "superseded"})),
+    );
+    assert_eq!(v["status"], "revoked");
+    assert_eq!(g.to_sign(&id), doc);
+    refused(g.approve(&g.tax_sec2, &id, "security_admin"), "ENC2604");
+}
+
+#[test]
+fn a_revoked_governance_key_blocks_new_use_from_its_revocation_time() {
+    let Some(g) = gov_world() else { return };
+    let k = key(1);
+    let (purpose, version) = g.ready(&k);
+    let (id, authorization_id) = g.activated(&purpose, &version, &k);
+    let signed_at = now();
+    // Usable now, by its row or its AuthorizationId.
+    assert_eq!(usable_code(&g, &id, now()), None);
+    assert_eq!(usable_code(&g, &authorization_id, now()), None);
+    // Not before it was active.
+    assert_eq!(usable_code(&g, &id, signed_at - 3600), Some("ENC2701"));
+
+    after(signed_at);
+    let keys = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    assert_eq!(keys[0]["revoked_at"], Value::Null);
+    let key_row = keys[0]["id"].as_str().unwrap().to_owned();
+    let revoke = || {
+        g.t.ok(
+            &g.tax_sec2,
+            "POST",
+            &format!("/v1/organizations/{TAX}/governance-keys/{key_row}/revoke"),
+            None,
+        )
+    };
+    let v = revoke();
+    let revoked_at = v["revoked_at"].as_u64().expect("the revocation time");
+    assert!(revoked_at > signed_at, "{v}");
+    let keys = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    assert_eq!(keys[0]["revoked_at"], revoked_at);
+    // Revoking again changes nothing, the time included.
+    assert_eq!(revoke()["revoked_at"], revoked_at);
+
+    // From the revocation on, nothing new may use it...
+    assert_eq!(usable_code(&g, &id, revoked_at), Some("ENC2708"));
+    assert_eq!(usable_code(&g, &id, now() + 60), Some("ENC2708"));
+    // ...while use before it stays valid, as history.
+    assert_eq!(usable_code(&g, &id, revoked_at - 1), None);
+    assert_eq!(usable_code(&g, &authorization_id, signed_at), None);
+    // Its owner sees it: still the signed document it was, no longer
+    // usable, and why.
+    let v = g.t.ok(
+        &g.tax_owner,
+        "GET",
+        &format!("/v1/authorizations/{id}"),
+        None,
+    );
+    assert_eq!(v["status"], "active", "{v}");
+    assert_eq!(v["usable"], false, "{v}");
+    assert_eq!(v["governance_key_revoked_at"], revoked_at, "{v}");
+    // A new key revives none of the old key's authorizations.
+    g.register_key(TAX, &g.tax_admin, &g.tax_sec1, &key(2));
+    assert_eq!(usable_code(&g, &id, now()), Some("ENC2708"));
+    // Nor does the old key sign anything new, or a revocation.
+    let revocation = RevocationV2 {
+        version: 2,
+        party: TAX.into(),
+        authorization: authorization_id.clone(),
+        reason: "key compromised".into(),
+        issued_at: now(),
+    };
+    refused(
+        g.t.call(
+            &g.tax_sec1,
+            "POST",
+            &format!("/v1/authorizations/{id}/revoke"),
+            Some(json!({"reason": "key compromised", "revocation": revocation.sign(&k).unwrap()})),
+        ),
+        "ENC2708",
+    );
+
+    // The revocation time is set with the revocation and never changes.
+    let mut c = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    for sql in [
+        "UPDATE governance_keys SET revoked_at = revoked_at + interval '1 day' WHERE id = $1",
+        "UPDATE governance_keys SET revoked_at = revoked_at - interval '1 day' WHERE id = $1",
+        "UPDATE governance_keys SET revoked_at = NULL WHERE id = $1",
+    ] {
+        let e = c.execute(sql, &[&key_row]).unwrap_err();
+        assert!(db_msg(&e).contains("revocation time"), "{sql}: {e}");
+    }
+    let e = c
+        .execute(
+            "INSERT INTO governance_keys (id, organization_id, key_id, public_key, status, proposed_by)
+             VALUES ('gky_x', $1, 'x', 'y', 'revoked', 'usr_x')",
+            &[&TAX],
+        )
+        .unwrap_err();
+    assert!(db_msg(&e).contains("check"), "{e}");
+}
+
+#[test]
+fn a_revoked_authorization_is_unusable_from_its_revocation_time_only() {
+    let Some(g) = gov_world() else { return };
+    let k = key(1);
+    let (purpose, version) = g.ready(&k);
+    // Proposed or approved, it is not usable: only a signed one is.
+    let v = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/authorizations",
+        Some(json!({"body": g.body(&purpose, &version)})),
+    );
+    let pending = v["id"].as_str().unwrap().to_owned();
+    assert_eq!(usable_code(&g, &pending, now()), Some("ENC2701"));
+    assert_eq!(usable_code(&g, "atz_missing", now()), Some("ENC2701"));
+
+    let (id, _) = g.activated(&purpose, &version, &k);
+    let signed_at = now();
+    after(signed_at);
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{id}/revoke"),
+        Some(json!({"reason": "superseded"})),
+    );
+    let v = g.t.ok(
+        &g.tax_owner,
+        "GET",
+        &format!("/v1/authorizations/{id}"),
+        None,
+    );
+    let revoked_at = v["revoked_at"].as_u64().expect("the revocation time");
+    assert!(revoked_at > signed_at, "{v}");
+    assert_eq!(v["usable"], false, "{v}");
+    // Not retroactive: blocked from its revocation on.
+    assert_eq!(usable_code(&g, &id, revoked_at - 1), None);
+    assert_eq!(usable_code(&g, &id, revoked_at), Some("ENC2706"));
+    // The database keeps the time: set with the revocation, never changed.
+    let mut c = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    for sql in [
+        "UPDATE authorizations SET revoked_at = now() + interval '1 day' WHERE id = $1",
+        "UPDATE authorizations SET revoked_at = NULL WHERE id = $1",
+    ] {
+        let e = c.execute(sql, &[&id]).unwrap_err();
+        assert!(db_msg(&e).contains("revocation time"), "{sql}: {e}");
+    }
+    // A retired purpose: its authorizations are unusable from then on.
+    let (other, _) = g.activated(&purpose, &version, &k);
+    // Outside its window: expired.
+    assert_eq!(usable_code(&g, &other, now() + 86_400), Some("ENC2705"));
+    let before = now();
+    after(before);
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/purposes/{purpose}/retire"),
+        None,
+    );
+    assert_eq!(usable_code(&g, &other, before), None);
+    assert_eq!(usable_code(&g, &other, now()), Some("ENC2706"));
 }
 
 #[test]

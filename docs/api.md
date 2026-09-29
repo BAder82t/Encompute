@@ -160,21 +160,28 @@ execution.
 | | |
 |---|---|
 | `POST /v1/organizations/{id}/governance-keys` | organization or security admins. `{public_key, kms_key_ref?}` (hex Ed25519; `kms_key_ref` names where the private key lives, never key material). `proposed`, with its `key_id` |
-| `GET /v1/organizations/{id}/governance-keys` | the organization's members |
+| `GET /v1/organizations/{id}/governance-keys` | the organization's members. Each key's `status`, and `revoked_at` (Unix seconds) once revoked |
 | `POST /v1/organizations/{id}/governance-keys/{key}/approve` | a security admin other than the proposer. One active key per organization (409 while another is active) |
-| `POST /v1/organizations/{id}/governance-keys/{key}/revoke` | security or organization admins. Final; the key activates nothing any more (ENC2708) |
+| `POST /v1/organizations/{id}/governance-keys/{key}/revoke` | security or organization admins. Final; replies with `revoked_at`, recorded once and never changed (revoking again returns the same time). From then on the key activates nothing and signs no revocation (ENC2708), and no authorization it signed is used (ENC2708), whether signed before or after a new key is approved; uses before `revoked_at` stay valid history |
 | `POST /v1/projects/{id}/purposes` | a security admin of a member. `{organization, name, revision?, description?, legal_basis_ref?, modes, allowed_release_classes, recipients, linkage_policy_id?, min_aggregate_parties?, valid_from, valid_until}`. The ID is the PurposeId of the document (project included); `proposed`. 409 in a standard project |
 | `GET /v1/projects/{id}/purposes`, `GET /v1/purposes/{id}` | project members; a purpose shows its document and the organizations that `accepted_by` it |
 | `POST /v1/purposes/{id}/approve` | a security admin of the proposing organization other than the proposer: `active` |
 | `POST /v1/purposes/{id}/accept` | a security or organization admin of a member. `{acceptance}`: a `PurposeAcceptance {version, organization, project, purpose_id, accepted_at}` signed with the organization's active governance key (ENC2708 without one, ENC2701 under another key) |
-| `POST /v1/purposes/{id}/retire` | a security admin of the proposing organization. Final: the purpose takes no new authorization (ENC2706) |
+| `POST /v1/purposes/{id}/retire` | a security admin of the proposing organization. Final: the purpose takes no new authorization, and its authorizations are not used from its retirement on (ENC2706) |
 | `POST /v1/authorizations` | a data owner or security admin of the owner. `{body}`: an `AuthorizationV2` without approvals. It must name an active purpose of the project that its organization accepted (ENC2702), a dataset version the organization registered (ENC2704), a release class and recipients the purpose allows (ENC2709), the purpose's linkage policy (ENC2711), and a window inside the purpose's that is not over (ENC2705); one program or one program set, never a wildcard |
-| `GET /v1/authorizations/{id}` | the owner's members only. `body` is the document to sign, approvals included; once active, `authorization_id` and the `signed` document |
-| `POST /v1/authorizations/{id}/approve` | a person of the owner, in a role it holds there: `{role}`. One approval per person. By default two people, a data owner and a security admin, make it `approved` |
+| `GET /v1/authorizations/{id}` | the owner's members only. `body` is the document to sign, approvals included; once active, `authorization_id`, the `signed` document, `activated_at` and `governance_key_revoked_at` (null unless its key was revoked); `revoked_at` once revoked. `usable` says whether anything new may use it now; when it is `false`, `unusable` gives the refusal's `code` and `message` (the same check the enforcement phases make) |
+| `POST /v1/authorizations/{id}/approve` | a person of the owner, in a role it holds there: `{role}`. One approval per person. By default two people, a data owner and a security admin, make it `approved`. Then its approvals are closed: approving an authorization that is `approved`, `active` or `revoked` is refused (409, ENC2604), and the database refuses to add, remove or change its approvals and recipients. An approved authorization is immutable evidence: to change anything (program, purpose, asset version, window, release class, recipients, approvers), propose a new authorization |
 | `POST /v1/authorizations/{id}/signature` | a data owner or security admin of the owner. `{public_key, signature}` over `body`, by the organization's active governance key: `active`. Refused before four eyes (ENC2707), under another key or over another body (ENC2701), under a revoked key (ENC2708), after revocation (ENC2706) or once over (ENC2705) |
-| `POST /v1/authorizations/{id}/revoke` | a data owner or security admin of the owner. `{reason, revocation?}` (the owner's signed `RevocationV2`, checked under its governance key). Final |
+| `POST /v1/authorizations/{id}/revoke` | a data owner or security admin of the owner. `{reason, revocation?}` (the owner's signed `RevocationV2`, checked under its active governance key; ENC2708 under a revoked one). Final: a state transition, never an edit. Its time is recorded once; from then on nothing new uses the authorization (ENC2706) |
 
 Expiry is strict: `valid_from <= now < valid_until`, with no margin.
+
+Revocations take effect at the time the control plane records (its own
+clock), never earlier: a revoked governance key, a revoked authorization,
+a retired purpose or a revoked dataset version blocks every use from that
+time on, and leaves uses before it valid as history. The later phases
+check an authorization at each plan, submission, schedule, start, key
+release and export against the time of that step.
 
 ### Security
 

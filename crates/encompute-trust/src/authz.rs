@@ -171,8 +171,13 @@ pub fn governance_key_id(public_key: &str) -> String {
 #[serde(rename_all = "snake_case")]
 pub enum GovernanceKeyStatus {
     Active,
-    /// Final: a revoked key never verifies again, whatever its documents'
-    /// dates (a stolen key can backdate them).
+    /// Final, from its revocation time on ([`GovernanceKey::revoked_at`]):
+    /// nothing it signed is used at or after that time, and nothing it
+    /// claims to have signed then or later is ever valid. A use before it
+    /// (an execution or key release that happened while the key was
+    /// active) stays verifiable as history, at a time taken from evidence
+    /// the verifier trusts, never from the signed document's own dates (a
+    /// stolen key can backdate them).
     Revoked,
 }
 
@@ -187,12 +192,26 @@ pub struct GovernanceKey {
     /// Hex Ed25519 public key.
     pub public_key: String,
     pub status: GovernanceKeyStatus,
+    /// When a revoked key was revoked (Unix seconds): present exactly when
+    /// the key is revoked, and never changed once recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<u64>,
 }
 
 impl GovernanceKey {
-    /// A well-formed Ed25519 public key for a labelled organization.
+    /// A well-formed Ed25519 public key for a labelled organization; a
+    /// revoked key carries its revocation time, an active one none.
     pub fn check(&self) -> Result<()> {
         check_label("organization", &self.organization)?;
+        match (self.status, self.revoked_at) {
+            (GovernanceKeyStatus::Active, None) | (GovernanceKeyStatus::Revoked, Some(_)) => {}
+            (GovernanceKeyStatus::Active, Some(_)) => {
+                return Err(err("an active governance key has no revocation time"))
+            }
+            (GovernanceKeyStatus::Revoked, None) => {
+                return Err(err("a revoked governance key carries its revocation time"))
+            }
+        }
         unhex(&self.public_key)
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
             .and_then(|b| VerifyingKey::from_bytes(&b).ok())
@@ -203,6 +222,11 @@ impl GovernanceKey {
 
     pub fn key_id(&self) -> String {
         governance_key_id(&self.public_key)
+    }
+
+    /// Whether the key is revoked at `t`: from its revocation time on.
+    pub fn revoked_by(&self, t: u64) -> bool {
+        self.revoked_at.is_some_and(|r| t >= r)
     }
 }
 
@@ -471,6 +495,69 @@ impl SignedAuthorizationV2 {
     pub fn id(&self) -> String {
         self.body.id()
     }
+
+    /// Whether the authorization may be used at `t`: for a submission,
+    /// schedule, start, key release or export at `t`, or, as history, for
+    /// an execution that ran at `t`. Its signature verifies under `key`
+    /// (the organization's governance key as the caller records it, never
+    /// the document's own); the key is not revoked at `t`, and did not
+    /// sign after its revocation (ENC2708); `t` lies in the window
+    /// (ENC2705); and the owner's `revocation` of it, if any (verified by
+    /// the caller), is not in effect at `t` (ENC2706). Revocations, of the
+    /// key or of the authorization, block use from their time on and are
+    /// never retroactive. `t` comes from the verifier's own clock or from
+    /// evidence it trusts (a signed receipt or grant), never from the
+    /// authorization.
+    pub fn usable_at(
+        &self,
+        key: &GovernanceKey,
+        revocation: Option<&RevocationV2>,
+        t: u64,
+    ) -> Result<()> {
+        key.check()?;
+        if key.organization != self.body.party {
+            return Err(err(format!(
+                "a governance key of {} does not verify an authorization of {}",
+                key.organization, self.body.party
+            )));
+        }
+        self.verify(&key.public_key)?;
+        if let Some(r) = key.revoked_at {
+            let revoked = |m: String| Error::new(Code::GovernanceKeyRevoked, m);
+            if self.body.issued_at >= r {
+                return Err(revoked(format!(
+                    "issued at {} under a governance key revoked at {r}",
+                    self.body.issued_at
+                )));
+            }
+            if t >= r {
+                return Err(revoked(format!(
+                    "the governance key that signed it was revoked at {r}: it is not used at {t}"
+                )));
+            }
+        }
+        if !self.body.is_valid_at(t) {
+            return Err(Error::new(
+                Code::GovernanceAuthorizationExpired,
+                format!(
+                    "valid from {} until {}, not at {t}",
+                    self.body.valid_from, self.body.valid_until
+                ),
+            ));
+        }
+        if let Some(rev) = revocation {
+            if rev.party != self.body.party || rev.authorization != self.id() {
+                return Err(err("the revocation is for another authorization"));
+            }
+            if rev.in_effect_at(t) {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationRevoked,
+                    format!("revoked by its owner at {}", rev.issued_at),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// An owner's revocation of one v2 authorization (supersession is revoke
@@ -491,6 +578,12 @@ pub type SignedRevocationV2 = Signed<RevocationV2>;
 impl RevocationV2 {
     pub fn sign(self, key: &SigningKey) -> Result<SignedRevocationV2> {
         sign(REVOCATION_V2, self, key)
+    }
+
+    /// In effect from its issue time on, never before: a use at an earlier
+    /// time stays valid.
+    pub fn in_effect_at(&self, t: u64) -> bool {
+        t >= self.issued_at
     }
 }
 

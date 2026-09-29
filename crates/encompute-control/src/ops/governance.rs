@@ -12,9 +12,18 @@
 //! ([`require_human`]); approvals take a different person than the one who
 //! proposed (four eyes, ENC2707).
 //!
+//! Once approved (its quorum met) an authorization is immutable evidence:
+//! no approval is added or removed, and any change of meaning is a new
+//! authorization. Revocations, of an authorization or of the governance key
+//! that signed it, and purpose retirements take effect at the time the
+//! control plane records (its own clock, never changed afterwards): from
+//! then on nothing new uses the authorization, while uses before it stay
+//! valid history ([`Control::authorization_usable_at`]).
+//!
 //! Not yet (later phases): enforcement of authorizations at job
 //! submission, scheduling, start and key release (jobs in governed
-//! projects are refused meanwhile), release tickets, and anchoring of
+//! projects are refused meanwhile; those phases call
+//! [`Control::authorization_usable_at`]), release tickets, and anchoring of
 //! revocations and retirements against database rollback.
 
 use std::collections::BTreeMap;
@@ -22,7 +31,10 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use encompute_ir::{Code, Error, Result};
-use encompute_trust::authz::{governance_key_id, ApprovalEvidence, AuthorizationV2, Signed};
+use encompute_trust::authz::{
+    governance_key_id, ApprovalEvidence, AuthorizationV2, GovernanceKey, GovernanceKeyStatus,
+    Signed, SignedAuthorizationV2,
+};
 use encompute_verification::governance::{Purpose, PURPOSE_VERSION};
 use encompute_verification::service::now;
 
@@ -236,8 +248,11 @@ impl Control {
         })
     }
 
-    /// Revokes a governance key (proposed or active); never undone.
-    /// Signatures by it no longer activate anything.
+    /// Revokes a governance key (proposed or active); never undone. From
+    /// its revocation time (recorded once, never changed) signatures by it
+    /// activate nothing, and nothing it signed is used: every authorization
+    /// it signed is unusable from then on, though uses before it stay valid
+    /// history ([`Self::authorization_usable_at`]).
     pub fn revoke_governance_key(&self, ctx: &Ctx, org: &str, id: &str) -> Result<Value> {
         require_human(
             &ctx.principal,
@@ -256,8 +271,9 @@ impl Control {
             let (status, key_id): (String, String) = (r.get(0), r.get(1));
             if status != "revoked" {
                 t.execute(
-                    "UPDATE governance_keys SET status = 'revoked', revoked_by = $2, revoked_at = now() WHERE id = $1",
-                    &[&id, &ctx.actor()],
+                    "UPDATE governance_keys SET status = 'revoked', revoked_by = $2,
+                            revoked_at = to_timestamp($3::bigint) WHERE id = $1",
+                    &[&id, &ctx.actor(), &secs(now())],
                 )
                 .map_err(db_err)?;
                 audit::append(
@@ -267,7 +283,15 @@ impl Control {
                         .r#ref("key_id", key_id.clone()),
                 )?;
             }
-            Ok(json!({"id": id, "organization": org, "key_id": key_id, "status": "revoked"}))
+            let revoked_at: Option<i64> = t
+                .query_one(
+                    &format!("SELECT {} FROM governance_keys WHERE id = $1", epoch("revoked_at")),
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .get(0);
+            Ok(json!({"id": id, "organization": org, "key_id": key_id, "status": "revoked",
+                      "revoked_at": revoked_at}))
         })
     }
 
@@ -279,8 +303,11 @@ impl Control {
         let mut c = self.db.conn()?;
         let rows = c
             .query(
-                "SELECT id, key_id, public_key, kms_key_ref, status FROM governance_keys
-                  WHERE organization_id = $1 ORDER BY created_at, id",
+                &format!(
+                    "SELECT id, key_id, public_key, kms_key_ref, status, {} FROM governance_keys
+                      WHERE organization_id = $1 ORDER BY created_at, id",
+                    epoch("revoked_at")
+                ),
                 &[&org],
             )
             .map_err(db_err)?;
@@ -289,7 +316,8 @@ impl Control {
                 .map(|r| {
                     json!({"id": r.get::<_, String>(0), "organization": org,
                            "key_id": r.get::<_, String>(1), "public_key": r.get::<_, String>(2),
-                           "kms_key_ref": r.get::<_, Option<String>>(3), "status": r.get::<_, String>(4)})
+                           "kms_key_ref": r.get::<_, Option<String>>(3), "status": r.get::<_, String>(4),
+                           "revoked_at": r.get::<_, Option<i64>>(5)})
                 })
                 .collect(),
         ))
@@ -487,11 +515,17 @@ impl Control {
                     "a purpose is retired by a security admin of its proposer, {org}"
                 )));
             }
-            require_human(&ctx.principal, &org, &[Role::SecurityAdmin], "retiring a purpose")?;
+            require_human(
+                &ctx.principal,
+                &org,
+                &[Role::SecurityAdmin],
+                "retiring a purpose",
+            )?;
             if status != "retired" {
                 t.execute(
-                    "UPDATE purposes SET status = 'retired', retired_by = $2, retired_at = now() WHERE id = $1",
-                    &[&id, &ctx.actor()],
+                    "UPDATE purposes SET status = 'retired', retired_by = $2,
+                            retired_at = to_timestamp($3::bigint) WHERE id = $1",
+                    &[&id, &ctx.actor(), &secs(now())],
                 )
                 .map_err(db_err)?;
                 audit::append(
@@ -679,7 +713,9 @@ impl Control {
     /// A person of the owning organization approves, in a role it holds
     /// there. Each person approves once; once the organization's rule is
     /// met (by default two people: a data owner and a security admin) the
-    /// authorization is ready for the owner's signature.
+    /// authorization is approved, ready for the owner's signature, and its
+    /// approvals are closed (ENC2604): an approved authorization is
+    /// immutable evidence, and a change is a new authorization.
     pub fn approve_authorization(
         &self,
         ctx: &Ctx,
@@ -694,8 +730,12 @@ impl Control {
                 &[r.role],
                 &format!("approving an authorization as {}", r.role.as_str()),
             )?;
-            if !matches!(row.status.as_str(), "proposed" | "approved") {
-                return Err(conflict(format!("authorization {id} is {}", row.status)));
+            if row.status != "proposed" {
+                return Err(conflict(format!(
+                    "authorization {id} is {}: its approvals are closed (an approved authorization is \
+                     immutable evidence; propose a new authorization to change it)",
+                    row.status
+                )));
             }
             let (issuer, subject) = approver(ctx)?;
             let again = t
@@ -768,17 +808,37 @@ impl Control {
             let doc = with_approvals(t, id, &row.body)?;
             let r = t
                 .query_one(
-                    "SELECT authorization_id, signed, governance_key_id FROM authorizations WHERE id = $1",
+                    &format!(
+                        "SELECT a.authorization_id, a.signed, a.governance_key_id, {}, {}, {}
+                           FROM authorizations a
+                           LEFT JOIN governance_keys k
+                             ON k.key_id = a.governance_key_id AND k.organization_id = a.organization_id
+                          WHERE a.id = $1",
+                        epoch("a.activated_at"),
+                        epoch("a.revoked_at"),
+                        epoch("k.revoked_at")
+                    ),
                     &[&id],
                 )
                 .map_err(db_err)?;
             let mut v = json!({"id": id, "organization": row.org, "project": row.project,
                                "purpose_id": doc.purpose_id, "asset_version_id": doc.asset_version_id,
-                               "status": row.status, "body": doc});
+                               "status": row.status, "body": doc,
+                               "revoked_at": r.get::<_, Option<i64>>(4)});
             if let Some(a) = r.get::<_, Option<String>>(0) {
                 v["authorization_id"] = json!(a);
                 v["signed"] = r.get::<_, Option<Value>>(1).unwrap_or(Value::Null);
                 v["governance_key_id"] = json!(r.get::<_, Option<String>>(2));
+                v["activated_at"] = json!(r.get::<_, Option<i64>>(3));
+                v["governance_key_revoked_at"] = json!(r.get::<_, Option<i64>>(5));
+            }
+            // Whether anything new may use it now, and if not, why.
+            match usable_at(t, id, now()) {
+                Ok(()) => v["usable"] = json!(true),
+                Err(e) => {
+                    v["usable"] = json!(false);
+                    v["unusable"] = json!({"code": e.code.as_str(), "message": e.message});
+                }
             }
             Ok(v)
         })
@@ -843,12 +903,13 @@ impl Control {
             let authorization_id = doc.id();
             t.execute(
                 "UPDATE authorizations SET status = 'active', authorization_id = $2, signed = $3,
-                        governance_key_id = $4, activated_at = now() WHERE id = $1",
+                        governance_key_id = $4, activated_at = to_timestamp($5::bigint) WHERE id = $1",
                 &[
                     &id,
                     &authorization_id,
                     &serde_json::to_value(&signed).expect("serializable"),
                     &key_id,
+                    &secs(now()),
                 ],
             )
             .map_err(db_err)?;
@@ -869,9 +930,19 @@ impl Control {
         })
     }
 
+    /// Whether anything new may use `authorization` (its row ID or its
+    /// AuthorizationId) at `at` (Unix seconds): a plan, submission,
+    /// schedule, start, key release or export at `at`, or, as history, an
+    /// execution that ran then. See [`usable_at`]; the enforcement phases
+    /// call it inside their own transactions.
+    pub fn authorization_usable_at(&self, authorization: &str, at: u64) -> Result<()> {
+        self.db.tx(|t| usable_at(t, authorization, at))
+    }
+
     /// A person of the owning organization revokes the authorization (with
-    /// the owner's signed revocation, when it has one). Final; it blocks
-    /// new use and is not retroactive.
+    /// the owner's signed revocation, when it has one). Final, and a state
+    /// transition of its own, never an edit: from its recorded time (never
+    /// changed) it blocks new use; it is not retroactive.
     pub fn revoke_authorization(
         &self,
         ctx: &Ctx,
@@ -906,14 +977,15 @@ impl Control {
                 under_active_key(t, &row.org, &rev.public_key, |k| rev.verify(k))?;
             }
             t.execute(
-                "UPDATE authorizations SET status = 'revoked', revoked_by = $2, revoked_at = now(),
-                        revocation = $3 WHERE id = $1",
+                "UPDATE authorizations SET status = 'revoked', revoked_by = $2,
+                        revoked_at = to_timestamp($4::bigint), revocation = $3 WHERE id = $1",
                 &[
                     &id,
                     &ctx.actor(),
                     &r.revocation
                         .as_ref()
                         .map(|x| serde_json::to_value(x).expect("serializable")),
+                    &secs(now()),
                 ],
             )
             .map_err(db_err)?;
@@ -1082,4 +1154,141 @@ fn approval_rule(
             ]),
         ),
     })
+}
+
+/// Seconds as stored (`to_timestamp($n::bigint)`): the control plane's
+/// clock, so every governance time is on one clock.
+fn secs(t: u64) -> i64 {
+    i64::try_from(t).unwrap_or(i64::MAX)
+}
+
+/// A timestamp column as whole Unix seconds (NULL stays NULL).
+fn epoch(column: &str) -> String {
+    format!("floor(extract(epoch FROM {column}))::bigint")
+}
+
+fn at_or_before(t: Option<i64>, at: u64) -> Option<u64> {
+    t.map(|t| t.max(0) as u64).filter(|t| *t <= at)
+}
+
+/// Whether `authorization` (row ID or AuthorizationId) may be used at `at`,
+/// the rows it depends on share-locked against a concurrent revocation:
+/// - it is signed, and was active by `at` (else ENC2701);
+/// - it was not revoked by `at` (ENC2706);
+/// - its signature verifies under the governance key that signed it, which
+///   was not revoked by `at` and did not sign after its revocation
+///   (ENC2708), and `at` lies in its window (ENC2705): the same check the
+///   trust graph and the key brokers make
+///   ([`SignedAuthorizationV2::usable_at`]);
+/// - its purpose was not retired, nor its dataset version revoked, by `at`
+///   (ENC2706).
+///
+/// A revocation (of the authorization, its key, purpose or version) blocks
+/// use from its recorded time on, never before: an execution before it
+/// stays valid history.
+pub(crate) fn usable_at(
+    t: &mut postgres::Transaction<'_>,
+    authorization: &str,
+    at: u64,
+) -> Result<()> {
+    let missing = |m: String| gov(Code::GovernanceAuthorizationMissing, m);
+    let withdrawn = |m: String| gov(Code::GovernanceAuthorizationRevoked, m);
+    let r = t
+        .query_opt(
+            &format!(
+                "SELECT id, organization_id, status, signed, governance_key_id, purpose_id, asset_id, {}, {}
+                   FROM authorizations WHERE id = $1 OR authorization_id = $1 FOR SHARE",
+                epoch("activated_at"),
+                epoch("revoked_at")
+            ),
+            &[&authorization],
+        )
+        .map_err(db_err)?
+        .ok_or_else(|| missing(format!("no authorization {authorization}")))?;
+    let (row, org, status): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+    let (signed, key_id): (Option<Value>, Option<String>) = (r.get(3), r.get(4));
+    let (purpose, asset): (String, String) = (r.get(5), r.get(6));
+    let (activated_at, revoked_at): (Option<i64>, Option<i64>) = (r.get(7), r.get(8));
+    let (Some(signed), Some(key_id)) = (signed, key_id) else {
+        return Err(missing(format!(
+            "authorization {row} is {status}: only one its owner signed is used"
+        )));
+    };
+    let signed: SignedAuthorizationV2 =
+        serde_json::from_value(signed).map_err(|e| db_err(format!("stored authorization: {e}")))?;
+    match activated_at {
+        Some(a) if a.max(0) as u64 <= at => {}
+        _ => {
+            return Err(missing(format!(
+                "authorization {row} was not active yet at {at}"
+            )))
+        }
+    }
+    if let Some(r) = at_or_before(revoked_at, at) {
+        return Err(withdrawn(format!("authorization {row} was revoked at {r}")));
+    }
+    let k = t
+        .query_opt(
+            &format!(
+                "SELECT public_key, {} FROM governance_keys
+                  WHERE organization_id = $1 AND key_id = $2 FOR SHARE",
+                epoch("revoked_at")
+            ),
+            &[&org, &key_id],
+        )
+        .map_err(db_err)?
+        .ok_or_else(|| {
+            gov(
+                Code::GovernanceKeyRevoked,
+                format!("the governance key that signed authorization {row} is not on record"),
+            )
+        })?;
+    let key_revoked_at: Option<i64> = k.get(1);
+    let key = GovernanceKey {
+        organization: org,
+        public_key: k.get(0),
+        status: if key_revoked_at.is_some() {
+            GovernanceKeyStatus::Revoked
+        } else {
+            GovernanceKeyStatus::Active
+        },
+        revoked_at: key_revoked_at.map(|t| t.max(0) as u64),
+    };
+    signed.usable_at(&key, None, at).map_err(|e| {
+        if e.code == Code::TrustAuthorization {
+            missing(format!(
+                "authorization {row} does not verify under its governance key: {}",
+                e.message
+            ))
+        } else {
+            e
+        }
+    })?;
+    let retired: Option<i64> = t
+        .query_one(
+            &format!(
+                "SELECT {} FROM purposes WHERE id = $1 FOR SHARE",
+                epoch("retired_at")
+            ),
+            &[&purpose],
+        )
+        .map_err(db_err)?
+        .get(0);
+    if let Some(r) = at_or_before(retired, at) {
+        return Err(withdrawn(format!("its purpose was retired at {r}")));
+    }
+    let v = t
+        .query_one(
+            &format!(
+                "SELECT status, {} FROM assets WHERE id = $1 FOR SHARE",
+                epoch("revoked_at")
+            ),
+            &[&asset],
+        )
+        .map_err(db_err)?;
+    let (asset_status, asset_revoked): (String, Option<i64>) = (v.get(0), v.get(1));
+    if asset_status == "revoked" && asset_revoked.is_none_or(|r| r.max(0) as u64 <= at) {
+        return Err(withdrawn("its dataset version was revoked".to_owned()));
+    }
+    Ok(())
 }

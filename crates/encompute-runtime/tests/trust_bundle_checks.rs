@@ -417,7 +417,7 @@ fn an_invalid_training_spec_in_a_bundle_fails_the_report() {
         &[],
         Evidence::TrainingSpec(Box::new(spec)),
     );
-    let (_, problems) = bundle.rebuild();
+    let problems = bundle.rebuild().problems;
     assert!(
         problems
             .iter()

@@ -30,7 +30,8 @@ use crate::graph::{node_id, EdgeKind, Evidence, Node, NodeKind, TrustGraph};
 
 /// A party node's attribute holding an anchored governance key, by key ID.
 pub(crate) const GOVERNANCE_KEY_ATTR: &str = "governance_key:";
-/// A party node's attribute marking an anchored governance key revoked.
+/// A party node's attribute marking an anchored governance key revoked,
+/// by key ID: its value is the revocation time (Unix seconds).
 pub(crate) const GOVERNANCE_KEY_REVOKED_ATTR: &str = "governance_key_revoked:";
 
 /// Whether a party node attribute is a governance key anchor (not
@@ -231,8 +232,9 @@ impl TrustGraph {
     /// them, e.g. the control plane's approved keys), anchored on their
     /// party nodes like [`Self::add_party_keys`]. An anchor never changes:
     /// an organization has at most one active key, another is refused
-    /// while it is, and a key once revoked stays revoked (anchoring it
-    /// again as active does not revive it). A new key may be anchored
+    /// while it is, and a key once revoked stays revoked, at the time first
+    /// recorded (anchoring it again as active does not revive it; with
+    /// another revocation time, it is refused). A new key may be anchored
     /// once every earlier one is revoked.
     pub fn add_governance_keys(&mut self, keys: &[GovernanceKey]) -> Result<()> {
         for k in keys {
@@ -266,10 +268,10 @@ impl TrustGraph {
                 }
             }
             let mut attrs = vec![(format!("{GOVERNANCE_KEY_ATTR}{kid}"), k.public_key.clone())];
-            if k.status == GovernanceKeyStatus::Revoked {
+            if let Some(at) = k.revoked_at {
                 attrs.push((
                     format!("{GOVERNANCE_KEY_REVOKED_ATTR}{kid}"),
-                    "revoked".into(),
+                    at.to_string(),
                 ));
             }
             let mut n = node(NodeKind::Party, "");
@@ -279,10 +281,10 @@ impl TrustGraph {
         Ok(())
     }
 
-    /// The governance key `presented` (a signed document's own key) if it
-    /// is anchored for `org` and not revoked: the only key a v2 document of
-    /// `org` is verified under.
-    fn governance_key(&self, org: &str, presented: &str) -> Result<String> {
+    /// The governance key `presented` (a signed document's own key) as
+    /// anchored for `org`, with its revocation time if it was revoked: the
+    /// only key a v2 document of `org` is verified under.
+    fn anchored_governance_key(&self, org: &str, presented: &str) -> Result<GovernanceKey> {
         let refuse = |m: String| Error::new(Code::TrustAuthorization, m);
         let party = self
             .node(&node_id(NodeKind::Party, org))
@@ -305,20 +307,44 @@ impl TrustGraph {
                 )))
             }
         }
-        if party
+        let revoked_at = party
             .attrs
-            .contains_key(&format!("{GOVERNANCE_KEY_REVOKED_ATTR}{kid}"))
-        {
-            return Err(Error::new(
-                Code::GovernanceKeyRevoked,
-                format!("signed by a governance key of {org} that is revoked"),
-            ));
-        }
-        Ok(presented.to_owned())
+            .get(&format!("{GOVERNANCE_KEY_REVOKED_ATTR}{kid}"))
+            .map(|t| {
+                t.parse::<u64>().map_err(|_| {
+                    refuse(format!(
+                        "{org}'s governance key has a malformed revocation time"
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok(GovernanceKey {
+            organization: org.to_owned(),
+            public_key: presented.to_owned(),
+            status: if revoked_at.is_some() {
+                GovernanceKeyStatus::Revoked
+            } else {
+                GovernanceKeyStatus::Active
+            },
+            revoked_at,
+        })
     }
 
-    /// A governed project's owner authorization, verified under the
-    /// governance key anchored for its organization
+    /// The governance key `presented`, anchored for `org`, for current use:
+    /// refused once revoked (ENC2708).
+    fn governance_key(&self, org: &str, presented: &str) -> Result<String> {
+        let k = self.anchored_governance_key(org, presented)?;
+        if let Some(at) = k.revoked_at {
+            return Err(Error::new(
+                Code::GovernanceKeyRevoked,
+                format!("signed by a governance key of {org} that was revoked at {at}"),
+            ));
+        }
+        Ok(k.public_key)
+    }
+
+    /// A governed project's owner authorization, for current use, verified
+    /// under the governance key anchored for its organization
     /// ([`Self::add_governance_keys`]): a document signed by any other key,
     /// or by a revoked one, is refused. Its program node is linked when
     /// the graph has it.
@@ -326,6 +352,57 @@ impl TrustGraph {
         self.check_authorization_v2(&a)?;
         a.verify(&self.governance_key(&a.body.party, &a.public_key)?)?;
         self.link_authorization_v2(&a)
+    }
+
+    /// A governed project's owner authorization as evidence of a use at
+    /// `at` (the time an execution ran or a key was released, from evidence
+    /// the caller trusts): accepted when it was usable then
+    /// ([`SignedAuthorizationV2::usable_at`]), so one signed by a key
+    /// revoked since stays verifiable for what happened before the
+    /// revocation, and is refused from the revocation time on (ENC2708).
+    pub fn add_authorization_v2_at(&mut self, a: SignedAuthorizationV2, at: u64) -> Result<String> {
+        self.check_authorization_v2(&a)?;
+        a.usable_at(
+            &self.anchored_governance_key(&a.body.party, &a.public_key)?,
+            None,
+            at,
+        )?;
+        self.link_authorization_v2(&a)
+    }
+
+    /// A v2 authorization's signature on rebuild. At an evaluation time,
+    /// it is usable then (as [`Self::add_authorization_v2_at`]). Without
+    /// one, it verifies under its anchored key; if that key was revoked
+    /// since it signed, the authorization is valid only as history, which
+    /// `historical` records (never current evidence).
+    fn recheck_authorization_v2(
+        &self,
+        id: &str,
+        a: &SignedAuthorizationV2,
+        at: Option<u64>,
+        historical: &mut Vec<String>,
+    ) -> Result<()> {
+        let k = self.anchored_governance_key(&a.body.party, &a.public_key)?;
+        if let Some(t) = at {
+            return a.usable_at(&k, None, t);
+        }
+        a.verify(&k.public_key)?;
+        if let Some(r) = k.revoked_at {
+            if a.body.issued_at >= r {
+                return Err(Error::new(
+                    Code::GovernanceKeyRevoked,
+                    format!(
+                        "issued at {} under a governance key revoked at {r}",
+                        a.body.issued_at
+                    ),
+                ));
+            }
+            historical.push(format!(
+                "{id}: signed by a governance key of {} revoked at {r}: historically valid only (for use before {r}), never current evidence",
+                a.body.party
+            ));
+        }
+        Ok(())
     }
 
     /// Without trust anchors: well formed, by a party in the graph.
@@ -867,12 +944,27 @@ impl TrustGraph {
     /// under the governance key the bundle anchors for its organization)
     /// and re-linked into a fresh graph, in dependency
     /// order. Edges, nodes and attributes the bundle carries but the
-    /// evidence does not imply are absent here. Returns the graph and the
-    /// evidence that failed its checks or to link (any of which fails the
-    /// report's evidence row).
-    pub fn rebuild(&self) -> (TrustGraph, Vec<String>) {
+    /// evidence does not imply are absent here. Without an evaluation
+    /// time, a v2 authorization whose governance key was revoked after it
+    /// signed is not a problem but is never current evidence: it is listed
+    /// as historically valid only ([`Rebuilt::historical_only`]).
+    pub fn rebuild(&self) -> Rebuilt {
+        self.rebuild_with(None)
+    }
+
+    /// [`Self::rebuild`] for evidence of a use at `at` (the time an
+    /// execution ran or a key was released): each v2 authorization must
+    /// have been usable then ([`SignedAuthorizationV2::usable_at`]), so one
+    /// whose governance key was revoked at or before `at` is a problem, and
+    /// one revoked later is valid history.
+    pub fn rebuild_at(&self, at: u64) -> Rebuilt {
+        self.rebuild_with(Some(at))
+    }
+
+    fn rebuild_with(&self, at: Option<u64>) -> Rebuilt {
         let mut g = TrustGraph::new();
         let mut problems = vec![];
+        let mut historical_only = vec![];
         let order = |e: &Evidence| match e {
             Evidence::Program(_) => 0,
             // After its program, which it is checked against.
@@ -913,7 +1005,7 @@ impl TrustGraph {
                 // counts no v2 authorization towards any requirement.
                 Evidence::AuthorizationV2(a) => g
                     .check_authorization_v2(a)
-                    .and_then(|_| a.verify(&self.governance_key(&a.body.party, &a.public_key)?)),
+                    .and_then(|_| self.recheck_authorization_v2(id, a, at, &mut historical_only)),
                 Evidence::Revocation(_) => Ok(()),
                 Evidence::AggregationReceipt(r) => g.check_aggregation(r),
                 Evidence::PrivacyReceipt(r) => {
@@ -949,8 +1041,26 @@ impl TrustGraph {
                 Err(e) => problems.push(format!("{id}: {}", e.message)),
             }
         }
-        (g, problems)
+        Rebuilt {
+            graph: g,
+            problems,
+            historical_only,
+        }
     }
+}
+
+/// What rebuilding a graph from its evidence finds ([`TrustGraph::rebuild`]).
+#[derive(Clone, Debug)]
+pub struct Rebuilt {
+    /// The graph the evidence implies.
+    pub graph: TrustGraph,
+    /// Evidence that failed its checks or to link: any fails the report's
+    /// evidence row.
+    pub problems: Vec<String>,
+    /// Evidence valid only for uses before a revocation time (a v2
+    /// authorization whose governance key was revoked after it signed):
+    /// never current evidence; the report notes each.
+    pub historical_only: Vec<String>,
 }
 
 /// An execution receipt's signature, against its own key (the report

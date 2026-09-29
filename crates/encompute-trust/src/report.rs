@@ -190,13 +190,22 @@ impl TrustGraph {
         let mut rows = vec![];
 
         // Evidence: the graph is exactly what its evidence implies.
-        let (g, link_problems) = self.rebuild();
+        let crate::Rebuilt {
+            graph: g,
+            problems: link_problems,
+            historical_only,
+        } = self.rebuild();
         let mut t = Tally {
             present: !self.nodes.is_empty(),
             ..Tally::default()
         };
         for p in link_problems {
             t.fail(p);
+        }
+        // Never current evidence (and the report counts no v2
+        // authorization towards any requirement): said, not failed.
+        for h in historical_only {
+            t.note(h);
         }
         if let Err(e) = self.check_edges() {
             t.fail(e.message);

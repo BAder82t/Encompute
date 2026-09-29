@@ -82,7 +82,7 @@ fn mutated_bundles_never_panic() {
                 let _ = g.upstream(id);
                 let _ = g.downstream(id);
             }
-            let (rebuilt, _) = g.rebuild();
+            let rebuilt = g.rebuild().graph;
             report(&g);
             let _ = rebuilt.to_bytes();
         },

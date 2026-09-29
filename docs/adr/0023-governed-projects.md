@@ -212,6 +212,15 @@ Approval statement = SHA256("encompute.approval.v1" ||
 - `execution_spec_ids` optionally pins the authorization tighter, to
   specific specs.
 - **Supersession** is revoke plus reissue. There is no in-place edit.
+- **An approved authorization is immutable evidence.** Once its quorum is
+  met (`approved`), and so once signed (`active`), its approvals are
+  closed: no approval is added or removed (the control plane refuses with
+  ENC2604, and database triggers refuse to add, remove or change its
+  approvals and recipients, or to return it to `proposed`). Any change of
+  meaning (program or program set, purpose, asset version, validity,
+  release class, recipients, approvers) is a new authorization with its
+  own four eyes. Withdrawal is revocation: a state transition of its own,
+  never an edit.
 - Where it lives:
   - control plane: tables `authorizations`, `authorization_recipients` and
     `authorization_approvals`. An authorization is proposed, collects its
@@ -267,6 +276,31 @@ Approval statement = SHA256("encompute.approval.v1" ||
   report's rows and the evidence bundle are in ADR-027.
 - Revocation and expiry affect future actions only. Receipts from inside
   the window stay verifiable.
+- **Revocations carry their time, and the time decides.** The control
+  plane records when a governance key, an authorization, a purpose
+  (retirement) or a dataset version is revoked, on its own clock, once
+  (the database refuses to change or clear it). A use at time `t` is
+  refused when a revocation's time is `<= t`, and allowed when it is
+  later. So revoking a governance key at `T` cascades to every
+  authorization it signed, for the future: from `T` on no plan,
+  submission, schedule, start, key release or export uses them (ENC2708),
+  and a new key revives none of them, while an execution before `T`
+  stays verifiable. `authorization_usable_at(authorization, t)` in the
+  control plane and `SignedAuthorizationV2::usable_at(key, revocation,
+  t)` in the trust crate are the one check every enforcement point calls.
+  A document claiming issue at or after its key's revocation is never
+  valid, whatever `t`.
+- In a trust graph a revoked governance key is anchored with its
+  revocation time (`GovernanceKey.revoked_at`), which never changes. An
+  authorization it signed is accepted for current use only while the key
+  is not revoked; as evidence of a use at `t` (`add_authorization_v2_at`,
+  `rebuild_at`) it is accepted only when `t` is before the revocation.
+  Rebuilt without a time, such an authorization is not a failure but is
+  never current evidence: the report lists it as historically valid only.
+  The time `t` comes from evidence the verifier trusts (the grant's
+  signed issue time, a receipt, a ticket), never from the authorization's
+  own dates, which a stolen key could backdate. A `RevocationV2` takes
+  effect from its `issued_at`, never before.
 
 ### 9. Derived assets and revocation (D6)
 

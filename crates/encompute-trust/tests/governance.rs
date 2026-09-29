@@ -384,11 +384,23 @@ fn graph_and_authorization() -> (TrustGraph, String, AuthorizationV2) {
     (g, prog, b)
 }
 
+/// When [`anchor`] revokes a key: inside [`body`]'s window (1000..2000),
+/// after its issue (900).
+const KEY_REVOKED_AT: u64 = 1_500;
+
 fn anchor(org: &str, k: &SigningKey, status: GovernanceKeyStatus) -> GovernanceKey {
     GovernanceKey {
         organization: org.into(),
         public_key: pk(k),
         status,
+        revoked_at: (status == GovernanceKeyStatus::Revoked).then_some(KEY_REVOKED_AT),
+    }
+}
+
+fn revoked_key(org: &str, k: &SigningKey, at: u64) -> GovernanceKey {
+    GovernanceKey {
+        revoked_at: Some(at),
+        ..anchor(org, k, GovernanceKeyStatus::Revoked)
     }
 }
 
@@ -408,8 +420,10 @@ fn a_v2_authorization_joins_the_trust_graph_under_its_anchored_governance_key() 
     assert!(matches!(n.evidence, Some(Evidence::AuthorizationV2(_))));
     // Rebuilt from its evidence alone, it is the same node, with no
     // problem.
-    let (rebuilt, problems) = g.rebuild();
-    assert!(problems.is_empty(), "{problems:?}");
+    let r = g.rebuild();
+    assert!(r.problems.is_empty(), "{:?}", r.problems);
+    assert!(r.historical_only.is_empty(), "{:?}", r.historical_only);
+    let rebuilt = r.graph;
     assert!(rebuilt.node(&id).is_some());
     rebuilt.check_edges().unwrap();
     assert!(rebuilt
@@ -506,7 +520,7 @@ fn a_revoked_governance_key_is_refused() {
     g.add_governance_keys(&[anchor("tax-agency", &new, GovernanceKeyStatus::Active)])
         .unwrap();
     let id = g.add_authorization_v2(b.sign(&new).unwrap()).unwrap();
-    let (_, problems) = g.rebuild();
+    let problems = g.rebuild().problems;
     assert!(problems.is_empty(), "{problems:?}");
     assert!(g.node(&id).is_some());
 }
@@ -521,7 +535,7 @@ fn a_bundle_with_a_v2_authorization_not_under_its_anchored_key_fails_rebuild() {
         .add_authorization_v2(b.clone().sign(&gk).unwrap())
         .unwrap();
     let evidence_fails = |bundle: &TrustGraph| {
-        let (_, problems) = bundle.rebuild();
+        let problems = bundle.rebuild().problems;
         assert!(
             problems
                 .iter()
@@ -544,7 +558,7 @@ fn a_bundle_with_a_v2_authorization_not_under_its_anchored_key_fails_rebuild() {
     if let Some(Evidence::AuthorizationV2(a)) = &mut tampered.nodes.get_mut(&id).unwrap().evidence {
         a.body.recipients.insert("fraud-unit".into());
     }
-    let (_, problems) = tampered.rebuild();
+    let problems = tampered.rebuild().problems;
     assert!(
         problems.iter().any(|p| p.contains("invalid evidence")),
         "{problems:?}"
@@ -558,12 +572,191 @@ fn a_bundle_with_a_v2_authorization_not_under_its_anchored_key_fails_rebuild() {
         .attrs
         .retain(|k, _| !k.starts_with("governance_key"));
     evidence_fails(&unanchored);
-    // The anchored key marked revoked in the bundle.
-    let mut revoked = g.clone();
-    revoked
-        .add_governance_keys(&[anchor("tax-agency", &gk, GovernanceKeyStatus::Revoked)])
+    // The anchored key marked revoked in the bundle at the document's
+    // issue (900), or before it: the key could not have signed it.
+    for at in [900, 100] {
+        let mut revoked = g.clone();
+        revoked
+            .add_governance_keys(&[revoked_key("tax-agency", &gk, at)])
+            .unwrap();
+        evidence_fails(&revoked);
+    }
+}
+
+#[test]
+fn a_governance_key_carries_its_revocation_time_and_it_never_changes() {
+    let gk = key(1);
+    // A revoked key carries the time it was revoked; an active one none.
+    let revoked = anchor("tax-agency", &gk, GovernanceKeyStatus::Revoked);
+    revoked.check().unwrap();
+    let mut timeless = revoked.clone();
+    timeless.revoked_at = None;
+    assert!(timeless.check().is_err());
+    let mut active = anchor("tax-agency", &gk, GovernanceKeyStatus::Active);
+    active.check().unwrap();
+    assert!(!serde_json::to_string(&active)
+        .unwrap()
+        .contains("revoked_at"));
+    active.revoked_at = Some(1);
+    assert!(active.check().is_err());
+
+    let (mut g, _, _) = graph_and_authorization();
+    assert!(g.add_governance_keys(&[timeless]).is_err());
+    g.add_governance_keys(&[anchor("tax-agency", &gk, GovernanceKeyStatus::Active)])
         .unwrap();
-    evidence_fails(&revoked);
+    g.add_governance_keys(&[revoked_key("tax-agency", &gk, 1_500)])
+        .unwrap();
+    // The same record again changes nothing; another time is refused,
+    // earlier or later.
+    g.add_governance_keys(&[revoked_key("tax-agency", &gk, 1_500)])
+        .unwrap();
+    for at in [1_000, 1_700] {
+        assert!(g
+            .clone()
+            .add_governance_keys(&[revoked_key("tax-agency", &gk, at)])
+            .is_err());
+    }
+}
+
+#[test]
+fn a_revoked_governance_key_blocks_new_use_and_keeps_past_use_verifiable() {
+    let gk = key(1);
+    let (mut g, _, b) = graph_and_authorization();
+    g.add_governance_keys(&[anchor("tax-agency", &gk, GovernanceKeyStatus::Active)])
+        .unwrap();
+    let s = b.clone().sign(&gk).unwrap();
+    let id = g.add_authorization_v2(s.clone()).unwrap();
+    // The key is revoked at 1500 (the authorization's window is 1000..2000).
+    g.add_governance_keys(&[revoked_key("tax-agency", &gk, 1_500)])
+        .unwrap();
+
+    // A graph that learns of the authorization after the revocation.
+    let (mut h, _, _) = graph_and_authorization();
+    h.add_governance_keys(&[anchor("tax-agency", &gk, GovernanceKeyStatus::Active)])
+        .unwrap();
+    h.add_governance_keys(&[revoked_key("tax-agency", &gk, 1_500)])
+        .unwrap();
+    // For current use: refused.
+    let e = h.clone().add_authorization_v2(s.clone()).unwrap_err();
+    assert_eq!(e.code, Code::GovernanceKeyRevoked);
+    // For an execution or key release before the revocation: verifiable.
+    assert_eq!(
+        h.clone().add_authorization_v2_at(s.clone(), 1_499).unwrap(),
+        id
+    );
+    assert_eq!(
+        h.clone().add_authorization_v2_at(s.clone(), 1_000).unwrap(),
+        id
+    );
+    // At or after it: refused.
+    for t in [1_500, 1_999] {
+        let e = h.clone().add_authorization_v2_at(s.clone(), t).unwrap_err();
+        assert_eq!(e.code, Code::GovernanceKeyRevoked, "{t}: {}", e.message);
+    }
+    // Outside the authorization's window, whatever the key: refused.
+    let e = h
+        .clone()
+        .add_authorization_v2_at(s.clone(), 999)
+        .unwrap_err();
+    assert_eq!(e.code, Code::GovernanceAuthorizationExpired);
+    // A document claiming issue at or after the revocation: never valid.
+    let mut late = body();
+    late.issued_at = 1_500;
+    late.approvals = vec![
+        approval(&late, "alice", "data_owner"),
+        approval(&late, "bob", "security_admin"),
+    ];
+    let e = h
+        .clone()
+        .add_authorization_v2_at(late.sign(&gk).unwrap(), 1_499)
+        .unwrap_err();
+    assert_eq!(e.code, Code::GovernanceKeyRevoked);
+
+    // Rebuilt without an evaluation time, the bundle is not current
+    // evidence: the authorization is reported as historically valid only.
+    let r = g.rebuild();
+    assert!(r.problems.is_empty(), "{:?}", r.problems);
+    assert!(
+        r.historical_only
+            .iter()
+            .any(|n| n.starts_with(&id) && n.contains("1500")),
+        "{:?}",
+        r.historical_only
+    );
+    // At an evaluation time before the revocation it verifies; at or after
+    // it, it fails.
+    let r = g.rebuild_at(1_499);
+    assert!(
+        r.problems.is_empty() && r.historical_only.is_empty(),
+        "{r:?}"
+    );
+    let r = g.rebuild_at(1_500);
+    assert!(r.problems.iter().any(|p| p.starts_with(&id)), "{r:?}");
+    // The report says so and does not count it as current.
+    let rep = g.report(&ReportOptions::default()).unwrap();
+    let ev = rep.rows.iter().find(|r| r.name == "Evidence").unwrap();
+    assert_eq!(ev.status, Status::Verified, "{rep}");
+    assert!(
+        ev.details
+            .iter()
+            .any(|d| d.contains("historically valid only")),
+        "{rep}"
+    );
+}
+
+#[test]
+fn an_authorization_is_usable_only_at_times_its_key_window_and_revocation_allow() {
+    let gk = key(1);
+    let s = approved().sign(&gk).unwrap();
+    let active = anchor("tax-agency", &gk, GovernanceKeyStatus::Active);
+    // Strictly within its window (1000..2000).
+    s.usable_at(&active, None, 1_000).unwrap();
+    s.usable_at(&active, None, 1_999).unwrap();
+    for t in [999, 2_000] {
+        let e = s.usable_at(&active, None, t).unwrap_err();
+        assert_eq!(e.code, Code::GovernanceAuthorizationExpired, "{t}");
+    }
+    // Under another organization's key, or another key: refused.
+    assert!(s
+        .usable_at(
+            &anchor("benefits-agency", &gk, GovernanceKeyStatus::Active),
+            None,
+            1_200
+        )
+        .is_err());
+    assert!(s
+        .usable_at(
+            &anchor("tax-agency", &key(2), GovernanceKeyStatus::Active),
+            None,
+            1_200
+        )
+        .is_err());
+    // Its key revoked at 1500: usable before, not from then on.
+    let revoked = revoked_key("tax-agency", &gk, 1_500);
+    s.usable_at(&revoked, None, 1_499).unwrap();
+    for t in [1_500, 1_501] {
+        let e = s.usable_at(&revoked, None, t).unwrap_err();
+        assert_eq!(e.code, Code::GovernanceKeyRevoked, "{t}");
+    }
+    // Revoked by its owner at 1200: from then on, never before.
+    let rev = RevocationV2 {
+        version: 2,
+        party: "tax-agency".into(),
+        authorization: s.id(),
+        reason: "superseded".into(),
+        issued_at: 1_200,
+    };
+    s.usable_at(&active, Some(&rev), 1_199).unwrap();
+    let e = s.usable_at(&active, Some(&rev), 1_200).unwrap_err();
+    assert_eq!(e.code, Code::GovernanceAuthorizationRevoked);
+    // A revocation of another authorization, or by another party, is not
+    // this one's.
+    let mut other = rev.clone();
+    other.authorization = h('f');
+    assert!(s.usable_at(&active, Some(&other), 1_100).is_err());
+    let mut foreign = rev;
+    foreign.party = "benefits-agency".into();
+    assert!(s.usable_at(&active, Some(&foreign), 1_100).is_err());
 }
 
 const PROGRAM: &str = "encompute 0.1

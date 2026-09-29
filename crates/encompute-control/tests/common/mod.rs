@@ -129,6 +129,7 @@ pub fn db_name(url: &str) -> String {
 pub fn backup_database(url: &str, backup: &str) {
     drop_at_test_end(&admin_url(), backup);
     let mut c = postgres::Client::connect(&admin_url(), postgres::NoTls).unwrap();
+    drop_at_test_end(&admin_url(), backup);
     let live = db_name(url);
     // A dropped pool closes its connections asynchronously: end them first.
     for _ in 0..50 {

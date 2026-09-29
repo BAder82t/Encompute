@@ -34,7 +34,9 @@ CREATE TRIGGER projects_governance_immutable BEFORE UPDATE ON projects
 
 -- Governance keys: an organization's Ed25519 public key, proposed by one
 -- person and approved by a different security admin. At most one is
--- active per organization. A revoked key never comes back.
+-- active per organization. A revoked key never comes back, and its
+-- revocation time, set with the revocation, never changes: from that time
+-- on nothing it signed is used, while uses before it stay valid history.
 CREATE TABLE governance_keys (
     id              TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL REFERENCES organizations(id),
@@ -50,7 +52,8 @@ CREATE TABLE governance_keys (
     revoked_by      TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     approved_at     TIMESTAMPTZ,
-    revoked_at      TIMESTAMPTZ
+    revoked_at      TIMESTAMPTZ,
+    CHECK ((status = 'revoked') = (revoked_at IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX governance_keys_one_active ON governance_keys (organization_id)
@@ -63,6 +66,10 @@ BEGIN
        OR NEW.public_key IS DISTINCT FROM OLD.public_key
        OR NEW.proposed_by IS DISTINCT FROM OLD.proposed_by THEN
         RAISE EXCEPTION 'a governance key is immutable' USING ERRCODE = 'check_violation';
+    END IF;
+    IF OLD.revoked_at IS NOT NULL AND (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at
+       OR NEW.revoked_by IS DISTINCT FROM OLD.revoked_by) THEN
+        RAISE EXCEPTION 'a governance key''s revocation time is immutable' USING ERRCODE = 'check_violation';
     END IF;
     IF OLD.status = 'revoked' AND NEW.status <> 'revoked' THEN
         RAISE EXCEPTION 'a revoked governance key stays revoked' USING ERRCODE = 'check_violation';
@@ -99,7 +106,8 @@ CREATE TABLE purposes (
     approved_at     TIMESTAMPTZ,
     retired_at      TIMESTAMPTZ,
     UNIQUE (project_id, name, revision),
-    CHECK (valid_from < valid_until)
+    CHECK (valid_from < valid_until),
+    CHECK ((status = 'retired') = (retired_at IS NOT NULL))
 );
 
 CREATE FUNCTION encompute_purpose_guard() RETURNS trigger AS $$
@@ -114,6 +122,9 @@ BEGIN
        OR NEW.valid_until IS DISTINCT FROM OLD.valid_until
        OR NEW.proposed_by IS DISTINCT FROM OLD.proposed_by THEN
         RAISE EXCEPTION 'a purpose is immutable: propose a new revision' USING ERRCODE = 'check_violation';
+    END IF;
+    IF OLD.retired_at IS NOT NULL AND NEW.retired_at IS DISTINCT FROM OLD.retired_at THEN
+        RAISE EXCEPTION 'a purpose''s retirement time is immutable' USING ERRCODE = 'check_violation';
     END IF;
     IF OLD.status = 'retired' AND NEW.status <> 'retired' THEN
         RAISE EXCEPTION 'a retired purpose stays retired' USING ERRCODE = 'check_violation';
@@ -157,7 +168,11 @@ CREATE TABLE approval_rules (
 -- organization, approved by distinct people (four eyes), and active only
 -- once the owner's governance-key signature over the approved body
 -- verifies. `body` is the proposal (no approvals); the approvals are rows
--- below; `signed` is the signed document. Revocation is final.
+-- below; `signed` is the signed document. Once approved (its quorum met)
+-- an authorization is immutable evidence: its approvals and recipients
+-- never change and it is not proposed again; any change of meaning is a
+-- new authorization. Revocation is final, a state transition of its own,
+-- and its time never changes: it blocks use from then on, never before.
 CREATE TABLE authorizations (
     id                TEXT PRIMARY KEY,
     organization_id   TEXT NOT NULL REFERENCES organizations(id),
@@ -181,7 +196,9 @@ CREATE TABLE authorizations (
     -- An owner-signed revocation, when one was supplied.
     revocation        JSONB,
     CHECK (valid_from < valid_until),
-    CHECK ((status = 'active') <= (signed IS NOT NULL))
+    CHECK ((status = 'active') <= (signed IS NOT NULL)),
+    CHECK ((signed IS NOT NULL) = (activated_at IS NOT NULL)),
+    CHECK ((status = 'revoked') = (revoked_at IS NOT NULL))
 );
 
 CREATE INDEX authorizations_project ON authorizations (project_id, status);
@@ -199,11 +216,21 @@ BEGIN
         RAISE EXCEPTION 'an authorization is immutable: revoke and reissue' USING ERRCODE = 'check_violation';
     END IF;
     IF OLD.signed IS NOT NULL AND (NEW.signed IS DISTINCT FROM OLD.signed
-       OR NEW.authorization_id IS DISTINCT FROM OLD.authorization_id) THEN
+       OR NEW.authorization_id IS DISTINCT FROM OLD.authorization_id
+       OR NEW.governance_key_id IS DISTINCT FROM OLD.governance_key_id
+       OR NEW.activated_at IS DISTINCT FROM OLD.activated_at) THEN
         RAISE EXCEPTION 'a signed authorization is immutable' USING ERRCODE = 'check_violation';
+    END IF;
+    IF OLD.revoked_at IS NOT NULL AND (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at
+       OR NEW.revoked_by IS DISTINCT FROM OLD.revoked_by
+       OR NEW.revocation IS DISTINCT FROM OLD.revocation) THEN
+        RAISE EXCEPTION 'an authorization''s revocation time is immutable' USING ERRCODE = 'check_violation';
     END IF;
     IF OLD.status = 'revoked' AND NEW.status <> 'revoked' THEN
         RAISE EXCEPTION 'a revoked authorization stays revoked' USING ERRCODE = 'check_violation';
+    END IF;
+    IF OLD.status = 'approved' AND NEW.status = 'proposed' THEN
+        RAISE EXCEPTION 'an approved authorization is not proposed again' USING ERRCODE = 'check_violation';
     END IF;
     IF OLD.status = 'active' AND NEW.status NOT IN ('active', 'revoked') THEN
         RAISE EXCEPTION 'an active authorization is only revoked' USING ERRCODE = 'check_violation';
@@ -235,6 +262,36 @@ CREATE TABLE authorization_approvals (
     PRIMARY KEY (authorization_row, approver_id),
     UNIQUE (authorization_row, idp_issuer, approver_subject)
 );
+
+-- An authorization's approvals and recipients are evidence: a row never
+-- changes, and rows are added or removed only while it is proposed. Once
+-- approved, active or revoked, a change of meaning is a new authorization.
+CREATE FUNCTION encompute_authorization_evidence_guard() RETURNS trigger AS $$
+DECLARE
+    s TEXT;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'an authorization''s approvals and recipients are immutable'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    SELECT status INTO s FROM authorizations
+     WHERE id = CASE WHEN TG_OP = 'DELETE' THEN OLD.authorization_row ELSE NEW.authorization_row END
+       FOR SHARE;
+    IF s IS DISTINCT FROM 'proposed' THEN
+        RAISE EXCEPTION 'the approvals and recipients of an authorization that is % are immutable: propose a new authorization', s
+            USING ERRCODE = 'check_violation';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER authorization_approvals_guard BEFORE INSERT OR UPDATE OR DELETE ON authorization_approvals
+    FOR EACH ROW EXECUTE FUNCTION encompute_authorization_evidence_guard();
+CREATE TRIGGER authorization_recipients_guard BEFORE INSERT OR UPDATE OR DELETE ON authorization_recipients
+    FOR EACH ROW EXECUTE FUNCTION encompute_authorization_evidence_guard();
 
 -- Dataset versions: each version is its own asset row, `series@version`,
 -- with a content-addressed version ID. A versioned asset's identity,
