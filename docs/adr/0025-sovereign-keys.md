@@ -1,0 +1,254 @@
+# ADR-025 — Sovereign keys and two-part key release
+
+Status: **Accepted** (2026-09-29) for the two-part release rule, custody
+modes, release tickets and the fail-closed behaviour, as design.
+The items under "Open decisions" are **Proposed** and not decided.
+Implementation starts after 0.3.0 ships; nothing here is part of 0.3.
+
+## Context
+
+In a cross-agency project, each agency must keep its keys under its own
+control, in its own KMS, and must be the one that finally decides whether a
+key is released. Encompute 0.3 goes part of the way:
+
+- Each key broker's KEK is wrapped under the organization's root key in its
+  KMS (OpenBao/Vault Transit), and a broker serves one organization.
+- Attested key release binds the workload, spec and policy.
+- But: a platform broker may hold any organization's keys; the rc.4 fixes
+  restrict a training spec to one broker rather than binding each asset to
+  its owner's broker; the client's FHE `secret.key` is an unencrypted file;
+  and a broker releases on the strength of its release policy and the
+  control plane's grant. A compromised control plane that forges state is
+  therefore a key-release risk, not only an availability risk.
+
+ADR-023 makes the agency-signed authorization the source of consent. This
+record makes the agency's broker enforce it.
+
+## Decision
+
+### 1. Two-part release
+
+The agency-owned key broker is the final release authority. It releases a
+key only when **both** are present:
+
+1. an **owner-signed AuthorizationV2** (ADR-023), installed at the broker
+   and verified against the owner's pinned governance key; and
+2. a **valid control-plane release ticket**: short-lived, single-use,
+   signed by the pinned control-plane key, and matching the job.
+
+A ticket without an authorization is useless, so a compromised control
+plane can only deny. An authorization without a ticket releases nothing,
+so a stolen authorization cannot be replayed outside a scheduled job.
+
+### 2. Key classes
+
+| Class | Holder | Protects |
+|---|---|---|
+| K1 org root key | the organization's KMS | K2 |
+| K2 broker KEK (wrapped) | broker | K3, K4, the state MAC |
+| K3 asset data key, per version | owner's broker | sealed assets |
+| K4 grant-signing key | owner's broker | grants (pinned in the attested identity) |
+| K5 FHE secret key | decryptor, KMS-wrapped | its ciphertexts |
+| K6 FHE public and evaluation keys | encryptors and evaluator | encryption and evaluation |
+| K7 evaluator receipt key | evaluator | receipts |
+| K8 session HPKE key | TEE | grants in transit |
+| K9 SecAgg keys | parties and coordinator | masks |
+| K10 control-plane signer | control plane | grants, tickets, anchor |
+| K11 governance key | the agency's KMS or HSM | authorizations, charter, versions, revocation heads |
+| K12 linkage key | depends on the scheme (ADR-024) | pseudonyms |
+| K13 derived-artifact key | custodian's broker | released artifacts |
+
+No key is shared by the project, and the control plane holds no key that
+protects data.
+
+### 3. Custody modes
+
+- `Custody{Standard, Sovereign}`. **Sovereign is the default in governed
+  projects.**
+- Brokers are registered per organization:
+  `POST /v1/organizations/{org}/key-brokers` (grant public key, provider
+  kind, `key_ref` namespace, location).
+- In Sovereign mode, registering an asset requires a broker of the asset's
+  own organization.
+- Planning checks each source's owner broker (instead of "some broker
+  exists") and emits a key-custody requirement per asset, which binds
+  custody into the PlanId and appears in the report.
+- **Per-asset broker binding.** A map `asset_brokers: asset or key id →
+  BrokerId` goes in the training spec and, through the GovernanceBinding,
+  in execution identities. Acquiring a key requires
+  `asset_brokers[asset] == grant.broker_id` and a pinned signer for that
+  broker. This replaces the rc.4 one-broker-per-spec restriction safely,
+  and lets confidential model collaboration keep each owner's keys at the
+  owner's broker.
+- **FHE secret keys** (K5) in governed projects are wrapped under the
+  decryptor's K1, through a KMS-backed client key store. This also removes
+  the unencrypted `secret.key` file for governed projects.
+
+### 4. Release tickets
+
+```
+ReleaseTicket { ticket_id, kind: KeyRelease | Decrypt | Export,
+  organization, broker, asset_version_id, authorization_ids,
+  job_id, project, purpose_id, governance_id, plan_id,
+  execution_spec_id, policy_id, workload_or_recipient,
+  placement_digest, not_before,
+  not_after = min(now + 300 s, job.not_after, grant.expires_at),
+  anchor_counter, issuer, issuer_public_key, signature }
+```
+
+- Signed under its own domain (`KEY_TICKET`).
+- Issued at scheduling, or on request by the scheduled workload or the
+  recipient only (`POST /v1/jobs/{id}/release-ticket`). Every issue is
+  audited.
+- **TTL 300 seconds**, and never beyond the job's or grant's window. The
+  owner decision was "minutes" (D7); the shorter of the two proposed
+  values was taken.
+- Single-use: the broker persists seen `ticket_id`s until `not_after`.
+
+### 5. Broker checks
+
+`release_key(session, asset, authorization_id, ticket)` checks, in order,
+and refuses at the first failure:
+
+1. the session exists;
+2. the secret exists and is not revoked;
+3. the existing release policy (attestation, spec, policy) passes;
+4. the AuthorizationV2 is installed, verifies under the pinned governance
+   key, belongs to this organization, and is not locally revoked;
+5. the spec, policy, privacy policy, linkage policy and program are covered
+   by it;
+6. `valid_from ≤ now < valid_until` on the broker's own clock, strictly,
+   and the attestation's `issued_at` is before `valid_until`;
+7. the attested placement is admitted; missing placement evidence means
+   not admitted;
+8. the ticket is signed by the pinned control-plane key, is for this
+   organization, matches the request, is inside its window (60 seconds of
+   skew, applied toward denial) and has not been seen;
+9. the authorization's limits allow the release; counters are incremented
+   and persisted **before** the key is granted;
+10. a grant header v2 is issued, naming the authorization, project, purpose,
+    `valid_until` and ticket, with
+    `expires_at = min(session expiry, valid_until)`.
+
+The broker signs a `KeyRelease` receipt (never containing a key) for the
+evidence bundle.
+
+### 6. Fail-closed rules
+
+- **Broker unreachable:** nothing is released.
+- **Control plane down:** nothing is released, and the owner can still
+  revoke locally at its broker. A local revocation takes effect at once,
+  without the control plane.
+- **Compromised control plane:** it can deny service or delay delivering a
+  revocation. It cannot release a key, because it cannot sign an
+  authorization.
+- **Unknown or unpinned governance key, ticket signer or broker:** refused.
+- **Revocation messages:** the control channel, which accepts only
+  `asset.revoked` today, gains `authorization.revoked` and `asset.expired`.
+  Each is sent only after it is anchored.
+- **Missing evidence never passes:** no placement evidence, no installed
+  authorization or an unparseable ticket are refusals, not warnings.
+
+### 7. Placement evidence levels
+
+- Evaluators and brokers carry a `Location{jurisdiction, provider, region,
+  zone}` with evidence ordered
+  `SelfDeclared < OperatorDeclared < Attested`:
+  - `SelfDeclared`: the service says so. **Never satisfies production.**
+  - `OperatorDeclared`: signed by a human `security_admin` of the operator
+    organization, audited and recorded in the governance log.
+  - `Attested`: taken from a verified TEE attestation (for Confidential
+    Space, the GCE zone in the attestation), refreshed after a maximum
+    evidence age.
+- The report labels every location "attested" or "declared".
+- The broker checks attested placement per session (check 7).
+- Region is not jurisdiction. Placement constraints therefore also name
+  allowed operators. The legal assessment of a location stays with the
+  owner.
+- How placement constraints are declared, combined, planned and enforced
+  is in ADR-026.
+
+## Open decisions
+
+These are recorded in the milestone plan's open decisions and are not
+decided here:
+
+- **K-1 Development exception to tickets.** Whether a
+  `require_ticket = false` setting exists for air-gapped development only,
+  refused in production. Recommendation: yes. In production governed
+  projects, tickets are required by the two-part rule above.
+- **K-2 Decryption-key custody for record-level and statistics
+  collaboration.** M1, recipient-held and KMS-wrapped (ships soonest;
+  confidentiality against the recipient rests on the evaluator operator not
+  colluding, disclosed in the report); M2, an attested TEE decryptor (needs
+  the Confidential Space live run); M3, threshold or multi-key decryption
+  (research; BinFHE threshold support is unverified). Recommendation: M1
+  now, M2 as the strong profile, M3 as research.
+- **K-3 Location evidence in production.** `OperatorDeclared` as the floor;
+  whether `Attested` is required when prohibited locations are declared.
+  Recommendation: the floor now, `Attested` in the strong profile.
+- **K-4 Platform brokers in sovereign projects.** Whether to forbid them
+  outright. Recommendation: yes.
+- **K-5 Broker state rollback guard.** A generation high-water mark in the
+  organization's KMS (KV-v2 with compare-and-set). Recommendation: yes,
+  before any invariant claims that broker state cannot be rolled back.
+  Until then, broker rollback is handled by procedure only.
+- **K-6 One FHE key per (project, purpose, linkage epoch).** Cryptographic
+  purpose separation, at about 525 MiB of BinFHE evaluation keys each.
+  Recommendation: yes.
+- **K-7 Expiry during a running job.** Finish but block export after
+  `valid_until` (recommended), or abort.
+- **K-8 Location taxonomy and KMS adapters.** Who maintains the location
+  table, and the adapter order after OpenBao (PKCS#11, then GCP KMS/EKM,
+  Azure Managed HSM, AWS KMS).
+- **K-9 Residency scope.** Whether constraints cover ciphertexts, keys and
+  evidence at rest, not only plaintext. Recommendation: all by default.
+- **O-1 Operator-owned evaluators.** Evaluators are platform services
+  today. Whether a designated operator organization may register them in
+  governed projects, which operator separation needs. Recommendation: yes.
+
+### External review scope (key model)
+
+Together with ADR-024's linkage review:
+
+- BinFHE public-key encryption with ciphertext switching: noise after
+  switching, and the security label of the new profile;
+- binding evaluation keys to the announced public key;
+- the chosen decryption-key model (K-2), and its collusion assumptions.
+
+## Consequences
+
+- Each agency can check, from its own broker's state and receipts, that no
+  key left it without its own signature.
+- Brokers gain state (installed authorizations, counters, seen tickets),
+  which makes broker state rollback matter; K-5 addresses it.
+- Key release needs the control plane and the broker both to be up. That
+  is the price of the control plane not being an authority.
+- Per-asset broker binding lifts the rc.4 one-broker restriction without
+  reopening the cross-owner grant confusion it closed.
+- Per-purpose FHE keys, if adopted, multiply evaluation-key storage and
+  upload time.
+
+## Alternatives considered
+
+- **Broker trusts the control plane's grant (0.3).** Rejected for governed
+  projects: a compromised control plane could release keys.
+- **Broker checks only the owner's authorization, no ticket.** Rejected:
+  the authorization is a standing document; without a single-use,
+  job-bound ticket, it could be replayed for any session that passes
+  attestation.
+- **A project key or central KMS.** Rejected: it contradicts sovereign
+  custody and makes the control-plane operator a key holder.
+- **A 600-second ticket.** Rejected in favour of 300 seconds (D7 asks for
+  minutes; the shorter was taken).
+
+## Relevant source modules
+
+Planned changes touch:
+
+- `crates/encompute-keybroker/src/{server,store,root}.rs`
+- `crates/encompute-attestation/src/{grant,gcp,policy}.rs`
+- `crates/encompute-control/src/ops/{assets,jobs}.rs`
+- `crates/encompute-openfhe-client` (KMS-wrapped key store, public-key
+  encryption)
+- `crates/encompute-planner/src/{model,requirements}.rs`

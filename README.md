@@ -51,6 +51,8 @@ v0.2.0). What you can rely on is in the
 [performance](docs/performance.md), [compatibility](docs/compatibility.md),
 [API stability](docs/api-stability.md), [threat model](docs/threat-model.md),
 [cryptography](docs/cryptography.md) and [error codes](docs/errors.md).
+Planned for after 0.3.0, at the design stage:
+[confidential cross-agency computation](docs/public-sector.md).
 
 | Area | Status |
 |---|---|

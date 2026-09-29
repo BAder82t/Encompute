@@ -1,0 +1,195 @@
+# Confidential cross-agency computation
+
+> **Status: planned for after 0.3.0; design stage.** Nothing on this page
+> is part of Encompute 0.3. It describes what is being designed, so that
+> institutions, reviewers and design partners can comment on it. Features,
+> names and formats may change before they ship. Where this page says
+> Encompute "refuses" or "checks" something, it describes the design, not
+> released behaviour.
+
+Encompute lets public institutions compute across organizational
+boundaries without centralizing sensitive data. Each institution retains
+ownership and key control, authorizes specific purposes, and receives
+verifiable evidence of what was computed and released.
+
+In short: compute across institutions without pooling sensitive records.
+
+## Who this is for
+
+Public bodies that need an answer depending on records several of them
+hold, and that cannot, or should not, copy those records to one place. For
+example:
+
+- a benefits agency that needs to know whether an applicant meets a rule
+  that depends on tax and residency records held elsewhere;
+- regional health authorities that want joint weekly statistics without
+  sending each other case-level data;
+- several institutions that want to improve a shared model without any of
+  them seeing the others' training data.
+
+## Four collaboration patterns
+
+| Pattern | What is computed | Mechanism | What is released |
+|---|---|---|---|
+| **1. Exact eligibility** | A rule over one person's records held by several institutions | Exact encrypted computation (OpenFHE Boolean circuits), with a declared record-linkage policy | A single yes/no, or a small bounded category, to the one authorized institution |
+| **2. Encrypted statistics** | Totals, rates or distributions over several institutions' data | Encrypted arithmetic, with differential privacy applied before release | Noisy aggregates, within a privacy budget |
+| **3. Multi-institution secure aggregation** | Sums of per-institution local results | Secure aggregation with a minimum number of contributors, plus differential privacy | Only the combined, noised result; no single contribution |
+| **4. Confidential model collaboration** | Fine-tuning a shared model | Confidential fine-tuning, with each owner's keys at the owner's own key broker | A model adapter or update, as a derived artifact with its own release rules |
+
+Patterns 2 and 3 need no new cryptography and are expected to be available
+first. Pattern 1 needs record linkage and a multi-party key model that will
+go through external cryptographic review before they ship. Pattern 4 builds
+on the existing confidential fine-tuning.
+
+## What each institution retains
+
+- **Its data.** Records stay with the institution that holds them. Other
+  parties receive ciphertexts, masked contributions or nothing, depending
+  on the pattern. The released result is the only thing decrypted, and only
+  for its authorized recipient.
+- **Its keys.** Each institution's keys stay in its own key management
+  system, released only by its own key broker. There is no shared project
+  key and no central master key. The platform operator holds no key that
+  protects data.
+- **Its authorization.** Each institution signs, with a governance key it
+  holds, exactly what it allows: which program may run over which version
+  of its dataset, for which declared purpose, until when, with which
+  approvals, and which result may be released to whom. Using its own data
+  in a project needs such an authorization too.
+- **Its approvals.** Authorizations need two distinct people in the
+  institution. Automated service accounts never count as approvers.
+- **Its revocation.** An institution can revoke an authorization or a
+  dataset at any time, including locally at its own key broker if the
+  control plane is unavailable. Revocation stops future use; it cannot
+  recall results already released, and the evidence says so.
+- **Its evidence.** Each institution can export a governance evidence
+  bundle for a computation and verify it offline, using only public keys it
+  has obtained itself. The bundle contains no source records.
+
+## How a governed project works
+
+1. Institutions create a *governed* project together. Each member's
+   administrator accepts, and the members co-sign a project charter naming
+   the members and any appointed auditor organization. A project's
+   governance mode cannot be changed later.
+2. The members agree on a **purpose**: its name, what may be computed, what
+   may be released and to whom, where computation may run, and its validity
+   period. Every institution whose data is used signs its acceptance.
+3. Each data-owning institution signs an **authorization** for one dataset
+   version, one program (or a fixed set of programs) and that purpose, with
+   an end date. Two of its people approve it.
+4. A job is planned. Planning fails if any authorization is missing,
+   expired, for another purpose or program, or if no evaluator meets the
+   declared placement rules.
+5. Each institution's own software checks the job against its own
+   authorization before encrypting anything. Its key broker releases a key
+   only when it holds that institution's signed authorization **and** a
+   short-lived, single-use ticket for the job.
+6. The result is released only in the form and to the recipients every
+   source authorized. It becomes a new asset with its own lineage and
+   release rules.
+7. Anyone holding the institutions' public keys can check the evidence:
+   what was computed, over which versions, under which authorizations and
+   approvals, where, and what was released.
+
+Authorization windows are strict. Evidence from a computation that ran
+inside its window stays valid after the window ends; it is judged at the
+time the computation ran, not the time someone checks it.
+
+## Roles
+
+| Role | Holds | Never receives |
+|---|---|---|
+| Data-owning institution | Its own records and keys, its governance key | Other institutions' records or keys |
+| Result recipient | The released result | The inputs |
+| Evaluator operator (a separate organization) | Ciphertexts and the program | Any decryption key, any records |
+| Platform (control-plane) operator | Metadata, schedules, tickets | Any key that protects data |
+| Auditor organization | Read access to authorizations, evidence, lineage and privacy spending | The ability to run, approve, receive or change anything |
+
+The auditor role is read-only and cannot be combined with any other role.
+
+## Technical enforcement and legal authority
+
+Encompute enforces a declared technical policy. Each institution in a
+project signs what may happen to its data: which program may run over which
+dataset version, for which declared purpose, until when, with which
+approvals, and which result may be released to whom. Encompute refuses any
+computation, key release or export those signed declarations do not allow,
+and it produces evidence anyone holding the institutions' public keys can
+check.
+
+Encompute does not decide whether any of this is lawful. It does not
+determine:
+
+- the lawful basis or statutory authority for a computation;
+- whether a purpose is legitimate, necessary or proportionate;
+- retention periods required by law or records schedules (it enforces the
+  periods an institution declares);
+- the rights of the people concerned, including access, correction,
+  objection, notification and appeal;
+- whether a decision requires human oversight, or whether a result may be
+  used in a decision about a person;
+- jurisdiction and cross-border rules (it enforces the regions and
+  operators an institution declares).
+
+A purpose name or legal reference recorded in Encompute is a label an
+institution declared and signed. Encompute binds it to the computation and
+shows it in reports; it does not check it against any law.
+
+"CROSS-AGENCY REQUIREMENTS SATISFIED" means the computation matched what
+the institutions technically authorized. It is not legal advice, a
+compliance certification, or evidence that an authorization was lawful.
+Evidence cannot show what an institution did outside Encompute, and a
+released result cannot be recalled: revocation stops future use and lists
+what was derived. "Ownership" in reports means control within Encompute
+(keys, authorization, revocation), not legal title.
+
+Each institution remains responsible for its own legal assessment and for
+its use of data and results.
+
+Every governance report ends with a one-line form of this boundary.
+
+## Known limits of the design
+
+- **Record linkage is pseudonymous, not anonymous.** Whoever holds a
+  linkage key, or a linkage authority, can recompute the pseudonym of a
+  person it can identify. An institution colluding with the evaluator
+  operator can learn which of its subjects appear in another institution's
+  records.
+- **Recipient-held decryption relies on non-collusion.** If the recipient
+  institution holds the decryption key, confidentiality of the inputs
+  against it rests on the evaluator operator not colluding with it. Reports
+  state this assumption wherever it applies.
+- **Repeated queries can reveal values.** Limits on queries per person and
+  per job, and the audit trail, bound this; they do not prevent it.
+- **Declared locations are declarations.** A location declared by an
+  operator is attributable, not proven. Only attested locations are
+  checked cryptographically, and reports label which is which.
+- **Released results cannot be recalled.**
+
+## Non-goals
+
+Encompute will not be:
+
+- a national citizen-data platform;
+- a data lake;
+- an identity registry or national identity system;
+- a case-management system;
+- a system that automates policy decisions;
+- a legal authorization engine;
+- a records-management system;
+- a data-quality platform;
+- a full data catalog;
+- a user interface for every workflow.
+
+## Design records
+
+- [Governed projects and owner-signed authorizations](adr/0023-governed-projects.md)
+- [Record linkage](adr/0024-record-linkage.md) (proposed; open decisions and
+  the external review scope)
+- [Sovereign keys and two-part key release](adr/0025-sovereign-keys.md)
+- [Placement, operators and data minimization](adr/0026-placement-and-operators.md)
+- [Cross-agency trust report and governance evidence bundle](adr/0027-governance-report-and-bundle.md)
+
+Related: [threat model](threat-model.md), [known
+limitations](../KNOWN_LIMITATIONS.md), [support matrix](support-matrix.md).

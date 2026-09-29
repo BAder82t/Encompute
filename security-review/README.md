@@ -45,6 +45,14 @@ Other references:
   [0020](../docs/adr/0020-openfhe-exact.md) and
   [0022](../docs/adr/0022-exact-optimization.md) (OpenFHE exact),
   [0021](../docs/adr/0021-enterprise-deployment.md) (control plane).
+  [0023](../docs/adr/0023-governed-projects.md) (governed projects),
+  [0024](../docs/adr/0024-record-linkage.md) (record linkage, proposed),
+  [0025](../docs/adr/0025-sovereign-keys.md) (sovereign keys),
+  [0026](../docs/adr/0026-placement-and-operators.md) (placement and
+  operators) and
+  [0027](../docs/adr/0027-governance-report-and-bundle.md) (governance
+  report and evidence bundle) are designs for after 0.3.0 and outside
+  this review's scope.
   Some decision records describe an earlier state; where they disagree
   with the code, the code and the threat model are authoritative.
 - Vulnerability intake: [SECURITY.md](../SECURITY.md).

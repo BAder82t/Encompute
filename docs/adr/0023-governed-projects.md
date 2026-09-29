@@ -1,0 +1,452 @@
+# ADR-023 — Governed projects and owner-signed authorizations
+
+Status: **Accepted** (2026-09-29) as design. Implementation starts after
+0.3.0 ships; nothing in this record is part of 0.3. The items under
+"Still open" are not decided.
+
+## Context
+
+Public institutions want to compute across organizational boundaries
+without pooling sensitive records: an eligibility rule over three
+agencies' registers, regional statistics, a model trained on data no
+single party may see. Encompute 0.3 already has most of the machinery:
+exact and approximate FHE, secure aggregation, differential privacy,
+attested key release, per-organization brokers and a control plane with
+projects and asset approvals. What it lacks is an authority model that
+survives a distrustful setting.
+
+Today authority over a collaboration sits in the operator's database:
+
+- Control-plane `asset_approvals` are unsigned rows. They have no validity
+  window and no program binding, so an approval authorizes any program in
+  the project. Only the database knows about them.
+- The trust graph's `SignedAuthorization` is signed, but has no project,
+  version, `valid_from`, plan or spec, and `purpose: None` acts as a
+  wildcard.
+- The two systems are not connected.
+- Trust-report expiry is judged on the verifier's clock, so valid
+  historical evidence starts failing once an authorization expires.
+- Privacy budgets are per asset, so a new version or a new project starts
+  from zero.
+- The auditor role can be combined with other roles.
+- The audit chain is global, so proving one project's events reveals
+  other organizations' events.
+
+For an agency, "the platform operator's database says we approved it" is
+not consent. An agency needs to sign what it allows with a key it holds,
+and needs every enforcement point, including its own key broker, to check
+that signature.
+
+The rc.4 review fixes (ENC-SF-2026-088 to 092) close the 0.3.x gaps that
+matter already: job purpose and source assets bound to the program,
+human-only job approval, anchored withdrawal, cross-organization
+redaction, and one broker per training spec. They are release blockers
+for 0.3.0 and are not part of this decision.
+
+## Decision
+
+### 1. Settled architecture
+
+- **An agency-signed authorization is the source of consent.** It is
+  signed with the agency's governance key. That key stays in the agency's
+  own KMS, HSM or Vault. The control plane stores only the public key, its
+  key ID and its revocation state, and never the private key.
+- **The control plane coordinates and enforces, but is not an
+  authority.** It indexes authorizations, collects approvals, plans,
+  schedules and issues tickets. A compromised control-plane operator can
+  deny service or lie about state. It cannot manufacture an agency's
+  authorization or obtain its keys.
+- **The agency's own key broker is the final release authority.** It
+  releases a key only when an owner-signed authorization, verified against
+  the owner's pinned governance key, and a valid control-plane release
+  ticket are both present. The ticket format and the broker's checks are
+  in ADR-025.
+
+### 2. Governed mode
+
+- `CreateProject` gains an optional `governance: "standard" | "governed"`
+  (default `standard`) and an optional `organizations: [...]`.
+- The mode is **immutable** for the life of the project, enforced by a
+  database trigger. A standard project never becomes governed and the
+  reverse.
+- Everything in this record applies to governed projects only. Standard
+  projects and API v1 behave exactly as in 0.3. Every change is additive:
+  optional request fields, new routes, new response fields and new enum
+  values, following `docs/api-stability.md`.
+- In a governed project:
+  - PartyId equals OrganizationId.
+  - Listed organizations are invited, and each organization's admin must
+    accept.
+  - **Every source-asset owner authorizes explicitly** (D12). There is no
+    implicit authorization from membership.
+  - **An owner's use of its own asset needs an authorization too** (D2).
+    Owning a dataset does not exempt a job from the purpose, program and
+    window checks.
+- **Project charter.** A `ProjectCharter{name, members with their
+  governance-key fingerprints, appointed auditor organizations,
+  created_at}` is co-signed by every member's governance key. A membership
+  change is a new charter version, co-signed by all current members and the
+  joiner. The charter is trust-graph evidence.
+
+### 3. Governance keys
+
+- One active governance key per organization (table `governance_keys`).
+- Registration by a human org admin; activation by a **different** human
+  `security_admin`; revocation is anchored.
+- Signing happens in the agency's KMS through the CLI or broker
+  (`encompute governance sign`). The private key never reaches the control
+  plane (D3).
+- A later phase binds approvals to the agency's identity provider (subject,
+  issuer, authentication time, MFA level). The approval format carries
+  these fields from the start, so that phase changes verification, not the
+  format.
+
+### 4. Purpose objects and PurposeId
+
+```
+Purpose { version, project_id, name, revision, description,
+          legal_basis_ref?, modes, allowed_release_classes, recipients,
+          linkage_policy_id?, placement?, min_aggregate_parties?,
+          valid_from, valid_until, created_by_org }
+PurposeId = SHA256("encompute.purpose.v1" || 0x00 || canonical JSON)
+```
+
+- `name` equals the IR `Confidentiality.purpose` of every program run
+  under it.
+- `modes` is a subset of `RecordLevelExact | Aggregate |
+  ModelCollaboration`. `RecordLevelExact` requires a `linkage_policy_id`
+  (ADR-024).
+- `legal_basis_ref` is an opaque label. Encompute records it, binds it and
+  shows it; it never interprets it.
+- Lifecycle `proposed → active → retired`. A human `security_admin` of the
+  proposing organization proposes; a **different** human approves; every
+  source-owner organization accepts with a governance-key signature.
+- Editing creates a new revision with a new PurposeId. Retirement is
+  recorded in the governance event log (section 11).
+- At planning and submission, the program's declared purpose, the
+  `Purpose.name` and the job's purpose must be equal.
+
+### 5. The binding chain
+
+Every new identifier is `SHA256(tag || 0x00 || canonical JSON)`:
+`PurposeId`, `LinkageId`, `AuthorizationId` (tag
+`encompute.authorization.v2`), `AuthorizationSetId` (over the sorted IDs),
+`ProgramSetId` (`encompute.program-set.v1`), `AssetVersionId` (the hash of
+the owner-signed version record) and `GovernanceId`
+(`encompute.governance-binding.v1`).
+
+```
+GovernanceBinding { version, project, purpose_id, linkage_policy_id?,
+  inputs:  map input -> { asset_version_id, digest_commitment, organization },
+  outputs: map output -> { release_class, recipients },
+  placement_digest?, project_policy_digest? }
+GovernanceId = H(GovernanceBinding)
+```
+
+- **PolicyId** keeps its form. New optional IR fields (linkage, release
+  forms, placement) are skipped when absent, so existing PolicyIds do not
+  change.
+- **ExecutionSpec** gains one optional field, `governance_id`, skipped when
+  absent. `SPEC_VERSION` stays 1, as it did when `policy_id` was added.
+  Linkage reaches the spec through the PolicyId and the binding, so there is
+  no separate `linkage_id` field.
+- **Authorization IDs are not in the spec.** Reissuing an authorization
+  must not change what is computed or the FHE key IDs. They are bound in
+  JobGrant v2 instead.
+- **ConfidentialExecutionPlan** gains optional `governance_id`, placement
+  constraints and key-custody requirements, all bound into the PlanId.
+  Placement is in ADR-026.
+- **JobGrant v2** (governed projects only) carries the real PlanId (today
+  the grant carries the `pln_` row ID), `purpose_id`, the full binding (so
+  the evaluator recomputes the spec), `authorization_set_id`, the evaluator
+  operator and location, the FHE key IDs, and
+  `not_after = min(authorizations' valid_until, purpose valid_until,
+  assets' delete_after)`, with `expires_at = min(t0 + TTL, not_after)`.
+- **ExecutionReceipt v4** gains an optional `grant_digest`. It ties an
+  execution to the control plane's signed grant, and so to a signed
+  execution time (section 8).
+- The protocol envelope `Header` gains an optional `governance_id`; a
+  mismatch is refused, so ciphertexts cannot move between projects.
+- Field-sweep tests show that changing any field of the purpose, linkage
+  policy or binding changes the PolicyId, PlanId, ExecutionSpecId and
+  GovernanceId.
+
+### 6. One owner-signed authorization: AuthorizationV2
+
+One document, with the same bytes enforced by the control plane (as an
+index), the key broker (as its release authority) and the governance report
+(as evidence).
+
+```
+AuthorizationV2 (unknown fields refused) {
+  version: 2, party, project, purpose_id,
+  asset_version_id, asset_digest_commitment,
+  program: ProgramId | ProgramSetId,
+  policy_id, privacy_policy_id?, linkage_policy_id?,
+  release_class, recipients[], placement?,
+  privacy_scope_id?, execution_spec_ids?,
+  limits { max_executions?, max_releases?,
+           max_subjects_per_job?, max_evaluations_per_subject? },
+  per_job_four_eyes: bool,
+  valid_from, valid_until, issued_at, nonce,
+  approvals: [ ApprovalEvidence { statement_digest, approver_subject,
+                                  idp_issuer, auth_time, acr?, amr?,
+                                  role, organization, at } ] }
+SignedAuthorizationV2 = governance-key signature, domain "encompute.authorization.v2"
+RevocationV2 { party, authorization, reason, issued_at }   (signed)
+Approval statement = SHA256("encompute.approval.v1" ||
+                            canonical{body without approvals, approver, role})
+```
+
+- **Purpose and project are mandatory.** There is no wildcard. A v1
+  authorization never satisfies a governed project.
+- **Program binding (D4).** `program` is exactly one ProgramId or one
+  content-addressed ProgramSetId. It is never a pattern, prefix or
+  wildcard. A changed rule is a different ProgramId and needs a new
+  authorization.
+- **Asset binding.** The authorization names one asset version by its
+  `AssetVersionId` and a salted digest commitment. The agency's client
+  encrypts only a file whose salted digest matches.
+- **Release ceiling.** `release_class` and `recipients` bound what the
+  program may release from this asset.
+- `execution_spec_ids` optionally pins the authorization tighter, to
+  specific specs.
+- **Supersession** is revoke plus reissue. There is no in-place edit.
+- Where it lives:
+  - control plane: tables `authorizations`, `authorization_recipients` and
+    `authorization_approvals`. An authorization is proposed, collects its
+    quorum, and becomes `active` only when its signature verifies against
+    an active governance key. Routes `/v1/authorizations` and
+    `/v1/authorizations/{id}/approve|signature|revoke`;
+  - key broker: installed by the owner (`encompute keys authorize FILE`) or
+    pushed by the control plane. Either way the broker verifies it against
+    its pinned governance key before storing it, with its release counters
+    and local revocations, in its MAC-protected state;
+  - trust graph: `Evidence::Authorization` body v2.
+
+### 7. Four-eyes (D5)
+
+- **Standing authorizations** need an approval rule per (project,
+  organization): at least two **distinct humans**, by default one
+  `data_owner` and one `security_admin`.
+- **Per-job four-eyes** is optional, switched on by `per_job_four_eyes`,
+  and may be required for sensitive release classes. Its record binds the
+  job, spec and authorization set.
+- A human approver counts only if:
+  - the principal is a user, not a service account;
+  - the user is active;
+  - the user belongs to the approving organization (roles held in another
+    organization never count there);
+  - the user holds no auditor role;
+  - the user is not the job's submitter.
+- **Service accounts never count** toward any quorum. One person with two
+  keys or two roles is one approver.
+- The first implementation verifies the governance-key signature over the
+  approval evidence. Verifying the IdP token itself (OIDC with `nonce =
+  statement_digest`) at the broker and in the report is a later phase.
+
+### 8. Expiry and execution-time validity (D7)
+
+- **Expiry is strict:** `valid_from ≤ t < valid_until`, with no margin.
+- The 60-second clock skew applies only to validating signed tokens
+  (tickets, grants, attestation `issued_at`), and always in the direction
+  of denial. It never extends an authorization window.
+- Validity is checked at plan creation; at submission (with the
+  authorizations locked); at approval; at scheduling (the grant is
+  capped at `not_after`); at start (the whole set must still be active,
+  otherwise the job fails and is anchored as ended); at ticket issue; at
+  key release on the broker's own clock; and at export and derived use.
+- A job that started before `not_after` may complete. Whether its export
+  also needs a ticket inside the window is open (K-7).
+- **Historical verification judges validity at execution time, never at
+  verification time.** The execution time is the control plane's signed
+  `issued_at`/`expires_at` in the grant, reached from the receipt's
+  `grant_digest` (`ExecutionReceipt` itself has no timestamp). The report
+  shows "VALID AT EXECUTION" from that, and a separate "now:
+  VALID/EXPIRED/REVOKED" line that never fails a historical audit. The
+  report's rows and the evidence bundle are in ADR-027.
+- Revocation and expiry affect future actions only. Receipts from inside
+  the window stay verifiable.
+
+### 9. Derived assets and revocation (D6)
+
+- A released result is a first-class asset,
+  `POST /v1/jobs/{id}/derived-assets` after success only.
+- Its parents are forced to the job's source versions; its class and
+  policy are the join of the parents and are never wider; its custodian
+  comes from governance policy (by default the recipient organization),
+  never the control-plane operator.
+- Evidence: a `SignedReleaseRecord` from the decrypting recipient (salted
+  output commitment, class, recipients, parents, onward policy).
+- **Revocation blocks new use; it is not retroactive.** Revoking a source
+  marks descendants with `source_revoked_at`, which blocks new use, export,
+  re-encryption, key release and further derivation, and fails their
+  unstarted jobs. Results already released remain valid historically.
+  Lineage shows the later revocation and never claims erasure.
+- Export is a new, ticketed action: every ancestor's authorization must be
+  active and the class must allow the recipient.
+
+### 10. Shared population DP cap (D8)
+
+- `privacy_populations` are per dataset series by default, so a new version
+  does not reset the budget. Each carries a hard cap in ρ, and **the
+  population cap is authoritative**.
+- `privacy_scopes(population, project, purpose, program?)` are
+  sub-ledgers, allocated with four-eyes. A spend locks scope, then
+  population, then the audit head, and appends to both.
+- Both are anchored. An unrelated project has no scope, so it cannot spend
+  and inherits nothing. Spend composes at the population and
+  privacy-unit identity.
+
+### 11. Auditor exclusivity (D9)
+
+- The auditor role is exclusive of every other role, in every
+  organization. If 0.3 compatibility prevents enforcing that globally at
+  once (bootstrap admins receive admin, operator and auditor today),
+  governed mode enforces it immediately, the legacy-admin report lists
+  existing combinations, and a later migration removes them.
+- Every mutating handler refuses an auditor.
+- An auditor organization, appointed in the charter, cannot own, submit,
+  receive or approve. It reads authorizations, policies, privacy spending,
+  evidence, lineage, revocations and exports.
+
+### 12. Governance event log (D10)
+
+- **Interim** (early phases): the signed state anchor gains sets of revoked
+  authorizations, withdrawn approvals, retired purposes, revoked governance
+  keys and expired assets. Startup refuses a database that has undone any
+  of them. `authorization.revoked` reaches the broker only after anchoring.
+- **Before GA:** these growing sets are replaced by an append-only,
+  hash-chained governance event log. It records issuance, withdrawal and
+  revocation of authorizations, purpose retirement, governance-key
+  revocation, asset expiry and revocation, membership changes and privacy
+  scope allocation. The anchor carries only its signed, checkpointed root
+  and size, and startup checks that the database log extends it.
+- The log is partitioned per project with a Merkle root per project, so
+  `GET /v1/projects/{id}/audit` returns that project's events with
+  inclusion proofs and never another organization's.
+- Each owner signs revocation heads, so an exported bundle cannot silently
+  omit a revocation.
+
+### 13. Error codes (D13)
+
+The block ENC2701 to ENC2712 is reserved for governed projects:
+
+| Code | Meaning |
+|---|---|
+| ENC2701 | Missing owner authorization |
+| ENC2702 | Purpose mismatch |
+| ENC2703 | Program not authorized |
+| ENC2704 | Asset or version mismatch |
+| ENC2705 | Authorization expired |
+| ENC2706 | Authorization withdrawn or revoked |
+| ENC2707 | Four-eyes approval incomplete |
+| ENC2708 | Governance key revoked |
+| ENC2709 | Release class or output form not allowed |
+| ENC2710 | Residency or placement unsatisfied |
+| ENC2711 | Linkage mismatch |
+| ENC2712 | Release ticket invalid or expired |
+
+A compile-time output-form violation uses a new compiler code, ENC1907,
+which maps to ENC2709 at runtime. The codes enter `docs/errors.md` when
+their checks are implemented.
+
+### 14. Invariants (D11)
+
+- The public-sector invariants continue the catalog sequentially from
+  **INV-218**, with area `public-sector`. There is no separate numbering
+  block.
+- The catalog's maximum is INV-217 on 2026-09-29. If the rc.4 fixes take
+  IDs from 218, the whole block shifts to the next free ID, keeping its
+  order.
+- Existing claims are extended rather than duplicated where they already
+  cover part of the ground (for example INV-194, 195 and 196).
+- Every new enforcement point in this record gets a catalog entry with
+  positive, negative and adversarial evidence, and the release gate
+  requires area `public-sector` to pass.
+
+## Consequences
+
+- Consent moves out of the operator's database into documents each agency
+  signs with a key it controls. A database edit, a restored backup or a
+  compromised control plane cannot create an authorization; at worst it
+  can deny service or delay a revocation's delivery, which the owner can
+  still enforce locally at its broker.
+- One document serves three enforcers. The control plane, the broker and
+  the report cannot disagree about what was authorized, because they check
+  the same signed bytes.
+- Standard projects, API v1 and existing evidence are unaffected.
+  Governed-mode objects are new versions (authorization v2, grant v2,
+  receipt v4, trust graph v2); v1 objects stay verifiable, and v1 bundles
+  load read-only.
+- Agencies must operate a governance key in their own KMS or HSM and staff
+  two distinct approvers per authorization. That is deliberate friction.
+- Program binding without wildcards means every rule change needs new
+  signatures. Program sets keep this manageable for a known family of
+  programs.
+- Strict expiry means jobs near the end of a window fail rather than run
+  late. Historical evidence is unaffected.
+- A shared population cap means cumulative privacy loss is tracked per
+  population, across projects and versions. Scopes can run out while the
+  population still has budget, but never the reverse.
+- The anchor grows until the event log lands; the event log is a GA
+  requirement, not optional.
+- The design adds new failure modes to test: every enforcement point is
+  paired with an invariant and an attack demonstration.
+
+## Still open
+
+These are recorded in the milestone plan and are not decided here:
+
+- **K-7:** a job running when its window ends finishes; whether its export
+  is then blocked (recommended) or the job aborts.
+- **G-2:** whether every member must co-sign project checkpoints, and
+  whether owner revocation heads are required in every bundle
+  (recommended: yes to both).
+- The IdP-bound approval phase: which identity providers and which MFA
+  levels count.
+
+## Alternatives considered
+
+- **Database-only authorization (the 0.3 model, extended).** Add windows,
+  programs and quorum to `asset_approvals`. Rejected: the operator's
+  database stays the authority, so a compromised operator or a restored
+  backup can create or resurrect consent, and no agency can check it
+  independently.
+- **Owner-signed only, no control-plane index.** Agencies exchange signed
+  documents and brokers check them; the control plane knows nothing.
+  Rejected: nothing would refuse a job at submission, collect quorums,
+  cap grants or schedule against authorization windows. Failures would
+  surface only at key release, after work was done.
+- **Hybrid (chosen).** One owner-signed document, indexed and enforced
+  early by the control plane, verified independently by the broker and the
+  report.
+- **A broker-local release authorization.** A separate record at each
+  broker, written by the owner, independent of the control plane's
+  record. Rejected as a separate document: two records drift. It survives
+  as the broker's verified copy of the same AuthorizationV2 plus its local
+  counters and revocations.
+- **Program patterns or wildcards.** Rejected (D4): an authorization that
+  matches "any version of this rule" authorizes rules nobody reviewed.
+- **A clock-skew margin on authorization windows.** Rejected (D7): skew
+  belongs to token validation, and always toward denial.
+- **Judging validity at verification time.** Rejected: evidence of a
+  lawful-at-the-time execution would fail after expiry, and auditors would
+  learn nothing about when the job actually ran.
+- **Independent per-project privacy budgets.** Rejected (D8): a new
+  project or version would reset cumulative loss for the same people.
+- **A separate INV-300 block.** Rejected (D11): the catalog stays one
+  sequence.
+
+## Relevant source modules
+
+Planned changes touch:
+
+- `crates/encompute-control/src/ops/{tenancy,assets,jobs}.rs`, new
+  migrations under `crates/encompute-control/migrations/`
+- `crates/encompute-trust/src/authz.rs`, `crates/encompute-trust/src/report.rs`
+- `crates/encompute-verification/src/spec.rs`,
+  `crates/encompute-verification/src/service.rs` (JobGrant)
+- `crates/encompute-protocol/src/lib.rs` (envelope header)
+- `crates/encompute-keybroker` (authorization install and verification)
+- `crates/encompute-assurance/src/catalog.rs` (INV-218 onward)
