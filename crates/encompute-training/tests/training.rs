@@ -1016,6 +1016,55 @@ fn a_spec_names_only_an_allowlisted_factory() {
     assert!(t.validate().is_err());
 }
 
+/// The reference factory's arguments were bounded one by one (each at most
+/// 2^20), not together: `dim` = 2^20 alone asks the worker for five
+/// dim x dim linear layers, terabytes. The model's exact parameter count
+/// (embedding, q/k/v/out/feed-forward, head) and its per-sample
+/// activations are bounded too, before any worker builds it.
+#[test]
+fn reference_factory_arguments_are_bounded_together() {
+    let parse = |kwargs: serde_json::Value| {
+        Architecture::parse(
+            &serde_json::json!({"factory": REFERENCE_FACTORY, "kwargs": kwargs}).to_string(),
+        )
+    };
+    // The TinyClassifier's parameters: vocab*dim + 5*(dim*dim + dim) + dim*classes + classes.
+    let params = |vocab: u64, dim: u64, classes: u64| {
+        vocab * dim + 5 * (dim * dim + dim) + dim * classes + classes
+    };
+    for ok in [
+        serde_json::json!({}),
+        serde_json::json!({"vocab": 64, "dim": 16, "classes": 2, "seq": 8}),
+        serde_json::json!({"dim": 4096}),
+        serde_json::json!({"vocab": 1 << 20, "dim": 128}),
+        serde_json::json!({"seq": 1 << 13}),
+        serde_json::json!({"seq": 16000}),
+        serde_json::json!({"classes": 1 << 20}),
+    ] {
+        parse(ok.clone()).unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    assert!(params(64, 4096, 2) <= 1 << 28 && params(64, 8192, 2) > 1 << 28);
+    for too_big in [
+        serde_json::json!({"dim": 1 << 20}),
+        serde_json::json!({"dim": 8192}),
+        serde_json::json!({"vocab": 1 << 20, "dim": 256}),
+        serde_json::json!({"dim": 1 << 14, "classes": 1 << 20}),
+        serde_json::json!({"seq": 1 << 20}),
+        serde_json::json!({"seq": 1 << 14}),
+        // seq alone fits (16000 x 16016); with dim 1000 the activations do not.
+        serde_json::json!({"seq": 16000, "dim": 1000}),
+    ] {
+        let e = parse(too_big.clone()).unwrap_err();
+        assert_eq!(e.code, Code::TrainingSpec, "{too_big}");
+        assert!(e.message.contains("too large"), "{too_big}: {e}");
+    }
+    // Through the validator too.
+    let mut t = spec();
+    t.base_model.architecture =
+        serde_json::json!({"factory": REFERENCE_FACTORY, "kwargs": {"dim": 1 << 20}}).to_string();
+    assert_eq!(t.validate().unwrap_err().code, Code::TrainingSpec);
+}
+
 /// Review finding TR-4 (ENC-SF-2026-073): a package's configuration cannot ask for
 /// quantization or choose the attention implementation, and its tokenizer
 /// configuration holds only known settings of a Transformers-native

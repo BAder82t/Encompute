@@ -278,8 +278,22 @@ def _revocation_nodes(bundle: dict, source: str) -> Dict[str, dict]:
     return out
 
 
+def _production_run(st: dict, mc: Path) -> bool:
+    """Whether a run targets production: recorded when it is set up, else
+    (a run set up before that was recorded) whether it planned for real
+    TEEs only, with no mock one."""
+    if "production" in st:
+        return bool(st["production"])
+    try:
+        tees = json.loads((mc / "infra.json").read_text()).get("tees") or []
+    except (OSError, ValueError, AttributeError):
+        return False
+    return bool(tees) and not any(
+        t.get("tee") == "mock" or t.get("provider") == "mock" for t in tees)
+
+
 def _refuse_revoked(cli: str, mc: Path, anchors: List[str], spec: dict,
-                    revocations: Sequence[str] = ()) -> None:
+                    revocations: Sequence[str] = (), production: bool = False) -> None:
     """Refuses to go on once an owner has revoked any parent asset: in the
     run's trust bundle, or in any bundle an owner hands over itself
     (``revocations``). The run's bundle is held by the model owner, who
@@ -296,7 +310,10 @@ def _refuse_revoked(cli: str, mc: Path, anchors: List[str], spec: dict,
     authorization). The trust report itself still ignores a non-owner's
     revocation (it withholds nothing there); here, where the only effect
     is to stop, an unexplained revocation of a parent stops the run until
-    it is resolved, so an owner's revocation is never silently dropped."""
+    it is resolved, so an owner's revocation is never silently dropped.
+
+    ``production`` (a production-targeted run) judges the bundle with the
+    trust report's production strictness (``--production``)."""
     run_bundle = mc / "trust.json"
     try:
         merged = json.loads(run_bundle.read_text())
@@ -337,8 +354,8 @@ def _refuse_revoked(cli: str, mc: Path, anchors: List[str], spec: dict,
     else:
         path = str(run_bundle)
     try:
-        out = _run([cli, "trust", "report", "--bundle", path, *anchors, "--json"], mc,
-                   check=False)
+        out = _run([cli, "trust", "report", "--bundle", path, *anchors, "--json",
+                    *(["--production"] if production else [])], mc, check=False)
     finally:
         if supplied:
             os.unlink(path)
@@ -444,7 +461,7 @@ class FineTuneResult:
         c = self._ctx
         try:
             _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]),
-                            revocations)
+                            revocations, production=c["production"])
         except EncomputeError as e:
             return False, f"EXPORT DENIED: {self.adapter_id}: {e.message}"
         p = subprocess.run([c["cli"], "export", self.adapter_id, "--bundle", str(c["bundle"])]
@@ -467,7 +484,8 @@ class FineTuneResult:
         has revoked a parent asset (``revocations``: owners' own trust
         bundles, besides the run's)."""
         c = self._ctx
-        _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]), revocations)
+        _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]), revocations,
+                        production=c["production"])
         which = adapter or self.adapter_id
         rec = c["modelco"] / f"{which}.record.json"
         digest = (json.loads(rec.read_text())["record"]["adapter_digest"] if rec.exists()
@@ -494,7 +512,8 @@ class FineTuneResult:
         - any resume once a parent asset has been revoked (in the run's
           trust bundle, or in an owner's own bundle, ``revocations``)."""
         c = self._ctx
-        _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]), revocations)
+        _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]), revocations,
+                        production=c["production"])
         keys, _ = _native.acquire_training_keys(
             c["spec"], self._broker(), ["checkpoints"], str(c["modelco"] / "coord.key"),
             str(c["hw_seed"]), IMAGE)
@@ -897,6 +916,9 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
         "gradient_assets": [c["gradient_asset"] for c in commitments],
         "commitments": commitments, "plan_id": plan_id, "spec": spec_json,
         "training_spec_id": spec_id, "run_id": run_id, "attested_coord": attested_coord,
+        # Production-targeted: a real attestation target, no development
+        # allowance. Its trust checks use production strictness.
+        "production": target is not None or not allow_development,
         "mock_root": mock_root, "coord_key": coord, "eir": eir, "dim": dim,
         "adapter0_digest": _native.sha256_hex(a0),
         "lora": {"rank": cfg.rank, "alpha": cfg.alpha, "target_modules": list(cfg.target_modules),
@@ -995,12 +1017,13 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
     if recovery:
         # Before any key is released or worker started: no resume once an
         # owner has revoked a parent (in the run's bundle or its own).
-        _refuse_revoked(cli, mc, anchors, spec, revocations)
+        _refuse_revoked(cli, mc, anchors, spec, revocations,
+                        production=_production_run(st, mc))
     broker, broker_url = _start_broker(cli, mc, mock_root)
     ctx: Dict[str, Any] = dict(cli=cli, bundle=mc / "trust.json", modelco=mc, spec=spec_json,
                                broker=broker_url, broker_proc=broker, hw_seed=W / "hw.seed",
                                env=env, mock_root=mock_root, adapter0_digest=st["adapter0_digest"],
-                               dp_sgd=dp)
+                               dp_sgd=dp, production=_production_run(st, mc))
     ctx["anchors"] = anchors
     ctx.update(base_module=None if resume else model.payload, seed=cfg.seed,
                package_id=st.get("package_id"))

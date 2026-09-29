@@ -239,8 +239,9 @@ impl Remote {
     /// set but empty pins nothing and refuses every evaluator). `None`
     /// accepts the key the control plane names, and is returned only with
     /// the explicit development opt-out (`allow_unpinned`, or
-    /// `ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1`), never under
-    /// `ENCOMPUTE_ENV=production`. With no pin and no opt-out it fails
+    /// `ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1`), and only when
+    /// `ENCOMPUTE_ENV=development` is set explicitly (unset or any other
+    /// value refuses the opt-out). With no pin and no opt-out it fails
     /// closed: a compromised control plane could otherwise choose the
     /// evaluator and the receipt key that "verifies" its result.
     pub fn trusted_evaluators(
@@ -283,11 +284,16 @@ impl Remote {
                  control plane names",
             ));
         }
-        if env("ENCOMPUTE_ENV").as_deref() == Some("production") {
+        // Fails closed: the opt-out holds only where the environment says,
+        // explicitly, that this is development. Unset, production or any
+        // other value (a typo included) refuses it.
+        if env("ENCOMPUTE_ENV").as_deref() != Some("development") {
             return Err(Error::new(
                 Code::InsecureConfiguration,
-                "ENCOMPUTE_ENV=production requires pinned evaluator keys: an unpinned \
-                 evaluator is for development only",
+                "an unpinned evaluator is for development only: the opt-out \
+                 (--allow-unpinned-evaluator, ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR) is honoured \
+                 only with ENCOMPUTE_ENV=development; elsewhere pin the evaluator keys with \
+                 --trust-evaluator KEY or ENCOMPUTE_TRUSTED_EVALUATORS",
             ));
         }
         Ok(None)
@@ -420,8 +426,8 @@ mod tests {
 
     /// Review findings EV-4 and PY-1 (ENC-SF-2026-046, ENC-SF-2026-078): pins are the client's, an empty pin
     /// set refuses every key, and without a pin only the explicit
-    /// development opt-out (never in production) accepts the control
-    /// plane's choice.
+    /// development opt-out, under an explicit `ENCOMPUTE_ENV=development`,
+    /// accepts the control plane's choice.
     #[test]
     fn evaluator_pins_fail_closed() {
         let (a, b) = ("AB".repeat(32), "cd".repeat(32));
@@ -451,13 +457,32 @@ mod tests {
             resolve(None, false, &[]).unwrap_err().code,
             Code::InsecureConfiguration
         );
-        assert_eq!(resolve(None, true, &[]).unwrap(), None);
+        let dev = ("ENCOMPUTE_ENV", "development");
+        assert_eq!(resolve(None, true, &[dev]).unwrap(), None);
         assert_eq!(
-            resolve(None, false, &[("ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR", "1")]).unwrap(),
+            resolve(
+                None,
+                false,
+                &[("ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR", "1"), dev]
+            )
+            .unwrap(),
             None
         );
-        let e = resolve(None, true, &[("ENCOMPUTE_ENV", "production")]).unwrap_err();
-        assert_eq!(e.code, Code::InsecureConfiguration);
+        // The opt-out is honoured only under an explicit
+        // ENCOMPUTE_ENV=development: unset, production or anything else
+        // (a typo included) fails closed.
+        for env in [
+            &[][..],
+            &[("ENCOMPUTE_ENV", "production")][..],
+            &[("ENCOMPUTE_ENV", "prod")][..],
+            &[("ENCOMPUTE_ENV", "")][..],
+            &[("ENCOMPUTE_ENV", "Development")][..],
+            &[("ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR", "1")][..],
+        ] {
+            let e = resolve(None, true, env).unwrap_err();
+            assert_eq!(e.code, Code::InsecureConfiguration, "{env:?}");
+            assert!(e.message.contains("ENCOMPUTE_ENV=development"), "{e}");
+        }
         assert!(Remote::check_trusted_evaluator(None, &b).is_ok());
     }
 }

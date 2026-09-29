@@ -108,6 +108,7 @@ def test_without_a_pin_a_job_is_refused():
 
 
 def test_the_development_opt_out_warns_and_is_refused_in_production(monkeypatch):
+    monkeypatch.setenv("ENCOMPUTE_ENV", "development")
     p = project(ROGUE, allow_unpinned_evaluator=True)
     with pytest.warns(UserWarning, match="not pinned"):
         with pytest.raises(encompute.EncomputeError) as e:
@@ -121,6 +122,26 @@ def test_the_development_opt_out_warns_and_is_refused_in_production(monkeypatch)
     with pytest.raises(ControlError) as e:
         c.check_evaluator(ROGUE)
     assert e.value.code == "ENC2605"
+
+
+@pytest.mark.parametrize("env", [None, "", "prod", "Development", "staging"])
+def test_the_opt_out_fails_closed_unless_explicitly_in_development(monkeypatch, env):
+    """The opt-out used to be refused only under ENCOMPUTE_ENV=production, so
+    an unset or misspelt environment accepted the control plane's key. It is
+    now honoured only under an explicit ENCOMPUTE_ENV=development, in the
+    Python check and in the native run alike."""
+    if env is not None:
+        monkeypatch.setenv("ENCOMPUTE_ENV", env)
+    c = Client("http://control.invalid", token="t", allow_unpinned_evaluator=True)
+    with pytest.raises(ControlError) as e:
+        c.check_evaluator(ROGUE)
+    assert e.value.code == "ENC2605"
+    assert "ENCOMPUTE_ENV=development" in str(e.value)
+    with pytest.raises(encompute.EncomputeError) as e:
+        _call(double._native.run_remote_json, "http://127.0.0.1:9", {"x": [0.1, 0.2]},
+              json.dumps({}), ROGUE, None, None, True)
+    assert e.value.code == "ENC2605"
+    assert "ENCOMPUTE_ENV=development" in str(e.value)
 
 
 def test_the_native_run_enforces_the_pin_before_sending_anything():

@@ -315,7 +315,7 @@ fi
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   check "CS training image" bash -c 'D=deploy/confidential-space-training/Dockerfile &&
     docker build -q -f $D -t encompute-training:production . >/dev/null &&
-    docker run --rm --entrypoint sh encompute-training:production -c "! command -v encompute" &&
+    docker run --rm --entrypoint sh encompute-training:production -c "! command -v encompute && ! python -c \"import pip\" 2>/dev/null && ! python -c \"import ensurepip\" 2>/dev/null" &&
     docker build -q --target rehearsal -f $D -t encompute-training:approved . >/dev/null &&
     docker build -q --target rehearsal --build-arg VARIANT=tampered -f $D -t encompute-training:tampered . >/dev/null &&
     W="$(mktemp -d)" && ENCOMPUTE_CLI="$PWD/target/debug/encompute" "$PY" examples/18_confidential_space_hf/job.py container "$W/a" &&

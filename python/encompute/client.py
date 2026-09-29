@@ -23,7 +23,8 @@ other key is refused before inputs are sent, and an empty pin set refuses
 every evaluator. Without a pin a job is refused; for development only,
 ``allow_unpinned_evaluator=True`` (or
 ``ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1``) accepts the key the control plane
-names, with a warning, except under ``ENCOMPUTE_ENV=production``.
+names, with a warning, and only under an explicit ``ENCOMPUTE_ENV=development``
+(unset or any other value refuses it).
 """
 
 from __future__ import annotations
@@ -105,8 +106,9 @@ class Client:
     def check_evaluator(self, receipt_key: str) -> None:
         """Refuses an evaluator receipt key outside the pinned set (an empty
         set refuses every key). Without a pin, refuses too, unless the
-        development opt-out is set (never under ``ENCOMPUTE_ENV=production``):
-        then warns that the control plane chose the key."""
+        development opt-out is set and ``ENCOMPUTE_ENV=development`` explicitly
+        (unset or any other value fails closed): then warns that the control
+        plane chose the key."""
         if self.trusted_evaluators is not None:
             if str(receipt_key).lower() not in self.trusted_evaluators:
                 raise ControlError(
@@ -123,11 +125,13 @@ class Client:
                 "for development only, allow_unpinned_evaluator=True accepts the key the control "
                 "plane names",
             )
-        if os.environ.get("ENCOMPUTE_ENV") == "production":
+        if os.environ.get("ENCOMPUTE_ENV") != "development":
             raise ControlError(
                 "ENC2605",
-                "ENCOMPUTE_ENV=production requires pinned evaluator keys: an unpinned evaluator "
-                "is for development only",
+                "an unpinned evaluator is for development only: the opt-out "
+                "(allow_unpinned_evaluator, ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR) is honoured only "
+                "with ENCOMPUTE_ENV=development; elsewhere pin the evaluator keys with "
+                "trusted_evaluators= or ENCOMPUTE_TRUSTED_EVALUATORS",
             )
         warnings.warn(
             "the evaluator's receipt key comes from the control plane and is not pinned "

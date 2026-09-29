@@ -231,21 +231,36 @@ fn without_a_pin_the_job_is_refused_unless_explicitly_in_development() {
         asked.lock().unwrap().is_empty(),
         "refused before submitting"
     );
-    // The development opt-out is refused in production.
-    let (code, err) = jobs_run(
+    // The development opt-out is refused unless ENCOMPUTE_ENV says
+    // development explicitly: in production, with it unset, or misspelt.
+    for env in [
+        &[("ENCOMPUTE_ENV", "production")][..],
+        &[][..],
+        &[("ENCOMPUTE_ENV", "dev")][..],
+    ] {
+        let (code, err) = jobs_run(&s, &control, &["--allow-unpinned-evaluator"], env);
+        assert_ne!(code, 0);
+        assert!(
+            err.contains("ENC2605") && err.contains("ENCOMPUTE_ENV=development"),
+            "{env:?}: {err}"
+        );
+        let (code, err) = jobs_run(
+            &s,
+            &control,
+            &[],
+            &[&[("ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR", "1")][..], env].concat(),
+        );
+        assert_ne!(code, 0);
+        assert!(err.contains("ENC2605"), "{env:?}: {err}");
+    }
+    assert!(sent.lock().unwrap().is_empty());
+    // In development it proceeds to the evaluator (which then fails here).
+    let (code, _) = jobs_run(
         &s,
         &control,
         &["--allow-unpinned-evaluator"],
-        &[("ENCOMPUTE_ENV", "production")],
+        &[("ENCOMPUTE_ENV", "development")],
     );
-    assert_ne!(code, 0);
-    assert!(
-        err.contains("ENC2605") && err.contains("production"),
-        "{err}"
-    );
-    assert!(sent.lock().unwrap().is_empty());
-    // In development it proceeds to the evaluator (which then fails here).
-    let (code, _) = jobs_run(&s, &control, &["--allow-unpinned-evaluator"], &[]);
     assert_ne!(code, 0);
     assert!(!sent.lock().unwrap().is_empty());
 }

@@ -152,7 +152,8 @@ CREATED → PLANNING → PLANNED → (WAITING_FOR_APPROVAL) → AUTHORIZED → Q
    refused (ENC2607), an empty set refuses every evaluator, and without a
    pin the job is refused (ENC2605). Only in development, the explicit
    opt-out (`--allow-unpinned-evaluator`, `ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1`)
-   accepts the key the control plane names; `ENCOMPUTE_ENV=production`
+   accepts the key the control plane names, and only with
+   `ENCOMPUTE_ENV=development` set explicitly; unset or any other value
    refuses it. The client then sends its encrypted inputs to the evaluator
    with the grant. The evaluator:
    - checks the grant against the pinned control-plane key;
@@ -379,7 +380,7 @@ are read from files only.
 
 | Variable | |
 |---|---|
-| `ENCOMPUTE_ENV` | required: `production` fails closed (below); `development` for local trials only. Unset or any other value refuses to start |
+| `ENCOMPUTE_ENV` | required: `production` fails closed (below); `development` for local trials only. Unset or any other value refuses to start. Clients read it too: only `development` lets `jobs run` and the SDK accept an unpinned evaluator |
 | `ENCOMPUTE_LISTEN` | default `127.0.0.1:8770` |
 | `ENCOMPUTE_SERVICE_ID` | the control plane's service ID (default `control-plane`) |
 | `ENCOMPUTE_WORKERS` | HTTP worker threads (default 8) |
@@ -410,8 +411,9 @@ Clients that run jobs (`encompute jobs run`, the Python SDK) take
 `ENCOMPUTE_TRUSTED_EVALUATORS`, the evaluator receipt keys they trust (hex,
 separated by commas or spaces; set but empty pins nothing and refuses every
 evaluator), and, for development only,
-`ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1` (refused under
-`ENCOMPUTE_ENV=production`).
+`ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1` (honoured only with
+`ENCOMPUTE_ENV=development` set explicitly; unset or any other value
+refuses it).
 
 Evaluator resource limits:
 

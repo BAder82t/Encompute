@@ -356,7 +356,7 @@ pub enum JobsCmd {
         /// other key is refused before anything is sent to the evaluator.
         #[arg(long = "trust-evaluator", value_name = "KEY")]
         trust_evaluators: Vec<String>,
-        /// Development only (refused under `ENCOMPUTE_ENV=production`):
+        /// Development only (honoured only with `ENCOMPUTE_ENV=development`):
         /// without a pin, accept the evaluator key the control plane names.
         #[arg(long)]
         allow_unpinned_evaluator: bool,

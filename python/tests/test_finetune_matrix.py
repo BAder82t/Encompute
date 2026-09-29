@@ -281,6 +281,42 @@ def test_owner_revocation_alone_refuses_export_infer_and_resume(run, tmp_path):
                    revocations=[str(tmp_path / "missing.json")])
 
 
+def test_revocation_check_uses_production_strictness_for_production_runs(run, tmp_path,
+                                                                       monkeypatch):
+    """The revocation check ran ``trust report`` without ``--production``, so
+    for a production-targeted run it judged the bundle against the
+    development plan floor. It now passes ``--production`` whenever the run
+    targets production, and only then."""
+    mc = tmp_path / "modelco"
+    mc.mkdir()
+    (mc / "trust.json").write_text(json.dumps({"nodes": {}, "edges": []}))
+    spec = {"base_model": {"asset_id": "m"}, "datasets": []}
+    calls = []
+
+    def fake_run(args, cwd, check=True, stdin=None, both=False):
+        calls.append(list(args))
+        return json.dumps({"revoked": {}, "rows": []})
+
+    monkeypatch.setattr(ft, "_run", fake_run)
+    ft._refuse_revoked(CLI, mc, ["--parties", "p.json"], spec, production=True)
+    ft._refuse_revoked(CLI, mc, ["--parties", "p.json"], spec)
+    assert calls[0][1:3] == ["trust", "report"] and "--production" in calls[0], calls[0]
+    assert "--production" not in calls[1], calls[1]
+    # Which runs are production-targeted: recorded when the run is set up,
+    # else (a run from before) read from the infrastructure it planned for.
+    assert ft._production_run({"production": True}, mc)
+    assert not ft._production_run({"production": False}, mc)
+    for infra, production in [
+        ({"tees": [{"tee": "intel-tdx", "provider": "gcp-confidential-space"}]}, True),
+        ({"tees": [{"tee": "mock", "provider": "mock"}]}, False),
+        ({}, False),
+    ]:
+        (mc / "infra.json").write_text(json.dumps(infra))
+        assert ft._production_run({}, mc) is production, infra
+    # The development run in the fixture is not production-targeted.
+    assert run._ctx["production"] is False
+
+
 def test_non_owner_revocation_does_not_revoke_but_is_not_dropped(run, tmp_path):
     # Hospital-b validly signs a revocation of hospital-a's dataset.
     other, rid = revocation_only(run, tmp_path, "non-owner", "hospital-b", "patients-a",

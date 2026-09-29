@@ -543,8 +543,9 @@ attestation policies name artifact or code digests.
    evaluator. With no pin at all the job is refused (ENC2605) unless the
    explicit development opt-out is given (`--allow-unpinned-evaluator`,
    `allow_unpinned_evaluator=True` or
-   `ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1`), which is itself refused under
-   `ENCOMPUTE_ENV=production` (`crates/encompute-runtime/src/remote.rs`
+   `ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1`), which is itself honoured only
+   under an explicit `ENCOMPUTE_ENV=development` and refused when it is
+   unset or anything else (`crates/encompute-runtime/src/remote.rs`
    `trusted_evaluators`, `crates/encompute-cli/src/control.rs`,
    `python/encompute/client.py`).
 

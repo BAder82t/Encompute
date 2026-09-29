@@ -216,6 +216,13 @@ Later review of the control plane (ENC-SF-2026-088 to 094):
   submitter's list. Lineage, revocation, audit and the trust report follow
   the derived set; the trust report fails a job whose recorded sources
   differ from its program's.
+- **Pre-merge hardening:** the production training image also removes the
+  standard library's `ensurepip` (which bundles pip and setuptools); the
+  fine-tuning revocation check of a production-targeted run uses the trust
+  report's `--production` strictness; the reference model's arguments are
+  bounded together (at most 2^28 parameters and 2^28 activations per
+  sample), not only one by one; and the unpinned-evaluator opt-out is
+  honoured only under an explicit `ENCOMPUTE_ENV=development`.
 - **Assurance:** invariants INV-192 to INV-217; INV-007, INV-101, INV-130,
   INV-131, INV-137, INV-138, INV-142, INV-143, INV-147, INV-156, INV-160,
   INV-162, INV-164, INV-170, INV-171, INV-174, INV-176, INV-178, INV-180,
@@ -276,7 +283,10 @@ Later review of the control plane (ENC-SF-2026-088 to 094):
   (`--trust-evaluator`, `ENCOMPUTE_TRUSTED_EVALUATORS`,
   `trusted_evaluators=`). Without one a job is refused unless
   `--allow-unpinned-evaluator` / `allow_unpinned_evaluator=True` is given,
-  which production refuses.
+  and that development opt-out is honoured only with
+  `ENCOMPUTE_ENV=development` set explicitly: unset, `production` or any
+  other value refuses it (rc.3 refused it only under `production`). Local
+  scripts that use the opt-out must now also set `ENCOMPUTE_ENV=development`.
 - **BGV parameter-set IDs change** (the profile's failure-probability text
   is part of the ID): recompile BGV artifacts and re-key.
 - **KEK-protected key broker state needs an upgrade:** run `encompute keys

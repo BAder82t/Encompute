@@ -150,8 +150,8 @@ impl Model {
     /// `receipt_key` (named by the control plane) must be among
     /// `trusted_evaluators` (else `ENCOMPUTE_TRUSTED_EVALUATORS`; an empty
     /// list refuses every key), checked before anything is sent; with no
-    /// pin only `allow_unpinned_evaluator` (development, never under
-    /// `ENCOMPUTE_ENV=production`) accepts it. Keys come from `keys_dir`
+    /// pin only `allow_unpinned_evaluator` (development: honoured only
+    /// with `ENCOMPUTE_ENV=development`) accepts it. Keys come from `keys_dir`
     /// (`encompute keys generate`) or are generated for this run. Returns
     /// JSON: outputs, the verified receipt, and the commitments the control
     /// plane checks.

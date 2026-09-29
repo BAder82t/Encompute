@@ -857,7 +857,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-cli/src/main.rs::pinning_over_plain_http_to_another_host_is_warned"),
         (EndToEnd, "test:crates/encompute-cli/tests/cli.rs::remote_receipts_and_verify"),
     ]),
-    inv!("INV-184", "receipts", "Every client that decrypts (the CLI's `jobs run`, the Python SDK and the native SDK) sends no inputs to an evaluator whose receipt key is outside its own pinned set: a compromised control plane cannot choose which evaluator key a client accepts. An empty pin set refuses every evaluator, and without a pin a job is refused unless an explicit development opt-out is given, which production refuses (ENC-SF-2026-008, ENC-SF-2026-046, ENC-SF-2026-078).", [
+    inv!("INV-184", "receipts", "Every client that decrypts (the CLI's `jobs run`, the Python SDK and the native SDK) sends no inputs to an evaluator whose receipt key is outside its own pinned set: a compromised control plane cannot choose which evaluator key a client accepts. An empty pin set refuses every evaluator, and without a pin a job is refused unless an explicit development opt-out is given, honoured only with ENCOMPUTE_ENV=development (ENC-SF-2026-008, ENC-SF-2026-046, ENC-SF-2026-078).", [
         (Positive, "test:crates/encompute-cli/tests/jobs_run.rs::a_pinned_key_proceeds_to_the_evaluator"),
         (Positive, "test:python/tests/test_client.py::test_the_pin_comes_from_the_environment"),
         (Negative, "test:python/tests/test_client.py::test_a_key_outside_the_pinned_set_is_refused"),
@@ -869,6 +869,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:python/tests/test_client.py::test_the_development_opt_out_warns_and_is_refused_in_production"),
         (EndToEnd, "test:crates/encompute-cli/tests/jobs_run.rs::without_a_pin_the_job_is_refused_unless_explicitly_in_development"),
         (EndToEnd, "test:crates/encompute-cli/tests/cli.rs::remote_receipts_and_verify"),
+        (Adversarial, "test:python/tests/test_client.py::test_the_opt_out_fails_closed_unless_explicitly_in_development"),
     ]),
     inv!("INV-185", "dp", "A differentially private aggregation receipt verifies only with the privacy receipts it binds: missing, substituted or unbound privacy receipts fail verification (ENC-SF-2026-009).", [
         (Positive, "test:crates/encompute-runtime/tests/privacy.rs::dp_receipts_require_bound_privacy_receipts"),
@@ -1036,6 +1037,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:crates/encompute-training/tests/training.rs::a_spec_names_only_an_allowlisted_factory"),
         (Adversarial, "test:python/tests/test_confidential_job.py::test_the_worker_refuses_other_code_before_any_key"),
         (EndToEnd, "script:examples/15_confidential_lora/attack.py"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::reference_factory_arguments_are_bounded_together"),
     ]),
     inv!("INV-209", "confidential-space", "A confidential training job trains with the spec's configuration and only from the spec's initial adapter (round 1) or the coordinator-recorded adapter of the previous round; its signed evidence commits to the input adapter, the configuration digest and the seed (ENC-SF-2026-050).", [
         (Positive, "test:python/tests/test_confidential_job.py::test_the_evidence_binds_what_the_worker_trained_from_and_with"),
@@ -1072,6 +1074,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (EndToEnd, "test:crates/encompute-trust/tests/report_plan_floor.rs::the_report_applies_the_callers_plan_floor"),
         (EndToEnd, "test:crates/encompute-control/tests/jobs.rs::production_plans_are_checked_against_the_control_planes_floor"),
         (EndToEnd, "test:python/tests/test_plan_floor.py::test_production_refuses_a_plan_accepting_development_attestation"),
+        (Positive, "test:python/tests/test_finetune_matrix.py::test_revocation_check_uses_production_strictness_for_production_runs"),
     ]),
     inv!("INV-215", "supply-chain", "The commercial build audit fails when it cannot read an Encompute binary's Rust symbols (a stripped binary or an unknown format), instead of passing vacuously (ENC-SF-2026-079).", [
         (Negative, "script:scripts/audit-commercial-build.sh"),

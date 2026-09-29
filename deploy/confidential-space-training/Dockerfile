@@ -46,7 +46,11 @@ COPY --from=build /src/target/release/encompute /usr/local/bin/encompute
 FROM runtime AS production
 # No package installers either: nothing in the workload installs anything,
 # and pip, setuptools and wheel (with setuptools' vendored copies) only add
-# code and advisories. Runs as the last step; the entrypoint is unchanged.
+# code and advisories. The standard library's ensurepip goes too: it bundles
+# pip and setuptools wheels and would re-install them. Runs as the last
+# step; the entrypoint is unchanged.
 RUN python -m pip uninstall -y pip setuptools wheel \
+ && rm -rf "$(python -c 'import ensurepip, os; print(os.path.dirname(ensurepip.__file__))')" \
  && ! python -c "import pip" 2>/dev/null \
+ && ! python -c "import ensurepip" 2>/dev/null \
  && python -c "import encompute.torch.cs_worker, torch, transformers, peft"

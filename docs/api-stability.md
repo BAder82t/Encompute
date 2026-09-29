@@ -188,7 +188,7 @@ the interface. Human-readable output may change; scripts should use
 | Stable (clients of API v1) | `login`, `projects list`, `projects show`, `projects create`, `projects add-member`, `assets list`, `assets show`, `assets register`, `assets approve`, `assets revoke`, `assets lineage`, `jobs submit`, `jobs run` (including `--trust-evaluator`), `jobs status`, `jobs list`, `jobs cancel`, `trust report JOB`, `audit list`, `security legacy-service-admins` (including `--json`) |
 | Experimental | `train`, `lineage`, `export` (the last two also take `--production` and `--minimum-profile`) |
 | Research only | `verify --proof --evaluation-keys` (needs `vfhe-research`); `--backend tfhe-rs` anywhere (needs `research-tfhe-rs`) |
-| Development only | `attest mock-root`, `attest simulate-launcher`, `--mock-root`, `--development` (on `attest policy`, `aggregate coordinator-policy` and `keys protect`), `plan --allow-development`, `keys serve` without `--kek` or `--root-key`, `jobs run --allow-unpinned-evaluator` (refused under `ENCOMPUTE_ENV=production`) |
+| Development only | `attest mock-root`, `attest simulate-launcher`, `--mock-root`, `--development` (on `attest policy`, `aggregate coordinator-policy` and `keys protect`), `plan --allow-development`, `keys serve` without `--kek` or `--root-key`, `jobs run --allow-unpinned-evaluator` (honoured only with `ENCOMPUTE_ENV=development`; unset or any other value refuses it) |
 | Debugging | `keys challenge`, `keys release`, `workload attest` |
 
 `keys upgrade-state` authenticates a broker state written before 0.3.0

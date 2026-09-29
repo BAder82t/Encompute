@@ -31,6 +31,13 @@ pub const HF_FACTORY: &str = "encompute.torch.hf:from_config";
 /// The reference factory's keyword arguments, each a positive integer.
 const REFERENCE_KWARGS: &[&str] = &["classes", "dim", "seq", "vocab"];
 const MAX_REFERENCE_DIM: u64 = 1 << 20;
+/// The reference model's parameters, all together (about 1 GiB of float32
+/// weights): each argument is bounded alone, but their products are what
+/// the worker allocates.
+const MAX_REFERENCE_PARAMETERS: u128 = 1 << 28;
+/// Its per-sample activations, `seq x (dim + seq)` (the hidden states and
+/// the attention matrix).
+const MAX_REFERENCE_ACTIVATIONS: u128 = 1 << 28;
 const RUN: &str = "encompute.training-run.v1";
 const PARTICIPANT: &str = "encompute.training-participant.v1";
 
@@ -410,6 +417,7 @@ impl Architecture {
                         )));
                     }
                 }
+                a.check_reference_size()?;
             }
             HF_FACTORY => {
                 let mut keys: Vec<&str> = a.kwargs.keys().map(String::as_str).collect();
@@ -433,6 +441,43 @@ impl Architecture {
             }
         }
         Ok(a)
+    }
+
+    /// Bounds what the reference model (`TinyClassifier` in
+    /// `encompute/torch/models.py`) allocates, with its defaults for
+    /// missing arguments (vocab 64, dim 16, classes 2, seq 8): its exact
+    /// parameter count, `vocab*dim` (embedding) + `5*(dim*dim + dim)` (the
+    /// q, k, v, out and feed-forward layers) + `dim*classes + classes`
+    /// (the head), and its per-sample activations.
+    fn check_reference_size(&self) -> Result<()> {
+        let arg = |k: &str, default: u128| {
+            self.kwargs
+                .get(k)
+                .and_then(|v| v.as_u64())
+                .map_or(default, u128::from)
+        };
+        let (vocab, dim, classes, seq) = (
+            arg("vocab", 64),
+            arg("dim", 16),
+            arg("classes", 2),
+            arg("seq", 8),
+        );
+        let parameters = vocab * dim + 5 * (dim * dim + dim) + dim * classes + classes;
+        if parameters > MAX_REFERENCE_PARAMETERS {
+            return Err(bad(format!(
+                "{REFERENCE_FACTORY}: the model is too large: {parameters} parameters \
+                 (vocab {vocab}, dim {dim}, classes {classes}); at most \
+                 {MAX_REFERENCE_PARAMETERS}"
+            )));
+        }
+        let activations = seq * (dim + seq);
+        if activations > MAX_REFERENCE_ACTIVATIONS {
+            return Err(bad(format!(
+                "{REFERENCE_FACTORY}: the model is too large: {activations} activations per \
+                 sample (seq {seq}, dim {dim}); at most {MAX_REFERENCE_ACTIVATIONS}"
+            )));
+        }
+        Ok(())
     }
 
     /// The architecture fits the spec: the reference factory for reference
