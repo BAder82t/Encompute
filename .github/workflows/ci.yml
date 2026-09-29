@@ -13,14 +13,26 @@ jobs:
     name: rust (no OpenFHE)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # The commercial audit fails closed: a binary whose Rust symbols it
+      # cannot read (here, stripped) fails instead of passing vacuously.
+      - name: commercial audit refuses a stripped binary
+        run: |
+          cargo build -p encompute-cli
+          d="$(mktemp -d)"
+          cp target/debug/encompute "$d/encompute"
+          strip "$d/encompute"
+          if scripts/audit-commercial-build.sh "$d" > "$d/audit.txt"; then
+            cat "$d/audit.txt"; echo "a stripped binary passed the commercial audit" >&2; exit 1
+          fi
+          grep -E '^encompute \(CLI\) +FAIL: .*cannot audit' "$d/audit.txt"
 
   # The oldest supported Python (requires-python in pyproject.toml): the
   # whole SDK suite, as the other jobs run it on 3.12.
@@ -28,10 +40,10 @@ jobs:
     name: python 3.11 (minimum supported)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - run: cargo build --bins
@@ -48,10 +60,10 @@ jobs:
     name: examples (standard)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - run: cargo build --bins
@@ -84,10 +96,10 @@ jobs:
     name: confidential space training image
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - run: cargo build --bins
@@ -123,15 +135,15 @@ jobs:
     name: assurance (security invariants)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --release -p encompute-assurance --bins --examples
       - run: ./target/release/assurance-report --json assurance-report.json --md assurance-report.md
       - if: always()
         run: cat assurance-report.md >> "$GITHUB_STEP_SUMMARY"
       - if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assurance-report
           path: assurance-report.*
@@ -144,13 +156,15 @@ jobs:
     name: supply chain (cargo-deny, vulnerability and license scans)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-deny,cargo-audit
       - run: cargo deny check advisories bans licenses sources
       - run: scripts/release/check-pins.sh
+      - name: third-party notices cover the production crates
+        run: cargo fetch --locked && python3 scripts/third_party_notices.py --check
       - name: scanners
         env:
           TRIVY_VERSION: "0.74.0"
@@ -172,7 +186,7 @@ jobs:
         run: |
           [ -f target/release-scan/policy.txt ] && { echo '```'; tail -n 40 target/release-scan/policy.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
       - if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: supply-chain-reports
           path: target/release-scan/
@@ -185,14 +199,14 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - if: runner.os == 'macOS'
         run: brew install libomp
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .deps/openfhe
           key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
@@ -211,7 +225,7 @@ jobs:
         run: |
           cargo build --release -p encompute-cli -p encompute-evaluator --features encompute-cli/openfhe,encompute-evaluator/openfhe
           ./scripts/audit-commercial-build.sh target/release
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: python sdk
@@ -258,11 +272,11 @@ jobs:
       ENCOMPUTE_TEST_BAO_ADDR: http://127.0.0.1:8200
       ENCOMPUTE_TEST_BAO_TOKEN: ci-root
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy -p encompute-control -p encompute-keybroker -p encompute-verification --all-targets -- -D warnings
       - run: cargo test -p encompute-control -p encompute-keybroker -p encompute-verification
 
@@ -286,17 +300,17 @@ jobs:
         ports: ["8200:8200"]
         options: --cap-add IPC_LOCK
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/cache@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .deps/openfhe
           key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
       - run: ./scripts/install-openfhe.sh
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null
       - run: cargo build --release -p encompute-cli -p encompute-evaluator -p encompute-control --features encompute-cli/openfhe,encompute-evaluator/openfhe
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: SDK (OpenFHE) and test tools
@@ -318,16 +332,16 @@ jobs:
     name: two-machine demo (client ↔ evaluator container)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/cache@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .deps/openfhe
           key: openfhe-${{ runner.os }}-${{ hashFiles('scripts/install-openfhe.sh') }}
       - run: ./scripts/install-openfhe.sh
       - run: cargo build --release --features openfhe -p encompute-cli
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: client SDK
@@ -343,11 +357,11 @@ jobs:
     name: exact backend (TFHE-rs, research feature)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy -p encompute-tfhe -p encompute-tfhe-client -p encompute-runtime -p encompute-evaluator -p encompute-cli --all-targets --features encompute-tfhe-client/research-tfhe-rs,encompute-runtime/research-tfhe-rs,encompute-evaluator/research-tfhe-rs,encompute-cli/research-tfhe-rs -- -D warnings
       - run: cargo test --release -p encompute-tfhe -p encompute-tfhe-client --features encompute-tfhe-client/research-tfhe-rs
       - run: cargo test --release -p encompute-runtime --features research-tfhe-rs --test exact

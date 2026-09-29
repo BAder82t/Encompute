@@ -23,7 +23,9 @@
 #                       (OpenFHE, the services above, pg_dump/psql); else the
 #                       Compose smoke test (docker, images :dev)
 #   security scans      cargo-deny, cargo-audit, pip-audit; IMAGES="a b" adds a
-#                       container scan (trivy or grype) and container SBOMs (syft)
+#                       container scan (trivy or grype) and container SBOMs (syft);
+#                       a release lists the TEE images too (encompute-confidential-
+#                       space, encompute-training) and sets REQUIRE_IMAGES
 #   Python rows         python3 and network access for pip (first run)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -294,7 +296,7 @@ else
   partial "SBOM" "the release SBOMs record the OpenFHE builds" \
     bash -c 'OPENFHE=0 BIN=target/release IMAGES="${IMAGES:-}" scripts/release/sbom-all.sh target/sbom'
 fi
-check "security scans" env IMAGES="${IMAGES:-}" scripts/release/scan.sh
+check "security scans" env IMAGES="${IMAGES:-}" REQUIRE_IMAGES="${REQUIRE_IMAGES:-}" scripts/release/scan.sh
 check "build pins" scripts/release/check-pins.sh
 if [ "$REPRO" = 1 ]; then
   if [ "$OPENFHE" = 1 ]; then check "reproducibility" scripts/release/repro-check.sh --openfhe

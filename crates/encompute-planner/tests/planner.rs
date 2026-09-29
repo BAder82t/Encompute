@@ -550,3 +550,139 @@ fn the_validator_accepts_unverified_bgv_only_in_the_subset() {
     let e = verify_plan(&v, &plan).unwrap_err();
     assert!(e.message.contains("RequireCorrectness"), "{}", e.message);
 }
+
+/// Review finding TG-3 (ENC-SF-2026-077): a plan carries the context it was made in, and that
+/// context is the plan's own claim. The validator recomputes the semantics
+/// from the program, and a verifier's floor (its compiler's facts, the
+/// backends it accepts, a minimum profile, production) refuses a plan whose
+/// self-declared context would weaken it.
+#[test]
+fn the_validator_checks_the_plans_own_context_against_the_verifiers_floor() {
+    let v = prog(ELIGIBILITY);
+    let c = production(Some(54_000), Some(8), true);
+    let plan = planned(&v, &c);
+    assert_eq!(fhe_of(&plan), vec![bgv(), Mechanism::VerifiedExecution]);
+    let with = |f: PlanFloor| verify_plan_with(&v, &plan, &f);
+    // The facts the verifier's compiler computes: the same pass; a plan
+    // claiming proof coverage the compiler does not see is refused.
+    with(PlanFloor {
+        facts: Some(c.facts.clone()),
+        catalog: Some(c.catalog.clone()),
+        ..PlanFloor::default()
+    })
+    .unwrap();
+    let mut compiler = c.facts.clone();
+    compiler.proof_covered = false;
+    let e = with(PlanFloor {
+        facts: Some(compiler),
+        ..PlanFloor::default()
+    })
+    .unwrap_err();
+    assert_eq!(e.code, Code::PlanInvalid);
+    assert!(
+        e.message.contains("are not the compiler's"),
+        "{}",
+        e.message
+    );
+    // The semantics follow from the program, with or without a floor.
+    let mut bad = plan.clone();
+    bad.context.facts.semantics = "approximate".into();
+    let e = verify_plan(&v, &bad).unwrap_err();
+    assert!(
+        e.message.contains("but the program is exact"),
+        "{}",
+        e.message
+    );
+    // A backend the verifier does not accept.
+    let e = with(PlanFloor {
+        catalog: Some(BackendCatalog {
+            verified_execution: false,
+            ..c.catalog.clone()
+        }),
+        ..PlanFloor::default()
+    })
+    .unwrap_err();
+    assert!(
+        e.message.contains("verified execution backend"),
+        "{}",
+        e.message
+    );
+    // A minimum profile: a standard plan is weaker than strong.
+    let e = with(PlanFloor::production(Profile::Strong)).unwrap_err();
+    assert!(
+        e.message.contains("weaker than the required strong"),
+        "{}",
+        e.message
+    );
+    with(PlanFloor::production(Profile::Standard)).unwrap();
+    // Production: no research backend in the plan's catalog.
+    let a = prog(&fedavg(true, "", false));
+    let research = planned(&a, &ctx("approximate", Profile::Standard));
+    assert!(research.context.catalog.tfhe);
+    let e = verify_plan_with(&a, &research, &PlanFloor::production(Profile::Standard)).unwrap_err();
+    assert!(e.message.contains("TFHE-rs"), "{}", e.message);
+}
+
+/// Review finding TG-3 (ENC-SF-2026-077): development (mock) attestation, which a plan may
+/// accept for itself, is refused by a production floor.
+#[test]
+fn a_production_floor_refuses_plans_that_accept_development_attestation() {
+    let p = prog(&fedavg(true, "", true));
+    let mut c = ctx("approximate", Profile::Standard);
+    c.catalog.tfhe = false;
+    c.preferences.allow_development = true;
+    c.infrastructure.tees = vec![TeeOffer {
+        tee: "mock".into(),
+        provider: "mock".into(),
+        gpu: false,
+        debug_only: false,
+        cloud: false,
+        region: None,
+    }];
+    c.training = Some(TrainingDeclaration {
+        model: "base-model".into(),
+        data: vec![
+            "patients-a".into(),
+            "patients-b".into(),
+            "patients-c".into(),
+        ],
+        verified: false,
+        privacy_unit: None,
+        per_example_clipping: false,
+        framework: None,
+    });
+    let plan = planned(&p, &c);
+    assert!(plan
+        .steps
+        .iter()
+        .any(|s| matches!(&s.placement, Placement::Tee(t) if t.provider == "mock")));
+    verify_plan_with(&p, &plan, &PlanFloor::default()).unwrap();
+    let e = verify_plan_with(&p, &plan, &PlanFloor::production(Profile::Standard)).unwrap_err();
+    assert!(
+        e.message.contains("accepts development attestation"),
+        "{}",
+        e.message
+    );
+    assert!(
+        e.message.contains("is not production attestation"),
+        "{}",
+        e.message
+    );
+}
+
+/// Review finding TG-3 (ENC-SF-2026-077): the validator derives a floor of requirements with
+/// its own rules, not only with the planner's `derive`.
+#[test]
+fn the_validator_has_its_own_floor_of_requirements() {
+    let p = prog(&fedavg(true, "", false));
+    let mut plan = planned(&p, &ctx("approximate", Profile::Standard));
+    plan.requirements
+        .retain(|r| !matches!(r, TrustRequirement::MinimumParticipants { .. }));
+    let e = verify_plan(&p, &plan).unwrap_err();
+    assert!(
+        e.message
+            .contains("requirement missing: MinimumParticipants"),
+        "{}",
+        e.message
+    );
+}

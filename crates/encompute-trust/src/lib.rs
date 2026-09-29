@@ -14,7 +14,7 @@ pub use authz::{
 };
 pub use graph::{node_id, Edge, EdgeKind, Evidence, Node, NodeKind, TrustGraph};
 pub use ingest::program_id;
-pub use report::{Anchors, ReportOptions, Row, Status, TrustReport, ROWS};
+pub use report::{Anchors, FactsFn, ProofCheckFn, ReportOptions, Row, Status, TrustReport, ROWS};
 
 use sha2::{Digest, Sha256};
 

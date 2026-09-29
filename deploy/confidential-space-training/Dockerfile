@@ -10,19 +10,20 @@
 # VARIANT changes the image (and so its digest) without changing the code:
 # the "tampered image" that must receive no key.
 
-FROM rust:1.98-bookworm AS build
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 WORKDIR /src
+COPY deploy/confidential-space-training/build-requirements.lock /build-requirements.lock
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
  && rm -rf /var/lib/apt/lists/* && python3 -m venv /venv \
- && /venv/bin/pip install --no-cache-dir maturin==1.7.4
+ && /venv/bin/pip install --no-cache-dir --require-hashes -r /build-requirements.lock
 COPY . .
 RUN cargo build --release --locked -p encompute-cli \
  && /venv/bin/maturin build --release --locked -m crates/encompute-py/Cargo.toml -o /wheels
 
-FROM python:3.11-slim-bookworm AS runtime
-COPY deploy/confidential-space-training/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
-      -r /app/requirements.txt
+FROM python:3.11.16-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b AS runtime
+COPY deploy/confidential-space-training/requirements.lock /app/requirements.lock
+RUN pip install --no-cache-dir --require-hashes --no-deps \
+      --extra-index-url https://download.pytorch.org/whl/cpu -r /app/requirements.lock
 COPY --from=build /wheels/ /wheels/
 RUN pip install --no-cache-dir --no-deps /wheels/*.whl && rm -rf /wheels \
  && pip freeze > /app/installed.txt
@@ -43,3 +44,9 @@ COPY --from=build /src/target/release/encompute /usr/local/bin/encompute
 # The production image (the default target): the worker and its
 # libraries, nothing else. No CLI, no broker, no launcher simulator.
 FROM runtime AS production
+# No package installers either: nothing in the workload installs anything,
+# and pip, setuptools and wheel (with setuptools' vendored copies) only add
+# code and advisories. Runs as the last step; the entrypoint is unchanged.
+RUN python -m pip uninstall -y pip setuptools wheel \
+ && ! python -c "import pip" 2>/dev/null \
+ && python -c "import encompute.torch.cs_worker, torch, transformers, peft"

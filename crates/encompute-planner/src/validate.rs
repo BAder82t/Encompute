@@ -2,14 +2,25 @@
 //! made it. A planner bug must not become a security bypass, so nothing
 //! here reuses the planner's selection or capability logic. The validator
 //! re-derives the requirements from the program and the plan's own
-//! context, then checks, with its own rules, that every mechanism is
-//! available and supported and every requirement is discharged.
+//! context, checks them against a floor of requirements it derives with
+//! its own rules, then checks that every mechanism is available and
+//! supported and every requirement is discharged.
+//!
+//! A plan carries the context it was made in (profile, backends, facts
+//! about the program, development attestation). [`verify_plan`] checks a
+//! plan against that context and recomputes what it can from the program
+//! alone (its semantics); [`verify_plan_with`] also checks the context
+//! against what the verifier knows itself ([`PlanFloor`]): the facts its
+//! own compiler computes, the backends it accepts, the weakest profile it
+//! accepts and, in production, no development attestation or research
+//! backend.
 
 use std::collections::BTreeSet;
 
 use encompute_analysis::confidentiality::analyze;
-use encompute_ir::confidentiality::PartyId;
-use encompute_ir::{Code, Error, Program, Result};
+use encompute_analysis::Semantics;
+use encompute_ir::confidentiality::{PartyId, Release};
+use encompute_ir::{Code, Error, Program, Result, Verification};
 use encompute_verification::{PolicyId, PrivacyPolicyId};
 
 use crate::ids::program_id;
@@ -17,9 +28,50 @@ use crate::model::*;
 use crate::planner::PLAN_VERSION;
 use crate::requirements::{derive, steps};
 
+/// What a verifier knows independently of a plan, and the weakest plan it
+/// accepts. The default checks only the plan's own consistency.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlanFloor {
+    /// The facts the verifier's own compiler computes for the program
+    /// (the runtime's `planning_facts`). The plan's semantics, FHE
+    /// support and proof coverage must be these: a plan cannot claim
+    /// proof coverage or an encrypted plan the compiler does not produce.
+    pub facts: Option<ProgramFacts>,
+    /// The backends the verifier accepts: the plan may claim no backend
+    /// outside these.
+    pub catalog: Option<BackendCatalog>,
+    /// The weakest profile accepted.
+    pub minimum_profile: Profile,
+    /// Production: no development (mock) attestation, no debug-only TEE,
+    /// and no research-only backend (TFHE-rs).
+    pub production: bool,
+}
+
+impl PlanFloor {
+    /// The production floor: production attestation and backends only,
+    /// at least `minimum_profile`.
+    pub fn production(minimum_profile: Profile) -> Self {
+        PlanFloor {
+            minimum_profile,
+            production: true,
+            ..PlanFloor::default()
+        }
+    }
+}
+
 /// Checks `plan` for `program`; every problem is listed in the error.
 pub fn verify_plan(program: &Program, plan: &ConfidentialExecutionPlan) -> Result<()> {
+    verify_plan_with(program, plan, &PlanFloor::default())
+}
+
+/// Checks `plan` for `program`, and its context against `floor`.
+pub fn verify_plan_with(
+    program: &Program,
+    plan: &ConfidentialExecutionPlan,
+    floor: &PlanFloor,
+) -> Result<()> {
     let mut p = vec![];
+    check_floor(program, plan, floor, &mut p);
     check(program, plan, &mut p)?;
     if p.is_empty() {
         Ok(())
@@ -56,6 +108,194 @@ pub fn verify_plan_against(
     }
 }
 
+/// A TEE offer with production attestation (not mock, not debug-only).
+fn production_offer(offer: &TeeOffer) -> bool {
+    offer.provider == "gcp-confidential-space" && !offer.debug_only
+}
+
+/// The plan's self-declared context against what the verifier knows.
+fn check_floor(
+    program: &Program,
+    plan: &ConfidentialExecutionPlan,
+    floor: &PlanFloor,
+    p: &mut Vec<String>,
+) {
+    let ctx = &plan.context;
+    // The semantics follow from the program's types alone.
+    if let Ok(s) = encompute_analysis::semantics(program) {
+        let want = match s {
+            Semantics::Exact => "exact",
+            Semantics::Approximate => "approximate",
+        };
+        if ctx.facts.semantics != want {
+            p.push(format!(
+                "the plan declares {} semantics, but the program is {want}",
+                ctx.facts.semantics
+            ));
+        }
+    }
+    if let Some(f) = &floor.facts {
+        if ctx.facts.semantics != f.semantics
+            || ctx.facts.fhe_supported != f.fhe_supported
+            || ctx.facts.proof_covered != f.proof_covered
+        {
+            p.push(format!(
+                "the plan's facts about the program (semantics {}, encrypted plan {}, proof \
+                 coverage {}) are not the compiler's ({}, {}, {})",
+                ctx.facts.semantics,
+                ctx.facts.fhe_supported,
+                ctx.facts.proof_covered,
+                f.semantics,
+                f.fhe_supported,
+                f.proof_covered
+            ));
+        }
+    }
+    if let Some(c) = &floor.catalog {
+        let claimed = [
+            ("CKKS", ctx.catalog.ckks, c.ckks),
+            ("TFHE-rs", ctx.catalog.tfhe, c.tfhe),
+            ("OpenFHE BinFHE", ctx.catalog.openfhe_exact, c.openfhe_exact),
+            ("BGV", ctx.catalog.bgv, c.bgv),
+            (
+                "verified execution",
+                ctx.catalog.verified_execution,
+                c.verified_execution,
+            ),
+        ];
+        for (name, plan_has, have) in claimed {
+            if plan_has && !have {
+                p.push(format!(
+                    "the plan assumes the {name} backend, which this verifier does not accept"
+                ));
+            }
+        }
+    }
+    if ctx.profile < floor.minimum_profile {
+        p.push(format!(
+            "the plan's profile {} is weaker than the required {}",
+            ctx.profile.name(),
+            floor.minimum_profile.name()
+        ));
+    }
+    if floor.production {
+        if ctx.preferences.allow_development {
+            p.push("the plan accepts development attestation (not in production)".into());
+        }
+        if ctx.catalog.tfhe {
+            p.push("the plan assumes the research-only TFHE-rs backend (not in production)".into());
+        }
+        for s in &plan.steps {
+            if let Placement::Tee(t) = &s.placement {
+                if !production_offer(t) {
+                    p.push(format!(
+                        "{}: {} ({}) is not production attestation",
+                        s.id, t.tee, t.provider
+                    ));
+                }
+            }
+            for m in &s.mechanisms {
+                let research = match m {
+                    Mechanism::Fhe { scheme, backend } => {
+                        *scheme == Scheme::Tfhe || backend == "tfhe-rs"
+                    }
+                    Mechanism::Attestation { provider }
+                    | Mechanism::ConfidentialCompute { provider, .. } => {
+                        provider != "gcp-confidential-space"
+                    }
+                    _ => false,
+                };
+                if research {
+                    p.push(format!(
+                        "{}: {} is not available in production",
+                        s.id,
+                        m.name()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// A floor of requirements, derived here with the validator's own rules
+/// (not the planner's `derive`), so a bug that drops a requirement from
+/// both the planner and `derive` is still caught.
+fn floor_requirements(program: &Program, profile: Profile) -> Result<BTreeSet<TrustRequirement>> {
+    let mut r = BTreeSet::from([TrustRequirement::SignedEvidence]);
+    let c = program.confidentiality();
+    let report = analyze(program)?;
+    let release = |a: &str| {
+        c.and_then(|c| c.asset(a))
+            .map_or(Release::Never, |x| x.policy.release)
+    };
+    if let Some(c) = c {
+        for a in &c.assets {
+            for q in &c.parties {
+                if !a.policy.owners.contains(&q.id) && !a.policy.readers.contains(&q.id) {
+                    r.insert(TrustRequirement::HideFrom {
+                        asset: a.id.clone(),
+                        principal: Principal::Party(q.id.to_string()),
+                    });
+                }
+            }
+            if let Some(b) = &a.policy.privacy {
+                r.insert(TrustRequirement::PrivacyBudget {
+                    asset: a.id.clone(),
+                    unit: b.unit.to_string(),
+                    epsilon: format!("{:?}", b.epsilon),
+                    delta: format!("{:?}", b.delta),
+                });
+            }
+        }
+    }
+    let boundaries = report
+        .as_ref()
+        .map_or(&[][..], |x| x.aggregations.as_slice());
+    let mut read: Vec<String> = vec![];
+    if boundaries.is_empty() {
+        for (_, name, _, _) in program.inputs() {
+            read.push(
+                c.and_then(|c| c.inputs.get(name).cloned())
+                    .unwrap_or_else(|| crate::requirements::input_asset(name)),
+            );
+        }
+        if program.verification() == Verification::Required || profile == Profile::Maximum {
+            r.insert(TrustRequirement::RequireCorrectness {
+                step: "evaluate".into(),
+            });
+        }
+    }
+    for b in boundaries {
+        r.insert(TrustRequirement::MinimumParticipants {
+            output: b.output.clone(),
+            minimum: b.minimum,
+        });
+        if profile >= Profile::Strong {
+            r.insert(TrustRequirement::RequireAttestation {
+                step: format!("aggregate:{}", b.output),
+            });
+        }
+        for x in &b.contributions {
+            read.push(x.asset.clone());
+            if release(&x.asset) == Release::AggregateOnly {
+                r.insert(TrustRequirement::AggregateOnly {
+                    asset: x.asset.clone(),
+                    output: b.output.clone(),
+                });
+            }
+        }
+    }
+    for a in read {
+        if release(&a) != Release::Public {
+            r.insert(TrustRequirement::HideFrom {
+                asset: a,
+                principal: Principal::ComputeHost,
+            });
+        }
+    }
+    Ok(r)
+}
+
 fn usable(offer: &TeeOffer, ctx: &PlanningContext) -> bool {
     let production = match offer.provider.as_str() {
         "gcp-confidential-space" => true,
@@ -87,7 +327,13 @@ fn check(program: &Program, plan: &ConfidentialExecutionPlan, p: &mut Vec<String
     {
         p.push("the plan is for another policy".into());
     }
-    // No weakening: exactly the requirements the program and context imply.
+    // No weakening: never below the validator's own floor, and exactly
+    // the requirements the program and context imply.
+    for r in floor_requirements(program, ctx.profile)? {
+        if !plan.requirements.contains(&r) {
+            p.push(format!("requirement missing: {r:?}"));
+        }
+    }
     let want = derive(program, ctx)?;
     if plan.requirements != want {
         for r in want.iter().filter(|r| !plan.requirements.contains(r)) {

@@ -111,7 +111,27 @@ It downloads nothing else: no Hugging Face Hub, no PyPI, no GitHub. The
 image sets `HF_HUB_OFFLINE=1`, and the model is a sealed package. The
 launch policy lets the operator set only `JOB_URL`. The production image
 holds only the worker and its libraries: no CLI, no broker, no launcher
-simulator.
+simulator. Its base images are pinned by digest, and its Python packages
+are installed from `requirements.lock` (every file's hash, `pip
+--require-hashes --no-deps`; the same versions as the release lock,
+checked by `scripts/release/check-pins.sh`).
+
+The job descriptor at `JOB_URL` is the operator's to write, so the worker
+trusts nothing in it that the training spec does not confirm:
+- it accepts key grants only under the grant-signing key the training spec
+  names for the broker (the descriptor gives the broker's address only);
+- the training configuration is the spec's, and the input adapter is the
+  spec's initial adapter or the one the coordinator recorded for the
+  previous round;
+- the DP-SGD clip and sampling rate are the approved plan's, whose ID the
+  spec binds;
+- it builds only a model factory the image ships, from the package's own
+  `config.json`, and refuses to run if its own code is not the code the
+  spec binds;
+- the image its evidence names is the one its attestation measures.
+
+Test hooks (`ENCOMPUTE_CANARY_UPDATE`) are never honoured with Confidential
+Space evidence.
 
 ## Cost
 

@@ -15,8 +15,23 @@ Policy (docs/release-process.md, "Severity policy"):
   an owner and an expiry (``accepted_risk`` or ``not_affected``).
 * Low is reported.
 * A finding whose severity cannot be determined counts as High.
-* An expired exception blocks; an exception that matches nothing is reported
-  as stale. No exception may run longer than MAX_DAYS.
+* An exception that matches nothing is reported as stale. No exception may
+  run longer than MAX_DAYS.
+
+Exceptions are narrow and machine-checked. Every entry names exactly one
+advisory (``id``), one package (``package``) and the exact installed
+version(s) the scanner reports (``version``; a list only for spellings of
+the same release, e.g. ``2.3.1`` and ``2.3.1+cpu``), and carries a
+``reason``, ``compensating_controls``, an ``added`` date, an ``expires``
+date and a ``tracking`` URL (the upstream advisory or issue). An exception
+matches a finding only when the advisory, the package and the version all
+match: one written for torch 2.3.1 does not cover 2.3.2. The file-level
+approval covers the entries added on or before its ``approved_on``; a later
+entry needs a new approval. Any invalid entry (a missing field, a wildcard
+or list where one exact value is required, an expired or over-long entry,
+a missing approval) fails the gate whether or not it matches a finding, and
+a finding whose advisory and package match an exception for another
+version blocks with that reason.
 
 Severities: the scanner's own rating (trivy, grype), else the GitHub
 advisory's rating (GHSA, through OSV), else a CVSS v3 base score computed
@@ -30,6 +45,7 @@ import datetime as dt
 import json
 import math
 import os
+import re
 import sys
 import urllib.request
 
@@ -43,6 +59,16 @@ MAX_DAYS = 183
 VEX = {"component_not_present", "vulnerable_code_not_present",
        "vulnerable_code_not_in_execute_path", "vulnerable_code_cannot_be_controlled_by_adversary",
        "inline_mitigations_already_exist"}
+REQUIRED = ("id", "package", "version", "status", "reason", "compensating_controls",
+            "added", "expires", "tracking")
+# One advisory: CVE-2025-32434, GHSA-xxxx-xxxx-xxxx, PYSEC-2024-1, RUSTSEC-2023-0071,
+# DLA-4792-1, DSA-5000-1, TEMP-0841856-B18BAF.
+ADVISORY = re.compile(r"^(CVE-\d{4}-\d{4,}|GHSA(-[23456789cfghjmpqrvwx]{4}){3}|PYSEC-\d{4}-\d+"
+                      r"|RUSTSEC-\d{4}-\d{4}|DLA-\d+-\d+|DSA-\d+-\d+|TEMP-\d+-[0-9A-F]+)$")
+# One exact version as scanners print it (PEP 440, SemVer, Debian epoch:version~rev):
+# no wildcard, range or separator.
+EXACT_VERSION = re.compile(r"^[0-9][A-Za-z0-9.+:~_-]*$")
+PACKAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
 # --- CVSS v3.x base score ---------------------------------------------------------
@@ -224,31 +250,87 @@ def load_exceptions(path):
         sys.exit("vuln_policy: Python 3.11+ is needed to read the exceptions file")
     with open(path, "rb") as f:
         doc = tomllib.load(f)
-    # One approval may cover the whole file; an entry may carry its own.
-    approval = (doc.get("approval") or {}).get("approved_by", "")
+    # One approval may cover the whole file (the entries added on or before
+    # its date); an entry may carry its own approved_by and approved_on.
+    approval = doc.get("approval") or {}
     out = []
     for e in doc.get("exception", []):
         e = dict(e)
-        e.setdefault("approved_by", approval)
+        if "approved_by" not in e:
+            e["approved_by"] = approval.get("approved_by", "")
+            e["approved_on"] = approval.get("approved_on")
         out.append(e)
     return out
 
 
+def _date(v):
+    """A TOML date or a YYYY-MM-DD string, else None."""
+    if isinstance(v, dt.datetime):
+        return None
+    if isinstance(v, dt.date):
+        return v
+    if isinstance(v, str):
+        try:
+            return dt.date.fromisoformat(v)
+        except ValueError:
+            return None
+    return None
+
+
+def _versions(e):
+    v = e.get("version")
+    return v if isinstance(v, list) else [v]
+
+
 def exception_problems(e, today):
     p = []
-    for k in ("id", "package", "status", "reason", "expires"):
-        if not e.get(k):
+    for k in REQUIRED:
+        v = e.get(k)
+        if v is None or v == "" or v == [] or (isinstance(v, str) and not v.strip()):
             p.append(f"missing {k}")
-    if not str(e.get("approved_by") or "").strip():
-        p.append("not approved (approved_by is empty)")
-    exp = e.get("expires")
-    if isinstance(exp, str):
-        exp = dt.date.fromisoformat(exp)
-    if isinstance(exp, dt.date):
+    # Narrow: one advisory, one package, exact versions. No wildcard, list or range.
+    i = e.get("id")
+    if isinstance(i, list):
+        p.append("id must be one advisory, not a list (one entry per advisory)")
+    elif i and not ADVISORY.match(str(i)):
+        p.append(f"id {i!r} is not one exact advisory ID (CVE, GHSA, PYSEC, RUSTSEC, DLA, DSA, TEMP)")
+    pkg = e.get("package")
+    if isinstance(pkg, list):
+        p.append("package must be one package, not a list")
+    elif pkg and not PACKAGE.match(str(pkg)):
+        p.append(f"package {pkg!r} is not one exact package name")
+    if e.get("version") not in (None, "", []):
+        for v in _versions(e):
+            if not isinstance(v, str) or not EXACT_VERSION.match(v):
+                p.append(f"version {v!r} is not one exact installed version (no wildcard or range)")
+    cc = e.get("compensating_controls")
+    if isinstance(cc, list) and not all(isinstance(c, str) and c.strip() for c in cc):
+        p.append("compensating_controls has an empty item")
+    tr = e.get("tracking")
+    if tr and not (isinstance(tr, str) and re.match(r"^https://\S+$", tr)):
+        p.append(f"tracking {tr!r} is not an https URL of the upstream advisory or issue")
+    added, exp = _date(e.get("added")), _date(e.get("expires"))
+    if e.get("added") and added is None:
+        p.append(f"added {e.get('added')!r} is not a date (YYYY-MM-DD)")
+    if e.get("expires") and exp is None:
+        p.append(f"expires {e.get('expires')!r} is not a date (YYYY-MM-DD)")
+    if added and added > today:
+        p.append(f"added {added} is in the future")
+    if exp:
         if exp < today:
             p.append(f"expired {exp}")
         elif (exp - today).days > MAX_DAYS:
             p.append(f"expiry {exp} is more than {MAX_DAYS} days away")
+        if added and (exp - added).days > MAX_DAYS:
+            p.append(f"runs {(exp - added).days} days from {added}, more than {MAX_DAYS}")
+    if not str(e.get("approved_by") or "").strip():
+        p.append("not approved (approved_by is empty)")
+    else:
+        on = _date(e.get("approved_on"))
+        if on is None:
+            p.append("not approved (approved_on is missing)")
+        elif added and on < added:
+            p.append(f"not approved (added {added}, after the approval of {on})")
     if e.get("status") not in ("accepted_risk", "not_affected"):
         p.append("status must be accepted_risk or not_affected")
     if e.get("status") == "not_affected" and e.get("justification") not in VEX:
@@ -256,12 +338,14 @@ def exception_problems(e, today):
     return p
 
 
-def _list(v):
-    return v if isinstance(v, list) else [v]
+def advisory_match(e, f):
+    """The same advisory and package, whatever the version."""
+    return isinstance(e.get("id"), str) and e.get("package") == f["package"] and e["id"] in f["ids"]
 
 
 def match(e, f):
-    return f["package"] in _list(e.get("package")) and any(i in f["ids"] for i in _list(e.get("id")))
+    """Advisory, package and exact installed version."""
+    return advisory_match(e, f) and f["version"] in _versions(e)
 
 
 # --- Main -------------------------------------------------------------------------
@@ -306,8 +390,14 @@ def main() -> int:
         e = next((e for e in exceptions if match(e, f)), None)
         if e is not None:
             used.add(id(e))
+        other = None if e else next((x for x in exceptions if advisory_match(x, f)), None)
         verdict = "REPORTED"
-        if f.get("os_unfixed") and not e:
+        if other is not None and eff in ("critical", "high", "medium"):
+            # An exception for another version of the package covers nothing:
+            # the analysis was made for different code.
+            verdict = (f"BLOCKING (the exception is for version {', '.join(map(str, _versions(other)))}"
+                       f", installed {f['version']})")
+        elif f.get("os_unfixed") and not e:
             # A base-image package the distribution has not fixed: reported
             # and re-checked at every release (docs/release-process.md).
             verdict = "REPORTED (no fix in the distribution)"
@@ -343,18 +433,29 @@ def main() -> int:
     for n in notes:
         print(f"NOTE      {n}")
     for e in stale:
-        print(f"STALE     exception {e.get('id')} ({e.get('package')}) matches no finding"
-              + (f": {'; '.join(bad_exc[id(e)])}" if id(e) in bad_exc else ""))
+        print(f"STALE     exception {e.get('id')} ({e.get('package')} {e.get('version')}) matches no finding")
+    # An invalid exception fails the gate even when it matches nothing: an
+    # expired, blanket or unapproved entry must be fixed or removed.
+    for e in exceptions:
+        if id(e) in bad_exc:
+            print(f"BLOCKING  invalid exception {e.get('id')} ({e.get('package')} {e.get('version')}): "
+                  + "; ".join(bad_exc[id(e)]))
     summary = (f"{len(findings)} findings: " + ", ".join(f"{counts[k]} {k}" for k in
                ["critical", "high", "medium", "low", "unknown"] if counts[k]) +
-               f"; {blocking} blocking; {len(exceptions)} exceptions ({len(stale)} stale)")
+               f"; {blocking} blocking; {len(exceptions)} exceptions ({len(stale)} stale, "
+               f"{len(bad_exc)} invalid)")
     print(summary)
     if a.report:
         with open(a.report, "w") as f:
             f.write("# Vulnerability scan\n\n" + summary + "\n\n" + "\n".join(lines) + "\n")
             if notes:
                 f.write("\n## Notes\n\n" + "\n".join(f"- {n}" for n in notes) + "\n")
-    return 1 if blocking else 0
+            bad = [e for e in exceptions if id(e) in bad_exc]
+            if bad:
+                f.write("\n## Invalid exceptions (blocking)\n\n" + "\n".join(
+                    f"- {e.get('id')} ({e.get('package')} {e.get('version')}): "
+                    + "; ".join(bad_exc[id(e)]) for e in bad) + "\n")
+    return 1 if blocking or bad_exc else 0
 
 
 if __name__ == "__main__":

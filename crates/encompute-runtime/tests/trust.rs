@@ -604,6 +604,45 @@ fn privacy_releases_answer_to_the_declared_budget() {
     assert_eq!(row(&report(&t), "Privacy budget"), Status::Failed);
 }
 
+/// Review finding DP-4: the Privacy budget row shows a named level with the
+/// noise it resolved to for the receipt's unit, and fails a receipt that
+/// names a level its noise is below (the listed noise for a patient).
+#[test]
+fn the_privacy_row_shows_the_preset_and_its_effective_noise() {
+    let (_, g, _) = collaboration();
+    let level = |noise: f64| {
+        move |r: &mut encompute_runtime::dp::PrivacyReceipt| {
+            r.cumulative_epsilon = "2.9".into();
+            r.mechanism.noise_multiplier = noise;
+            r.mechanism.preset = Some("strong".into());
+        }
+    };
+    let t = signed_release(&g, level(12.0), &coordinator());
+    let r = report(&t);
+    assert_eq!(row(&r, "Privacy budget"), Status::Satisfied, "{r}");
+    let details = &r
+        .rows
+        .iter()
+        .find(|x| x.name == "Privacy budget")
+        .unwrap()
+        .details;
+    assert!(
+        details.iter().any(|d| d.contains(
+            "(patient level): preset=strong, sensitivity_factor=2, \
+             effective_noise_multiplier=12 (2x preset 6.0)"
+        )),
+        "{details:?}"
+    );
+    assert!(
+        r.to_string().contains("effective_noise_multiplier=12"),
+        "{r}"
+    );
+    let t = signed_release(&g, level(6.0), &coordinator());
+    let r = report(&t);
+    assert_eq!(row(&r, "Privacy budget"), Status::Failed, "{r}");
+    assert!(r.to_string().contains("not that level's"), "{r}");
+}
+
 /// Review finding 6: an empty or partial bundle is never SATISFIED.
 #[test]
 fn absent_evidence_is_not_satisfied() {

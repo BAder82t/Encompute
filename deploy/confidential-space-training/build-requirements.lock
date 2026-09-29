@@ -1,0 +1,20 @@
+# The build stage's Python tool (maturin builds the SDK wheel), with hashes:
+# installed with pip --require-hashes. The version is the release lock's
+# (scripts/release/python/constraints.txt). Regenerate from this directory:
+#
+#   echo maturin==1.7.4 | uv pip compile - -c ../../scripts/release/python/constraints.txt \
+#     --python-version 3.11 --generate-hashes --no-header -o build-requirements.lock
+maturin==1.7.4 \
+    --hash=sha256:0182a9638399c8835afd39d2aeacf56908e37cba3f7abb15816b9df6774fab81 \
+    --hash=sha256:23fae44e345a2da5cb391ae878726fb793394826e2f97febe41710bd4099460e \
+    --hash=sha256:2b349d742a07527d236f0b4b6cab26f53ebecad0ceabfc09ec4c6a396e3176f9 \
+    --hash=sha256:35487a424467d1fda4567cbb02d21f09febb10eda22f5fd647b130bc0767dc61 \
+    --hash=sha256:41a29c5b23f3ebdfe7633637e3de256579a1b2700c04cd68c16ed46934440c5a \
+    --hash=sha256:71f668f19e719048605dbca6a1f4d0dc03b987c922ad9c4bf5be03b9b278e4c3 \
+    --hash=sha256:7ccb66d0c5297cf06652c5f72cb398f447d3a332eccf5d1e73b3fe14dbc9498c \
+    --hash=sha256:8b441521c151f0dbe70ed06fb1feb29b855d787bda038ff4330ca962e5d56641 \
+    --hash=sha256:c179fcb2b494f19186781b667320e43d95b3e71fcb1c98fffad9ef6bd6e276b3 \
+    --hash=sha256:eb7b7753b733ae302c08f80bca7b0c3fda1eea665c2b1922c58795f35a54c833 \
+    --hash=sha256:f3d38a6d0c7fd7b04bec30dd470b2173cf9bd184ab6220c1acaf49df6b48faf5 \
+    --hash=sha256:f70c1c8ec9bd4749a53c0f3ae8fdbb326ce45be4f1c5551985ee25a6d7150328 \
+    --hash=sha256:fd5b4b95286f2f376437340f8a4908f4761587212170263084455be8099099a7

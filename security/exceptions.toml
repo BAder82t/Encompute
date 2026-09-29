@@ -4,223 +4,1071 @@
 #   * Critical/High pass only with status = "not_affected" and a VEX
 #     justification: the vulnerable code is not present or cannot be reached.
 #   * Medium passes with status = "accepted_risk" or "not_affected".
-#   * Every entry has a reason and an expiry at most 183 days away; an
-#     expired entry blocks the release again.
-#   * `id` matches the finding's ID or any alias (CVE, GHSA, PYSEC, RUSTSEC);
-#     `package` is the package name as the scanner reports it.
 #
-# Entries are proposed by whoever runs the scan and take effect only once
-# approved: set `approved_by` below (or on an entry). Until then the
-# "security scans" row of scripts/release-check.sh reports FAIL.
+# Every entry is narrow and complete, or the gate fails (whether or not the
+# entry matches a finding):
+#
+#   id                     one advisory (CVE, GHSA, PYSEC, RUSTSEC, DLA, ...),
+#                          matched against the finding's ID and aliases
+#   package                the package name as the scanner reports it
+#   version                the exact installed version the scanner reports; a
+#                          list only for spellings of one release (pip-audit
+#                          reads "2.3.1" from the lock, trivy "2.3.1+cpu" in
+#                          the image). Another version is not covered.
+#   reason, justification  the analysis (justification: a VEX label)
+#   compensating_controls  what keeps the vulnerable code unreachable, stated
+#                          from the code, with the test or gate that holds it
+#   tracking               the upstream advisory or issue (https URL)
+#   added, expires         YYYY-MM-DD; at most 183 days apart and from today.
+#                          An expired entry fails the gate.
+#
+# Entries take effect only once approved: the [approval] below covers the
+# entries added on or before its approved_on; an entry added later needs the
+# release manager to review it and move approved_on (or give the entry its
+# own approved_by and approved_on). Until then the "security scans" row of
+# scripts/release-check.sh reports FAIL.
 
 [approval]
 approved_by = "BAder82t"  # the release manager's GitHub handle, after review
 approved_on = "2026-09-27"  # YYYY-MM-DD
 
-# --- Rust --------------------------------------------------------------------------
+# --- Rust ---------------------------------------------------------------------
 
 [[exception]]
 id = "RUSTSEC-2023-0071"
 package = "rsa"
+version = "0.9.10"
 severity = "medium"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """Marvin timing side channel in RSA *private-key* operations. `rsa` \
-comes in through jsonwebtoken, which production uses only to verify RS256 \
-Confidential Space tokens with Google's public keys; only tests sign. No fixed \
-release exists. Also ignored in deny.toml."""
+reason = "Marvin timing side channel in RSA private-key operations. `rsa` comes in through jsonwebtoken, which production uses only to verify RS256 tokens with public keys (Google's for Confidential Space, the identity provider's for OIDC). No fixed release exists. Also ignored in deny.toml."
+compensating_controls = [
+  "RS256 is only verified in production (crates/encompute-attestation/src/gcp.rs, crates/encompute-control/src/authn.rs; the control plane's own session tokens are HMAC-signed)",
+  "the one RSA signer is the development-only launcher simulator (crates/encompute-cli/src/launcher_sim.rs), with an operator-supplied test key whose tokens a real deployment never accepts",
+  "deny.toml records the same advisory with the same reason, so cargo-deny and this file agree",
+]
+tracking = "https://rustsec.org/advisories/RUSTSEC-2023-0071.html"
+added = 2026-09-27
 expires = 2026-12-31
 
-# --- Python: PyTorch 2.3.1 (pinned by the confidential training image) --------------
-# Encompute never calls torch.load, torch.jit, torch.compile/Inductor,
-# torch.export or torch.distributed: models are rebuilt from Transformers
-# configurations and weights are read from safetensors (python/encompute/torch).
-# Upgrading torch changes the model package binding (major.minor) and the
-# training image digest; it is planned after 0.3 (docs/release-process.md).
+# --- Python: PyTorch 2.3.1 (pinned by the confidential training image) --------
 
 [[exception]]
-id = ["CVE-2025-32434", "CVE-2026-24747"]
+id = "CVE-2025-32434"
 package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
 severity = "critical"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """RCE through torch.load (weights_only bypasses). Encompute never \
-calls torch.load: weights are safetensors only, and pickled weights are \
-refused at import (encompute.torch.hf, _check_files)."""
+reason = "RCE through torch.load with weights_only=True. Encompute never calls torch.load."
+compensating_controls = [
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-53q9-r3pm-6pq6"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-24747"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "RCE through untrusted checkpoint files (torch.load weights_only bypass). Encompute never calls torch.load; weights are read with safetensors."
+compensating_controls = [
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-63cw-57p8-fm3p"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
 id = "CVE-2024-48063"
 package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
 severity = "critical"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """torch.distributed.rpc RemoteModule deserialization (disputed). \
-Encompute uses no torch.distributed; workers exchange sealed updates through \
-its own secure aggregation."""
+reason = "torch.distributed.rpc RemoteModule deserialization RCE (disputed). Encompute uses no torch.distributed; workers exchange sealed updates through its own secure aggregation."
+compensating_controls = [
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2024-48063"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
-id = ["CVE-2025-55553", "CVE-2025-55557", "CVE-2025-55558", "CVE-2025-55560", "CVE-2026-4538", "CVE-2025-3000", "CVE-2025-2148"]
+id = "CVE-2025-55553"
 package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
 severity = "high"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """Crashes in torch.compile/Inductor, proxy_tensor (FX tracing), \
-the pt2 (torch.export) loader, torch.jit.script and the profiler. None is \
-used: training runs eager PyTorch on Transformers-native BERT, DistilBERT \
-and RoBERTa models."""
+reason = "DoS from a syntax error in proxy_tensor.py (FX tracing). Training runs eager PyTorch: no torch.compile/Inductor, FX tracing, torch.export, torch.jit or profiler."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-55553"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
-id = ["CVE-2025-55551", "CVE-2025-55552", "CVE-2025-55554", "CVE-2025-2998", "CVE-2025-2999", "CVE-2025-3730", "CVE-2025-2953", "CVE-2025-46148", "CVE-2025-3001", "CVE-2025-2149"]
+id = "CVE-2025-55557"
 package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
 severity = "high"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """Local crashes or wrong results in operators the supported models \
-never call: linalg.lu, rot90 with randn_like, nan_to_num, rnn \
-pad_packed_sequence/unpack_sequence, lstm_cell, ctc_loss, mkldnn_max_pool2d, \
-PairwiseDistance, quantized sigmoid. The architectures are fixed \
-(encompute-training hf::SUPPORTED) and their operators are attention, linear, \
-layer norm, GELU and embedding."""
+reason = "DoS in a model with torch.cummin compiled by Inductor. Training runs eager PyTorch: no torch.compile/Inductor, FX tracing, torch.export, torch.jit or profiler."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-55557"
+added = 2026-09-27
 expires = 2026-12-31
 
-# --- Python: Transformers 4.46.3 (pinned; the model package binds 4.46) --------------
+[[exception]]
+id = "CVE-2025-55558"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Buffer overflow in a Conv2d/hardshrink/view-mv model compiled by Inductor. Training runs eager PyTorch: no torch.compile/Inductor, FX tracing, torch.export, torch.jit or profiler."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-55558"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-55560"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "DoS in a to_sparse/to_dense model compiled by Inductor. Training runs eager PyTorch: no torch.compile/Inductor, FX tracing, torch.export, torch.jit or profiler."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-55560"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-4538"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Deserialization in the pt2 (torch.export) loading handler, local access only. Training runs eager PyTorch: no torch.compile/Inductor, FX tracing, torch.export, torch.jit or profiler."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-4538"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-3000"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "low"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Memory corruption in torch.jit.script. Training runs eager PyTorch: no torch.compile/Inductor, FX tracing, torch.export, torch.jit or profiler."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-rrmf-rvhw-rf47"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-2148"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "low"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Memory corruption in the profiler's tuple handler. Training runs eager PyTorch: no torch.compile/Inductor, FX tracing, torch.export, torch.jit or profiler."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-c678-jfcj-6jmf"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-55551"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "DoS in torch.linalg.lu with a slice operation. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-55551"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-55552"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Unexpected behaviour of torch.rot90 used with torch.randn_like. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-55552"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-55554"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Integer overflow in torch.nan_to_num(...).long(). The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-55554"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-2998"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Memory consumption in rnn pad_packed_sequence. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-f4hp-rmr7-r7v8"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-2999"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Memory corruption in rnn unpack_sequence. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-vgrw-7cvw-pwgx"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-3730"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Improper resource release in nn.functional.ctc_loss. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-887c-mr87-cxwp"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-2953"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "low"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Local DoS in torch.mkldnn_max_pool2d. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-3749-ghw9-m3mg"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-46148"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "nn.PairwiseDistance(p=2) returns incorrect results in eager mode. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-46148"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-3001"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "low"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Memory corruption in torch.lstm_cell. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-qfhq-4f3w-5fph"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-2149"
+package = "torch"
+version = ["2.3.1", "2.3.1+cpu"]
+severity = "low"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Improper initialization in the quantized sigmoid module. The supported architectures (BERT, DistilBERT, RoBERTa) use attention, linear, layer norm, GELU, dropout and embedding operators; this operator is never called."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-x3gm-94wq-g975"
+added = 2026-09-27
+expires = 2026-12-31
+
+# --- Python: Transformers 4.46.3 (pinned; the model package binds 4.46) -------
 
 [[exception]]
 id = "CVE-2026-4372"
 package = "transformers"
+version = "4.46.3"
 severity = "critical"
 status = "not_affected"
 justification = "vulnerable_code_not_present"
-reason = """`_attn_implementation_internal` naming a Hub repository whose \
-kernel code is downloaded and run. 4.46.3 has no Hub kernel loading: \
-_autoset_attn_implementation accepts only eager, sdpa and flash_attention_2 \
-and raises otherwise (checked in the installed source). Encompute also \
-passes attn_implementation="eager", loads with local_files_only=True, and \
-the training image sets HF_HUB_OFFLINE=1. Follow-up: hf::check_config should \
-refuse `_attn_implementation*` keys before transformers moves to 5.x."""
+reason = "`_attn_implementation_internal` naming a Hub repository whose kernel code is downloaded and run. 4.46.3 has no Hub kernel loading: _autoset_attn_implementation accepts only eager, sdpa and flash_attention_2 and raises otherwise (checked in the installed source)."
+compensating_controls = [
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-29pf-2h5f-8g72"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
-id = ["CVE-2024-11392", "CVE-2024-11393", "CVE-2024-11394", "CVE-2025-14920", "CVE-2025-14921", "CVE-2025-14924", "CVE-2025-14930"]
+id = "CVE-2024-11392"
 package = "transformers"
+version = "4.46.3"
 severity = "high"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """Pickle deserialization in the MobileViTV2, MaskFormer, Trax, \
-Perceiver, Transformer-XL, Megatron-GPT2 and GLM4 code paths. Only BERT, \
-DistilBERT and RoBERTa are accepted (hf::check_config), weights are \
-safetensors only (use_safetensors=True), and pickled files are refused at \
-import."""
+reason = "Pickle deserialization in the MobileViTV2 code path. Only BERT, DistilBERT and RoBERTa are accepted and pickled files never enter a model package."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-qxrp-vhvm-j765"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
-id = ["CVE-2025-14926", "CVE-2025-14927", "CVE-2025-14928", "CVE-2025-14929"]
+id = "CVE-2024-11393"
 package = "transformers"
+version = "4.46.3"
 severity = "high"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """Code injection in the SEW, SEW-D, HuBERT and X-CLIP checkpoint \
-conversion scripts. Encompute never runs a conversion script."""
+reason = "Pickle deserialization in the MaskFormer code path. Only BERT, DistilBERT and RoBERTa are accepted and pickled files never enter a model package."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-wrfc-pvp9-mr9g"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2024-11394"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Pickle deserialization in the Trax code path. Only BERT, DistilBERT and RoBERTa are accepted and pickled files never enter a model package."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-hxxf-235m-72v3"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-14920"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Pickle deserialization in the Perceiver code path. Only BERT, DistilBERT and RoBERTa are accepted and pickled files never enter a model package."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-14920"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-14921"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Pickle deserialization in the Transformer-XL code path. Only BERT, DistilBERT and RoBERTa are accepted and pickled files never enter a model package."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-14921"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-14924"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Pickle deserialization in the Megatron-GPT2 code path. Only BERT, DistilBERT and RoBERTa are accepted and pickled files never enter a model package."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-14924"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-14930"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Pickle deserialization in the GLM4 code path. Only BERT, DistilBERT and RoBERTa are accepted and pickled files never enter a model package."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "weights are safetensors only: pickled formats (.bin, .pt, .pth, .pkl, .pickle, .ckpt, .h5, .msgpack, .joblib) are refused at import (crates/encompute-training/src/hf.rs; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused) and models load with use_safetensors=True, local_files_only=True (python/encompute/torch/hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-14930"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-14926"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Code injection in the SEW checkpoint conversion script. Encompute never runs a Transformers conversion script."
+compensating_controls = [
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-14926"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-14927"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Code injection in the SEW-D checkpoint conversion script. Encompute never runs a Transformers conversion script."
+compensating_controls = [
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-14927"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-14928"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Code injection in the HuBERT checkpoint conversion script. Encompute never runs a Transformers conversion script."
+compensating_controls = [
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-14928"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-14929"
+package = "transformers"
+version = "4.46.3"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Code injection in the X-CLIP checkpoint conversion script. Encompute never runs a Transformers conversion script."
+compensating_controls = [
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-14929"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
 id = "CVE-2026-5241"
 package = "transformers"
+version = "4.46.3"
 severity = "high"
 status = "not_affected"
 justification = "vulnerable_code_not_present"
-reason = """LightGlue loading path of transformers 5.2.0; LightGlue does not \
-exist in 4.46.3, and trust_remote_code is refused by Encompute."""
+reason = "LightGlue model loading path of transformers 5.2.0; LightGlue does not exist in 4.46.3."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+]
+tracking = "https://github.com/advisories/GHSA-fgcw-684q-jj6r"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
 id = "CVE-2026-9856"
 package = "transformers"
+version = "4.46.3"
 severity = "high"
 status = "not_affected"
 justification = "vulnerable_code_not_present"
-reason = """chat_template keys used as file names by save_pretrained. In \
-4.46.3 chat templates are written inside tokenizer_config.json, not as \
-separate files (tokenization_utils_base.save_pretrained); Encompute calls \
-save_pretrained only on tokenizers it builds itself (demo models)."""
+reason = "chat_template keys used as file names by save_pretrained. In 4.46.3 chat templates are written inside tokenizer_config.json, not as separate files (tokenization_utils_base.save_pretrained)."
+compensating_controls = [
+  "Encompute calls save_pretrained only on tokenizers it builds itself (demo models)",
+  "tokenizer settings outside an allowlist are refused at import (hf.py TOKENIZER_FILES; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused)",
+]
+tracking = "https://github.com/advisories/GHSA-xrqw-3rrv-vx5w"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
 id = "CVE-2026-1839"
 package = "transformers"
+version = "4.46.3"
 severity = "medium"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """Trainer._load_rng_state calls torch.load. Encompute does not use \
-the Trainer class; its training loop is its own (encompute.torch.finetune)."""
+reason = "Trainer._load_rng_state calls torch.load. Encompute does not use the Trainer class; its training loop is its own (encompute.torch.finetune)."
+compensating_controls = [
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-69w3-r845-3855"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
-id = ["CVE-2024-12720", "CVE-2025-1194", "CVE-2025-2099", "CVE-2025-3933", "CVE-2025-5197", "CVE-2025-6638", "CVE-2025-6051", "CVE-2025-6921", "CVE-2025-3264"]
+id = "CVE-2024-12720"
 package = "transformers"
+version = "4.46.3"
 severity = "medium"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """ReDoS in the Nougat, GPT-NeoX-Japanese and Marian tokenizers, \
-Donut's token2json, testing_utils, TF weight-name conversion, the TF \
-AdamWeightDecay optimizer, the SpeechT5 number normalizer and remote-code \
-import scanning (get_imports; trust_remote_code is refused). None is used by \
-BERT-family sequence classification."""
+reason = "ReDoS in the Nougat tokenizer post-processing. Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-6rvg-6v2m-4j46"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-1194"
+package = "transformers"
+version = "4.46.3"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "ReDoS in the GPT-NeoX-Japanese tokenizer. Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-fpwr-67px-3qhx"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-2099"
+package = "transformers"
+version = "4.46.3"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "ReDoS in testing_utils (preprocess_string). Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-qq3j-4f4f-9583"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-3933"
+package = "transformers"
+version = "4.46.3"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "ReDoS in DonutProcessor.token2json. Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-37mw-44qp-f5jm"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-5197"
+package = "transformers"
+version = "4.46.3"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "ReDoS in the TF-to-PyTorch weight-name conversion. Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-9356-575x-2w9m"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-6638"
+package = "transformers"
+version = "4.46.3"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "ReDoS in the MarianTokenizer. Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-59p9-h35m-wg4g"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-6051"
+package = "transformers"
+version = "4.46.3"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "ReDoS in the SpeechT5 English number normalizer. Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-rcv9-qm8p-9p6j"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-6921"
+package = "transformers"
+version = "4.46.3"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "ReDoS in the TF AdamWeightDecay optimizer. Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-4w7r-h757-3r74"
+added = 2026-09-27
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-3264"
+package = "transformers"
+version = "4.46.3"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "ReDoS in get_imports (remote-code import scanning). Not used by BERT-family sequence classification with the package's own WordPiece/BPE tokenizer, and remote code is refused."
+compensating_controls = [
+  "only BERT, DistilBERT and RoBERTa sequence classification are accepted (crates/encompute-training/src/hf.rs SUPPORTED and check_config; python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused); workers rebuild them from the package's digest-bound config.json with attn_implementation=\"eager\" (hf.py)",
+  "trust_remote_code is refused (hf.import_model; python/tests/test_huggingface.py::test_unsafe_repositories_are_refused), auto_map and _attn_implementation* config keys are refused (hf.rs check_config)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-jjph-296x-mrcr"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
 id = "CVE-2025-3263"
 package = "transformers"
+version = "4.46.3"
 severity = "medium"
 status = "accepted_risk"
-reason = """ReDoS in get_configuration_file on a crafted `configuration_files` \
-list in config.json: a denial of service while the model owner imports its \
-own repository (outside any confidential workload). Workers rebuild models \
-with AutoConfig.for_model, which does not call it. Fixed in 4.51; upgrade \
-planned after 0.3."""
+reason = "ReDoS in get_configuration_file on a crafted `configuration_files` list in config.json: a denial of service while the model owner imports its own repository (outside any confidential workload). Workers rebuild models with AutoConfig.for_model, which does not call it. Fixed in 4.51; upgrade planned after 0.3."
+compensating_controls = [
+  "workers never call get_configuration_file: they rebuild the model with AutoConfig.for_model from the package's digest-bound config.json (hf.py)",
+  "the import that can reach it runs on the model owner's own machine against a repository they chose; its worst case is that the import hangs",
+]
+tracking = "https://github.com/advisories/GHSA-q2wp-rjmx-x6x9"
+added = 2026-09-27
 expires = 2026-12-31
 
-# --- Python: other ----------------------------------------------------------------
+# --- Python: other ------------------------------------------------------------
 
 [[exception]]
 id = "CVE-2026-69112"
 package = "accelerate"
+version = "1.1.1"
 severity = "medium"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = """Path traversal in load_checkpoint_in_model / \
-load_checkpoint_and_dispatch. Encompute calls neither; a sharded index is \
-also checked (hf::check_index) to name only the package's own files. No \
-fixed release exists."""
+reason = "Path traversal and DoS through sharded-checkpoint weight_map entries in load_checkpoint_in_model / load_checkpoint_and_dispatch. Encompute calls neither. No fixed release exists."
+compensating_controls = [
+  "python/encompute calls no torch.load, torch.jit, torch.compile/Inductor, torch.export, torch.distributed, Transformers Trainer or accelerate load_checkpoint_*: the 'exception controls' row of scripts/release/scan.sh fails the release gate if it does",
+  "a sharded index may name only the package's own files (hf.rs check_index)",
+  "in the training image the entrypoint is fixed (python -m encompute.torch.cs_worker), the launch policy lets the operator set only JOB_URL, HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set, and key brokers release keys only to the approved image digest",
+]
+tracking = "https://github.com/advisories/GHSA-4j2p-28q2-5m79"
+added = 2026-09-27
 expires = 2026-12-31
 
 [[exception]]
 id = "CVE-2025-71176"
 package = "pytest"
+version = "8.4.2"
 severity = "medium"
 status = "accepted_risk"
-reason = """Predictable /tmp/pytest-of-{user} directories on multi-user \
-hosts. pytest is a test tool, not shipped in the wheel or any image; release \
-builds run on single-tenant ephemeral runners. Fixed in 9.0.3; the bump is \
-left for after the RC (it drops Python 3.9, which pyproject still allows)."""
+reason = "Predictable /tmp/pytest-of-{user} directories on multi-user hosts. Fixed in 9.0.3; the bump is left for after the RC (it drops Python 3.9, which pyproject still allows)."
+compensating_controls = [
+  "pytest is a test tool: it is not in the wheel, the training lock or any image",
+  "release builds run on single-tenant ephemeral CI runners",
+]
+tracking = "https://github.com/advisories/GHSA-6w46-j5rx-g56g"
+added = 2026-09-27
 expires = 2026-12-31
 
-# --- Containers (Debian 12 base) -------------------------------------------------
-# Debian packages with no fixed version in the distribution are reported,
-# not blocking (docs/release-process.md). Fixed ones must be fixed by a
-# refreshed base digest or listed here.
+# --- Containers (Debian 12 base) ----------------------------------------------
 
 [[exception]]
 id = "DLA-4792-1"
 package = "tzdata"
+version = "2026b-0+deb12u1"
 severity = "unknown"
 status = "not_affected"
 justification = "vulnerable_code_cannot_be_controlled_by_adversary"
-reason = """A time-zone data update (2026b to 2026c), not a code flaw; the \
-current debian:bookworm-slim digest still ships 2026b. The services log and \
-compare times in UTC and take no security decision on local time rules. \
-Refresh the base digest when Debian publishes it."""
+reason = "A time-zone data update (2026b to 2026c), not a code flaw; the pinned Debian 12 bases still ship 2026b. Refresh the base digests when Debian publishes it."
+compensating_controls = [
+  "the services and workloads log and compare times in UTC and take no security decision on local time-zone rules",
+]
+tracking = "https://security-tracker.debian.org/tracker/DLA-4792-1"
+added = 2026-09-27
+expires = 2026-12-31
+
+# --- Containers: the training image's installer tooling (python:3.11.16-slim-bookworm base) ---
+
+[[exception]]
+id = "CVE-2026-23949"
+package = "jaraco.context"
+version = "5.3.0"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Path traversal in jaraco.context.tarball() when extracting a malicious tar archive (the copy vendored in setuptools/_vendor). The training workload never invokes it."
+compensating_controls = [
+  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
+  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
+  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://github.com/jaraco/jaraco.context/security/advisories/GHSA-58pv-8j8x-9vj2"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-24049"
+package = "wheel"
+version = "0.45.1"
+severity = "high"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "File permission change outside the target through `wheel unpack` of a malicious wheel (the copy vendored in setuptools/_vendor). The training workload never invokes it."
+compensating_controls = [
+  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
+  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
+  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://github.com/pypa/wheel/security/advisories/GHSA-8rrh-rw8j-w5fx"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-59890"
+package = "setuptools"
+version = "79.0.1"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "MANIFEST.in exclusion bypass through Unicode normalization when building an sdist on macOS. The training workload never invokes it."
+compensating_controls = [
+  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
+  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
+  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://github.com/pypa/setuptools/security/advisories/GHSA-h35f-9h28-mq5c"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2025-8869"
+package = "pip"
+version = "24.0"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "pip's fallback tar extraction does not check symbolic links. The training workload never invokes it."
+compensating_controls = [
+  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
+  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
+  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-8869"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-13346"
+package = "pip"
+version = "24.0"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "pip installs files to arbitrary locations from doubly-encoded URLs served by a malicious index. The training workload never invokes it."
+compensating_controls = [
+  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
+  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
+  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-13346"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-3219"
+package = "pip"
+version = "24.0"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "pip treats a file that is both a tar and a ZIP archive as ZIP. The training workload never invokes it."
+compensating_controls = [
+  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
+  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
+  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-3219"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-6357"
+package = "pip"
+version = "24.0"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "pip's self-update check imports modules after installing wheels. The training workload never invokes it."
+compensating_controls = [
+  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
+  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
+  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-6357"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-8643"
+package = "pip"
+version = "24.0"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "pip installs entry-point scripts outside the installation directory. The training workload never invokes it."
+compensating_controls = [
+  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
+  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
+  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-8643"
+added = 2026-09-29
+expires = 2026-12-31
+
+# --- Containers: OpenSSL in the training image (Debian 12; fixed in 3.0.22-1~deb12u1) ---
+
+[[exception]]
+id = "CVE-2026-63072"
+package = "libssl3"
+version = "3.0.20-1~deb12u2"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Heap buffer overflow in CMS decryption (AES key unwrap) of a crafted CMS message. Nothing in the training workload decrypts CMS or runs a CMP server."
+compensating_controls = [
+  "the only OpenSSL user in the running workload is CPython's ssl and hashlib modules (TLS to Google Cloud Storage and the key brokers, digests); neither exposes CMS or CMP, and the encompute native module links no OpenSSL (checked with ldd in encompute-training:rc4)",
+  "the openssl command-line tool is present but nothing in the image runs it; the entrypoint is fixed and the launch policy lets the operator override only JOB_URL",
+  "follow-up: refresh the python:3.11.16-slim-bookworm digest once it carries 3.0.22-1~deb12u1 (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-63072"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-63076"
+package = "libssl3"
+version = "3.0.20-1~deb12u2"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Invalid pointer dereference in an OpenSSL CMP server on a crafted protectionAlg. Nothing in the training workload decrypts CMS or runs a CMP server."
+compensating_controls = [
+  "the only OpenSSL user in the running workload is CPython's ssl and hashlib modules (TLS to Google Cloud Storage and the key brokers, digests); neither exposes CMS or CMP, and the encompute native module links no OpenSSL (checked with ldd in encompute-training:rc4)",
+  "the openssl command-line tool is present but nothing in the image runs it; the entrypoint is fixed and the launch policy lets the operator override only JOB_URL",
+  "follow-up: refresh the python:3.11.16-slim-bookworm digest once it carries 3.0.22-1~deb12u1 (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-63076"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-63072"
+package = "openssl"
+version = "3.0.20-1~deb12u2"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Heap buffer overflow in CMS decryption (AES key unwrap) of a crafted CMS message. Nothing in the training workload decrypts CMS or runs a CMP server."
+compensating_controls = [
+  "the only OpenSSL user in the running workload is CPython's ssl and hashlib modules (TLS to Google Cloud Storage and the key brokers, digests); neither exposes CMS or CMP, and the encompute native module links no OpenSSL (checked with ldd in encompute-training:rc4)",
+  "the openssl command-line tool is present but nothing in the image runs it; the entrypoint is fixed and the launch policy lets the operator override only JOB_URL",
+  "follow-up: refresh the python:3.11.16-slim-bookworm digest once it carries 3.0.22-1~deb12u1 (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-63072"
+added = 2026-09-29
+expires = 2026-12-31
+
+[[exception]]
+id = "CVE-2026-63076"
+package = "openssl"
+version = "3.0.20-1~deb12u2"
+severity = "medium"
+status = "not_affected"
+justification = "vulnerable_code_not_in_execute_path"
+reason = "Invalid pointer dereference in an OpenSSL CMP server on a crafted protectionAlg. Nothing in the training workload decrypts CMS or runs a CMP server."
+compensating_controls = [
+  "the only OpenSSL user in the running workload is CPython's ssl and hashlib modules (TLS to Google Cloud Storage and the key brokers, digests); neither exposes CMS or CMP, and the encompute native module links no OpenSSL (checked with ldd in encompute-training:rc4)",
+  "the openssl command-line tool is present but nothing in the image runs it; the entrypoint is fixed and the launch policy lets the operator override only JOB_URL",
+  "follow-up: refresh the python:3.11.16-slim-bookworm digest once it carries 3.0.22-1~deb12u1 (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
+]
+tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-63076"
+added = 2026-09-29
 expires = 2026-12-31

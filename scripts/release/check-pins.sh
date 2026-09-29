@@ -16,8 +16,9 @@ if ! echo "$tc" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then bad "Rust toolchain"
 else
   # fuzz.yml is exempt: cargo-fuzz needs a nightly compiler, and fuzzing
   # builds no release artifact.
-  off="$(grep -ho 'dtolnay/rust-toolchain@[0-9.a-z]*' $(ls .github/workflows/*.yml | grep -v '/fuzz.yml$') | sort -u | grep -v "@$tc\$" || true)"
-  dk="$(grep -h '^FROM rust:' Dockerfile.* | grep -v "rust:$tc-" || true)"
+  # Actions are pinned by commit SHA with the version as a comment.
+  off="$(grep -hoE 'dtolnay/rust-toolchain@[^ ]+( # [^ ]+)?' $(ls .github/workflows/*.yml | grep -v '/fuzz.yml$') | sort -u | grep -vE "@[0-9a-f]{40} # $tc\$" || true)"
+  dk="$(grep -h '^FROM rust:' Dockerfile.* deploy/confidential-space*/Dockerfile | grep -v "rust:$tc-" || true)"
   if [ -n "$off" ]; then bad "Rust toolchain" "workflows use $off (want $tc)"
   elif [ -n "$dk" ]; then bad "Rust toolchain" "Dockerfiles use $dk (want rust:$tc-*)"
   else row "Rust toolchain" "PASS ($tc: rust-toolchain.toml, workflows, Dockerfiles)"; fi
@@ -28,9 +29,14 @@ if cargo metadata --format-version 1 --locked >/dev/null 2>&1; then row "Cargo.l
 else bad "Cargo.lock" "out of date: cargo metadata --locked fails"; fi
 
 # Docker base images pinned by digest.
-unpinned="$(grep -hE '^FROM ' Dockerfile.* | grep -v '@sha256:[0-9a-f]\{64\}' | grep -vE '^FROM [a-z]+ AS|^FROM (runtime|build) ' || true)"
+unpinned="$(grep -hE '^FROM ' Dockerfile.* deploy/confidential-space*/Dockerfile | grep -v '@sha256:[0-9a-f]\{64\}' | grep -vE '^FROM [a-z]+ AS|^FROM (runtime|build) ' || true)"
 if [ -n "$unpinned" ]; then bad "Docker base images" "not pinned by digest: $(echo "$unpinned" | tr '\n' ';')"
-else row "Docker base images" "PASS ($(grep -hcE '^FROM .*@sha256:' Dockerfile.* | paste -sd+ - | bc) FROM lines pinned by digest)"; fi
+else row "Docker base images" "PASS ($(grep -hcE '^FROM .*@sha256:' Dockerfile.* deploy/confidential-space*/Dockerfile | paste -sd+ - | bc) FROM lines pinned by digest)"; fi
+
+# GitHub Actions pinned by full commit SHA, with the version as a comment.
+unpinned_uses="$(grep -hE '^[[:space:]]*(- )?uses: ' .github/workflows/*.yml | grep -vE 'uses: [^ ]+@[0-9a-f]{40} # [^ ]+$' || true)"
+if [ -n "$unpinned_uses" ]; then bad "GitHub Actions" "not pinned by commit SHA: $(echo "$unpinned_uses" | sed 's/^ *//' | tr '\n' ';')"
+else row "GitHub Actions" "PASS ($(grep -hE '^[[:space:]]*(- )?uses: ' .github/workflows/*.yml | wc -l | tr -d ' ') uses pinned by SHA)"; fi
 
 # OpenFHE: one version everywhere, a commit, and the install checks it.
 v_inst="$(sed -n 's/^OPENFHE_VERSION="\(.*\)"/\1/p' scripts/install-openfhe.sh)"
@@ -68,7 +74,14 @@ else
     n="${pin%%==*}"; v="${pin#*==}"
     grep -qiE "^$n==$v(\+[a-z0-9.]+)? " "$lock" || miss="$miss $pin"
   done < <(grep -E '^[A-Za-z0-9_.-]+==' "$req" | sed 's/ *#.*//')
-  if [ -n "$miss" ]; then bad "Python lock" "differs from $req:$miss"
+  # The training image installs its own hashed lock: same versions as ours.
+  img_lock=deploy/confidential-space-training/requirements.lock
+  if [ -f "$img_lock" ]; then
+    while read -r pin; do
+      awk -v p="$pin" 'tolower($1)==tolower(p){f=1} END{exit !f}' "$lock" || miss="$miss $pin"
+    done < <(grep -oE '^[A-Za-z0-9_.-]+==[^ ]+' "$img_lock")
+  fi
+  if [ -n "$miss" ]; then bad "Python lock" "differs from $req or $img_lock:$miss"
   elif python3 - "$lock" <<'PY'
 import re, sys
 try:
