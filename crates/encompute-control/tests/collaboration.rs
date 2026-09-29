@@ -589,8 +589,9 @@ fn an_approval_covers_only_programs_declared_for_its_purpose() {
     let undeclared = plan_of(&w, EXACT);
     let (s, v) = submit_over(&w, &undeclared, "medical-training", &[&d], "p-3");
     assert_eq!(s, 403, "no declared purpose: {v}");
-    // (Its own assets need no approval, so no purpose either.)
-    let (s, v) = submit_over(&w, &undeclared, "anything", &[&w.model_b], "p-4");
+    // (Its own data needs no approval, so no purpose either; a program
+    // that binds no registered asset lists none.)
+    let (s, v) = submit_over(&w, &undeclared, "anything", &[], "p-4");
     assert_eq!(s, 201, "{v}");
     // The program declared for the approved purpose runs.
     let ok = plan_of(
@@ -733,30 +734,126 @@ fn a_job_is_approved_by_a_person_of_the_owner() {
     assert_ne!(v["state"], "waiting_for_approval", "{v}");
 }
 
-/// Review finding rc.4 F2 residual (ENC-SF-2026-089): a job over the submitter's own data,
-/// whose program binds no input to a registered asset, has the sources its
-/// submitter lists. Leaving out an own asset the job uses (budgeted,
-/// revoked, or requiring job approval) bypasses no control that stands
-/// between the organization and another party or its key broker:
-/// - job approval: an organization's own assets never need it, listed or
-///   not (and another organization's asset must be bound, see
-///   `a_job_lists_exactly_the_registered_assets_its_program_reads`);
-/// - DP accounting: a ledger is charged by asset, only by the owner's data
-///   owners or the SecAgg services it authorized, never through a job;
-/// - lineage: an asset's parents are what it was registered with; a
-///   revoked parent refuses a derivation, whatever any job listed;
-/// - release: a revoked asset's key broker is told once the revocation is
-///   anchored, and key releases it reports map to the asset, whatever any
-///   job listed;
-/// - visibility: no other organization sees the job.
-///
-/// What the list does decide is the job-level revocation bookkeeping: a
-/// job that does not list a revoked asset is not refused or failed for it.
-/// That is the submitter's own declaration about its own data, which it
-/// holds (the control plane never sees inputs); the trust report says the
-/// sources are the submitter's list.
+/// Review finding rc.4 F2 residual (ENC-SF-2026-094): a job's sources are
+/// exactly the registered assets its program binds, for every job, the
+/// submitter's own data included. The request's list must match that set:
+/// an omitted, extra, substituted (another registered version), or
+/// repeated asset is refused, and a program that binds none lists none (on
+/// rc.3, a program binding no asset took any list the submitter gave, and
+/// that list became the job's lineage, revocation scope and trust report).
 #[test]
-fn an_incomplete_own_source_list_bypasses_no_control() {
+fn a_job_lists_exactly_the_assets_its_program_binds_even_its_own() {
+    let Some(w) = world() else { return };
+    let t = &w.t;
+    let register = |kind: &str, name: &str, digest: char| -> String {
+        t.ok(
+            &w.b_admin,
+            "POST",
+            "/v1/assets",
+            Some(
+                json!({"organization": "modelco", "kind": kind, "name": name,
+                        "digest": digest.to_string().repeat(64)}),
+            ),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let a = w.model_b.clone();
+    let b = register("dataset", "own-cohort", 'c');
+    let c = register("dataset", "own-other", 'd');
+    // Two versions of one dataset are two registered assets.
+    let v6 = register("dataset", "cohort@v6", '6');
+    let v7 = register("dataset", "cohort@v7", '7');
+    let reads_ab = plan_of(
+        &w,
+        &format!(
+            "encompute 0.1
+program adult precision 0.001 purpose \"medical-training\"
+party \"modelco\" \"ModelCo\"
+asset \"{a}\" model owners [\"modelco\"] readers [\"modelco\"] purposes [\"medical-training\"] release allowed_parties
+asset \"{b}\" dataset owners [\"modelco\"] readers [\"modelco\"] purposes [\"medical-training\"] release allowed_parties
+%0 = input \"age\" [0.0, 120.0] asset \"{a}\" : secret u8
+%1 = input \"min\" [0.0, 120.0] asset \"{b}\" : secret u8
+%2 = ge %0, %1 : secret bool
+output \"out\" = %2 to \"modelco\"
+"
+        ),
+    );
+    let reads_a = plan_of(&w, &exact_own(&a));
+    let reads_v7 = plan_of(&w, &exact_own(&v7));
+    let binds_none = plan_of(&w, EXACT);
+    let refused = |plan: &Value, sources: &[&str], key: &str, what: &str| {
+        let (s, v) = submit_over(&w, plan, "medical-training", sources, key);
+        assert_eq!(s, 403, "{what}: {v}");
+        v
+    };
+    let accepted = |plan: &Value, sources: &[&str], key: &str| {
+        let (s, v) = submit_over(&w, plan, "medical-training", sources, key);
+        assert_eq!(s, 201, "{v}");
+        v
+    };
+    // Missing: the program binds A and B; the job lists A.
+    let v = refused(&reads_ab, &[&a], "ab-1", "an omitted source");
+    assert!(v["message"].as_str().unwrap().contains(&b), "{v}");
+    let v = accepted(&reads_ab, &[&a, &b], "ab-2");
+    let mut want = vec![a.clone(), b.clone()];
+    want.sort();
+    assert_eq!(v["source_assets"], json!(want), "{v}");
+    // Extra: the program binds A; the job lists A and C.
+    let v = refused(&reads_a, &[&a, &c], "a-1", "an extra source");
+    assert!(v["message"].as_str().unwrap().contains(&c), "{v}");
+    // Substituted: the program binds v7; the job supplies v6.
+    refused(&reads_v7, &[&v6], "v-1", "another version");
+    refused(&reads_v7, &[&v6, &v7], "v-2", "another version besides");
+    let v = accepted(&reads_v7, &[&v7], "v-3");
+    assert_eq!(v["source_assets"], json!([v7]), "{v}");
+    // Repeated.
+    let v = refused(&reads_a, &[&a, &a], "a-2", "a repeated source");
+    assert!(
+        v["message"].as_str().unwrap().contains("more than once"),
+        "{v}"
+    );
+    // A program that binds no registered asset: the job lists none, so it
+    // can neither claim nor leave out provenance.
+    let v = refused(
+        &binds_none,
+        &[&a],
+        "n-1",
+        "a source the program does not bind",
+    );
+    assert!(
+        v["message"].as_str().unwrap().contains("binds no input"),
+        "{v}"
+    );
+    let v = accepted(&binds_none, &[], "n-2");
+    assert_eq!(v["source_assets"], json!([]), "{v}");
+    // An ID the caller cannot see is not found, whether or not it exists.
+    let hidden = w.dataset_a.clone();
+    for (id, key) in [
+        (hidden.as_str(), "h-1"),
+        ("ast_0000000000000000000000000000dead", "h-2"),
+    ] {
+        let (s, v) = submit_over(&w, &binds_none, "medical-training", &[id], key);
+        assert_eq!(s, 404, "{v}");
+    }
+    let reasons: Vec<String> = audit_actions(t, &w.b_auditor)
+        .into_iter()
+        .filter(|e| e["action"] == "job.denied")
+        .map(|e| e["refs"]["reason"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    for why in ["unlisted_source", "undeclared_source", "duplicate_source"] {
+        assert!(reasons.iter().any(|r| r == why), "{why}: {reasons:?}");
+    }
+}
+
+/// Review finding rc.4 F2 residual (ENC-SF-2026-094): the sources the
+/// control plane derives from the program are the ones revocation, the
+/// job record and the trust report follow; a recorded list that is not the
+/// program's set fails the trust report instead of being reported (on
+/// rc.3 the report took the submitter's list, with a caveat).
+#[test]
+fn the_derived_sources_drive_revocation_and_the_trust_report() {
     let Some(w) = world() else { return };
     let t = &w.t;
     let kb = Arc::new(
@@ -769,156 +866,63 @@ fn an_incomplete_own_source_list_bypasses_no_control() {
         Some(json!({"id": "keybroker-modelco", "kind": "keybroker",
                     "public_key": kb.public_key_hex(), "url": "http://kb.internal:8760"})),
     );
-    let register = |who: &As, body: Value| -> String {
-        t.ok(who, "POST", "/v1/assets", Some(body))["id"]
-            .as_str()
+    let source_row = |job: &str| -> Value {
+        let r = t.ok(&w.b_dev, "GET", &format!("/v1/trust/{job}"), None);
+        r["checks"]
+            .as_array()
             .unwrap()
-            .to_owned()
+            .iter()
+            .find(|c| c["check"] == "source assets")
+            .cloned()
+            .unwrap_or_else(|| panic!("{r}"))
     };
-    // modelco's own assets: one requiring job approval, one budgeted.
-    let gated = register(
-        &w.b_owner,
-        json!({"organization": "modelco", "kind": "model", "name": "gated-own",
-               "digest": "c".repeat(64), "policy": {"require_job_approval": true}}),
-    );
-    let budgeted = register(
-        &w.b_admin,
-        json!({"organization": "modelco", "kind": "dataset", "name": "own-cohort",
-               "digest": "d".repeat(64), "privacy_budget": budget(1.0)}),
-    );
-    let spent =
-        |a: &str| t.ok(&w.b_admin, "GET", &format!("/v1/privacy/{a}"), None)["spent"].clone();
-    let before = spent(&budgeted);
-    let plan = plan_of(&w, EXACT);
-    let listed = |sources: &[&str], key: &str| {
-        let (s, v) = submit_over(&w, &plan, "own-research", sources, key);
-        assert_eq!(s, 201, "{v}");
-        v
-    };
-    // Job approval: the same state whether or not the gated asset is
-    // listed (an organization does not approve its own jobs).
-    let with = listed(&[&gated], "gated-listed");
-    let without = listed(&[], "gated-omitted");
-    assert_eq!(with["state"], without["state"]);
-    assert_ne!(with["state"], "waiting_for_approval", "{with}");
-    // DP accounting: no job, listed or not, spends or skips the budget.
-    listed(&[&budgeted], "budget-listed");
-    listed(&[], "budget-omitted");
-    assert_eq!(spent(&budgeted), before);
-    // The developer who submitted cannot spend it either, nor can a SecAgg
-    // service the owner did not authorize.
-    let (s, _) = t.call(
-        &w.b_dev,
-        "POST",
-        &format!("/v1/privacy/{budgeted}/events"),
-        Some(reserve("dev-spend", 1)),
-    );
-    assert_eq!(s, 403);
-    let sa = Arc::new(
-        encompute_verification::ServiceSigner::from_seed("secagg-own", &[24; 32]).unwrap(),
-    );
-    t.ok(
-        &w.platform,
-        "POST",
-        "/v1/organizations/platform/service-accounts",
-        Some(json!({"id": "secagg-own", "kind": "secagg", "public_key": sa.public_key_hex()})),
-    );
-    let (s, _) = t.call(
-        &As::Service(sa),
-        "POST",
-        &format!("/v1/privacy/{budgeted}/events"),
-        Some(reserve("unauthorized-spend", 1)),
-    );
-    assert_eq!(s, 404);
-    assert_eq!(spent(&budgeted), before);
-    // Revocation: two queued jobs over the model, one listing it.
-    let listing = listed(&[&w.model_b], "model-listed");
-    let omitting = listed(&[], "model-omitted");
-    let (listing, omitting) = (
-        listing["id"].as_str().unwrap().to_owned(),
-        omitting["id"].as_str().unwrap().to_owned(),
-    );
-    let derived = register(
-        &w.b_owner,
-        json!({"organization": "modelco", "kind": "model", "name": "fine-tuned",
-               "digest": "9".repeat(64), "parents": [w.model_b]}),
-    );
-    t.transport.drain();
+    let binds = plan_of(&w, &exact_own(&w.model_b));
+    let (s, j) = submit_over(&w, &binds, "medical-training", &[&w.model_b], "d-1");
+    assert_eq!(s, 201, "{j}");
+    let binding = j["id"].as_str().unwrap().to_owned();
+    let (s, j) = submit_over(&w, &plan_of(&w, EXACT), "own-research", &[], "d-2");
+    assert_eq!(s, 201, "{j}");
+    let unbound = j["id"].as_str().unwrap().to_owned();
+    // The trust report's source row is the program's set, and says nothing
+    // about the submitter's word.
+    let row = source_row(&binding);
+    assert_eq!(row["sources"], json!([w.model_b]), "{row}");
+    assert_eq!(row["status"], "VERIFIED", "{row}");
+    let row = source_row(&unbound);
+    assert_eq!(row["sources"], json!([]), "{row}");
+    assert!(!row.to_string().contains("submitter"), "{row}");
+    // Revoking the model fails exactly the job whose program binds it, and
+    // no new job over it is accepted.
     let v = t.ok(
         &w.b_owner,
         "POST",
         &format!("/v1/assets/{}/revoke", w.model_b),
         None,
     );
-    assert_eq!(v["failed_jobs"], json!([listing]), "{v}");
-    // The broker is told (anchored first), whatever the jobs listed: no key
-    // of the model is released again.
-    assert!(t.control.anchor.snapshot().revoked.contains(&w.model_b));
-    let sent = t.transport.drain();
+    assert_eq!(v["failed_jobs"], json!([binding]), "{v}");
+    let v = t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{binding}"), None);
+    assert_eq!(v["state"], "failed", "{v}");
+    let (s, v) = submit_over(&w, &binds, "medical-training", &[&w.model_b], "d-3");
+    assert_eq!(s, 409, "{v}");
+    // ...and leaving it out of the list does not get around that.
+    let (s, v) = submit_over(&w, &binds, "medical-training", &[], "d-4");
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(source_row(&binding)["status"], "REVOKED");
+    // A recorded list that differs from the program's bindings (a row
+    // written before this check, or tampered with) fails the report.
+    t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE jobs SET source_assets = '[]'::jsonb WHERE id = $1",
+            &[&binding],
+        )
+        .unwrap();
+    let row = source_row(&binding);
+    assert_eq!(row["status"], "FAILED", "{row}");
     assert!(
-        sent.iter().any(|(u, m)| u == "http://kb.internal:8760"
-            && m.kind == "asset.revoked"
-            && m.payload["key_ref"] == "model-7"),
-        "{sent:?}"
+        row["detail"].as_str().unwrap().contains(&w.model_b),
+        "{row}"
     );
-    // A key release the broker reports maps to the model, not to a job.
-    let m = encompute_verification::service::seal(
-        &kb,
-        "key.release",
-        "control-plane",
-        Default::default(),
-        &json!({"asset": "model-7", "allowed": false, "reason": "revoked"}),
-        300,
-    )
-    .unwrap();
-    t.ok(
-        &As::Service(kb),
-        "POST",
-        "/v1/messages",
-        Some(serde_json::to_value(&m).unwrap()),
-    );
-    let denied: Vec<Value> = audit_actions(t, &w.b_auditor)
-        .into_iter()
-        .filter(|e| e["action"] == "key.release.denied")
-        .collect();
-    assert!(
-        denied
-            .iter()
-            .any(|e| e["resource_id"] == w.model_b.as_str()),
-        "{denied:?}"
-    );
-    // Lineage: the derived model still names its revoked parent, and
-    // nothing new can derive from the revoked model.
-    let l = t.ok(
-        &w.b_owner,
-        "GET",
-        &format!("/v1/assets/{}/lineage", w.model_b),
-        None,
-    );
-    assert!(l["descendants"].to_string().contains(&derived), "{l}");
-    let (s, _) = t.call(
-        &w.b_owner,
-        "POST",
-        "/v1/assets",
-        Some(
-            json!({"organization": "modelco", "kind": "model", "name": "fine-tuned-2",
-                    "digest": "8".repeat(64), "parents": [w.model_b]}),
-        ),
-    );
-    assert_eq!(s, 409);
-    // The job-level bookkeeping follows the list: the omitting job is not
-    // failed for the revoked model, and its trust report says its sources
-    // are the submitter's list.
-    let v = t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{omitting}"), None);
-    assert_ne!(v["state"], "failed", "{v}");
-    let r = t.ok(&w.b_dev, "GET", &format!("/v1/trust/{omitting}"), None);
-    assert!(
-        r.to_string().contains("as the submitter listed them"),
-        "{r}"
-    );
-    // Visibility: no other organization sees an own-asset job.
-    for id in [&listing, &omitting] {
-        let (s, _) = t.call(&w.a_owner, "GET", &format!("/v1/jobs/{id}"), None);
-        assert_eq!(s, 404);
-    }
 }

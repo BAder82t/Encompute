@@ -280,7 +280,7 @@ fn restore_and_recovery_keep_disables_and_cancellations() {
     );
     let who = w.t.ok(&w.a_dev, "GET", "/v1/whoami", None);
     let a_dev_id = who["id"].as_str().unwrap().to_owned();
-    let plan = w.plan(EXACT);
+    let plan = w.plan(&exact_own(&w.model_b));
     let (_, j) = w.job(&plan, &[&w.model_b], "to-cancel");
     let job = j["id"].as_str().unwrap().to_owned();
     let World {

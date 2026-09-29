@@ -157,7 +157,9 @@ struct PlanDoc {
 
 /// What a job's program declares about its sources: its purpose, and the
 /// registered assets its secret inputs are bound to (a program names a
-/// registered asset by its ID in an `asset` declaration).
+/// registered asset by its ID in an `asset` declaration). The bound assets
+/// are the job's authoritative sources: the server derives them from the
+/// program, and never takes a request's list as provenance.
 struct SourceBinding {
     purpose: Option<String>,
     assets: std::collections::BTreeSet<String>,
@@ -191,10 +193,17 @@ impl SourceBinding {
         })
     }
 
+    /// The job's sources, as recorded: the program's bound assets, in order.
+    fn sources(&self) -> Vec<String> {
+        self.assets.iter().cloned().collect()
+    }
+
     /// The request must state the program's purpose, and list exactly the
-    /// registered assets the program reads (when it names any): an
-    /// approval covers what the job declares, so nothing the program
-    /// reads may be left out, and nothing it does not read may stand in.
+    /// registered assets the program binds, each once: nothing the program
+    /// reads may be left out, nothing it does not read may be added or
+    /// stand in (another version of a dataset is another asset), and a
+    /// program that binds none lists none. The job record, revocation,
+    /// audit and the trust report follow these sources.
     /// Refusals carry their audit reason.
     fn check(
         &self,
@@ -211,6 +220,13 @@ impl SourceBinding {
                 ));
             }
         }
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(a) = sources.iter().find(|a| !seen.insert(a.as_str())) {
+            return Err((
+                "duplicate_source",
+                forbidden(format!("asset {a} is listed as a source more than once")),
+            ));
+        }
         if let Some(a) = self.assets.iter().find(|a| !sources.contains(a)) {
             return Err((
                 "unlisted_source",
@@ -219,15 +235,16 @@ impl SourceBinding {
                 )),
             ));
         }
-        if !self.assets.is_empty() {
-            if let Some(a) = sources.iter().find(|a| !self.assets.contains(*a)) {
-                return Err((
-                    "undeclared_source",
-                    forbidden(format!(
-                        "asset {a} is listed as a source, but the program reads no input from it"
-                    )),
-                ));
-            }
+        if let Some(a) = sources.iter().find(|a| !self.assets.contains(*a)) {
+            let why = if self.assets.is_empty() {
+                "the program binds no input to a registered asset, so the job lists no source"
+            } else {
+                "the program reads no input from it"
+            };
+            return Err((
+                "undeclared_source",
+                forbidden(format!("asset {a} is listed as a source, but {why}")),
+            ));
         }
         Ok(())
     }
@@ -649,10 +666,19 @@ impl Control {
             // IDs), never only the request's word.
             let program = encompute_ir::parse(plan.get::<_, &str>(3))?;
             let binding = SourceBinding::of(t, &program)?;
+            // A listed asset the program does not bind is refused below;
+            // one the caller cannot see is not found, as anywhere else (the
+            // refusal never tells an unknown ID from a hidden one).
+            for a in r.source_assets.iter().filter(|a| !binding.assets.contains(*a)) {
+                asset_visible(t, &ctx.principal, a)?;
+            }
             if let Err((why, e)) = binding.check(&r.purpose, &r.source_assets) {
                 *denied.borrow_mut() = Some(("plan", r.plan.clone(), org.clone(), why));
                 return Err(e);
             }
+            // From here on the sources are the derived set (equal to the
+            // request's list, which only confirms it).
+            let sources = binding.sources();
             if let Some(pol) = &r.policy {
                 let ok = t
                     .query_opt(
@@ -668,9 +694,9 @@ impl Control {
             // Lock the source assets (shared) until this transaction ends: a
             // concurrent revocation either commits first (and is seen here)
             // or waits, then finds this job and fails it.
-            t.execute("SELECT 1 FROM assets WHERE id = ANY($1) FOR SHARE", &[&r.source_assets])
+            t.execute("SELECT 1 FROM assets WHERE id = ANY($1) FOR SHARE", &[&sources])
                 .map_err(db_err)?;
-            for a in &r.source_assets {
+            for a in &sources {
                 let asset = asset_visible(t, &ctx.principal, a)?;
                 if asset.status == "revoked" {
                     *denied.borrow_mut() = Some(("asset", a.clone(), org.clone(), "revoked"));
@@ -734,7 +760,7 @@ impl Control {
                     &plan.get::<_, String>(1),
                     &r.policy,
                     &r.purpose,
-                    &json!(r.source_assets),
+                    &json!(sources),
                     &r.requested_output,
                     &doc.scheme,
                     &doc.backend,
@@ -1459,29 +1485,41 @@ impl Control {
             _ => Err(conflict("no verified receipt yet")),
         };
         check("receipt", receipt_status);
-        let revoked: Vec<String> = c
-            .query(
-                "SELECT id FROM assets WHERE id = ANY($1) AND status = 'revoked'",
-                &[&j.sources],
-            )
-            .map_err(db_err)?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
-        let mut assets_note = if revoked.is_empty() {
-            "no source asset is revoked".to_owned()
+        // The job's sources are the assets its program binds (derived at
+        // submission); a recorded list that differs from the program's
+        // bindings fails the report rather than being trusted.
+        let derived = SourceBinding::of(&mut *c, &program)?.sources();
+        let mut recorded = j.sources.clone();
+        recorded.sort();
+        let named = if derived.is_empty() {
+            "none (the program binds no input to a registered asset)".to_owned()
         } else {
-            format!("revoked since: {}", revoked.join(", "))
+            derived.join(", ")
         };
-        // The sources are the program's registered bindings when it has
-        // any; otherwise (a job over the submitter's own data) they are the
-        // submitter's word, and the report says so.
-        if SourceBinding::of(&mut *c, &program)?.assets.is_empty() {
-            assets_note.push_str(
-                " (as the submitter listed them: the program binds no input to a registered asset)",
-            );
+        if recorded != derived {
+            ok = false;
+            checks.push(json!({"check": "source assets", "status": "FAILED",
+                "detail": format!("the job records sources {:?}, but its program binds {named}", j.sources)}));
+        } else {
+            let revoked: Vec<String> = c
+                .query(
+                    "SELECT id FROM assets WHERE id = ANY($1) AND status = 'revoked'",
+                    &[&derived],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            let note = if revoked.is_empty() {
+                "no source asset is revoked".to_owned()
+            } else {
+                format!("revoked since: {}", revoked.join(", "))
+            };
+            checks.push(json!({"check": "source assets",
+                "status": if revoked.is_empty() { "VERIFIED" } else { "REVOKED" },
+                "sources": derived,
+                "detail": format!("the program's bound assets: {named}; {note}")}));
         }
-        checks.push(json!({"check": "source assets", "status": if revoked.is_empty() { "VERIFIED" } else { "REVOKED" }, "detail": assets_note}));
         let verdict = if ok && j.state == JobState::Succeeded {
             "SATISFIED"
         } else {

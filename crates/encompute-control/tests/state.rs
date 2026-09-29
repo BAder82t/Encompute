@@ -350,7 +350,7 @@ fn secagg_privacy_events_arrive_once_through_messages() {
 #[test]
 fn revocation_racing_submissions_leaves_no_usable_job() {
     let Some(w) = world() else { return };
-    let plan = w.plan(EXACT);
+    let plan = w.plan(&exact_own(&w.model_b));
     let w = Arc::new(w);
     let submitters: Vec<_> = (0..8)
         .map(|i| {
@@ -463,7 +463,7 @@ fn restoring_an_older_backup_cannot_unrevoke_an_asset() {
         Some(json!({"id": "keybroker-modelco", "kind": "keybroker",
                     "public_key": kb.public_key_hex(), "url": "http://kb.internal:8760"})),
     );
-    let plan = w.plan(EXACT);
+    let plan = w.plan(&exact_own(&w.model_b));
     let (_, j) = w.job(&plan, &[&w.model_b], "before-backup");
     let job = j["id"].as_str().unwrap().to_owned();
     let World {

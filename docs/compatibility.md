@@ -275,6 +275,7 @@ verified with rc.3.
 | PrivacyReceipts and ledgers | Doubled sensitivity for unsampled units inside a party; epsilon margin | rc.3 receipts for such units no longer verify; new entries charge the doubled sensitivity |
 | Aggregation party state | Per-spec `sequences` | None: read as is |
 | Control-plane database | Migration 0003 | Applied at `migrate`, `serve` or `recover` |
+| Job submissions (`POST /v1/jobs`) | `source_assets` must equal the registered assets the program binds, each once, for every job; empty when it binds none. Jobs recorded before with other sources fail the trust report's `source assets` check | Bind the assets in the program (`asset "<asset ID>" ...`, `input ... asset "<asset ID>"`) or send an empty list |
 
 ## Known inconsistencies
 

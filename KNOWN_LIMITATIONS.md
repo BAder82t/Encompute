@@ -155,19 +155,15 @@ Related: [support matrix](docs/support-matrix.md),
   The whole anchor is rewritten on each update.
 - **A job's sources are declarations, not data.** The control plane never
   sees inputs, so it cannot tell which data a client actually encrypts. It
-  binds a job to what its program declares: the purpose, and the
-  registered assets its secret inputs are bound to by asset ID. A program
-  that names no registered asset (possible only when every source is the
-  submitter's own) leaves `source_assets` to the submitter's word. Leaving
-  out one of its own assets then skips no approval, privacy charge,
-  lineage rule or key release (none of them is decided by a job's list),
-  but the job is not refused or failed when that asset is revoked; the
-  trust report says the sources are the submitter's list. The asset's key
-  broker still destroys its key once the revocation is anchored. The
-  program's own `asset` declarations (owners, readers, purposes) are the
-  submitter's text and are not compared with the registry; only the IDs
-  are. Checking that a registered asset ID names a real asset also tells a
-  submitter who already knows an ID that it exists.
+  derives a job's sources from what its program declares: the purpose, and
+  the registered assets its secret inputs are bound to by asset ID. The
+  request's `source_assets` must list exactly those assets (none for a
+  program that binds none); lineage, revocation, the audit trail and the
+  trust report follow the derived set. The program's own `asset`
+  declarations (owners, readers, purposes) are the submitter's text and
+  are not compared with the registry; only the IDs are. Checking that a
+  registered asset ID names a real asset also tells a submitter who
+  already knows an ID that it exists.
 - **The anchor's sets of ended jobs, withdrawn approvals, removed
   project memberships and removed roles grow without bound.**
 - **The control plane bounds privacy reservations, but does not recompute

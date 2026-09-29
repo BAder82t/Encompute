@@ -515,7 +515,25 @@ if [ "$BAO_OK" = 1 ]; then
   echo "evaluator-1 registered; key broker up (KEK wrapped by transit/$TAG-modelco)"
 fi
 
-PLAN="$(ok b-dev POST /v1/plans "$("$PY" -c 'import json,sys; print(json.dumps({"project": sys.argv[1], "program": open(sys.argv[2]).read()}))' "$PROJECT" "$W/score.eir")" | jget 'v["id"]')"
+# plan_of FILE: a plan of the program in FILE, in the drill's project.
+plan_of() {
+  ok b-dev POST /v1/plans "$("$PY" -c 'import json,sys; print(json.dumps({"project": sys.argv[1], "program": open(sys.argv[2]).read()}))' "$PROJECT" "$1")" | jget 'v["id"]'
+}
+# A job's sources are exactly the registered assets its program binds, even
+# over modelco's own models: these programs bind their input to each model.
+for m in "$MODEL" "$MODEL2"; do
+  cat > "$W/score-$m.eir" <<EIR
+encompute 0.1
+program score precision 0.001 purpose "drill"
+party "modelco" "ModelCo"
+asset "$m" model owners ["modelco"] readers ["modelco"] purposes ["drill"] release allowed_parties
+%0 = input "x" [-1.0, 1.0] asset "$m" : secret vector<4>
+%1 = mul %0, %0 : secret vector<4>
+output "y" = %1 to "modelco"
+EIR
+done
+PLAN_M7="$(plan_of "$W/score-$MODEL.eir")"
+PLAN_M8="$(plan_of "$W/score-$MODEL2.eir")"
 # A job that runs end to end (client-side encryption, OpenFHE evaluator,
 # signed receipt, trust report).
 export ENCOMPUTE_CONTROL_URL="$CTL_URL"
@@ -527,9 +545,9 @@ check "job runs end to end (CKKS result correct, trust SATISFIED)" \
 ok b-dev GET "/v1/jobs?project=$PROJECT" >/dev/null
 JOB_OK="$(body '[j["id"] for j in v if j["state"]=="succeeded"][0]')"
 # Jobs that never start (no client drives them): revocation must fail them.
-QJOB="$(ok b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL\"],\"requested_output\":\"y\"}" drill-queued-1 | jget 'v["id"]')"
-QJOB2="$(ok b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL2\"],\"requested_output\":\"y\"}" drill-queued-2 | jget 'v["id"]')"
-echo "plan $PLAN; job $JOB_OK succeeded; jobs $QJOB, $QJOB2 $(ok b-dev GET "/v1/jobs/$QJOB" | jget 'v["state"]')"
+QJOB="$(ok b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN_M7\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL\"],\"requested_output\":\"y\"}" drill-queued-1 | jget 'v["id"]')"
+QJOB2="$(ok b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN_M8\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL2\"],\"requested_output\":\"y\"}" drill-queued-2 | jget 'v["id"]')"
+echo "plans $PLAN_M7 $PLAN_M8; job $JOB_OK succeeded; jobs $QJOB, $QJOB2 $(ok b-dev GET "/v1/jobs/$QJOB" | jget 'v["state"]')"
 
 step "2. privacy spending (reservations and commits)"
 for ev in r1 r2 r3; do ok a-owner POST "/v1/privacy/$DS1/events" "$(reserve_body "$ev")" >/dev/null; done
@@ -687,7 +705,7 @@ if missing:
     print("      missing:", missing)
 sys.exit(1 if missing else 0)
 PY
-s="$(api b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL\"],\"requested_output\":\"y\"}" drill-after-restore)"
+s="$(api b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN_M7\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL\"],\"requested_output\":\"y\"}" drill-after-restore)"
 check "a new job using the revoked model is refused (409)" eq "$s" 409
 if [ "$BAO_OK" = 1 ]; then
   check "key broker: model-7 still destroyed after the restore" eq "$(broker_key_state model-7)" destroyed

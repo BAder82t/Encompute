@@ -182,7 +182,7 @@ fn invalid_authentication_is_refused_over_the_wire() {
 fn cross_tenant_access_is_refused_over_the_wire() {
     let Some(w) = world() else { return };
     let c = Client::new(live(&w.t.control, Limits::default()));
-    let plan = w.plan(EXACT);
+    let plan = w.plan(&exact_own(&w.model_b));
     let (s, bjob) = w.job(&plan, &[&w.model_b], "net-b-1");
     assert_eq!(s, 201, "{bjob}");
     let bjob = bjob["id"].as_str().unwrap().to_owned();

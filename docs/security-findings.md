@@ -243,11 +243,12 @@ ENC-SF-2026-088 to 092 come from a later review of the control plane
 | ENC-SF-2026-086 | THIRD_PARTY_NOTICES omitted the permissively licensed crates' notices (SC-4) | Informational | THIRD_PARTY_NOTICES.md, scripts (`third_party_notices.py`) | fixing | @BAder82t | 2026-09-28 | 2026-09-28 | — | `fix/rc3-review-findings` (uncommitted) | `scripts/third_party_notices.py --check` | INV-217 (new) | release-process.md |
 | ENC-SF-2026-087 | The key cache module documentation claimed isolation that did not hold (EV-7) | Informational | encompute-evaluator (`keycache.rs`) | fixing | @BAder82t | 2026-09-28 | 2026-09-28 | — | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-openfhe-client/tests/key_tags.rs::another_clients_keys_under_the_victims_tag_are_never_used` | INV-171 (extended) | — |
 | ENC-SF-2026-088 | A job's purpose was the request's free text, never compared with the purpose its program declares: an approval for one purpose ran a program written for another (rc.4 F1) | Medium | encompute-control (`ops/jobs.rs`) | fixing | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-control/tests/collaboration.rs::an_approval_covers_only_programs_declared_for_its_purpose` | INV-194 (extended) | api.md, KNOWN_LIMITATIONS.md |
-| ENC-SF-2026-089 | A job's `source_assets` were the submitter's choice, never matched with the assets its program reads: leaving one out skipped its owner's approval (rc.4 F2) | Medium | encompute-control (`ops/jobs.rs`) | fixing | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_registered_assets_its_program_reads`, `crates/encompute-control/tests/collaboration.rs::an_incomplete_own_source_list_bypasses_no_control` | INV-194 (extended) | api.md, KNOWN_LIMITATIONS.md |
+| ENC-SF-2026-089 | A job's `source_assets` were the submitter's choice, never matched with the assets its program reads: leaving one out skipped its owner's approval (rc.4 F2) | Medium | encompute-control (`ops/jobs.rs`) | fixing | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_registered_assets_its_program_reads` | INV-194 (extended) | api.md, KNOWN_LIMITATIONS.md |
 | ENC-SF-2026-090 | Job approvals accepted service accounts holding an owner role (rc.4 F3) | Low | encompute-control (`ops/jobs.rs`) | fixing | @BAder82t | 2026-09-29 | 2026-09-29 | next release | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-control/tests/collaboration.rs::a_job_is_approved_by_a_person_of_the_owner` | INV-195 (extended) | api.md |
 | ENC-SF-2026-091 | Withdrawn asset approvals and left project memberships were not anchored: a database restore shared the asset, or the project, again (rc.4 F4) | Medium | encompute-control (`anchor.rs`, `control.rs`, `ops/assets.rs`, `ops/tenancy.rs`, migration 0004) | fixing | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_withdrawn_approvals`, `crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_left_project_left` | INV-178 (extended) | api.md, deployment.md, threat-model.md, KNOWN_LIMITATIONS.md |
 | ENC-SF-2026-092 | Organizations an asset was shared with saw its key reference, storage location, size and full policy, and job histories showed other organizations' user IDs (rc.4 F10) | Medium | encompute-control (`ops/assets.rs`, `ops/jobs.rs`) | fixing | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-control/tests/isolation.rs::collaborators_see_no_private_metadata` | INV-156 (extended) | api.md |
 | ENC-SF-2026-093 | Removing a role (`memberships/remove`) was not anchored: a database restore gave the principal the role back (rc.4) | Medium | encompute-control (`anchor.rs`, `control.rs`, `ops/tenancy.rs`, migration 0004) | fixing | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_removed_role_removed`, `crates/encompute-control/tests/anchor_rollback.rs::approvals_from_before_version_4_get_stable_ids` | INV-178 (extended) | api.md, deployment.md, threat-model.md, KNOWN_LIMITATIONS.md |
+| ENC-SF-2026-094 | Source-asset lists were trusted for jobs whose program binds no registered asset (the ENC-SF-2026-089 residual): an omitted or extra asset became the job's lineage, revocation scope and trust report | Medium | encompute-control (`ops/jobs.rs`) | fixing | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `fix/rc3-review-findings` (uncommitted) | `crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_assets_its_program_binds_even_its_own`, `crates/encompute-control/tests/collaboration.rs::the_derived_sources_drive_revocation_and_the_trust_report` | INV-194 (extended) | api.md, KNOWN_LIMITATIONS.md, CHANGELOG.md |
 
 ### Open (accepted / needs design)
 
@@ -305,18 +306,6 @@ stated.
   several replicas against one anchor is not supported; the anchor's sets
   of ended jobs, withdrawn approvals, removed project memberships and
   removed roles grow without bound, and the whole anchor is rewritten on each update.
-- **A job's sources are bound to its program's declarations, not to the
-  data** (ENC-SF-2026-089, residual). The control plane never sees inputs.
-  A job over another organization's asset must run a program that
-  declares the approved purpose and binds its inputs to the asset's
-  registered ID; a program that names no registered asset (only the
-  submitter's own sources) leaves `source_assets` to the submitter.
-  Leaving out an own asset skips no approval, privacy charge, lineage rule
-  or key release (none reads the list), but a job that does not list a
-  revoked own asset is not refused or failed for it; its trust report says
-  the sources are the submitter's list, and the asset's key broker still
-  destroys the key. The program's `asset` declarations (owners, readers,
-  purposes) are not compared with the registry, only the IDs.
 - **Evaluator upload grants are reusable until they expire**
   (ENC-SF-2026-064, partly fixed), and are not bound to a client.
 - **A co-tenant can block a victim's key upload** (ENC-SF-2026-035,

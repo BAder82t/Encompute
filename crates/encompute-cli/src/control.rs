@@ -322,6 +322,8 @@ pub enum JobsCmd {
         project: String,
         #[arg(long)]
         purpose: String,
+        /// A registered asset the program binds an input to (repeat for
+        /// each): exactly the program's bindings, none when it binds none.
         #[arg(long = "source")]
         sources: Vec<String>,
         #[arg(long, default_value = "out")]
@@ -339,6 +341,8 @@ pub enum JobsCmd {
         project: String,
         #[arg(long)]
         purpose: String,
+        /// A registered asset the program binds an input to (repeat for
+        /// each): exactly the program's bindings, none when it binds none.
         #[arg(long = "source")]
         sources: Vec<String>,
         #[arg(short, long = "input")]

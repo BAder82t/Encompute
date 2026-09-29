@@ -15,8 +15,8 @@
 
 ### Security
 
-Fixes for the independent review of 0.3.0-rc.3 (findings ENC-SF-2026-033
-to 087 in `docs/security-findings.md`; partial fixes and residuals are in
+Fixes for the independent review of 0.3.0-rc.3 and the follow-up review of
+its fixes (findings ENC-SF-2026-033 to 094 in `docs/security-findings.md`; partial fixes and residuals are in
 its "Open" list and in `KNOWN_LIMITATIONS.md`):
 
 - **033:** a privacy ledger rolled back while the control plane runs is
@@ -180,6 +180,14 @@ Later review of the control plane (ENC-SF-2026-088 to 092):
   database that still holds it is refused at startup (ROLE STATE
   ROLLBACK) and recovery removes it again. A role granted again is a new
   membership.
+- **094:** every job's sources are derived from its program: the request's
+  `source_assets` must list exactly the registered assets the program
+  binds, each once, and none when it binds none. An omitted, extra,
+  repeated or substituted asset (another registered version of a dataset)
+  is refused, also over the submitter's own data, where rc.3 took the
+  submitter's list. Lineage, revocation, audit and the trust report follow
+  the derived set; the trust report fails a job whose recorded sources
+  differ from its program's.
 - **Assurance:** invariants INV-192 to INV-217; INV-007, INV-101, INV-130,
   INV-131, INV-137, INV-138, INV-142, INV-143, INV-147, INV-156, INV-160,
   INV-162, INV-164, INV-170, INV-171, INV-174, INV-176, INV-178, INV-180,
@@ -198,9 +206,14 @@ Later review of the control plane (ENC-SF-2026-088 to 092):
 - **A job over another organization's asset needs a program that declares
   its purpose and reads the asset by its registered ID** (`purpose "..."`
   on the `program` line; `asset "<asset ID>" ...` bound to the secret
-  inputs), and `purpose` must equal the declared one. Jobs over the
-  submitter's own assets are unchanged unless their program names
-  registered assets, which must then be listed exactly.
+  inputs), and `purpose` must equal the declared one.
+- **A job lists exactly the registered assets its program binds**, its own
+  included: `source_assets` (`--source`, `sources=`) names each asset the
+  program binds an input to (`asset "<asset ID>" ...`), once, and is empty
+  for a program that binds none. To record an own asset as a job's source,
+  bind it in the program. A job recorded before this release with sources
+  its program does not bind gets a failed `source assets` check in its
+  trust report.
 - **Shared assets are redacted for other organizations** (no `key_ref`,
   `storage_uri`, `size_bytes`, `media_type`; `policy` reduced to
   `require_job_approval`), and a job's actors appear to source owners as

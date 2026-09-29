@@ -307,7 +307,12 @@ class Project:
         idempotency_key: Optional[str] = None,
     ) -> Job:
         """Plans and submits a job. Retrying with the same idempotency key
-        returns the same job (never a second one)."""
+        returns the same job (never a second one).
+
+        ``sources`` are the registered asset IDs the program binds its
+        inputs to (``asset "<id>"``), exactly and each once; a program that
+        binds no registered asset lists none. The control plane derives a
+        job's sources from its program and refuses any other list."""
         plan = self.plan(program)
         body = {"project": self.id, "plan": plan["id"], "purpose": purpose,
                 "source_assets": list(sources), "requested_output": output}

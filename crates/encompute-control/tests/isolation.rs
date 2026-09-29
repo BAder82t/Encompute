@@ -493,7 +493,7 @@ fn cross_tenant_attacks_fail() {
     let Some(w) = world() else { return };
     let t = &w.t;
     let d = w.dataset_a.clone();
-    let plan = w.plan(EXACT);
+    let plan = w.plan(&exact_own(&w.model_b));
     // B's job, using only B's assets.
     let (s, bjob) = w.job(&plan, &[&w.model_b], "b-1");
     assert_eq!(s, 201, "{bjob}");

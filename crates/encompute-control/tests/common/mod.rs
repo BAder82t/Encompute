@@ -501,6 +501,24 @@ output \"out\" = %2 to \"modelco\"
     )
 }
 
+/// [`EXACT`] over modelco's own registered asset `asset` (its model, say):
+/// the program binds its input to the asset by ID, so the asset is the
+/// job's source. A job lists exactly the assets its program binds, even
+/// over the submitter's own data; [`EXACT`] binds none and lists none.
+pub fn exact_own(asset: &str) -> String {
+    format!(
+        "encompute 0.1
+program adult precision 0.001 purpose \"medical-training\"
+party \"modelco\" \"ModelCo\"
+asset \"{asset}\" model owners [\"modelco\"] readers [\"modelco\"] purposes [\"medical-training\"] release allowed_parties
+%0 = input \"age\" [0.0, 120.0] asset \"{asset}\" : secret u8
+%1 = const [18.0] : public u8
+%2 = ge %0, %1 : secret bool
+output \"out\" = %2 to \"modelco\"
+"
+    )
+}
+
 impl World {
     /// A plan of `program` in the shared project, by modelco's developer.
     pub fn plan(&self, program: &str) -> String {

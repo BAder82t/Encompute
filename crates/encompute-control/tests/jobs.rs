@@ -377,7 +377,7 @@ fn revocation_stops_future_use() {
         "id": "keybroker-modelco", "kind": "keybroker", "public_key": kb.public_key_hex(),
         "url": "http://keybroker-modelco.internal:8760"})),
     );
-    let plan = w.plan(EXACT);
+    let plan = w.plan(&exact_own(&w.model_b));
     // A job using B's model is queued (grant issued) but not started.
     let (_, j) = w.job(&plan, &[&w.model_b], "rv-1");
     let job = j["id"].as_str().unwrap().to_owned();
@@ -487,7 +487,7 @@ fn restart_preserves_jobs_and_never_replays() {
 #[test]
 fn a_job_failed_at_start_for_a_revoked_asset_is_audited() {
     let Some(w) = world() else { return };
-    let plan = w.plan(EXACT);
+    let plan = w.plan(&exact_own(&w.model_b));
     let (_, j) = w.job(&plan, &[&w.model_b], "rs-audit");
     let job = j["id"].as_str().unwrap().to_owned();
     assert_eq!(state(&w, &job), "queued");
