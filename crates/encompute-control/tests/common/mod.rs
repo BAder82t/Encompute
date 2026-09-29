@@ -112,6 +112,34 @@ pub fn restore_database(backup: &str, url: &str) {
     panic!("the backup database stayed in use");
 }
 
+/// The configuration `encompute-control recover` would run with on
+/// `env0`'s database and anchor.
+pub fn recovery_config(env0: &Env0) -> encompute_control::config::Config {
+    encompute_control::config::Config {
+        env: env0.env,
+        listen: "127.0.0.1:0".into(),
+        service_id: "control-plane".into(),
+        database_url: zeroize::Zeroizing::new(env0.url.clone()),
+        signing_key_file: None,
+        oidc: vec![],
+        dev_token_secret: None,
+        anchor: encompute_control::config::AnchorConfig::Dir(env0.anchor_dir.clone()),
+        audit_checkpoint_every: 5,
+        max_token_lifetime_secs: encompute_control::authn::DEFAULT_MAX_TOKEN_LIFETIME_SECS,
+        metrics: encompute_control::config::MetricsAccess::Closed,
+    }
+}
+
+/// Runs `encompute-control recover` on `env0`'s database and anchor: its
+/// notes.
+pub fn run_recovery(env0: &Env0) -> Vec<String> {
+    let db = Db::connect(&env0.url).unwrap();
+    let signer = ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
+    let store = Box::new(DirAnchor::new(env0.anchor_dir.clone()).unwrap());
+    let rc = Control::for_recovery(&recovery_config(env0), db, signer, store).unwrap();
+    rc.recover("operator-1").unwrap()
+}
+
 pub fn tmp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
         "encompute-control-{tag}-{}-{}",
@@ -350,8 +378,15 @@ pub fn world() -> Option<World> {
         Some(json!({"organization": "modelco", "name": "medical-training"})),
     );
     let project = p["id"].as_str().unwrap().to_owned();
+    // modelco invites hospital-a; hospital-a's admin accepts.
     t.ok(
         &b_admin,
+        "POST",
+        &format!("/v1/projects/{project}/members"),
+        Some(json!({"organization": "hospital-a"})),
+    );
+    t.ok(
+        &a_admin,
         "POST",
         &format!("/v1/projects/{project}/members"),
         Some(json!({"organization": "hospital-a"})),
@@ -405,7 +440,11 @@ pub fn budget(epsilon: f64) -> Value {
     .unwrap()
 }
 
-/// A reservation costing `sigma2`-dependent privacy (sensitivity 1).
+/// A reservation costing what sensitivity 1 at noise variance `sigma2`
+/// would (declared as sensitivity 2 at `4 * sigma2`, the least a release
+/// can have: one clipped code unit plus one coordinate's rounding). Its
+/// mechanism is consistent with that charge (a large noise multiplier), so
+/// the control plane's check of the declared sensitivity accepts it.
 pub fn reserve(event: &str, sigma2: u64) -> Value {
     serde_json::to_value(encompute_privacy::PrivacyEvent::Reserve {
         event_id: event.into(),
@@ -416,12 +455,13 @@ pub fn reserve(event: &str, sigma2: u64) -> Value {
         mechanism: encompute_ir::confidentiality::DpMechanism {
             kind: encompute_ir::confidentiality::DpKind::DiscreteGaussian,
             clip_norm: 1.0,
-            noise_multiplier: 1.0,
+            noise_multiplier: 10_000_000.0,
             sampling_rate: None,
+            preset: None,
         },
-        sensitivity: 1,
-        sigma2,
-        vector_len: 8,
+        sensitivity: 2,
+        sigma2: 4 * sigma2,
+        vector_len: 1,
         rng: encompute_privacy::CSPRNG.into(),
     })
     .unwrap()
@@ -442,6 +482,24 @@ program score precision 0.001
 %1 = mul %0, %0 : secret vector<4>
 output \"y\" = %1
 ";
+
+/// [`EXACT`] over another organization's registered asset: the program
+/// declares its purpose and binds its input to the asset by ID, as a job
+/// using an asset another organization approved must.
+pub fn exact_over(asset: &str, owner: &str, kind: &str, purpose: &str) -> String {
+    format!(
+        "encompute 0.1
+program adult precision 0.001 purpose \"{purpose}\"
+party \"{owner}\" \"{owner}\"
+party \"modelco\" \"ModelCo\"
+asset \"{asset}\" {kind} owners [\"{owner}\"] readers [\"modelco\"] purposes [\"{purpose}\"] release allowed_parties
+%0 = input \"age\" [0.0, 120.0] asset \"{asset}\" : secret u8
+%1 = const [18.0] : public u8
+%2 = ge %0, %1 : secret bool
+output \"out\" = %2 to \"modelco\"
+"
+    )
+}
 
 impl World {
     /// A plan of `program` in the shared project, by modelco's developer.

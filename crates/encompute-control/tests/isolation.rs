@@ -561,6 +561,7 @@ fn cross_tenant_attacks_fail() {
     );
     assert!(s == 403 || s == 404, "{s} {v}");
     // B uses A's dataset without A's approval for this purpose.
+    let plan = w.plan(&exact_over(&d, "hospital-a", "dataset", "medical-training"));
     let (s, v) = w.job(&plan, &[&d], "b-2");
     assert_eq!(s, 404, "an unshared asset is not visible: {v}");
     t.ok(
@@ -778,7 +779,8 @@ impl Idp {
         h.kid = Some(self.kid.into());
         encode(
             &h,
-            &json!({"iss": iss, "sub": sub, "aud": aud, "exp": exp}),
+            &json!({"iss": iss, "sub": sub, "aud": aud, "exp": exp,
+                     "iat": encompute_verification::service::now()}),
             &EncodingKey::from_ec_pem(pem.as_bytes()).unwrap(),
         )
         .unwrap()
@@ -874,4 +876,90 @@ fn oidc_tokens_and_production_refusals() {
         s, 401,
         "an authenticated but unregistered identity has no access"
     );
+}
+
+/// Review finding rc.4 F10 (ENC-SF-2026-092): an organization an asset is shared with sees
+/// what identifies it, not its owner's private metadata (key reference,
+/// storage location, size, media type, full policy); and a source asset's
+/// owner sees a job's actors as organization and kind, not the submitting
+/// organization's user IDs. On rc.3 both were shown in full.
+#[test]
+fn collaborators_see_no_private_metadata() {
+    let Some(w) = world() else { return };
+    let t = &w.t;
+    let d = t.ok(
+        &w.a_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": "hospital-a", "kind": "dataset", "name": "ward-7",
+                    "digest": "9".repeat(64), "size_bytes": 123456789,
+                    "media_type": "text/csv", "storage_uri": "s3://hospital-a-internal/ward-7.csv",
+                    "key_ref": {"broker": "keybroker-hospital", "provider": "openbao-transit",
+                                "key_ref": "ward-7-kek", "key_version": 3},
+                    "policy": {"require_job_approval": true, "retention_days": 30,
+                               "internal_contact": "dpo@hospital-a.example"}}),
+        ),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    t.ok(
+        &w.a_owner,
+        "POST",
+        &format!("/v1/assets/{d}/approvals"),
+        Some(json!({"project": w.project, "purpose": "medical-training"})),
+    );
+    let private = [
+        "s3://hospital-a-internal",
+        "ward-7-kek",
+        "keybroker-hospital",
+        "123456789",
+        "text/csv",
+        "dpo@hospital-a.example",
+        "retention_days",
+    ];
+    let shared = t.ok(&w.b_dev, "GET", &format!("/v1/assets/{d}"), None);
+    let listed = t.ok(&w.b_dev, "GET", "/v1/assets", None);
+    let listed = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == d.as_str())
+        .unwrap()
+        .clone();
+    for v in [&shared, &listed] {
+        for p in private {
+            assert!(
+                !v.to_string().contains(p),
+                "{p} shown to a collaborator: {v}"
+            );
+        }
+        assert_eq!(v["digest"], "9".repeat(64));
+        assert_eq!(v["policy"], json!({"require_job_approval": true}), "{v}");
+    }
+    // The owner sees it all.
+    let own = t.ok(&w.a_owner, "GET", &format!("/v1/assets/{d}"), None);
+    for p in private {
+        assert!(own.to_string().contains(p), "{p}: {own}");
+    }
+    // A job over it: hospital-a sees modelco's actors as organization/kind.
+    let b_dev_id = t.ok(&w.b_dev, "GET", "/v1/whoami", None)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let plan = w.plan(&exact_over(&d, "hospital-a", "dataset", "medical-training"));
+    let (s, j) = w.job(&plan, &[&d], "private-1");
+    assert_eq!(s, 201, "{j}");
+    let job = j["id"].as_str().unwrap().to_owned();
+    let seen = t.ok(&w.a_owner, "GET", &format!("/v1/jobs/{job}"), None);
+    assert!(!seen.to_string().contains(&b_dev_id), "{seen}");
+    assert_eq!(seen["initiated_by"], "modelco/user", "{seen}");
+    assert!(seen["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|x| x["actor"] == "modelco/user"));
+    let mine = t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{job}"), None);
+    assert_eq!(mine["initiated_by"], b_dev_id.as_str());
 }

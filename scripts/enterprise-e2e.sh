@@ -70,6 +70,7 @@ printf '%s' "$DB_URL" > "$W/secrets/db-url"
 "$PYTHON" -c 'import secrets; print(secrets.token_hex(32))' > "$W/secrets/evaluator.key"
 "$PYTHON" -c 'import secrets; print(secrets.token_hex(32))' > "$W/secrets/keybroker.key"
 printf '%s' "$BAO_TOKEN" > "$W/secrets/bao-token"
+"$PYTHON" -c 'import secrets; print(secrets.token_hex(32))' > "$W/secrets/metrics-token"
 chmod 600 "$W/secrets/"*
 
 CTL_PORT="$(free_port)"; EVAL_PORT="$(free_port)"; KB_PORT="$(free_port)"
@@ -83,6 +84,7 @@ control_env() {
     ENCOMPUTE_OIDC_ISSUER="$ISS" ENCOMPUTE_OIDC_AUDIENCE=encompute \
     ENCOMPUTE_OIDC_JWKS_FILE="$W/idp/jwks.json" \
     ENCOMPUTE_ANCHOR_DIR="$W/anchor" \
+    ENCOMPUTE_METRICS_TOKEN_FILE="$W/secrets/metrics-token" \
     "$@"
 }
 start_control() {
@@ -121,7 +123,9 @@ api a-admin POST /v1/organizations/hospital-a/users "{\"issuer\":\"$ISS\",\"subj
 api b-admin POST /v1/organizations/modelco/users "{\"issuer\":\"$ISS\",\"subject\":\"b-dev\",\"roles\":[\"ml_developer\",\"auditor\"]}" >/dev/null
 api b-admin POST /v1/organizations/modelco/users "{\"issuer\":\"$ISS\",\"subject\":\"b-owner\",\"roles\":[\"model_owner\"]}" >/dev/null
 PROJECT="$(api b-dev POST /v1/projects '{"organization":"modelco","name":"credit-decisions"}' | jget 'v["id"]')"
+# modelco invites; hospital-a's admin accepts (membership needs its consent).
 api b-admin POST "/v1/projects/$PROJECT/members" '{"organization":"hospital-a"}' >/dev/null
+api a-admin POST "/v1/projects/$PROJECT/members" '{"organization":"hospital-a"}' >/dev/null
 echo "project $PROJECT: modelco + hospital-a"
 
 step "assets: hospital-a's dataset (digest only) with a privacy budget; modelco's model key under its KMS root key"
@@ -158,6 +162,13 @@ api platform-admin POST /v1/organizations/platform/service-accounts \
   "{\"id\":\"evaluator-1\",\"kind\":\"evaluator\",\"public_key\":\"$(pubkey "$W/secrets/evaluator.key")\",\"url\":\"http://127.0.0.1:$EVAL_PORT\"}" >/dev/null
 api platform-admin POST /v1/organizations/platform/service-accounts \
   "{\"id\":\"keybroker-modelco\",\"kind\":\"keybroker\",\"public_key\":\"$(pubkey "$W/secrets/keybroker.key")\",\"url\":\"http://127.0.0.1:$KB_PORT\"}" >/dev/null
+# Clients pin the evaluator's receipt key out of band (here: read from the
+# evaluator this script started) and refuse any other.
+pin_evaluator() {
+  ENCOMPUTE_TRUSTED_EVALUATORS="$(curl -fs "http://127.0.0.1:$EVAL_PORT/v1/info" | jget 'v["evaluator"]["public_key"]')" \
+    || return 1
+  export ENCOMPUTE_TRUSTED_EVALUATORS
+}
 start_evaluator() {
   mkdir -p "$W/evaluator"
   ( cd "$W/evaluator" && exec env ENCOMPUTE_CONTROL_URL="$CTL_URL" ENCOMPUTE_CONTROL_PUBLIC_KEY="$CONTROL_KEY" \
@@ -165,7 +176,7 @@ start_evaluator() {
       ENCOMPUTE_ADVERTISE_URL="http://127.0.0.1:$EVAL_PORT" ENCOMPUTE_CAPACITY=2 \
       "$EVAL" serve --listen "127.0.0.1:$EVAL_PORT" --identity "$W/evaluator/receipt.key" ) >>"$W/logs/evaluator.log" 2>&1 &
   PIDS+=($!); EVAL_PID=$!
-  for _ in $(seq 150); do grep -q "registered with the control plane" "$W/logs/evaluator.log" && return 0; sleep 0.2; done
+  for _ in $(seq 150); do grep -q "registered with the control plane" "$W/logs/evaluator.log" && { pin_evaluator; return; }; sleep 0.2; done
   fail "the evaluator did not register"
 }
 start_keybroker() {
@@ -185,7 +196,7 @@ step "exact golden path: OpenFHE exact (BinFHE), no TFHE-rs"
 "$E" keys generate "$W/eligibility.encompute" -o "$W/exact.keys" >/dev/null
 export ENCOMPUTE_CONTROL_URL="$CTL_URL"
 EX_OUT="$(ENCOMPUTE_TOKEN="$(tok b-dev)" "$E" jobs run "$W/eligibility.encompute" --project "$PROJECT" --purpose credit-decision \
-  --source "$DATASET" --keys "$W/exact.keys" --idempotency-key exact-1 \
+  --keys "$W/exact.keys" --idempotency-key exact-1 \
   --input age=31 --input income=$CANARY_INCOME --input debt=21000 --input risk=400 2>"$W/exact.err")" \
   || { cat "$W/exact.err"; fail "the exact job"; }
 cat "$W/exact.err"
@@ -193,18 +204,23 @@ echo "$EX_OUT" | grep -q '"out": true' || fail "exact result: $EX_OUT"
 grep -q "Trust report            SATISFIED" "$W/exact.err" || fail "exact trust"
 EXACT_JOB="$(ENCOMPUTE_TOKEN="$(tok b-dev)" "$E" jobs list --project "$PROJECT" | jget '[j["id"] for j in v if j["backend"]=="openfhe-exact"][0]')"
 
-step "approximate golden path: OpenFHE CKKS through the same control plane"
-cat > "$W/score.eir" <<'EIR'
+step "approximate golden path: OpenFHE CKKS through the same control plane, over hospital-a's dataset"
+# A job using another organization's asset runs a program that declares
+# the purpose the owner approved and reads the asset by its registered ID.
+cat > "$W/score.eir" <<EIR
 encompute 0.1
-program score precision 0.001
-%0 = input "x" [-1.0, 1.0] : secret vector<4>
+program score precision 0.001 purpose "credit-decision"
+party "hospital-a" "Hospital A"
+party "modelco" "ModelCo"
+asset "$DATASET" dataset owners ["hospital-a"] readers ["modelco"] purposes ["credit-decision"] release allowed_parties
+%0 = input "x" [-1.0, 1.0] asset "$DATASET" : secret vector<4>
 %1 = mul %0, %0 : secret vector<4>
-output "y" = %1
+output "y" = %1 to "modelco"
 EIR
 "$E" compile "$W/score.eir" -o "$W/score.encompute" >/dev/null
 "$E" keys generate "$W/score.encompute" -o "$W/ckks.keys" >/dev/null
 CK_OUT="$(ENCOMPUTE_TOKEN="$(tok b-dev)" "$E" jobs run "$W/score.encompute" --project "$PROJECT" --purpose credit-decision \
-  --keys "$W/ckks.keys" --idempotency-key ckks-1 --input x=0.5,-0.25,0.1,1.0 2>"$W/ckks.err")" \
+  --source "$DATASET" --keys "$W/ckks.keys" --idempotency-key ckks-1 --input x=0.5,-0.25,0.1,1.0 2>"$W/ckks.err")" \
   || { cat "$W/ckks.err"; fail "the CKKS job"; }
 grep -q "Trust report            SATISFIED" "$W/ckks.err" || { cat "$W/ckks.err"; fail "CKKS trust"; }
 echo "$CK_OUT" | "$PYTHON" -c 'import json,sys; y=json.load(sys.stdin)["y"]; assert max(abs(a-b) for a,b in zip(y,[0.25,0.0625,0.01,1.0]))<1e-3, y; print("CKKS result", [round(v,4) for v in y])'
@@ -227,7 +243,7 @@ PY
 step "privacy spending (hospital-a's dataset)"
 spend() {
   local body
-  body="$(printf '{"kind":"reserve","event_id":"%s","policy_id":null,"execution_spec_id":null,"round_id":null,"output":"update","mechanism":{"kind":"discrete_gaussian","clip_norm":"1.0","noise_multiplier":"1.0"},"sensitivity":1,"sigma2":200,"vector_len":8,"rng":"csprng"}' "$1")"
+  body="$(printf '{"kind":"reserve","event_id":"%s","policy_id":null,"execution_spec_id":null,"round_id":null,"output":"update","mechanism":{"kind":"discrete_gaussian","clip_norm":"1.0","noise_multiplier":"1000.0"},"sensitivity":2,"sigma2":800,"vector_len":1,"rng":"csprng"}' "$1")"
   api a-owner POST "/v1/privacy/$DATASET/events" "$body"
 }
 spend e2e-release-1 >/dev/null
@@ -281,7 +297,9 @@ missing = need - acts
 assert not missing, f"missing audit events: {missing}"
 print(f"audit: {len(acts)} kinds of security-sensitive events recorded, including every job transition")
 PY
-curl -fs "$CTL_URL/metrics" > "$W/metrics.txt"
+# Production serves metrics only to the scraper holding the metrics token.
+if curl -fs "$CTL_URL/metrics" >/dev/null; then fail "metrics served without the metrics token"; fi
+curl -fs -H "Authorization: Bearer $(cat "$W/secrets/metrics-token")" "$CTL_URL/metrics" > "$W/metrics.txt"
 "$PG_DUMP" "$DB_URL" > "$W/db-dump.sql"
 # Numbers match only as whole numbers (not inside hashes or timestamps).
 for c in "$CANARY_DATA" "(^|[^0-9a-f])$CANARY_INCOME([^0-9a-f]|$)" "$CANARY_KEY"; do

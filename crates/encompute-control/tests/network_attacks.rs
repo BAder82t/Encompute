@@ -65,7 +65,8 @@ impl Idp {
         h.kid = Some(self.kid.into());
         encode(
             &h,
-            &json!({"iss": iss, "sub": sub, "aud": aud, "exp": exp}),
+            &json!({"iss": iss, "sub": sub, "aud": aud, "exp": exp,
+                     "iat": encompute_verification::service::now()}),
             &EncodingKey::from_ec_pem(pem.as_bytes()).unwrap(),
         )
         .unwrap()

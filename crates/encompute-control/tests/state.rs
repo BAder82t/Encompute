@@ -156,29 +156,11 @@ fn restart_keeps_spending_and_restoring_an_older_backup_is_refused() {
 
     // Explicit recovery: the rolled-back ledger is frozen (exhausted), so
     // the forgotten spending can never be spent again.
-    let db = encompute_control::db::Db::connect(&url).unwrap();
-    let signer =
-        encompute_verification::ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
-    let store =
-        Box::new(encompute_control::anchor::DirAnchor::new(env0.anchor_dir.clone()).unwrap());
-    let cfg = encompute_control::config::Config {
-        env: encompute_control::config::Env::Development,
-        listen: "127.0.0.1:0".into(),
-        service_id: "control-plane".into(),
-        database_url: zeroize::Zeroizing::new(url.clone()),
-        signing_key_file: None,
-        oidc: vec![],
-        dev_token_secret: None,
-        anchor: encompute_control::config::AnchorConfig::Dir(env0.anchor_dir.clone()),
-        audit_checkpoint_every: 5,
-    };
-    let rc = encompute_control::Control::for_recovery(&cfg, db, signer, store).unwrap();
-    let notes = rc.recover("operator-1").unwrap();
+    let notes = run_recovery(&env0);
     assert!(
         notes.iter().any(|n| n.contains(&d) && n.contains("frozen")),
         "{notes:?}"
     );
-    drop(rc);
     let t = env0.start().unwrap();
     let v = view(&t);
     assert!(v["frozen"].as_str().unwrap().contains("rolled back"), "{v}");
@@ -462,24 +444,7 @@ fn concurrent_policy_approvals_apply_once() {
 
 /// Runs `encompute-control recover` on `env0`'s database and anchor.
 fn recover(env0: &Env0) -> Vec<String> {
-    let db = encompute_control::db::Db::connect(&env0.url).unwrap();
-    let signer =
-        encompute_verification::ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
-    let store =
-        Box::new(encompute_control::anchor::DirAnchor::new(env0.anchor_dir.clone()).unwrap());
-    let cfg = encompute_control::config::Config {
-        env: encompute_control::config::Env::Development,
-        listen: "127.0.0.1:0".into(),
-        service_id: "control-plane".into(),
-        database_url: zeroize::Zeroizing::new(env0.url.clone()),
-        signing_key_file: None,
-        oidc: vec![],
-        dev_token_secret: None,
-        anchor: encompute_control::config::AnchorConfig::Dir(env0.anchor_dir.clone()),
-        audit_checkpoint_every: 5,
-    };
-    let rc = encompute_control::Control::for_recovery(&cfg, db, signer, store).unwrap();
-    rc.recover("operator-1").unwrap()
+    run_recovery(env0)
 }
 
 /// A revocation is anchored: restoring a database backup taken before it
@@ -588,4 +553,63 @@ fn restoring_an_older_backup_cannot_unrevoke_an_asset() {
     let env0 = t.env0;
     drop(t.control);
     env0.start().unwrap();
+}
+
+/// Review finding SA-1 (ENC-SF-2026-048, related hardening): a reservation is charged only
+/// if its declared sensitivity is at least what its own noise and
+/// mechanism imply for the ledger's privacy unit (ENC2204), by the
+/// release's own sensitivity rule; on rc.3 a spender could declare any
+/// sensitivity and be charged almost nothing.
+#[test]
+fn a_reservation_cannot_under_declare_its_sensitivity() {
+    let Some(w) = world() else { return };
+    let d = w.dataset_a.clone();
+    // Honest: the codec's scale 100, clip 1, noise multiplier 10, 8
+    // coordinates: sigma2 = (10 * 100)^2. Without sampling one patient may
+    // move a party's clipped contribution anywhere (k = 2): sensitivity
+    // 200 + 3; with Poisson sampling (per-unit clipping), 100 + 3.
+    let body = |event: &str, sensitivity: u64, sampled: bool| {
+        let mut r = reserve(event, 1);
+        r["sigma2"] = json!(1_000_000);
+        r["sensitivity"] = json!(sensitivity);
+        r["vector_len"] = json!(8);
+        r["mechanism"]["noise_multiplier"] = json!("10.0");
+        if sampled {
+            r["mechanism"]["sampling_rate"] = json!("0.01");
+        }
+        r
+    };
+    let spend = |body: serde_json::Value| {
+        w.t.call(
+            &w.a_owner,
+            "POST",
+            &format!("/v1/privacy/{d}/events"),
+            Some(body),
+        )
+    };
+    let (s, v) = spend(body("honest", 203, false));
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = spend(body("honest-sampled", 103, true));
+    assert_eq!(s, 200, "{v}");
+    // Under-declared: sensitivity 1 with the same noise is charged 40 000
+    // times less; one short of the bound is refused too.
+    for (event, sensitivity, sampled) in [
+        ("cheat", 1, false),
+        ("cheat-2", 202, false),
+        ("cheat-3", 102, true),
+    ] {
+        let (s, v) = spend(body(event, sensitivity, sampled));
+        assert_eq!(
+            (s, v["code"].as_str()),
+            (400, Some("ENC2204")),
+            "{event}: {v}"
+        );
+    }
+    // Malformed values are refused before any charge.
+    let mut r = body("zero", 203, false);
+    r["sigma2"] = json!(0);
+    assert_eq!(spend(r).0, 400);
+    let entries =
+        w.t.ok(&w.a_auditor, "GET", &format!("/v1/privacy/{d}"), None);
+    assert_eq!(entries["entries"], 2, "{entries}");
 }

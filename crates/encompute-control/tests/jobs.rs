@@ -480,3 +480,148 @@ fn restart_preserves_jobs_and_never_replays() {
     assert!(v["error"].as_str().unwrap().contains("not replayed"), "{v}");
     let _ = ev;
 }
+
+/// Review finding CP-S-5 (ENC-SF-2026-053): a job refused at start because a source asset
+/// was revoked (a revocation the database holds without having failed the
+/// job) leaves a `job.failed` audit event; rc.3 failed it silently.
+#[test]
+fn a_job_failed_at_start_for_a_revoked_asset_is_audited() {
+    let Some(w) = world() else { return };
+    let plan = w.plan(EXACT);
+    let (_, j) = w.job(&plan, &[&w.model_b], "rs-audit");
+    let job = j["id"].as_str().unwrap().to_owned();
+    assert_eq!(state(&w, &job), "queued");
+    w.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE assets SET status = 'revoked' WHERE id = $1",
+            &[&w.model_b],
+        )
+        .unwrap();
+    let (s, _) = w.t.call(
+        &w.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{job}/start"),
+        None,
+    );
+    assert_eq!(s, 409);
+    assert_eq!(state(&w, &job), "failed");
+    let events = w.t.ok(&w.b_auditor, "GET", "/v1/audit?limit=1000", None);
+    assert!(
+        events
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "job.failed"
+                && e["resource_id"] == job.as_str()
+                && e["refs"]["reason"] == "revoked_asset"),
+        "{events}"
+    );
+}
+
+/// Review finding CP-S-6 (ENC-SF-2026-054): an evaluator re-registering (its process
+/// restarting) does not lift an operator's drain, and the receipt key it
+/// registers is audited; on rc.3 re-registration set it ready again.
+#[test]
+fn re_registration_keeps_an_operators_drain_and_audits_the_receipt_key() {
+    let Some(w) = world() else { return };
+    let t = &w.t;
+    t.ok(
+        &w.platform,
+        "POST",
+        &format!("/v1/evaluators/{}/status", w.evaluator.id),
+        Some(json!({"status": "draining"})),
+    );
+    let body = json!({"id": w.evaluator.id, "url": format!("http://{}.internal:8750", w.evaluator.id),
+        "receipt_key": w.evaluator.receipt.identity().public_key_hex(),
+        "backends": ["openfhe", "openfhe-exact"],
+        "profiles": ["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"],
+        "openfhe_version": "1.5.1", "capacity": 4});
+    let v = t.ok(&w.evaluator.service, "POST", "/v1/evaluators", Some(body));
+    assert_eq!(v["status"], "draining", "{v}");
+    let list = t.ok(&w.platform, "GET", "/v1/evaluators", None);
+    assert_eq!(list[0]["status"], "draining");
+    // Nothing is scheduled on it.
+    let plan = w.plan(EXACT);
+    let (_, j) = w.job(&plan, &[], "drained");
+    assert_eq!(j["state"], "authorized", "{j}");
+    let digest = encompute_verification::service::sha256_hex(
+        w.evaluator.receipt.identity().public_key_hex().as_bytes(),
+    );
+    let mut c = t.control.db.conn().unwrap();
+    let n: i64 = c
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'evaluator.registered'
+               AND refs->>'receipt_key_sha256' = $1",
+            &[&digest],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 2, "both registrations name the receipt key");
+}
+
+/// Review finding TG-3 (ENC-SF-2026-077, control plane): in production a plan, as made or as
+/// loaded back from the database for a trust report, is checked against
+/// the control plane's own floor, not the context it declares about
+/// itself: a plan that accepts development attestation, assumes a research
+/// backend or misstates the compiler's facts is refused (ENC2402).
+#[test]
+fn production_plans_are_checked_against_the_control_planes_floor() {
+    let Some(w) = world() else { return };
+    let plan = w.plan(EXACT);
+    let (program, stored): (String, Value) = {
+        let mut c = w.t.control.db.conn().unwrap();
+        let r = c
+            .query_one(
+                "SELECT program, document FROM plans WHERE id = $1",
+                &[&plan],
+            )
+            .unwrap();
+        (r.get(0), r.get(1))
+    };
+    let program = encompute_ir::parse(&program).unwrap();
+    let good: encompute_planner::ConfidentialExecutionPlan =
+        serde_json::from_value(stored["plan"].clone()).unwrap();
+    let Some(url) = fresh_database() else { return };
+    let db = encompute_control::db::Db::connect(&url).unwrap();
+    db.migrate().unwrap();
+    let prod = encompute_control::Control::with_parts(
+        encompute_control::config::Env::Production,
+        "control-plane",
+        db,
+        encompute_control::authn::Authenticator::new(
+            encompute_control::config::Env::Production,
+            "control-plane",
+            vec![],
+            None,
+        ),
+        encompute_verification::ServiceSigner::from_seed("control-plane", &[8; 32]).unwrap(),
+        Box::new(encompute_control::anchor::DirAnchor::new(tmp_dir("floor")).unwrap()),
+        None,
+        5,
+    )
+    .unwrap();
+    prod.verify_stored_plan(&program, &good).unwrap();
+    let refused = |f: &dyn Fn(&mut encompute_planner::ConfidentialExecutionPlan), why: &str| {
+        let mut bad = good.clone();
+        f(&mut bad);
+        let e = prod.verify_stored_plan(&program, &bad).unwrap_err();
+        assert_eq!(e.code, encompute_ir::Code::PlanInvalid, "{why}: {e}");
+        assert!(e.message.contains(why), "{why}: {e}");
+    };
+    refused(
+        &|p| p.context.preferences.allow_development = true,
+        "development attestation",
+    );
+    refused(&|p| p.context.catalog.tfhe = true, "TFHE-rs");
+    refused(
+        &|p| p.context.facts.proof_covered = !p.context.facts.proof_covered,
+        "not the compiler's",
+    );
+    // Development keeps the plan's own floor.
+    let mut dev = good.clone();
+    dev.context.preferences.allow_development = true;
+    w.t.control.verify_stored_plan(&program, &dev).unwrap();
+}

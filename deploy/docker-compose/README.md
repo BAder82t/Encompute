@@ -71,7 +71,9 @@ affected privacy ledgers so the forgotten spending is never reused.
 
 ## Operations
 
-- `curl http://127.0.0.1:8770/ready`, `/live` and `/metrics` (Prometheus).
+- `curl http://127.0.0.1:8770/ready` and `/live`; `/metrics` (Prometheus)
+  needs the scraper's token: `curl -H "Authorization: Bearer $(cat secrets/metrics-token)" http://127.0.0.1:8770/metrics`.
+  (A deployment initialized before this token existed: run `./init.sh` again; it keeps existing secrets.)
 - Drain an evaluator before upgrading it: `POST /v1/evaluators/evaluator-1/status {"status":"draining"}`.
 - `docker compose logs control` gives JSON lines with request, job, project
   and organization IDs, and never payloads.

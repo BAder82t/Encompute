@@ -6,22 +6,26 @@
 //!
 //! | Method | Path | |
 //! |---|---|---|
-//! | GET | `/live`, `/ready`, `/metrics` | health (no auth) |
+//! | GET | `/live`, `/ready` | health (no auth) |
+//! | GET | `/metrics` | public in development; in production only with the metrics token (or `ENCOMPUTE_METRICS_PUBLIC=true`) |
 //! | GET | `/v1/info` | service ID, public key, API version |
 //! | GET | `/v1/whoami` | the caller and its roles |
 //! | POST | `/v1/organizations` | platform admins |
 //! | GET | `/v1/organizations/{id}` | |
 //! | POST | `/v1/organizations/{id}/users` | |
+//! | POST | `/v1/organizations/{id}/users/{user}/disable` | |
+//! | POST | `/v1/organizations/{id}/memberships/remove` | a principal's role (or all its roles) |
 //! | POST | `/v1/organizations/{id}/service-accounts` | |
 //! | POST | `/v1/organizations/{id}/service-accounts/{sa}/disable` | |
 //! | POST | `/v1/organizations/{id}/key-rotations` | root key rotations, for the audit trail |
 //! | POST, GET | `/v1/projects` | |
 //! | GET | `/v1/projects/{id}` | |
-//! | POST | `/v1/projects/{id}/members`, `/v1/projects/{id}/policies` | |
+//! | POST | `/v1/projects/{id}/members` | owners invite, the invited organization accepts |
+//! | POST | `/v1/projects/{id}/members/remove`, `/v1/projects/{id}/policies` | |
 //! | POST | `/v1/policies/{id}/approve` | |
 //! | POST, GET | `/v1/assets` | |
 //! | GET | `/v1/assets/{id}`, `/v1/assets/{id}/lineage` | |
-//! | POST | `/v1/assets/{id}/approvals`, `/v1/assets/{id}/revoke` | |
+//! | POST | `/v1/assets/{id}/approvals`, `/v1/assets/{id}/approvals/withdraw`, `/v1/assets/{id}/revoke` | |
 //! | POST | `/v1/plans` | |
 //! | POST, GET | `/v1/jobs` | POST needs `Idempotency-Key` |
 //! | GET | `/v1/jobs/{id}` | |
@@ -112,6 +116,30 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
     serde_json::from_slice(body).map_err(|e| bad(format!("request body: {e}")))
 }
 
+/// Whether the query string names a parameter twice. Such a request is
+/// refused: a signature covers the query as sent, and two readers could
+/// otherwise pick different values of the same name.
+fn duplicate_query_key(url: &str) -> bool {
+    let Some((_, q)) = url.split_once('?') else {
+        return false;
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    q.split('&')
+        .filter(|kv| !kv.is_empty())
+        .any(|kv| !seen.insert(kv.split_once('=').map_or(kv, |(k, _)| k)))
+}
+
+/// Constant-time equality of a presented and the expected secret.
+fn same_secret(a: &str, b: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    // Equal-length digests, compared without an early exit.
+    let (x, y) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
+    x.iter()
+        .zip(y.iter())
+        .fold(0u8, |acc, (p, q)| acc | (p ^ q))
+        == 0
+}
+
 fn query(url: &str) -> BTreeMap<String, String> {
     url.split_once('?')
         .map(|(_, q)| {
@@ -162,6 +190,25 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
             return (json_response(s, &json!({"ready": ready})), None);
         }
         ("GET", "/metrics") => {
+            use crate::config::MetricsAccess;
+            let allowed = match &control.metrics_access {
+                MetricsAccess::Public => true,
+                MetricsAccess::Token(t) => {
+                    r.header("Authorization")
+                        .and_then(|a| a.strip_prefix("Bearer ").map(|x| same_secret(x.trim(), t)))
+                        == Some(true)
+                }
+                MetricsAccess::Closed => false,
+            };
+            if !allowed {
+                return (
+                    error_response(&Error::new(
+                        Code::Unauthenticated,
+                        "metrics need the metrics token",
+                    )),
+                    None,
+                );
+            }
             return (
                 Response {
                     status: 200,
@@ -169,7 +216,7 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
                     body: control.metrics.render().into_bytes(),
                 },
                 None,
-            )
+            );
         }
         ("GET", "/v1/info") => {
             return (
@@ -186,6 +233,12 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
     }
     if r.body.len() > MAX_BODY {
         return (error_response(&bad("request body too large")), None);
+    }
+    if duplicate_query_key(&r.url) {
+        return (
+            error_response(&bad("a query parameter appears more than once")),
+            None,
+        );
     }
     // Authenticate.
     let service = match ServiceHeaders::from_lookup(|h| r.header(h)) {
@@ -256,6 +309,15 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "organizations", id, "service-accounts", sa, "disable"]) => {
             ok(control.disable_service_account(ctx, id, sa)?)
         }
+        ("POST", ["v1", "organizations", id, "users", user, "disable"]) => {
+            ok(control.disable_user(ctx, id, user)?)
+        }
+        ("POST", ["v1", "organizations", id, "memberships", "remove"]) => {
+            ok(control.remove_membership(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "security", "legacy-service-admins"]) => {
+            ok(control.list_legacy_service_admins(ctx)?)
+        }
 
         ("POST", ["v1", "organizations", id, "key-rotations"]) => {
             created(control.record_key_rotation(ctx, id, parse(&r.body)?)?)
@@ -265,6 +327,9 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("GET", ["v1", "projects", id]) => ok(control.get_project(ctx, id)?),
         ("POST", ["v1", "projects", id, "members"]) => {
             ok(control.add_project_member(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "projects", id, "members", "remove"]) => {
+            ok(control.remove_project_member(ctx, id, parse(&r.body)?)?)
         }
         ("POST", ["v1", "projects", id, "policies"]) => {
             created(control.propose_policy(ctx, id, parse(&r.body)?)?)
@@ -277,6 +342,9 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("GET", ["v1", "assets", id, "lineage"]) => ok(control.lineage(ctx, id)?),
         ("POST", ["v1", "assets", id, "approvals"]) => {
             ok(control.approve_asset(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "assets", id, "approvals", "withdraw"]) => {
+            ok(control.withdraw_asset_approval(ctx, id, parse(&r.body)?)?)
         }
         ("POST", ["v1", "assets", id, "revoke"]) => ok(control.revoke_asset(ctx, id)?),
 

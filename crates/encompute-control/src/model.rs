@@ -324,6 +324,16 @@ pub struct AddProjectMember {
     pub organization: String,
 }
 
+/// Removes a principal's role in an organization (all its roles there when
+/// `role` is absent).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveMembership {
+    pub principal: String,
+    #[serde(default)]
+    pub role: Option<Role>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegisterAsset {

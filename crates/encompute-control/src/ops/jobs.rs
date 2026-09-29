@@ -16,15 +16,16 @@ use serde_json::{json, Value};
 use encompute_evaluator::{compile_program, execution_spec, transcript_for, CompiledProgram, Ids};
 use encompute_ir::{Code, Error, Program, Result};
 use encompute_planner::{
-    plan_or_fail, verify_plan, BackendCatalog, ConfidentialExecutionPlan, Infrastructure,
-    PlanningContext, Preferences, Profile, ProgramFacts,
+    plan_or_fail, verify_plan, verify_plan_with, BackendCatalog, ConfidentialExecutionPlan,
+    Infrastructure, PlanFloor, PlanningContext, Preferences, Profile, ProgramFacts,
 };
-use encompute_verification::service::{now, verify_signed, JOB_GRANT};
+use encompute_verification::service::{now, sha256_hex, verify_signed, JOB_GRANT};
 use encompute_verification::{
     verify_receipt, EvaluatorIdentity, ExecutionSpec, ExpectedExecution, SignedExecutionReceipt,
 };
 
 use crate::audit::{self, Outcome};
+use crate::authn::PrincipalKind;
 use crate::authz::{
     asset_visible, conflict, forbidden, not_found, project_role_orgs, project_visible, require,
 };
@@ -124,6 +125,20 @@ fn facts(program: &Program) -> Result<ProgramFacts> {
     })
 }
 
+/// The backends the control plane accepts in a plan: every production
+/// backend it schedules, never a research one. (Which of them the
+/// deployment offers right now changes as evaluators register; a stored
+/// plan stays valid meanwhile.)
+fn accepted_catalog() -> BackendCatalog {
+    BackendCatalog {
+        ckks: true,
+        tfhe: false,
+        openfhe_exact: true,
+        bgv: true,
+        verified_execution: true,
+    }
+}
+
 /// A plan's stored document.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PlanDoc {
@@ -138,6 +153,84 @@ struct PlanDoc {
     /// made before schema version 2.
     #[serde(default)]
     estimated_gates: u64,
+}
+
+/// What a job's program declares about its sources: its purpose, and the
+/// registered assets its secret inputs are bound to (a program names a
+/// registered asset by its ID in an `asset` declaration).
+struct SourceBinding {
+    purpose: Option<String>,
+    assets: std::collections::BTreeSet<String>,
+}
+
+impl SourceBinding {
+    fn of(c: &mut impl GenericClient, program: &Program) -> Result<Self> {
+        let conf = program.confidentiality();
+        let named: Vec<String> = conf
+            .map(|c| {
+                c.inputs
+                    .values()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let assets = if named.is_empty() {
+            Default::default()
+        } else {
+            c.query("SELECT id FROM assets WHERE id = ANY($1)", &[&named])
+                .map_err(db_err)?
+                .iter()
+                .map(|r| r.get(0))
+                .collect()
+        };
+        Ok(Self {
+            purpose: conf.and_then(|c| c.purpose.clone()),
+            assets,
+        })
+    }
+
+    /// The request must state the program's purpose, and list exactly the
+    /// registered assets the program reads (when it names any): an
+    /// approval covers what the job declares, so nothing the program
+    /// reads may be left out, and nothing it does not read may stand in.
+    /// Refusals carry their audit reason.
+    fn check(
+        &self,
+        purpose: &str,
+        sources: &[String],
+    ) -> std::result::Result<(), (&'static str, Error)> {
+        if let Some(p) = &self.purpose {
+            if p != purpose {
+                return Err((
+                    "purpose_mismatch",
+                    forbidden(format!(
+                        "the request's purpose {purpose:?} is not the one the program declares, {p:?}"
+                    )),
+                ));
+            }
+        }
+        if let Some(a) = self.assets.iter().find(|a| !sources.contains(a)) {
+            return Err((
+                "unlisted_source",
+                forbidden(format!(
+                    "the program reads asset {a}, which the job does not list as a source"
+                )),
+            ));
+        }
+        if !self.assets.is_empty() {
+            if let Some(a) = sources.iter().find(|a| !self.assets.contains(*a)) {
+                return Err((
+                    "undeclared_source",
+                    forbidden(format!(
+                        "asset {a} is listed as a source, but the program reads no input from it"
+                    )),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 struct JobRow {
@@ -229,6 +322,31 @@ fn job_visible(c: &mut impl GenericClient, ctx: &Ctx, j: &JobRow) -> Result<()> 
     }
 }
 
+/// How `actor` appears to a viewer outside the submitting organization:
+/// itself when it is the viewer's own or a platform service (evaluators,
+/// the control plane, the scheduler), otherwise only its organization and
+/// kind (`modelco/user`, `modelco/service`).
+fn actor_label(c: &mut impl GenericClient, ctx: &Ctx, actor: &str) -> Result<String> {
+    let owner = c
+        .query_opt(
+            "SELECT organization_id, 'user' FROM users WHERE id = $1
+             UNION ALL
+             SELECT organization_id, 'service' FROM service_accounts WHERE id = $1
+             LIMIT 1",
+            &[&actor],
+        )
+        .map_err(db_err)?
+        .map(|r| (r.get::<_, Option<String>>(0), r.get::<_, String>(1)));
+    Ok(match owner {
+        Some((Some(org), kind)) if org != PLATFORM_ORG && !ctx.principal.member_of(&org) => {
+            format!("{org}/{kind}")
+        }
+        // A platform principal, the viewer's own, or not a principal (the
+        // control plane itself, an operator's recovery).
+        _ => actor.to_owned(),
+    })
+}
+
 impl Control {
     fn catalog(&self, c: &mut impl GenericClient) -> Result<BackendCatalog> {
         let backends: Vec<String> = c
@@ -256,15 +374,37 @@ impl Control {
 
     // --- plans ------------------------------------------------------------------
 
+    /// Checks a plan (one just made, or one loaded from the database) for
+    /// its program. In production also against the control plane's own
+    /// floor, never the context the plan declares about itself: the
+    /// compiler's facts for the program, production backends only (never a
+    /// research one), production attestation only, and at least the
+    /// standard profile.
+    pub fn verify_stored_plan(
+        &self,
+        program: &Program,
+        plan: &ConfidentialExecutionPlan,
+    ) -> Result<()> {
+        if !self.env.is_production() {
+            return verify_plan(program, plan);
+        }
+        verify_plan_with(
+            program,
+            plan,
+            &PlanFloor {
+                facts: Some(facts(program)?),
+                catalog: Some(accepted_catalog()),
+                ..PlanFloor::production(Profile::Standard)
+            },
+        )
+    }
+
     pub fn create_plan(&self, ctx: &Ctx, r: CreatePlan) -> Result<Value> {
         if r.program.len() > 4 << 20 {
             return Err(bad("program too large"));
         }
-        let program = encompute_ir::parse(&r.program)?;
-        let compiled = compile_program(&program)?;
-        let ids = Ids::of(&program, &compiled);
-        let target = compiled.target_backend();
-        let spec = execution_spec(&ids, &compiled, target);
+        // Authorized before any parsing or compiling: a caller outside the
+        // project costs no compilation.
         let mut c = self.db.conn()?;
         let project = project_visible(&mut *c, &ctx.principal, &r.project)?;
         let orgs = project_role_orgs(
@@ -277,6 +417,13 @@ impl Control {
                 "planning needs ml_developer in a project member organization",
             ));
         };
+        drop(c);
+        let program = encompute_ir::parse(&r.program)?;
+        let compiled = compile_program(&program)?;
+        let ids = Ids::of(&program, &compiled);
+        let target = compiled.target_backend();
+        let spec = execution_spec(&ids, &compiled, target);
+        let mut c = self.db.conn()?;
         let key_broker = c
             .query_opt(
                 "SELECT 1 FROM service_accounts WHERE kind = 'keybroker' AND status = 'active' LIMIT 1",
@@ -311,7 +458,7 @@ impl Control {
                 return Err(e);
             }
         };
-        verify_plan(&program, &plan)?;
+        self.verify_stored_plan(&program, &plan)?;
         let plan_id = plan.id()?.to_string();
         let (backend, backend_version) = target.label();
         let doc = PlanDoc {
@@ -491,12 +638,21 @@ impl Control {
             }
             let plan = t
                 .query_opt(
-                    "SELECT spec_id, program_id, document FROM plans WHERE id = $1 AND project_id = $2",
+                    "SELECT spec_id, program_id, document, program FROM plans WHERE id = $1 AND project_id = $2",
                     &[&r.plan, &r.project],
                 )
                 .map_err(db_err)?
                 .ok_or_else(|| not_found("plan", &r.plan))?;
             let doc: PlanDoc = serde_json::from_value(plan.get(2)).map_err(db_err)?;
+            // What the job is for, and which registered assets it reads, are
+            // the program's declarations (bound into its program and spec
+            // IDs), never only the request's word.
+            let program = encompute_ir::parse(plan.get::<_, &str>(3))?;
+            let binding = SourceBinding::of(t, &program)?;
+            if let Err((why, e)) = binding.check(&r.purpose, &r.source_assets) {
+                *denied.borrow_mut() = Some(("plan", r.plan.clone(), org.clone(), why));
+                return Err(e);
+            }
             if let Some(pol) = &r.policy {
                 let ok = t
                     .query_opt(
@@ -517,18 +673,42 @@ impl Control {
             for a in &r.source_assets {
                 let asset = asset_visible(t, &ctx.principal, a)?;
                 if asset.status == "revoked" {
-                    *denied.borrow_mut() = Some((a.clone(), org.clone(), "revoked"));
+                    *denied.borrow_mut() = Some(("asset", a.clone(), org.clone(), "revoked"));
                     return Err(conflict(format!("asset {a} is revoked")));
                 }
                 if asset.organization != org {
+                    // Another organization's approval is for a purpose: the
+                    // program must declare which.
+                    if binding.purpose.is_none() {
+                        *denied.borrow_mut() = Some(("asset", a.clone(), org.clone(), "no_declared_purpose"));
+                        return Err(forbidden(format!(
+                            "asset {a} belongs to {}: a program using it declares its purpose \
+                             (`purpose \"...\"` on its `program` line)",
+                            asset.organization
+                        )));
+                    }
+                    // ...and reads it by its registered ID: another
+                    // organization's approval never covers a source the
+                    // program does not declare.
+                    if !binding.assets.contains(a) {
+                        *denied.borrow_mut() = Some(("asset", a.clone(), org.clone(), "undeclared_source"));
+                        return Err(forbidden(format!(
+                            "asset {a} belongs to {}: a program using it binds an input to it \
+                             (`asset \"{a}\" ...` and `input ... asset \"{a}\"`)",
+                            asset.organization
+                        )));
+                    }
+                    // Approved for this project and purpose while the
+                    // submitting organization was a member.
                     let approved = t
                         .query_opt(
-                            "SELECT 1 FROM asset_approvals WHERE asset_id = $1 AND project_id = $2 AND purpose = $3",
-                            &[a, &r.project, &r.purpose],
+                            "SELECT 1 FROM asset_approval_members
+                              WHERE asset_id = $1 AND project_id = $2 AND purpose = $3 AND organization_id = $4",
+                            &[a, &r.project, &r.purpose, &org],
                         )
                         .map_err(db_err)?;
                     if approved.is_none() {
-                        *denied.borrow_mut() = Some((a.clone(), org.clone(), "not_approved"));
+                        *denied.borrow_mut() = Some(("asset", a.clone(), org.clone(), "not_approved"));
                         return Err(forbidden(format!(
                             "asset {a} is not approved by its owner for this project and purpose {:?}",
                             r.purpose
@@ -593,10 +773,10 @@ impl Control {
             )?;
             Ok((json!({"id": id}), true))
         });
-        if let (Err(_), Some((asset, org, why))) = (&out, denied.into_inner()) {
+        if let (Err(_), Some((rtype, rid, org, why))) = (&out, denied.into_inner()) {
             self.metrics.inc("encompute_key_release_denied_total", why);
             self.audit_denied(
-                ctx.draft("job.denied", "asset", &asset, Outcome::Denied)
+                ctx.draft("job.denied", rtype, &rid, Outcome::Denied)
                     .org(&org)
                     .project(&r.project)
                     .r#ref("reason", why),
@@ -609,9 +789,12 @@ impl Control {
         let mut c = self.db.conn()?;
         let j = job_row(&mut *c, id, false)?.ok_or_else(|| not_found("job", id))?;
         job_visible(&mut *c, ctx, &j)?;
+        // The evaluator's URL and receipt key, like the grant, go only to
+        // the submitting organization (the one that runs the job).
+        let submitter = ctx.principal.member_of(&j.organization);
         let (url, receipt_key, parallel): (Option<String>, Option<String>, Option<i32>) =
             match &j.evaluator {
-                Some(e) => c
+                Some(e) if submitter => c
                     .query_opt(
                         "SELECT url, receipt_key, max_parallel_gates FROM evaluators WHERE id = $1",
                         &[e],
@@ -620,28 +803,43 @@ impl Control {
                     .map_or((None, None, None), |r| {
                         (Some(r.get(0)), Some(r.get(1)), r.get(2))
                     }),
-                None => (None, None, None),
+                _ => (None, None, None),
             };
-        let transitions = c
+        // Who acted is the submitting organization's own business: other
+        // viewers (its source assets' owners) see the actor's organization
+        // and kind, never another organization's user or account IDs.
+        let mut labels = std::collections::BTreeMap::new();
+        let mut label = |c: &mut postgres::Client, actor: String| -> Result<String> {
+            if submitter {
+                return Ok(actor);
+            }
+            if let Some(l) = labels.get(&actor) {
+                return Ok(String::clone(l));
+            }
+            let l = actor_label(c, ctx, &actor)?;
+            labels.insert(actor, l.clone());
+            Ok(l)
+        };
+        let rows = c
             .query(
                 "SELECT from_state, to_state, actor, COALESCE(reason, '') FROM job_transitions WHERE job_id = $1 ORDER BY seq",
                 &[&id],
             )
-            .map_err(db_err)?
-            .iter()
-            .map(|r| {
+            .map_err(db_err)?;
+        let mut transitions = vec![];
+        for r in &rows {
+            let mut t: std::collections::BTreeMap<String, String> =
                 [("from", 0), ("to", 1), ("actor", 2), ("reason", 3)]
                     .into_iter()
                     .map(|(k, i)| (k.to_owned(), r.get::<_, String>(i)))
-                    .collect()
-            })
-            .collect();
+                    .collect();
+            let actor = t.remove("actor").unwrap_or_default();
+            t.insert("actor".into(), label(&mut c, actor)?);
+            transitions.push(t);
+        }
+        let initiated_by = label(&mut c, j.initiated_by.clone())?;
         // The grant goes only to the submitting organization.
-        let grant = if ctx.principal.member_of(&j.organization) {
-            j.grant.clone()
-        } else {
-            None
-        };
+        let grant = if submitter { j.grant.clone() } else { None };
         let v = JobView {
             id: j.id,
             organization: j.organization,
@@ -661,7 +859,7 @@ impl Control {
             evaluator_receipt_key: receipt_key,
             grant,
             error: j.error,
-            initiated_by: j.initiated_by,
+            initiated_by,
             transitions,
             estimated_gates: j.estimated_gates,
             estimated_ms: j.estimated_ms,
@@ -692,37 +890,44 @@ impl Control {
     }
 
     pub fn cancel_job(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.db.tx(|t| {
-            let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
-            if !ctx.principal.member_of(&j.organization) {
-                return Err(not_found("job", id));
-            }
-            require(
-                &ctx.principal,
-                &j.organization,
-                &[
-                    Role::MlDeveloper,
-                    Role::OrganizationAdmin,
-                    Role::SecurityAdmin,
-                ],
-                "cancelling a job",
-            )?;
-            self.transition_in(
-                t,
-                ctx.actor(),
-                &ctx.request_id,
-                id,
-                JobState::Cancelled,
-                Some("cancelled"),
-            )?;
-            audit::append(
-                t,
-                ctx.draft("job.cancelled", "job", id, Outcome::Succeeded)
-                    .org(&j.organization)
-                    .project(&j.project),
-            )?;
-            Ok(json!({"id": id, "state": "cancelled"}))
-        })
+        self.db
+            .tx(|t| {
+                let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
+                if !ctx.principal.member_of(&j.organization) {
+                    return Err(not_found("job", id));
+                }
+                require(
+                    &ctx.principal,
+                    &j.organization,
+                    &[
+                        Role::MlDeveloper,
+                        Role::OrganizationAdmin,
+                        Role::SecurityAdmin,
+                    ],
+                    "cancelling a job",
+                )?;
+                self.transition_in(
+                    t,
+                    ctx.actor(),
+                    &ctx.request_id,
+                    id,
+                    JobState::Cancelled,
+                    Some("cancelled"),
+                )?;
+                audit::append(
+                    t,
+                    ctx.draft("job.cancelled", "job", id, Outcome::Succeeded)
+                        .org(&j.organization)
+                        .project(&j.project),
+                )?;
+                Ok(json!({"id": id, "state": "cancelled"}))
+            })
+            .and_then(|v| {
+                // Anchored before acknowledging: a restored database cannot
+                // bring the job back.
+                self.sync_anchor()?;
+                Ok(v)
+            })
     }
 
     /// An owner approves a job that uses its asset (assets whose policy
@@ -744,8 +949,15 @@ impl Control {
                 .iter()
                 .map(|r| r.get(0))
                 .collect();
+            // An owner's consent is a person's, in the owning organization
+            // itself: never a service account (an automation key), nor a
+            // user homed elsewhere who holds a role there.
+            if !matches!(ctx.principal.kind, PrincipalKind::User { .. }) {
+                return Err(forbidden("jobs are approved by people (the assets' owners), not services"));
+            }
             let mine: Vec<&String> = required
                 .iter()
+                .filter(|o| ctx.principal.organization.as_deref() == Some(o.as_str()))
                 .filter(|o| ctx.principal.any_role(o, &[Role::DataOwner, Role::ModelOwner, Role::OrganizationAdmin]))
                 .collect();
             if mine.is_empty() {
@@ -924,6 +1136,13 @@ impl Control {
                     id,
                     JobState::Failed,
                     Some("a source asset was revoked"),
+                )?;
+                audit::append(
+                    t,
+                    ctx.draft("job.failed", "job", id, Outcome::Failed)
+                        .org(&j.organization)
+                        .project(&j.project)
+                        .r#ref("reason", "revoked_asset"),
                 )?;
                 return Ok(Err(conflict("a source asset was revoked")));
             }
@@ -1175,7 +1394,7 @@ impl Control {
         let (program, compiled, spec, doc) = self.load_plan(&mut *c, &j.plan)?;
         check(
             "plan",
-            verify_plan(&program, &doc.doc.plan)
+            self.verify_stored_plan(&program, &doc.doc.plan)
                 .map(|_| format!("plan {} satisfies its requirements", doc.doc.plan_id)),
         );
         check(
@@ -1249,11 +1468,19 @@ impl Control {
             .iter()
             .map(|r| r.get(0))
             .collect();
-        let assets_note = if revoked.is_empty() {
+        let mut assets_note = if revoked.is_empty() {
             "no source asset is revoked".to_owned()
         } else {
             format!("revoked since: {}", revoked.join(", "))
         };
+        // The sources are the program's registered bindings when it has
+        // any; otherwise (a job over the submitter's own data) they are the
+        // submitter's word, and the report says so.
+        if SourceBinding::of(&mut *c, &program)?.assets.is_empty() {
+            assets_note.push_str(
+                " (as the submitter listed them: the program binds no input to a registered asset)",
+            );
+        }
         checks.push(json!({"check": "source assets", "status": if revoked.is_empty() { "VERIFIED" } else { "REVOKED" }, "detail": assets_note}));
         let verdict = if ok && j.state == JobState::Succeeded {
             "SATISFIED"
@@ -1318,15 +1545,18 @@ impl Control {
         if r.memory_bytes.is_some_and(|n| n <= 0) {
             return Err(bad("memory_bytes must be positive"));
         }
-        self.db.tx(|t| {
-            t.execute(
+        let out = self.db.tx(|t| {
+            let status: String = t.query_one(
                 "INSERT INTO evaluators (id, service_account, url, receipt_key, backends, profiles, openfhe_version, capacity, status,
                                          cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates)
                  VALUES ($1, $1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9, $10, $11, $12)
                  ON CONFLICT (id) DO UPDATE SET url = $2, receipt_key = $3, backends = $4, profiles = $5,
-                     openfhe_version = $6, capacity = $7, status = 'ready', last_heartbeat = now(),
+                     openfhe_version = $6, capacity = $7, last_heartbeat = now(),
+                     -- An operator's drain holds across the evaluator's restarts.
+                     status = CASE WHEN evaluators.status = 'draining' THEN 'draining' ELSE 'ready' END,
                      cpu_model = $8, logical_cores = $9, memory_bytes = $10, benchmark_profile = $11,
-                     max_parallel_gates = $12",
+                     max_parallel_gates = $12
+                 RETURNING status",
                 &[
                     &r.id, &r.url, &r.receipt_key, &json!(r.backends), &json!(r.profiles), &r.openfhe_version, &r.capacity,
                     &r.cpu_model, &r.logical_cores, &r.memory_bytes, &r.benchmark_profile, &r.max_parallel_gates,
@@ -1338,7 +1568,8 @@ impl Control {
                 } else {
                     db_err(e)
                 }
-            })?;
+            })?
+            .get(0);
             // An evaluator registers when its process starts: a job it was
             // running and never reported died with the old process. It
             // fails now (never replayed) rather than staying "running"
@@ -1377,13 +1608,17 @@ impl Control {
                 .org(PLATFORM_ORG)
                 .r#ref("backends", r.backends.join("+"))
                 .r#ref("profiles", r.profiles.join("+"))
-                .r#ref("openfhe", r.openfhe_version.clone());
+                .r#ref("openfhe", r.openfhe_version.clone())
+                // Which receipt key clients will be told to trust.
+                .r#ref("receipt_key_sha256", sha256_hex(r.receipt_key.as_bytes()));
             if let Some(p) = &r.benchmark_profile {
                 d = d.r#ref("benchmark_profile", p.clone());
             }
             audit::append(t, d)?;
-            Ok(json!({"id": r.id, "status": "ready", "control_public_key": self.signer.public_key_hex()}))
-        })
+            Ok(json!({"id": r.id, "status": status, "control_public_key": self.signer.public_key_hex()}))
+        })?;
+        self.sync_anchor()?;
+        Ok(out)
     }
 
     /// Heartbeat / status: the evaluator itself (ready, busy, draining,
@@ -1618,11 +1853,14 @@ impl Control {
                         .as_str()
                         .ok_or_else(|| bad("key.release names no asset"))?;
                     let allowed = m.payload["allowed"].as_bool().unwrap_or(false);
+                    // A broker reports on the assets of its own organization
+                    // (the platform's brokers: on any organization's).
                     let mapped = t
                         .query_opt(
                             "SELECT id, organization_id FROM assets WHERE key_ref->>'broker' = $1 AND key_ref->>'key_ref' = $2
+                                AND ($3::text IS NULL OR organization_id = $3)
                               ORDER BY id LIMIT 1",
-                            &[&m.sender, &asset],
+                            &[&m.sender, &asset, &ctx.principal.organization],
                         )
                         .map_err(db_err)?
                         .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)));
@@ -1710,8 +1948,19 @@ impl Control {
             .iter()
             .map(|r| (r.get(0), r.get(1), r.get(2)))
             .collect();
+        let anchored = self.anchor.snapshot();
         for (id, url, env) in pending {
             let m: MessageEnvelope = serde_json::from_value(env).map_err(db_err)?;
+            // A key broker learns of a revocation only once the anchor holds
+            // it: a restored database cannot then un-revoke an asset whose
+            // key the broker already destroyed without it being noticed.
+            if m.kind == "asset.revoked"
+                && !m.payload["asset"]
+                    .as_str()
+                    .is_some_and(|a| anchored.revoked.contains(a))
+            {
+                continue;
+            }
             let r = self.transport.send(&url, &m);
             let mut c = self.db.conn()?;
             match r {

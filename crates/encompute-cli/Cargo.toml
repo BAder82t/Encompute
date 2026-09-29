@@ -28,6 +28,8 @@ jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_c
 
 [dev-dependencies]
 encompute-evaluator.workspace = true
+encompute-control.workspace = true
+postgres = "0.19"
 
 [features]
 openfhe = ["encompute-runtime/openfhe"]

@@ -140,6 +140,7 @@ ISS="https://idp.$TAG.test.invalid"
 printf '%s' "$DB_URL" > "$W/secrets/db-url"
 for k in control evaluator; do "$PYTHON" -c 'import secrets; print(secrets.token_hex(32))' > "$W/secrets/$k.key"; done
 printf '%s' "$BAO_TOKEN" > "$W/secrets/bao-token"
+rand > "$W/secrets/metrics-token"
 chmod 600 "$W/secrets/"*
 
 # Tokens are cached per subject and refreshed every 30 minutes (1 h TTL).
@@ -158,6 +159,7 @@ control_env() {
     ENCOMPUTE_LISTEN="127.0.0.1:$CTL_PORT" \
     ENCOMPUTE_DATABASE_URL_FILE="$W/secrets/db-url" \
     ENCOMPUTE_SIGNING_KEY_FILE="$W/secrets/control.key" \
+    ENCOMPUTE_METRICS_TOKEN_FILE="$W/secrets/metrics-token" \
     ENCOMPUTE_OIDC_ISSUER="$ISS" ENCOMPUTE_OIDC_AUDIENCE=encompute \
     ENCOMPUTE_OIDC_JWKS_FILE="$W/idp/jwks.json" \
     ENCOMPUTE_ANCHOR_DIR="$W/anchor" \
@@ -196,6 +198,8 @@ api b-admin POST /v1/organizations/modelco/users "{\"issuer\":\"$ISS\",\"subject
 api b-admin POST /v1/organizations/modelco/users "{\"issuer\":\"$ISS\",\"subject\":\"b-sec\",\"roles\":[\"security_admin\"]}" >/dev/null || die "user"
 PROJECT="$(api b-dev POST /v1/projects '{"organization":"modelco","name":"soak"}' | jget 'v["id"]')" || die "project"
 api b-admin POST "/v1/projects/$PROJECT/members" '{"organization":"hospital-a"}' >/dev/null || die "member"
+# Membership takes the invited organization's consent: its admin accepts.
+api a-admin POST "/v1/projects/$PROJECT/members" '{"organization":"hospital-a"}' >/dev/null || die "accept"
 new_dataset() {  # a dataset with a privacy budget; prints its ID
   api a-owner POST /v1/assets "{\"organization\":\"hospital-a\",\"kind\":\"dataset\",\"name\":\"soak-$1\",\"digest\":\"$(printf '%064x' "$1")\",\"privacy_budget\":{\"unit\":\"patient\",\"epsilon\":\"50.0\",\"delta\":\"1e-6\"}}" | jget 'v["id"]'
 }
@@ -248,6 +252,13 @@ PY
 }
 api platform-admin POST /v1/organizations/platform/service-accounts \
   "{\"id\":\"evaluator-1\",\"kind\":\"evaluator\",\"public_key\":\"$(pubkey "$W/secrets/evaluator.key")\",\"url\":\"http://127.0.0.1:$EVAL_PORT\"}" >/dev/null || die "service account"
+# Clients pin the evaluator's receipt key out of band (here: read from the
+# evaluator this script started) and refuse any other.
+pin_evaluator() {
+  ENCOMPUTE_TRUSTED_EVALUATORS="$(curl -fs "http://127.0.0.1:$EVAL_PORT/v1/info" | jget 'v["evaluator"]["public_key"]')" \
+    || return 1
+  export ENCOMPUTE_TRUSTED_EVALUATORS
+}
 start_evaluator() {
   mkdir -p "$W/evaluator"
   ( cd "$W/evaluator" && exec env ENCOMPUTE_CONTROL_URL="$CTL_URL" ENCOMPUTE_CONTROL_PUBLIC_KEY="$CONTROL_KEY" \
@@ -256,7 +267,7 @@ start_evaluator() {
       "$EVAL" serve --listen "127.0.0.1:$EVAL_PORT" --identity "$W/evaluator/receipt.key" \
         --workers 2 ${EVAL_BACKEND[@]+"${EVAL_BACKEND[@]}"} ) >>"$LOGS/evaluator.log" 2>&1 &
   echo $! > "$W/pids/evaluator"
-  for _ in $(seq 300); do grep -q "registered with the control plane" "$LOGS/evaluator.log" && return 0; sleep 0.2; done
+  for _ in $(seq 300); do grep -q "registered with the control plane" "$LOGS/evaluator.log" && { pin_evaluator; return; }; sleep 0.2; done
   die "the evaluator did not register"
 }
 start_evaluator
@@ -387,7 +398,7 @@ op_dp_round() {
 op_dp_spend() {
   local body code ds n
   ds="$(st_get dataset)"
-  body="$(printf '{"kind":"reserve","event_id":"soak-%s-%s","policy_id":null,"execution_spec_id":null,"round_id":null,"output":"update","mechanism":{"kind":"discrete_gaussian","clip_norm":"1.0","noise_multiplier":"1.0"},"sensitivity":1,"sigma2":200,"vector_len":8,"rng":"csprng"}' "$ds" "$ITER")"
+  body="$(printf '{"kind":"reserve","event_id":"soak-%s-%s","policy_id":null,"execution_spec_id":null,"round_id":null,"output":"update","mechanism":{"kind":"discrete_gaussian","clip_norm":"1.0","noise_multiplier":"1000.0"},"sensitivity":2,"sigma2":800,"vector_len":1,"rng":"csprng"}' "$ds" "$ITER")"
   code="$(curl -sS --max-time 60 -o "$W/spend.json" -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $(tok a-owner)" -H 'Content-Type: application/json' -d "$body" \
     "$CTL_URL/v1/privacy/$ds/events")" || { echo "spend: no response"; return 1; }
@@ -414,7 +425,10 @@ op_api() {
     api "$who" GET "$path" >/dev/null || { echo "GET $path failed"; return 1; }
     n=$((n + 1))
   done
-  for path in /metrics /ready /live /v1/info; do
+  curl -fs --max-time 30 -H "Authorization: Bearer $(cat "$W/secrets/metrics-token")" "$CTL_URL/metrics" >/dev/null \
+    || { echo "GET /metrics failed"; return 1; }
+  n=$((n + 1))
+  for path in /ready /live /v1/info; do
     curl -fs --max-time 30 "$CTL_URL$path" >/dev/null || { echo "GET $path failed"; return 1; }
     n=$((n + 1))
   done

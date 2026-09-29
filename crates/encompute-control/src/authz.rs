@@ -2,8 +2,8 @@
 //!
 //! Isolation is the default: an identity sees only its own organizations'
 //! resources, plus what an explicit collaboration grants (project
-//! membership, and assets their owners approved for a project and
-//! purpose). A resource outside that is reported as not found (ENC2603),
+//! membership its organization accepted, and assets their owners approved
+//! for a project and purpose while it was a member). A resource outside that is reported as not found (ENC2603),
 //! so other tenants' IDs do not even confirm existence. Inside its own
 //! organization, a missing role is ENC2602.
 //!
@@ -55,7 +55,11 @@ pub struct ProjectRow {
     pub organization: String,
     pub name: String,
     pub status: String,
+    /// Organizations whose membership is effective (accepted).
     pub members: Vec<String>,
+    /// Organizations invited that have not accepted yet: they see and do
+    /// nothing in the project.
+    pub invited: Vec<String>,
 }
 
 pub fn project_row(c: &mut impl GenericClient, id: &str) -> Result<Option<ProjectRow>> {
@@ -68,21 +72,27 @@ pub fn project_row(c: &mut impl GenericClient, id: &str) -> Result<Option<Projec
     else {
         return Ok(None);
     };
-    let members = c
+    let (mut members, mut invited) = (vec![], vec![]);
+    for m in c
         .query(
-            "SELECT organization_id FROM project_members WHERE project_id = $1 ORDER BY 1",
+            "SELECT organization_id, status FROM project_members WHERE project_id = $1 ORDER BY 1",
             &[&id],
         )
         .map_err(db_err)?
-        .iter()
-        .map(|r| r.get(0))
-        .collect();
+    {
+        if m.get::<_, String>(1) == "active" {
+            members.push(m.get(0));
+        } else {
+            invited.push(m.get(0));
+        }
+    }
     Ok(Some(ProjectRow {
         id: r.get(0),
         organization: r.get(1),
         name: r.get(2),
         status: r.get(3),
         members,
+        invited,
     }))
 }
 
@@ -149,7 +159,8 @@ pub fn asset_row(c: &mut impl GenericClient, id: &str) -> Result<Option<AssetRow
 }
 
 /// An asset its owner's members see, or that its owner approved for a
-/// project the principal's organization collaborates in.
+/// project the principal's organization collaborates in, while that
+/// organization was a member (a later member needs a new approval).
 pub fn asset_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Result<AssetRow> {
     let a = asset_row(c, id)?.ok_or_else(|| not_found("asset", id))?;
     if p.member_of(&a.organization) {
@@ -158,9 +169,10 @@ pub fn asset_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Res
     let orgs: Vec<String> = p.organizations().into_iter().collect();
     let shared = c
         .query_opt(
-            "SELECT 1 FROM asset_approvals ap
-               JOIN project_members pm ON pm.project_id = ap.project_id
-              WHERE ap.asset_id = $1 AND pm.organization_id = ANY($2) LIMIT 1",
+            "SELECT 1 FROM asset_approval_members am
+               JOIN project_members pm ON pm.project_id = am.project_id
+                AND pm.organization_id = am.organization_id AND pm.status = 'active'
+              WHERE am.asset_id = $1 AND am.organization_id = ANY($2) LIMIT 1",
             &[&id, &orgs],
         )
         .map_err(db_err)?;

@@ -4,9 +4,12 @@
 //! files (`*_FILE`); never command-line arguments (visible in process
 //! lists) and never config files in a repository.
 //!
+//! `ENCOMPUTE_ENV` must say `production` or `development`: an unset or
+//! misspelt value refuses to start rather than meaning development.
 //! `ENCOMPUTE_ENV=production` fails closed: it refuses development tokens,
 //! a development state anchor, missing signing keys, default database
-//! credentials, and plain-HTTP identity providers.
+//! credentials, and plain-HTTP identity providers, and serves `/metrics`
+//! only to a scraper presenting the metrics token (unless told otherwise).
 
 use std::path::PathBuf;
 
@@ -62,6 +65,38 @@ pub enum AnchorConfig {
     },
 }
 
+/// Who may read `GET /metrics`.
+#[derive(Clone)]
+pub enum MetricsAccess {
+    /// Anyone who reaches the port (expose it on an internal network only).
+    Public,
+    /// Scrapers presenting `Authorization: Bearer <token>`.
+    Token(Zeroizing<String>),
+    /// Nobody (production without a metrics token or an explicit opt-in).
+    Closed,
+}
+
+impl std::fmt::Debug for MetricsAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MetricsAccess::Public => "Public",
+            MetricsAccess::Token(_) => "Token",
+            MetricsAccess::Closed => "Closed",
+        })
+    }
+}
+
+impl MetricsAccess {
+    /// The default: public in development, closed in production.
+    pub fn default_for(env: Env) -> Self {
+        if env.is_production() {
+            MetricsAccess::Closed
+        } else {
+            MetricsAccess::Public
+        }
+    }
+}
+
 pub struct Config {
     pub env: Env,
     pub listen: String,
@@ -77,6 +112,10 @@ pub struct Config {
     pub anchor: AnchorConfig,
     /// Audit checkpoint every this many events.
     pub audit_checkpoint_every: u64,
+    /// The longest identity token lifetime (`exp - iat`) accepted.
+    pub max_token_lifetime_secs: u64,
+    /// Who may read `/metrics`.
+    pub metrics: MetricsAccess,
 }
 
 impl std::fmt::Debug for Config {
@@ -111,30 +150,33 @@ const DEFAULT_PASSWORDS: [&str; 8] = [
     "encompute-test",
 ];
 
-/// The password in a `postgres://user:password@host/db` or
-/// `key=value` connection string.
-fn db_password(url: &str) -> Option<String> {
-    if let Some(rest) = url
-        .strip_prefix("postgres://")
-        .or_else(|| url.strip_prefix("postgresql://"))
-    {
-        let creds = rest.split('@').next()?;
-        return creds.split_once(':').map(|(_, p)| p.to_owned());
-    }
-    url.split_whitespace()
-        .find_map(|kv| kv.strip_prefix("password="))
-        .map(str::to_owned)
+/// The password of a connection string, as the database driver itself
+/// reads it (`postgres://user:password@host/db`, a `?password=` query
+/// parameter, percent-encoding, or `key=value` with quoting).
+fn db_password(url: &str) -> Result<Option<String>> {
+    let c: postgres::Config = url
+        .parse()
+        .map_err(|_| insecure("ENCOMPUTE_DATABASE_URL is not a valid connection string"))?;
+    Ok(c.get_password()
+        .map(|p| String::from_utf8_lossy(p).into_owned()))
 }
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        // Explicit only: an unset variable must not silently mean the
+        // mode without production's checks.
         let env = match std::env::var("ENCOMPUTE_ENV").as_deref() {
             Ok("production") => Env::Production,
-            Ok("development") | Err(_) => Env::Development,
+            Ok("development") => Env::Development,
             Ok(other) => {
                 return Err(insecure(format!(
                     "ENCOMPUTE_ENV={other}: use production or development"
                 )))
+            }
+            Err(_) => {
+                return Err(insecure(
+                    "set ENCOMPUTE_ENV to production (or development, for local trials only)",
+                ))
             }
         };
         let database_url = secret("ENCOMPUTE_DATABASE_URL")?.ok_or_else(|| {
@@ -192,6 +234,27 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(100),
+            max_token_lifetime_secs: match std::env::var("ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS") {
+                Ok(v) => v.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+                    insecure(
+                        "ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS must be a positive number of seconds",
+                    )
+                })?,
+                Err(_) => crate::authn::DEFAULT_MAX_TOKEN_LIFETIME_SECS,
+            },
+            metrics: match (
+                secret("ENCOMPUTE_METRICS_TOKEN")?,
+                std::env::var("ENCOMPUTE_METRICS_PUBLIC").as_deref(),
+            ) {
+                (Some(t), _) if !t.is_empty() => MetricsAccess::Token(t),
+                (_, Ok("true")) => MetricsAccess::Public,
+                (_, Ok("false")) | (_, Err(_)) => MetricsAccess::default_for(env),
+                (_, Ok(other)) => {
+                    return Err(insecure(format!(
+                        "ENCOMPUTE_METRICS_PUBLIC={other}: use true or false"
+                    )))
+                }
+            },
         };
         c.validate()?;
         Ok(c)
@@ -229,7 +292,7 @@ impl Config {
                 "production mode needs a persistent signing key (ENCOMPUTE_SIGNING_KEY_FILE, a mounted secret)",
             ));
         }
-        match db_password(&self.database_url) {
+        match db_password(&self.database_url)? {
             None => {}
             Some(p) if p.is_empty() || DEFAULT_PASSWORDS.contains(&p.as_str()) => {
                 return Err(insecure(
@@ -268,6 +331,8 @@ mod tests {
             dev_token_secret: None,
             anchor: AnchorConfig::Dir("/var/lib/encompute/anchor".into()),
             audit_checkpoint_every: 100,
+            max_token_lifetime_secs: 3600,
+            metrics: MetricsAccess::Closed,
         }
     }
 
@@ -286,6 +351,18 @@ mod tests {
         refused(|c| c.signing_key_file = None);
         refused(|c| c.database_url = Zeroizing::new("postgres://encompute:postgres@db/x".into()));
         refused(|c| c.database_url = Zeroizing::new("host=db user=e password=changeme".into()));
+        // Review finding CP-A-8(d) (ENC-SF-2026-060): the driver also reads the password from
+        // the query string, percent-encoded, or quoted.
+        refused(|c| {
+            c.database_url =
+                Zeroizing::new("postgres://encompute@db/encompute?password=changeme".into())
+        });
+        refused(|c| {
+            c.database_url = Zeroizing::new("postgres://encompute:chang%65me@db/encompute".into())
+        });
+        refused(|c| c.database_url = Zeroizing::new("host=db user=e password='postgres'".into()));
+        refused(|c| c.database_url = Zeroizing::new("postgres://encompute:@db/encompute".into()));
+        refused(|c| c.database_url = Zeroizing::new("not a :// connection string ' ".into()));
         refused(|c| {
             c.anchor = AnchorConfig::OpenBaoKv {
                 addr: "http://bao:8200".into(),
@@ -301,5 +378,55 @@ mod tests {
         c.oidc.clear();
         c.signing_key_file = None;
         c.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    /// Review finding CP-A-8(e) (ENC-SF-2026-060): an unset ENCOMPUTE_ENV refuses to start
+    /// instead of silently meaning development. (One test touches the
+    /// process environment, so nothing races it.)
+    #[test]
+    fn unset_or_misspelt_environment_refuses_to_start() {
+        std::env::set_var(
+            "ENCOMPUTE_DATABASE_URL",
+            "postgres://u:Xk3!long-random@db/x",
+        );
+        std::env::set_var("ENCOMPUTE_ANCHOR_DIR", "/tmp/encompute-env-test-anchor");
+        std::env::remove_var("ENCOMPUTE_ENV");
+        let e = Config::from_env().unwrap_err();
+        assert_eq!(e.code, Code::InsecureConfiguration);
+        assert!(e.message.contains("ENCOMPUTE_ENV"), "{e}");
+        std::env::set_var("ENCOMPUTE_ENV", "prod");
+        assert_eq!(
+            Config::from_env().unwrap_err().code,
+            Code::InsecureConfiguration
+        );
+        std::env::set_var("ENCOMPUTE_ENV", "development");
+        let c = Config::from_env().unwrap();
+        assert_eq!(c.env, Env::Development);
+        assert!(matches!(c.metrics, MetricsAccess::Public));
+        assert_eq!(
+            c.max_token_lifetime_secs,
+            crate::authn::DEFAULT_MAX_TOKEN_LIFETIME_SECS
+        );
+        std::env::set_var("ENCOMPUTE_METRICS_TOKEN", "scrape-secret");
+        assert!(matches!(
+            Config::from_env().unwrap().metrics,
+            MetricsAccess::Token(_)
+        ));
+        std::env::remove_var("ENCOMPUTE_METRICS_TOKEN");
+        std::env::set_var("ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS", "0");
+        assert!(Config::from_env().is_err());
+        for v in [
+            "ENCOMPUTE_ENV",
+            "ENCOMPUTE_DATABASE_URL",
+            "ENCOMPUTE_ANCHOR_DIR",
+            "ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS",
+        ] {
+            std::env::remove_var(v);
+        }
     }
 }

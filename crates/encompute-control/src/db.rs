@@ -20,6 +20,16 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "evaluator_profiles",
         include_str!("../migrations/0002_evaluator_profiles.sql"),
     ),
+    (
+        3,
+        "consent_bound_sharing",
+        include_str!("../migrations/0003_consent_bound_sharing.sql"),
+    ),
+    (
+        4,
+        "approval_identity",
+        include_str!("../migrations/0004_approval_identity.sql"),
+    ),
 ];
 
 /// Serializes migrations across control-plane replicas.
