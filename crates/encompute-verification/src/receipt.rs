@@ -9,6 +9,10 @@ use crate::spec::ExecutionSpec;
 /// 2 adds `transcript_hash` (semantic transcripts); 3 adds `attestation`
 /// (attested workload sessions).
 pub const RECEIPT_VERSION: u32 = 3;
+/// A receipt of a governed project's execution: version 3 plus
+/// `grant_digest` (the job grant it ran under, which carries the control
+/// plane's signed issue time). Standard receipts stay version 3.
+pub const GOVERNED_RECEIPT_VERSION: u32 = 4;
 
 /// Largest receipt accepted on parse (receipts are ~1 KiB).
 pub const MAX_RECEIPT_BYTES: usize = 16 << 10;
@@ -72,6 +76,10 @@ pub struct ExecutionReceipt {
     /// The attested workload session, when the evaluator runs in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<WorkloadAttestationRef>,
+    /// The digest of the v2 job grant the execution ran under (governed
+    /// projects; version 4 receipts only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_digest: Option<String>,
 }
 
 /// A receipt with the evaluator's Ed25519 signature over
@@ -153,13 +161,48 @@ impl ExecutionReceipt {
             evaluator_id: evaluator.evaluator_id(),
             evidence,
             attestation: None,
+            grant_digest: None,
         })
+    }
+
+    /// Binds the v2 job grant (by [`crate::JobGrant::digest`]) the
+    /// execution ran under: the receipt is then version 4. `None` leaves a
+    /// standard version 3 receipt.
+    pub fn with_grant(mut self, grant_digest: Option<String>) -> Self {
+        self.version = if grant_digest.is_some() {
+            GOVERNED_RECEIPT_VERSION
+        } else {
+            RECEIPT_VERSION
+        };
+        self.grant_digest = grant_digest;
+        self
     }
 
     /// Binds the attested workload session the evaluator runs in.
     pub fn attested(mut self, attestation: Option<WorkloadAttestationRef>) -> Self {
         self.attestation = attestation;
         self
+    }
+
+    /// Version 3 without a grant digest, or version 4 with one.
+    pub(crate) fn check_version(&self) -> Result<()> {
+        match (self.version, &self.grant_digest) {
+            (RECEIPT_VERSION, None) | (GOVERNED_RECEIPT_VERSION, Some(_)) => Ok(()),
+            (GOVERNED_RECEIPT_VERSION, None) => Err(Error::new(
+                Code::Receipt,
+                "a version 4 receipt names the job grant it ran under",
+            )),
+            (RECEIPT_VERSION, Some(_)) => Err(Error::new(
+                Code::Receipt,
+                "a version 3 receipt names no job grant",
+            )),
+            (v, _) => Err(Error::new(
+                Code::Receipt,
+                format!(
+                    "receipt version {v} (this Encompute reads {RECEIPT_VERSION} and {GOVERNED_RECEIPT_VERSION})"
+                ),
+            )),
+        }
     }
 
     pub(crate) fn digest(&self) -> Result<[u8; 32]> {
@@ -224,6 +267,9 @@ impl SignedExecutionReceipt {
         if let Some(t) = &r.transcript_hash {
             hex_of("transcript hash", t, 32)?;
         }
+        if let Some(g) = &r.grant_digest {
+            hex_of("grant digest", g, 32)?;
+        }
         if let Some(a) = &r.attestation {
             hex_of("attestation ID", &a.attestation_id, 32)?;
             hex_of("workload session ID", &a.workload_session_id, 32)?;
@@ -262,16 +308,7 @@ impl SignedExecutionReceipt {
                 ));
             }
         }
-        if r.version != RECEIPT_VERSION {
-            return Err(Error::new(
-                Code::Receipt,
-                format!(
-                    "receipt version {} (this Encompute reads {RECEIPT_VERSION})",
-                    r.version
-                ),
-            ));
-        }
-        Ok(())
+        r.check_version()
     }
 
     pub(crate) fn signature_bytes(&self) -> Result<Vec<u8>> {

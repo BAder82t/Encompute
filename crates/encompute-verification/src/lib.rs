@@ -17,6 +17,7 @@
 
 mod backend;
 pub mod canonical;
+pub mod governance;
 mod hash;
 pub mod http;
 mod identity;
@@ -40,7 +41,7 @@ pub use proof::{
 };
 pub use receipt::{
     ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence, WorkloadAttestationRef,
-    RECEIPT_VERSION,
+    GOVERNED_RECEIPT_VERSION, RECEIPT_VERSION,
 };
 pub use reference::ReferenceTranscriptEvaluator;
 pub use service::{JobGrant, MessageEnvelope, ServiceHeaders, ServiceSigner};

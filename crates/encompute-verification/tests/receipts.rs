@@ -9,6 +9,7 @@ use encompute_verification::{
 
 fn spec() -> ExecutionSpec {
     ExecutionSpec {
+        governance_id: None,
         version: 1,
         program_id: "a".repeat(64),
         plan_id: "b".repeat(64),

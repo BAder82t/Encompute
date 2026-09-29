@@ -362,11 +362,19 @@ pub struct JobGrant {
     pub expires_at: u64,
     pub issuer: String,
     pub issuer_public_key: String,
+    /// Version 2 (governed projects only): the plan hash, purpose,
+    /// governance binding, authorization set and strict `not_after`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance: Option<crate::governance::GrantGovernance>,
     #[serde(default)]
     pub signature: String,
 }
 
 pub const JOB_GRANT_VERSION: u32 = 1;
+/// The version of a governed project's grant ([`JobGrant::governance`]).
+pub const JOB_GRANT_V2: u32 = 2;
+/// Domain of a job grant's digest, bound by version 4 receipts.
+pub const JOB_GRANT_DIGEST: &str = "encompute.job-grant-digest.v1";
 /// A grant is usable for this long after scheduling.
 pub const JOB_GRANT_TTL_SECS: u64 = 3600;
 /// The HTTP header carrying a grant (hex of its JSON).
@@ -390,8 +398,15 @@ impl JobGrant {
         program_id: &str,
         now: u64,
     ) -> Result<()> {
-        if self.version != JOB_GRANT_VERSION {
-            return Err(auth(format!("job grant version {}", self.version)));
+        match (self.version, &self.governance) {
+            (JOB_GRANT_VERSION, None) | (JOB_GRANT_V2, Some(_)) => {}
+            (JOB_GRANT_VERSION, Some(_)) => {
+                return Err(auth("a version 1 job grant carries no governance"))
+            }
+            (JOB_GRANT_V2, None) => {
+                return Err(auth("a version 2 job grant carries its governance"))
+            }
+            (v, _) => return Err(auth(format!("job grant version {v}"))),
         }
         if self.issuer_public_key != control_key {
             return Err(auth(
@@ -411,7 +426,33 @@ impl JobGrant {
         if now > self.expires_at {
             return Err(auth("the job grant expired"));
         }
+        if let Some(g) = &self.governance {
+            g.check(&self.project)?;
+            // Strict: the grant never outlives its authorizations, and is
+            // dead at `not_after` (no clock margin).
+            if self.expires_at > g.not_after {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationExpired,
+                    "the job grant outlives its authorizations",
+                ));
+            }
+            if now >= g.not_after {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationExpired,
+                    "the job grant's authorizations have expired",
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Lowercase hex digest of the whole signed grant (what a version 4
+    /// receipt binds).
+    pub fn digest(&self) -> String {
+        hex(&tagged(
+            JOB_GRANT_DIGEST,
+            &canonical_json(self).expect("strings and integers only"),
+        ))
     }
 
     pub fn to_header(&self) -> String {
@@ -750,6 +791,7 @@ mod tests {
             expires_at: 2000,
             issuer: "control-plane".into(),
             issuer_public_key: control.public_key_hex(),
+            governance: None,
             signature: String::new(),
         };
         g.signature = control.sign(JOB_GRANT, &g.unsigned()).unwrap();

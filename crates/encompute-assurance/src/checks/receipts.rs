@@ -11,6 +11,7 @@ use crate::{ensure, mutate, CheckResult, Outcome, Scale};
 
 fn spec(policy: bool) -> ExecutionSpec {
     ExecutionSpec {
+        governance_id: None,
         version: 1,
         program_id: "a".repeat(64),
         plan_id: "b".repeat(64),

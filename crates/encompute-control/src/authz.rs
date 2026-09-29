@@ -14,7 +14,7 @@ use postgres::GenericClient;
 
 use encompute_ir::{Code, Error, Result};
 
-use crate::authn::Principal;
+use crate::authn::{Principal, PrincipalKind};
 use crate::db::db_err;
 use crate::model::Role;
 
@@ -28,6 +28,46 @@ pub fn not_found(what: &str, id: &str) -> Error {
 
 pub fn conflict(msg: impl Into<String>) -> Error {
     Error::new(Code::Conflict, msg)
+}
+
+/// A person acting for `org` in a governed project: never a service
+/// account (an automation key an admin holds is not a second pair of eyes,
+/// ENC2707), homed in `org` (a role held there by someone of another
+/// organization does not count), never an auditor (read-only, whatever
+/// else it holds), and holding one of `roles` there. Non-members get "not
+/// found" for the organization itself.
+pub fn require_human(p: &Principal, org: &str, roles: &[Role], action: &str) -> Result<()> {
+    if !p.member_of(org) {
+        return Err(not_found("organization", org));
+    }
+    if !matches!(p.kind, PrincipalKind::User { .. }) {
+        return Err(Error::new(
+            Code::GovernanceFourEyesIncomplete,
+            format!("{action} needs a person, not a service account"),
+        ));
+    }
+    if p.organization.as_deref() != Some(org) {
+        return Err(forbidden(format!(
+            "{action} needs a person of {org}: roles held from another organization do not count"
+        )));
+    }
+    if p.has_role(org, Role::Auditor) {
+        return Err(forbidden(format!(
+            "auditors are read-only: {action} needs someone who is not an auditor"
+        )));
+    }
+    require(p, org, roles, action)
+}
+
+/// Four eyes: `actor` is none of the people who already acted (`earlier`).
+pub fn require_other_person(actor: &str, earlier: &[&str], action: &str) -> Result<()> {
+    if earlier.contains(&actor) {
+        return Err(Error::new(
+            Code::GovernanceFourEyesIncomplete,
+            format!("{action} needs a different person"),
+        ));
+    }
+    Ok(())
 }
 
 /// The principal must hold one of `roles` in `org`. Non-members get
@@ -60,12 +100,20 @@ pub struct ProjectRow {
     /// Organizations invited that have not accepted yet: they see and do
     /// nothing in the project.
     pub invited: Vec<String>,
+    /// `standard` or `governed` (immutable).
+    pub governance: String,
+}
+
+impl ProjectRow {
+    pub fn governed(&self) -> bool {
+        self.governance == "governed"
+    }
 }
 
 pub fn project_row(c: &mut impl GenericClient, id: &str) -> Result<Option<ProjectRow>> {
     let Some(r) = c
         .query_opt(
-            "SELECT id, organization_id, name, status FROM projects WHERE id = $1",
+            "SELECT id, organization_id, name, status, governance FROM projects WHERE id = $1",
             &[&id],
         )
         .map_err(db_err)?
@@ -93,6 +141,7 @@ pub fn project_row(c: &mut impl GenericClient, id: &str) -> Result<Option<Projec
         status: r.get(3),
         members,
         invited,
+        governance: r.get(4),
     }))
 }
 

@@ -282,3 +282,28 @@ fn every_code_round_trips_and_is_unique() {
         assert!(seen.insert(c.as_str()), "duplicate {c}");
     }
 }
+
+/// The governance block ENC2701..ENC2712 (public-sector governed projects)
+/// is complete, in order, and each code is documented in docs/errors.md.
+#[test]
+fn the_governance_codes_are_the_2701_block() {
+    let block: Vec<&str> = Code::ALL
+        .iter()
+        .map(|c| c.as_str())
+        .filter(|s| s.starts_with("ENC27"))
+        .collect();
+    let expected: Vec<String> = (2701..=2712).map(|n| format!("ENC{n}")).collect();
+    assert_eq!(block, expected);
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/errors.md"),
+    )
+    .unwrap();
+    for c in expected {
+        assert!(
+            doc.contains(&format!("| {c} |")),
+            "docs/errors.md lacks {c}"
+        );
+    }
+    assert_eq!(Code::GovernanceAuthorizationMissing.as_str(), "ENC2701");
+    assert_eq!(Code::GovernanceReleaseTicket.as_str(), "ENC2712");
+}

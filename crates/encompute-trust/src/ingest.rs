@@ -22,8 +22,22 @@ use encompute_secagg::{
 use encompute_training::{SignedAdapterRecord, SignedWorkerEvidence, TrainingSpec};
 use encompute_verification::{PolicyId, PrivacyPolicyId, SignedExecutionReceipt};
 
-use crate::authz::{SignedAuthorization, SignedRevocation};
+use crate::authz::{
+    governance_key_id, GovernanceKey, GovernanceKeyStatus, SignedAuthorization,
+    SignedAuthorizationV2, SignedRevocation,
+};
 use crate::graph::{node_id, EdgeKind, Evidence, Node, NodeKind, TrustGraph};
+
+/// A party node's attribute holding an anchored governance key, by key ID.
+pub(crate) const GOVERNANCE_KEY_ATTR: &str = "governance_key:";
+/// A party node's attribute marking an anchored governance key revoked.
+pub(crate) const GOVERNANCE_KEY_REVOKED_ATTR: &str = "governance_key_revoked:";
+
+/// Whether a party node attribute is a governance key anchor (not
+/// evidence: the report ignores it when comparing nodes).
+pub(crate) fn is_governance_anchor(attr: &str) -> bool {
+    attr.starts_with(GOVERNANCE_KEY_ATTR) || attr.starts_with(GOVERNANCE_KEY_REVOKED_ATTR)
+}
 
 fn graph_err(m: impl Into<String>) -> Error {
     Error::new(Code::TrustGraph, m)
@@ -210,6 +224,165 @@ impl TrustGraph {
             &node_id(NodeKind::Program, &b.program_id),
         );
         self.edge(&id, EdgeKind::Covers, &node_id(NodeKind::Asset, &b.asset));
+        Ok(id)
+    }
+
+    /// Organizations' governance keys (from the caller's own record of
+    /// them, e.g. the control plane's approved keys), anchored on their
+    /// party nodes like [`Self::add_party_keys`]. An anchor never changes:
+    /// an organization has at most one active key, another is refused
+    /// while it is, and a key once revoked stays revoked (anchoring it
+    /// again as active does not revive it). A new key may be anchored
+    /// once every earlier one is revoked.
+    pub fn add_governance_keys(&mut self, keys: &[GovernanceKey]) -> Result<()> {
+        for k in keys {
+            k.check()?;
+            let id = node_id(NodeKind::Party, &k.organization);
+            let Some(party) = self.nodes.get(&id) else {
+                return Err(graph_err(format!(
+                    "party {} is not in the graph",
+                    k.organization
+                )));
+            };
+            let kid = k.key_id();
+            if k.status == GovernanceKeyStatus::Active {
+                let other = party.attrs.keys().filter_map(|a| {
+                    a.strip_prefix(GOVERNANCE_KEY_ATTR)
+                        .filter(|x| *x != kid)
+                        .filter(|x| {
+                            !party
+                                .attrs
+                                .contains_key(&format!("{GOVERNANCE_KEY_REVOKED_ATTR}{x}"))
+                        })
+                });
+                if other.count() > 0 {
+                    return Err(Error::new(
+                        Code::TrustAuthorization,
+                        format!(
+                            "party {} already has another governance key",
+                            k.organization
+                        ),
+                    ));
+                }
+            }
+            let mut attrs = vec![(format!("{GOVERNANCE_KEY_ATTR}{kid}"), k.public_key.clone())];
+            if k.status == GovernanceKeyStatus::Revoked {
+                attrs.push((
+                    format!("{GOVERNANCE_KEY_REVOKED_ATTR}{kid}"),
+                    "revoked".into(),
+                ));
+            }
+            let mut n = node(NodeKind::Party, "");
+            n.attrs.extend(attrs);
+            self.upsert(id, n)?;
+        }
+        Ok(())
+    }
+
+    /// The governance key `presented` (a signed document's own key) if it
+    /// is anchored for `org` and not revoked: the only key a v2 document of
+    /// `org` is verified under.
+    fn governance_key(&self, org: &str, presented: &str) -> Result<String> {
+        let refuse = |m: String| Error::new(Code::TrustAuthorization, m);
+        let party = self
+            .node(&node_id(NodeKind::Party, org))
+            .ok_or_else(|| refuse(format!("party {org} is not in the graph")))?;
+        if !party
+            .attrs
+            .keys()
+            .any(|a| a.starts_with(GOVERNANCE_KEY_ATTR))
+        {
+            return Err(refuse(format!(
+                "party {org} has no governance key in the graph"
+            )));
+        }
+        let kid = governance_key_id(presented);
+        match party.attrs.get(&format!("{GOVERNANCE_KEY_ATTR}{kid}")) {
+            Some(k) if k == presented => {}
+            _ => {
+                return Err(refuse(format!(
+                    "signed by a key that is not {org}'s anchored governance key"
+                )))
+            }
+        }
+        if party
+            .attrs
+            .contains_key(&format!("{GOVERNANCE_KEY_REVOKED_ATTR}{kid}"))
+        {
+            return Err(Error::new(
+                Code::GovernanceKeyRevoked,
+                format!("signed by a governance key of {org} that is revoked"),
+            ));
+        }
+        Ok(presented.to_owned())
+    }
+
+    /// A governed project's owner authorization, verified under the
+    /// governance key anchored for its organization
+    /// ([`Self::add_governance_keys`]): a document signed by any other key,
+    /// or by a revoked one, is refused. Its program node is linked when
+    /// the graph has it.
+    pub fn add_authorization_v2(&mut self, a: SignedAuthorizationV2) -> Result<String> {
+        self.check_authorization_v2(&a)?;
+        a.verify(&self.governance_key(&a.body.party, &a.public_key)?)?;
+        self.link_authorization_v2(&a)
+    }
+
+    /// Without trust anchors: well formed, by a party in the graph.
+    fn check_authorization_v2(&self, a: &SignedAuthorizationV2) -> Result<()> {
+        a.body.check()?;
+        if self
+            .node(&node_id(NodeKind::Party, &a.body.party))
+            .is_none()
+        {
+            return Err(Error::new(
+                Code::TrustAuthorization,
+                format!("party {} is not in the graph", a.body.party),
+            ));
+        }
+        Ok(())
+    }
+
+    fn link_authorization_v2(&mut self, a: &SignedAuthorizationV2) -> Result<String> {
+        let b = &a.body;
+        let id = node_id(NodeKind::Authorization, &a.id());
+        let mut n = with(
+            node(
+                NodeKind::Authorization,
+                &format!(
+                    "{} authorizes version {}",
+                    b.party,
+                    &b.asset_version_id[..16.min(b.asset_version_id.len())]
+                ),
+            ),
+            &[
+                ("version", "2".to_owned()),
+                ("project", b.project.clone()),
+                ("purpose_id", b.purpose_id.clone()),
+                ("asset_version_id", b.asset_version_id.clone()),
+                ("release_class", b.release_class.as_str().to_owned()),
+            ],
+        );
+        n.evidence = Some(Evidence::AuthorizationV2(Box::new(a.clone())));
+        self.upsert(id.clone(), n)?;
+        let party = node_id(NodeKind::Party, &b.party);
+        if self.nodes.contains_key(&party) {
+            self.edge(&party, EdgeKind::Signed, &id);
+        }
+        let programs: Vec<String> = match &b.program {
+            encompute_verification::governance::ProgramRef::Program { program_id } => {
+                vec![program_id.clone()]
+            }
+            encompute_verification::governance::ProgramRef::ProgramSet { programs, .. } => {
+                programs.iter().cloned().collect()
+            }
+        };
+        for p in programs {
+            let pn = node_id(NodeKind::Program, &p);
+            if self.nodes.contains_key(&pn) {
+                self.edge(&id, EdgeKind::Authorizes, &pn);
+            }
+        }
         Ok(id)
     }
 
@@ -690,7 +863,9 @@ impl TrustGraph {
     /// The graph as its evidence alone implies it: every piece of evidence
     /// re-checked as its `add_*` checks it (everything but the signatures,
     /// which the report checks against its caller's anchors, never the
-    /// bundle's keys) and re-linked into a fresh graph, in dependency
+    /// bundle's keys; a v2 authorization's signature is also checked here,
+    /// under the governance key the bundle anchors for its organization)
+    /// and re-linked into a fresh graph, in dependency
     /// order. Edges, nodes and attributes the bundle carries but the
     /// evidence does not imply are absent here. Returns the graph and the
     /// evidence that failed its checks or to link (any of which fails the
@@ -708,6 +883,7 @@ impl TrustGraph {
             Evidence::AggregationSpec(_) => 1,
             Evidence::Attestation(_) => 2,
             Evidence::Authorization(_) => 3,
+            Evidence::AuthorizationV2(_) => 3,
             Evidence::Revocation(_) => 4,
             Evidence::AggregationReceipt(_) => 5,
             Evidence::PrivacyReceipt(_) => 6,
@@ -731,6 +907,13 @@ impl TrustGraph {
                 Evidence::TrainingWorker(_) | Evidence::Attestation(_) => Ok(()),
                 Evidence::AggregationSpec(s) => g.check_aggregation_spec(s),
                 Evidence::Authorization(a) => g.check_authorization(a),
+                // Its signature, under the governance key the bundle
+                // anchors for its organization (as at ingest), so a
+                // re-signed or tampered document fails here. The report
+                // counts no v2 authorization towards any requirement.
+                Evidence::AuthorizationV2(a) => g
+                    .check_authorization_v2(a)
+                    .and_then(|_| a.verify(&self.governance_key(&a.body.party, &a.public_key)?)),
                 Evidence::Revocation(_) => Ok(()),
                 Evidence::AggregationReceipt(r) => g.check_aggregation(r),
                 Evidence::PrivacyReceipt(r) => {
@@ -752,6 +935,7 @@ impl TrustGraph {
                 Evidence::AggregationSpec(s) => g.link_aggregation_spec(s),
                 Evidence::Attestation(a) => g.link_attestation(a),
                 Evidence::Authorization(a) => g.link_authorization(a),
+                Evidence::AuthorizationV2(a) => g.link_authorization_v2(a),
                 Evidence::Revocation(r) => g.link_revocation(r),
                 Evidence::AggregationReceipt(r) => g.link_aggregation(r),
                 Evidence::PrivacyReceipt(r) => g.link_privacy_receipt(r),

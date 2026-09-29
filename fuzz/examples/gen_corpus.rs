@@ -285,6 +285,7 @@ fn main() -> R<()> {
         expires_at: 1_700_003_600,
         issuer: "control-plane".into(),
         issuer_public_key: control.public_key_hex(),
+        governance: None,
         signature: String::new(),
     };
     grant.signature = control.sign(JOB_GRANT, &grant.unsigned())?;

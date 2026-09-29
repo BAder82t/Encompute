@@ -155,6 +155,30 @@ pub enum Code {
     /// A service request or message is unsigned, from an unknown service,
     /// for another recipient, expired or replayed (ENC2607).
     ServiceAuthentication,
+    /// A governed project's source has no active owner-signed authorization, or an authorization's owner signature does not verify against the organization's active governance key (ENC2701).
+    GovernanceAuthorizationMissing,
+    /// The purpose of a governed job, program or authorization differs from the governed purpose, or the purpose is not active or not accepted (ENC2702).
+    GovernancePurposeMismatch,
+    /// The program (or program set) is not the one the owner authorized (ENC2703).
+    GovernanceProgramNotAuthorized,
+    /// A dataset version does not match the authorized version, or a registered version would change (ENC2704).
+    GovernanceAssetVersionMismatch,
+    /// An authorization or purpose is outside its validity window (expiry is strict) (ENC2705).
+    GovernanceAuthorizationExpired,
+    /// An authorization or purpose was withdrawn, revoked or retired (ENC2706).
+    GovernanceAuthorizationRevoked,
+    /// Four-eyes approval is incomplete: distinct humans of the approving organization are required (ENC2707).
+    GovernanceFourEyesIncomplete,
+    /// The organization's governance key is revoked, not approved, or absent (ENC2708).
+    GovernanceKeyRevoked,
+    /// A release exceeds its release class or output form (ENC2709).
+    GovernanceReleaseClass,
+    /// Residency or placement constraints are unsatisfied (ENC2710).
+    GovernanceResidency,
+    /// The linkage policy differs from the authorized one (ENC2711).
+    GovernanceLinkageMismatch,
+    /// A key-release ticket is invalid, expired or replayed (ENC2712).
+    GovernanceReleaseTicket,
 }
 
 impl Code {
@@ -220,13 +244,25 @@ impl Code {
             Code::InsecureConfiguration => "ENC2605",
             Code::Scheduling => "ENC2606",
             Code::ServiceAuthentication => "ENC2607",
+            Code::GovernanceAuthorizationMissing => "ENC2701",
+            Code::GovernancePurposeMismatch => "ENC2702",
+            Code::GovernanceProgramNotAuthorized => "ENC2703",
+            Code::GovernanceAssetVersionMismatch => "ENC2704",
+            Code::GovernanceAuthorizationExpired => "ENC2705",
+            Code::GovernanceAuthorizationRevoked => "ENC2706",
+            Code::GovernanceFourEyesIncomplete => "ENC2707",
+            Code::GovernanceKeyRevoked => "ENC2708",
+            Code::GovernanceReleaseClass => "ENC2709",
+            Code::GovernanceResidency => "ENC2710",
+            Code::GovernanceLinkageMismatch => "ENC2711",
+            Code::GovernanceReleaseTicket => "ENC2712",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 60] = [
+    pub const ALL: [Code; 72] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -287,6 +323,18 @@ impl Code {
         Code::InsecureConfiguration,
         Code::Scheduling,
         Code::ServiceAuthentication,
+        Code::GovernanceAuthorizationMissing,
+        Code::GovernancePurposeMismatch,
+        Code::GovernanceProgramNotAuthorized,
+        Code::GovernanceAssetVersionMismatch,
+        Code::GovernanceAuthorizationExpired,
+        Code::GovernanceAuthorizationRevoked,
+        Code::GovernanceFourEyesIncomplete,
+        Code::GovernanceKeyRevoked,
+        Code::GovernanceReleaseClass,
+        Code::GovernanceResidency,
+        Code::GovernanceLinkageMismatch,
+        Code::GovernanceReleaseTicket,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

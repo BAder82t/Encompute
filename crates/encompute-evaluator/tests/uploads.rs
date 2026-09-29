@@ -47,6 +47,7 @@ fn fixture() -> Fixture {
         },
     );
     let header = |kind: Kind, key_id: &str| Header {
+        governance_id: None,
         kind,
         scheme: "CKKS".into(),
         backend: "mock".into(),
@@ -97,6 +98,7 @@ fn post(url: &str, path: &str, body: &[u8], grant: Option<&str>) -> u16 {
 fn grant(control: &ServiceSigner, evaluator: &str, program_id: &str) -> String {
     let now = encompute_verification::service::now();
     let mut g = JobGrant {
+        governance: None,
         version: JOB_GRANT_VERSION,
         job_id: "job_1".into(),
         organization: "modelco".into(),

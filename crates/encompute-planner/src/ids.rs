@@ -45,6 +45,13 @@ impl ConfidentialExecutionPlan {
         PlanId::of(self)
     }
 
+    /// This plan under a governed project's binding (hex `GovernanceId`):
+    /// the PlanId then changes with it.
+    pub fn governed(mut self, governance_id: &str) -> Self {
+        self.governance_id = Some(governance_id.to_owned());
+        self
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         canonical_json(self)
     }

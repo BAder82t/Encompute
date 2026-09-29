@@ -39,6 +39,14 @@
 //! | GET | `/v1/audit?organization=&after=&limit=` | |
 //! | POST | `/v1/audit/checkpoints` | |
 //! | POST | `/v1/messages` | services only |
+//! | POST, GET | `/v1/organizations/{id}/governance-keys` | governed projects: an organization's governance public keys |
+//! | POST | `/v1/organizations/{id}/governance-keys/{key}/approve`, `.../revoke` | a different security admin approves |
+//! | POST, GET | `/v1/projects/{id}/purposes` | governed projects |
+//! | GET | `/v1/purposes/{id}` | |
+//! | POST | `/v1/purposes/{id}/approve`, `/accept`, `/retire` | acceptance carries the organization's governance-key signature |
+//! | POST | `/v1/authorizations` | owner authorizations (v2), proposed without approvals |
+//! | GET | `/v1/authorizations/{id}` | to the owner's members: the document to sign |
+//! | POST | `/v1/authorizations/{id}/approve`, `/signature`, `/revoke` | four eyes, then the owner's governance-key signature |
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -96,6 +104,20 @@ pub fn status_of(code: Code) -> u16 {
     match code {
         Code::Unauthenticated | Code::ServiceAuthentication => 401,
         Code::Forbidden | Code::ExportDenied => 403,
+        // Governance refusals (ENC2701..ENC2712): the request is understood
+        // and refused by an owner's authorization, purpose or key state.
+        Code::GovernanceAuthorizationMissing
+        | Code::GovernancePurposeMismatch
+        | Code::GovernanceProgramNotAuthorized
+        | Code::GovernanceAssetVersionMismatch
+        | Code::GovernanceAuthorizationExpired
+        | Code::GovernanceAuthorizationRevoked
+        | Code::GovernanceFourEyesIncomplete
+        | Code::GovernanceKeyRevoked
+        | Code::GovernanceReleaseClass
+        | Code::GovernanceResidency
+        | Code::GovernanceLinkageMismatch
+        | Code::GovernanceReleaseTicket => 403,
         Code::NotFound => 404,
         Code::Conflict | Code::PrivacyBudgetExceeded => 409,
         Code::PlanningFailed | Code::PlanInvalid => 422,
@@ -330,6 +352,41 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         }
         ("POST", ["v1", "projects", id, "members", "remove"]) => {
             ok(control.remove_project_member(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "organizations", id, "governance-keys"]) => {
+            created(control.propose_governance_key(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "organizations", id, "governance-keys"]) => {
+            ok(control.list_governance_keys(ctx, id)?)
+        }
+        ("POST", ["v1", "organizations", id, "governance-keys", key, "approve"]) => {
+            ok(control.approve_governance_key(ctx, id, key)?)
+        }
+        ("POST", ["v1", "organizations", id, "governance-keys", key, "revoke"]) => {
+            ok(control.revoke_governance_key(ctx, id, key)?)
+        }
+        ("POST", ["v1", "projects", id, "purposes"]) => {
+            created(control.propose_purpose(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "projects", id, "purposes"]) => ok(control.list_purposes(ctx, id)?),
+        ("GET", ["v1", "purposes", id]) => ok(control.get_purpose(ctx, id)?),
+        ("POST", ["v1", "purposes", id, "approve"]) => ok(control.approve_purpose(ctx, id)?),
+        ("POST", ["v1", "purposes", id, "accept"]) => {
+            ok(control.accept_purpose(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "purposes", id, "retire"]) => ok(control.retire_purpose(ctx, id)?),
+        ("POST", ["v1", "authorizations"]) => {
+            created(control.propose_authorization(ctx, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "authorizations", id]) => ok(control.get_authorization(ctx, id)?),
+        ("POST", ["v1", "authorizations", id, "approve"]) => {
+            ok(control.approve_authorization(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "authorizations", id, "signature"]) => {
+            ok(control.sign_authorization(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "authorizations", id, "revoke"]) => {
+            ok(control.revoke_authorization(ctx, id, parse(&r.body)?)?)
         }
         ("POST", ["v1", "projects", id, "policies"]) => {
             created(control.propose_policy(ctx, id, parse(&r.body)?)?)

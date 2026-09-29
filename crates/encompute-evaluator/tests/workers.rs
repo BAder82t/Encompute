@@ -31,6 +31,7 @@ fn header(kind: Kind, ids: &encompute_evaluator::Ids, key_id: &str) -> Header {
 
 fn scheme_header(scheme: &str, kind: Kind, ids: &encompute_evaluator::Ids, key_id: &str) -> Header {
     Header {
+        governance_id: None,
         kind,
         scheme: scheme.into(),
         backend: "mock".into(),

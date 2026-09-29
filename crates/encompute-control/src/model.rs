@@ -316,6 +316,110 @@ pub struct CreateServiceAccount {
 pub struct CreateProject {
     pub organization: String,
     pub name: String,
+    /// `standard` (the default) or `governed`; immutable.
+    #[serde(default)]
+    pub governance: Option<GovernanceMode>,
+    /// Organizations to invite; each one's admin accepts
+    /// (`POST /v1/projects/{id}/members`).
+    #[serde(default)]
+    pub organizations: Vec<String>,
+}
+
+/// A project's mode. A governed project computes across organizations for
+/// declared purposes under owner-signed authorizations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernanceMode {
+    #[default]
+    Standard,
+    Governed,
+}
+
+impl GovernanceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GovernanceMode::Standard => "standard",
+            GovernanceMode::Governed => "governed",
+        }
+    }
+}
+
+/// An organization's governance public key (hex Ed25519). The private key
+/// stays in the organization's KMS or HSM.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposeGovernanceKey {
+    pub public_key: String,
+    #[serde(default)]
+    pub kms_key_ref: Option<String>,
+}
+
+/// A purpose of a governed project (the control plane adds the project and
+/// version, and computes the PurposeId).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposePurpose {
+    /// The proposing member organization.
+    pub organization: String,
+    pub name: String,
+    #[serde(default = "first_revision")]
+    pub revision: u32,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub legal_basis_ref: Option<String>,
+    pub modes: std::collections::BTreeSet<encompute_verification::governance::PurposeMode>,
+    pub allowed_release_classes:
+        std::collections::BTreeSet<encompute_verification::governance::ReleaseClass>,
+    pub recipients: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub linkage_policy_id: Option<String>,
+    #[serde(default)]
+    pub min_aggregate_parties: Option<u32>,
+    pub valid_from: u64,
+    pub valid_until: u64,
+}
+
+fn first_revision() -> u32 {
+    1
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptPurpose {
+    pub acceptance: encompute_trust::authz::SignedPurposeAcceptance,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposeAuthorization {
+    /// The authorization, without approvals.
+    pub body: encompute_trust::authz::AuthorizationV2,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveAuthorization {
+    /// The role the approver approves in (one it holds).
+    pub role: Role,
+}
+
+/// The owner's governance-key signature over the approved body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationSignature {
+    pub public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeAuthorization {
+    pub reason: String,
+    /// The owner's signed revocation, when it has one (the key broker
+    /// needs it).
+    #[serde(default)]
+    pub revocation: Option<encompute_trust::authz::SignedRevocationV2>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,6 +464,12 @@ pub struct RegisterAsset {
     /// A privacy budget for the asset: creates its privacy ledger.
     #[serde(default)]
     pub privacy_budget: Option<encompute_ir::confidentiality::PrivacyBudget>,
+    /// A dataset version: its series and version label (both or neither;
+    /// the name is then `series@version`). A version is immutable.
+    #[serde(default)]
+    pub series: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// Where an asset's key lives. Only references: the key broker holds the

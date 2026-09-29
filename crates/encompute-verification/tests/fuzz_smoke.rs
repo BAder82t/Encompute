@@ -26,6 +26,7 @@ const SEED: [u8; 32] = [7; 32];
 
 fn receipt() -> SignedExecutionReceipt {
     let spec = ExecutionSpec {
+        governance_id: None,
         version: 1,
         program_id: "a".repeat(64),
         plan_id: "b".repeat(64),
@@ -180,6 +181,7 @@ fn mutated_messages_and_grants_never_panic_or_verify() {
 
     let control = ServiceSigner::from_seed("control-plane", &SEED).unwrap();
     let mut g = JobGrant {
+        governance: None,
         version: 1,
         job_id: "job_1".into(),
         organization: "modelco".into(),

@@ -198,7 +198,7 @@ model (a new package, a new spec). Existing adapters keep their lineage.
 
 | | |
 |---|---|
-| Schema | Versioned SQL migrations embedded in the binary (`crates/encompute-control/migrations/`: `0001_initial.sql`, `0002_evaluator_profiles.sql`, `0003_consent_bound_sharing.sql`, `0004_approval_identity.sql`). Each applied migration is recorded with its checksum in `schema_migrations`. Shipped migrations are never edited. |
+| Schema | Versioned SQL migrations embedded in the binary (`crates/encompute-control/migrations/`: `0001_initial.sql`, `0002_evaluator_profiles.sql`, `0003_consent_bound_sharing.sql`, `0004_approval_identity.sql`, `0005_public_sector_governance.sql`). Each applied migration is recorded with its checksum in `schema_migrations`. Shipped migrations are never edited. |
 | Applied by | `encompute-control migrate`, and automatically at `serve` and `recover`, under a PostgreSQL advisory lock. Forward only: there are no down migrations. |
 | Reads | Any older schema (it is migrated forward). |
 | On mismatch | A database newer than the binary: ENC1602, "the database schema (version N) is newer than this control plane". An applied migration whose checksum changed: ENC1602. |

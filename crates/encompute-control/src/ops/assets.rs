@@ -160,6 +160,29 @@ impl Control {
         if r.privacy_budget.is_some() && r.kind != AssetKind::Dataset {
             return Err(bad("privacy budgets apply to datasets"));
         }
+        // A dataset version: `series@version`, content-addressed.
+        let version = match (&r.series, &r.version) {
+            (None, None) => None,
+            (Some(series), Some(label)) => {
+                let v = encompute_verification::governance::AssetVersion {
+                    version: encompute_verification::governance::ASSET_VERSION_VERSION,
+                    organization: r.organization.clone(),
+                    series: series.clone(),
+                    label: label.clone(),
+                    digest: r.digest.clone(),
+                };
+                v.check()?;
+                if r.name != v.name() {
+                    return Err(bad(format!("a version's name is {}", v.name())));
+                }
+                Some(v)
+            }
+            _ => {
+                return Err(bad(
+                    "a dataset version names both its series and its version",
+                ))
+            }
+        };
         let id = new_id("ast");
         let policy = if r.policy.is_null() {
             json!({})
@@ -222,10 +245,28 @@ impl Control {
                     )));
                 }
             }
+            if let Some(v) = &version {
+                // One label is one digest, forever: the same series and
+                // version with another digest is refused (and not only by
+                // name).
+                let taken = t
+                    .query_opt(
+                        "SELECT 1 FROM assets WHERE organization_id = $1 AND series = $2 AND version = $3",
+                        &[&r.organization, &v.series, &v.label],
+                    )
+                    .map_err(db_err)?;
+                if taken.is_some() {
+                    return Err(Error::new(
+                        Code::GovernanceAssetVersionMismatch,
+                        format!("{} is registered already: versions are immutable, register a new one", v.name()),
+                    ));
+                }
+            }
             t.execute(
                 "INSERT INTO assets (id, organization_id, kind, name, digest, size_bytes, media_type,
-                     storage_uri, policy, lineage_root, parents, key_ref, status, created_by)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', $13)",
+                     storage_uri, policy, lineage_root, parents, key_ref, status, created_by,
+                     series, version, version_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', $13, $14, $15, $16)",
                 &[
                     &id,
                     &r.organization,
@@ -240,10 +281,18 @@ impl Control {
                     &json!(r.parents),
                     &r.key_ref.as_ref().map(|k| json!(k)),
                     &ctx.actor(),
+                    &version.as_ref().map(|v| v.series.clone()),
+                    &version.as_ref().map(|v| v.label.clone()),
+                    &version.as_ref().map(|v| v.id().hex()),
                 ],
             )
             .map_err(|e| {
-                if e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION) {
+                if e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION) && version.is_some() {
+                    Error::new(
+                        Code::GovernanceAssetVersionMismatch,
+                        format!("asset {} exists in {}: versions are immutable", r.name, r.organization),
+                    )
+                } else if e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION) {
                     conflict(format!("asset {} exists in {}", r.name, r.organization))
                 } else {
                     db_err(e)
@@ -279,7 +328,13 @@ impl Control {
                 )?;
                 ledger = Some(genesis);
             }
-            Ok((json!({"id": id, "organization": r.organization, "lineage_root": lineage_root}), ledger))
+            let mut out = json!({"id": id, "organization": r.organization, "lineage_root": lineage_root});
+            if let Some(v) = &version {
+                out["series"] = json!(v.series);
+                out["version"] = json!(v.label);
+                out["version_id"] = json!(v.id().hex());
+            }
+            Ok((out, ledger))
         })?;
         if out.1.is_some() {
             self.anchor_ledger(&id)?;
@@ -353,6 +408,14 @@ impl Control {
             let p = project_visible(t, &ctx.principal, &r.project)?;
             if !p.members.contains(&a.organization) {
                 return Err(forbidden("the asset's owner must be a member of the project"));
+            }
+            // In a governed project an owner shares only through its signed
+            // authorization (`/v1/authorizations`), never a v1 approval.
+            if p.governed() {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationMissing,
+                    "a governed project shares assets only under owner-signed authorizations (POST /v1/authorizations)",
+                ));
             }
             // A new approval (and each organization it newly covers) gets a
             // new ID: one withdrawn before is never the same approval again.

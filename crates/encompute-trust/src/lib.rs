@@ -10,7 +10,9 @@ pub mod lineage;
 pub mod report;
 
 pub use authz::{
-    Authorization, Revocation, SignedAuthorization, SignedRevocation, AUTHORIZATION_VERSION,
+    Authorization, AuthorizationV2, GovernanceKey, GovernanceKeyStatus, Revocation, RevocationV2,
+    SignedAuthorization, SignedAuthorizationV2, SignedRevocation, SignedRevocationV2,
+    AUTHORIZATION_V2_VERSION, AUTHORIZATION_VERSION,
 };
 pub use graph::{node_id, Edge, EdgeKind, Evidence, Node, NodeKind, TrustGraph};
 pub use ingest::program_id;

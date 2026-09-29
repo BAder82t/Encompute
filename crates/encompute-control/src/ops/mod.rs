@@ -3,6 +3,7 @@
 //! that transaction.
 
 mod assets;
+mod governance;
 mod jobs;
 mod policies;
 mod tenancy;

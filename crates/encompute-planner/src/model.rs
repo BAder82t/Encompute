@@ -472,6 +472,10 @@ pub struct ConfidentialExecutionPlan {
     pub policy_id: Option<String>,
     #[serde(default)]
     pub privacy_policy_id: Option<String>,
+    /// Hex `GovernanceId` of a governed project's binding (bound into the
+    /// PlanId); absent, and not serialized, for standard plans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance_id: Option<String>,
     pub context: PlanningContext,
     pub requirements: Vec<TrustRequirement>,
     pub steps: Vec<ExecutionStep>,

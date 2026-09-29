@@ -61,6 +61,7 @@ fn header(kind: Kind, ids: &Ids, key_id: &str) -> Header {
         parameter_set_id: ids.parameter_set_id.clone(),
         program_id: matches!(kind, Kind::Inputs).then(|| ids.program_id.clone()),
         key_id: Some(key_id.into()),
+        governance_id: None,
         items: vec![],
     }
 }

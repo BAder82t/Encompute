@@ -640,6 +640,16 @@ impl Control {
             let Some(org) = orgs.first().cloned() else {
                 return Err(forbidden("submitting a job needs ml_developer in a project member organization"));
             };
+            // Fail closed: a governed project runs a job only once its
+            // purpose, program and source authorizations are enforced at
+            // submission, scheduling, start and key release, which this
+            // release does not do yet.
+            if project.governed() {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationMissing,
+                    "jobs in governed projects are not enabled in this release: owner authorizations are registered but not yet enforced at execution",
+                ));
+            }
             if let Some(row) = t
                 .query_opt(
                     "SELECT id, request_digest FROM jobs WHERE organization_id = $1 AND idempotency_key = $2",
@@ -1082,7 +1092,7 @@ impl Control {
                 return Ok(false);
             };
             let t0 = now();
-            let mut g = JobGrant {
+            let mut g = JobGrant { governance: None,
                 version: JOB_GRANT_VERSION,
                 job_id: j.id.clone(),
                 organization: j.organization.clone(),

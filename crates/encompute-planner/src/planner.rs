@@ -673,6 +673,7 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
         selected.iter().flat_map(Mechanism::evidence).collect();
     let estimated_ms = steps_out.iter().map(|s| s.estimated_ms).sum();
     let plan = ConfidentialExecutionPlan {
+        governance_id: None,
         version: PLAN_VERSION,
         program_id: program_id(program),
         policy_id: c.map(|c| PolicyId::of(c).hex()),

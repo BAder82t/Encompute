@@ -1095,4 +1095,53 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "script:scripts/third_party_notices.py"),
         (EndToEnd, "script:scripts/third_party_notices.py"),
     ]),
+    // Public-sector governance (governed projects). Phase 1: governance
+    // keys, purposes, owner authorizations v2 and their identities.
+    inv!("INV-218", "public-sector", "In a governed project an owner authorization (v2) becomes active only with its owner's signature over the approved document, verified under the organization's active governance key: a signature by another key, over a tampered or unapproved body, or by a revoked key is refused, and signing happens outside the control plane. In a trust graph a v2 authorization verifies only under the governance key anchored for its organization (at most one active, a revoked one never again), and rebuilding a bundle re-verifies it under that anchor, so a re-signed, tampered or unanchored one fails the evidence row and none counts towards the report's requirements. A project's governance mode is chosen at creation and immutable; until execution-time enforcement ships, jobs and v1 asset approvals in governed projects are refused, and standard projects keep their v1 behaviour.", [
+        (Positive, "test:crates/encompute-control/tests/governance.rs::an_authorization_is_active_only_with_four_eyes_and_a_valid_owner_signature"),
+        (Positive, "test:crates/encompute-control/tests/governance.rs::standard_projects_are_unchanged"),
+        (Negative, "test:crates/encompute-control/tests/governance.rs::an_authorization_needs_a_live_key_purpose_acceptance_and_version"),
+        (Negative, "test:crates/encompute-control/tests/governance.rs::jobs_in_governed_projects_are_refused_until_enforcement_ships"),
+        (Negative, "test:crates/encompute-control/tests/governance.rs::a_governed_project_invites_its_organizations_and_its_mode_is_immutable"),
+        (Adversarial, "test:crates/encompute-trust/tests/governance.rs::a_signed_authorization_verifies_only_under_its_governance_key"),
+        (Adversarial, "test:crates/encompute-trust/tests/governance.rs::a_substituted_governance_key_is_refused"),
+        (Adversarial, "test:crates/encompute-trust/tests/governance.rs::a_bundle_with_a_v2_authorization_not_under_its_anchored_key_fails_rebuild"),
+        (Positive, "test:crates/encompute-trust/tests/governance.rs::a_v2_authorization_joins_the_trust_graph_under_its_anchored_governance_key"),
+        (Negative, "test:crates/encompute-trust/tests/governance.rs::a_v2_authorization_without_an_anchored_governance_key_is_refused"),
+        (Negative, "test:crates/encompute-trust/tests/governance.rs::a_revoked_governance_key_is_refused"),
+        (EndToEnd, "test:crates/encompute-cli/tests/governance.rs::an_organization_signs_its_authorization_with_its_own_key_file"),
+    ]),
+    inv!("INV-219", "public-sector", "An authorization is for exactly one purpose of one project: the purpose (with its project) is mandatory and bound through the PurposeId, the AuthorizationId and the GovernanceId, and every field changes them; the execution spec, the plan and the envelope header bind the GovernanceId (absent, standard IDs are unchanged), and an envelope made for another binding, or for none, is refused. A purpose is used only once active and accepted by the authorizing organization with its governance key.", [
+        (Positive, "test:crates/encompute-verification/tests/governance.rs::every_purpose_field_changes_the_purpose_id"),
+        (Positive, "test:crates/encompute-verification/tests/governance.rs::every_governance_binding_field_changes_the_governance_id"),
+        (Negative, "test:crates/encompute-control/tests/governance.rs::a_purpose_takes_two_people_and_each_organization_accepts_it_with_its_key"),
+        (Negative, "test:crates/encompute-protocol/tests/envelope.rs::the_governance_binding_is_enforced_both_ways"),
+        (Adversarial, "test:crates/encompute-trust/tests/governance.rs::every_authorization_field_changes_its_id"),
+        (Adversarial, "test:crates/encompute-control/tests/governance.rs::an_authorization_needs_a_live_key_purpose_acceptance_and_version"),
+        (EndToEnd, "test:crates/encompute-verification/tests/governance.rs::the_spec_binds_a_governance_id_and_standard_specs_are_unchanged"),
+        (EndToEnd, "test:crates/encompute-planner/tests/governance.rs::the_plan_id_binds_the_governance_id"),
+    ]),
+    inv!("INV-220", "public-sector", "Expiry is strict, with no margin (valid_from <= t < valid_until), for purposes, owner authorizations and v2 job grants: a v2 grant never outlives its authorizations and is refused from its not_after on; an authorization that is over, or reaches outside its purpose's window, is neither proposed nor activated. A governed execution's v4 receipt binds the digest of the grant it ran under (the control plane's signed issue time), and standard receipts stay version 3.", [
+        (Positive, "test:crates/encompute-verification/tests/governance.rs::a_v2_grant_carries_the_binding_and_expires_strictly"),
+        (Positive, "test:crates/encompute-verification/tests/governance.rs::a_v4_receipt_binds_the_grant_and_v3_receipts_are_unchanged"),
+        (Negative, "test:crates/encompute-trust/tests/governance.rs::an_authorization_is_well_formed_and_its_window_is_strict"),
+        (Negative, "test:crates/encompute-verification/tests/governance.rs::a_purpose_is_checked_and_its_window_is_strict"),
+        (Adversarial, "test:crates/encompute-control/tests/governance.rs::an_authorization_needs_a_live_key_purpose_acceptance_and_version"),
+    ]),
+    inv!("INV-222", "public-sector", "Collaboration never transfers ownership: an organization's authorization is proposed, approved, signed and revoked only by people of that organization, under its own governance key; the project owner or another member cannot see or act on it, nor authorize another organization's dataset version.", [
+        (Positive, "test:crates/encompute-control/tests/governance.rs::an_authorization_is_active_only_with_four_eyes_and_a_valid_owner_signature"),
+        (Negative, "test:crates/encompute-control/tests/governance.rs::an_authorization_needs_a_live_key_purpose_acceptance_and_version"),
+        (Adversarial, "test:crates/encompute-control/tests/governance.rs::an_authorization_is_active_only_with_four_eyes_and_a_valid_owner_signature"),
+    ]),
+    inv!("INV-228", "public-sector", "Four eyes are distinct people of the approving organization: a governance key, a purpose and an owner authorization are approved by someone other than the proposer (an authorization by the roles its rule requires, by default a data owner and a security admin); one person twice is one approver, and service accounts, auditors and roles held from another organization never count.", [
+        (Positive, "test:crates/encompute-control/tests/governance.rs::a_governance_key_needs_a_second_person_who_is_a_security_admin"),
+        (Negative, "test:crates/encompute-control/tests/governance.rs::a_purpose_takes_two_people_and_each_organization_accepts_it_with_its_key"),
+        (Adversarial, "test:crates/encompute-control/tests/governance.rs::an_authorization_is_active_only_with_four_eyes_and_a_valid_owner_signature"),
+        (Adversarial, "test:crates/encompute-trust/tests/governance.rs::approvals_are_statements_over_the_unapproved_body"),
+    ]),
+    inv!("INV-231", "public-sector", "Dataset versions are immutable: one series and version label maps to one AssetVersionId and one digest, re-registration with another digest is refused, and the database refuses to change, delete or revive a registered version.", [
+        (Positive, "test:crates/encompute-verification/tests/governance.rs::every_asset_version_field_changes_its_id"),
+        (Negative, "test:crates/encompute-control/tests/governance.rs::dataset_versions_register_once_and_never_change"),
+        (Adversarial, "test:crates/encompute-control/tests/governance.rs::dataset_versions_register_once_and_never_change"),
+    ]),
 ];

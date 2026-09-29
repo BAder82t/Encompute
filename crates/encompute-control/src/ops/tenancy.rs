@@ -6,12 +6,15 @@ use encompute_ir::Result;
 use encompute_verification::service::check_service_id;
 
 use crate::audit::{self, Outcome};
-use crate::authz::{conflict, forbidden, not_found, project_row, project_visible, require};
+use crate::authz::{
+    conflict, forbidden, not_found, project_row, project_visible, require, require_human,
+};
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
 use crate::model::{
     bad, check_name, check_slug, new_id, AddProjectMember, CreateOrganization, CreateProject,
-    CreateServiceAccount, CreateUser, RemoveMembership, Role, ServiceKind, PLATFORM_ORG,
+    CreateServiceAccount, CreateUser, GovernanceMode, RemoveMembership, Role, ServiceKind,
+    PLATFORM_ORG,
 };
 
 fn unique_violation(e: &postgres::Error) -> bool {
@@ -540,19 +543,40 @@ impl Control {
         })
     }
 
+    /// Creates a project, `standard` unless `governance` says `governed`
+    /// (immutable either way). `organizations` are invited: each one's
+    /// admin accepts. A governed project, or one that invites, is created
+    /// by a person who administers the owning organization.
     pub fn create_project(&self, ctx: &Ctx, r: CreateProject) -> Result<Value> {
-        require(
-            &ctx.principal,
-            &r.organization,
-            &[Role::OrganizationAdmin, Role::MlDeveloper],
-            "creating a project",
-        )?;
+        let mode = r.governance.unwrap_or_default();
+        if mode == GovernanceMode::Governed || !r.organizations.is_empty() {
+            require_human(
+                &ctx.principal,
+                &r.organization,
+                &[Role::OrganizationAdmin],
+                "creating a governed project, or inviting at creation,",
+            )?;
+        } else {
+            require(
+                &ctx.principal,
+                &r.organization,
+                &[Role::OrganizationAdmin, Role::MlDeveloper],
+                "creating a project",
+            )?;
+        }
         check_name("project name", &r.name)?;
+        let invited: std::collections::BTreeSet<String> = r.organizations.iter().cloned().collect();
+        for o in &invited {
+            check_slug("organization", o)?;
+            if o == &r.organization || o == PLATFORM_ORG {
+                return Err(bad(format!("{o} cannot be invited to its own project")));
+            }
+        }
         let id = new_id("prj");
         self.db.tx(|t| {
             t.execute(
-                "INSERT INTO projects (id, organization_id, name, status) VALUES ($1, $2, $3, 'active')",
-                &[&id, &r.organization, &r.name],
+                "INSERT INTO projects (id, organization_id, name, status, governance) VALUES ($1, $2, $3, 'active', $4)",
+                &[&id, &r.organization, &r.name, &mode.as_str()],
             )
             .map_err(|e| {
                 if unique_violation(&e) {
@@ -566,13 +590,52 @@ impl Control {
                 &[&id, &r.organization, &ctx.actor(), &new_id("pmb")],
             )
             .map_err(db_err)?;
-            audit::append(
-                t,
-                ctx.draft("project.created", "project", &id, Outcome::Succeeded)
-                    .org(&r.organization)
-                    .project(&id),
-            )?;
-            Ok(json!({"id": id, "organization": r.organization, "name": r.name, "members": [r.organization]}))
+            // (Standard projects' audit events are unchanged.)
+            let mut created = ctx
+                .draft("project.created", "project", &id, Outcome::Succeeded)
+                .org(&r.organization)
+                .project(&id);
+            if mode == GovernanceMode::Governed {
+                created = created.r#ref("governance", mode.as_str());
+            }
+            audit::append(t, created)?;
+            // Invitations, as `add_project_member` makes them: an unknown
+            // organization gets the same answer (nothing is recorded).
+            for o in &invited {
+                let exists = t
+                    .query_opt("SELECT 1 FROM organizations WHERE id = $1", &[o])
+                    .map_err(db_err)?
+                    .is_some();
+                if !exists {
+                    continue;
+                }
+                t.execute(
+                    "INSERT INTO project_members (project_id, organization_id, added_by, status, membership_id)
+                     VALUES ($1, $2, $3, 'invited', $4)",
+                    &[&id, o, &ctx.actor(), &new_id("pmb")],
+                )
+                .map_err(db_err)?;
+                audit::append(
+                    t,
+                    ctx.draft("project.member_invited", "project", &id, Outcome::Succeeded)
+                        .org(&r.organization)
+                        .project(&id)
+                        .r#ref("member", o.clone()),
+                )?;
+                audit::append(
+                    t,
+                    ctx.draft("project.invited", "project", &id, Outcome::Succeeded)
+                        .org(o)
+                        .project(&id)
+                        .r#ref("owner", r.organization.clone()),
+                )?;
+            }
+            let mut out = json!({"id": id, "organization": r.organization, "name": r.name,
+                                 "members": [r.organization], "governance": mode.as_str()});
+            if !invited.is_empty() {
+                out["invited"] = json!(invited);
+            }
+            Ok(out)
         })
     }
 
@@ -581,7 +644,7 @@ impl Control {
         let mut c = self.db.conn()?;
         let rows = c
             .query(
-                "SELECT DISTINCT p.id, p.organization_id, p.name, p.status FROM projects p
+                "SELECT DISTINCT p.id, p.organization_id, p.name, p.status, p.governance FROM projects p
                    JOIN project_members m ON m.project_id = p.id AND m.status = 'active'
                   WHERE m.organization_id = ANY($1) ORDER BY p.id",
                 &[&orgs],
@@ -591,7 +654,8 @@ impl Control {
             rows.iter()
                 .map(|r| {
                     json!({"id": r.get::<_, String>(0), "organization": r.get::<_, String>(1),
-                           "name": r.get::<_, String>(2), "status": r.get::<_, String>(3)})
+                           "name": r.get::<_, String>(2), "status": r.get::<_, String>(3),
+                           "governance": r.get::<_, String>(4)})
                 })
                 .collect(),
         ))
@@ -622,6 +686,7 @@ impl Control {
         Ok(json!({
             "id": p.id, "organization": p.organization, "name": p.name, "status": p.status,
             "members": p.members, "invited": p.invited, "approved_assets": assets,
+            "governance": p.governance,
         }))
     }
 

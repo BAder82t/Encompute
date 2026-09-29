@@ -29,6 +29,7 @@ const EXACT: &str = include_str!("../../../benches/exact/mixed.eir");
 
 fn header(kind: Kind, ids: &Ids, key_id: &str) -> Header {
     Header {
+        governance_id: None,
         kind,
         scheme: "CKKS".into(),
         backend: "mock".into(),

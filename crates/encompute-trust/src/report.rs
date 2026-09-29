@@ -228,11 +228,15 @@ impl TrustGraph {
             t.fail(format!("{n}, implied by the evidence, is missing"));
         }
         for id in have.intersection(&want) {
-            // Party keys are the one thing a bundle may carry beyond its
-            // evidence (informational: the report never reads them).
+            // Party keys and governance key anchors are the one thing a
+            // bundle may carry beyond its evidence (the report never
+            // trusts them; rebuilding checks v2 authorizations against the
+            // anchors, and the report counts none).
             let mut mine = self.nodes[*id].clone();
             if mine.kind == NodeKind::Party {
                 mine.attrs.remove("public_key");
+                mine.attrs
+                    .retain(|k, _| !crate::ingest::is_governance_anchor(k));
             }
             if mine != g.nodes[*id] {
                 t.fail(format!(

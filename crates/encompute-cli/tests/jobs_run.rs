@@ -73,6 +73,7 @@ fn stub(reply: impl Fn(&str, &str) -> (u16, String) + Send + 'static) -> (String
 fn grant() -> serde_json::Value {
     use encompute_verification::service::{JobGrant, JOB_GRANT_VERSION};
     serde_json::to_value(JobGrant {
+        governance: None,
         version: JOB_GRANT_VERSION,
         job_id: "job_1".into(),
         organization: "o".into(),

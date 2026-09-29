@@ -63,6 +63,10 @@ pub struct Header {
     /// SHA-256 of the evaluation-key payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
+    /// Hex `GovernanceId` of a governed project's execution; absent
+    /// otherwise (standard headers are unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance_id: Option<String>,
     pub items: Vec<Item>,
 }
 
@@ -77,6 +81,9 @@ pub struct Expect<'a> {
     pub parameter_set_id: &'a str,
     pub program_id: Option<&'a str>,
     pub key_id: Option<&'a str>,
+    /// The governed binding the envelope must carry, exactly: `None` for a
+    /// standard execution, where a governed envelope is refused too.
+    pub governance_id: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -208,6 +215,12 @@ impl Envelope {
             if h.key_id.as_deref() != Some(k) {
                 return Err(Error::new(Code::WrongKey, "made under a different key"));
             }
+        }
+        if h.governance_id.as_deref() != e.governance_id {
+            return Err(Error::new(
+                Code::GovernancePurposeMismatch,
+                "made for another governed project, purpose or binding",
+            ));
         }
         Ok(())
     }

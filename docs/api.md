@@ -42,7 +42,7 @@ Errors are JSON `{"code": "ENCnnnn", "message": "..."}`:
 |---|---|
 | 400 | ENC1102 malformed request (including a repeated query parameter); ENC1604 receipt problems; ENC2204 a privacy reservation inconsistent with its own mechanism |
 | 401 | ENC2601 unauthenticated (including a disabled user, and `/metrics` without the metrics token); ENC2607 bad service signature, replay |
-| 403 | ENC2602 missing role |
+| 403 | ENC2602 missing role; ENC2701-ENC2712 refused by governance in a governed project (see [errors.md](errors.md)) |
 | 404 | ENC2603 not found, including other tenants' resources |
 | 409 | ENC2604 conflict (state, idempotency key, revoked asset); ENC2201 privacy budget exceeded, or ledger frozen |
 | 422 | ENC2401 PLANNING FAILED; ENC2402 a plan that does not satisfy its program or the control plane's floor |
@@ -89,8 +89,8 @@ own, serving only that organization's assets.
 
 | | |
 |---|---|
-| `POST /v1/projects` | `{organization, name}` |
-| `GET /v1/projects`, `GET /v1/projects/{id}` | the projects the caller's organizations are active members of, with their `members`, the organizations `invited` and not yet accepted, and `approved_assets`: only the approvals that cover the caller's organizations, or of the caller's own assets |
+| `POST /v1/projects` | `{organization, name, governance?, organizations?}`. `governance` is `standard` (the default) or `governed`, fixed at creation. `organizations` are invited (each one's admins accept with `POST /v1/projects/{id}/members`); the reply lists them as `invited`, whether or not they exist. A governed project, or one that invites, is created by a person who is an organization admin of the owner |
+| `GET /v1/projects`, `GET /v1/projects/{id}` | the projects the caller's organizations are active members of, with their `governance`, `members`, the organizations `invited` and not yet accepted, and `approved_assets`: only the approvals that cover the caller's organizations, or of the caller's own assets |
 | `POST /v1/projects/{id}/members` | `{organization}`. The owner's admins invite: `status: invited`, the same answer whether or not the organization exists. The invited organization's admins accept with the same call, naming their own organization: `status: active`. An admin of both organizations adds it directly (`active`). An invited organization sees and does nothing in the project until it accepts |
 | `POST /v1/projects/{id}/members/remove` | `{organization}`. The owner's admins, or the member's own admins (this also declines an invitation). The owner cannot leave (403). Removes the member's approvals in the project both ways (others' assets approved to it, its own assets approved to the project), recorded as withdrawn and anchored (a restored database that still holds them is refused at startup), and fails the project's jobs that have not started and that it submitted or that use its assets. The membership (or invitation) is anchored as removed too: a restored database that lists it again is refused at startup (MEMBERSHIP STATE ROLLBACK) until `encompute-control recover` removes it again; joining again is a new membership. Returns `failed_jobs`; anchored before the reply |
 | `POST /v1/projects/{id}/policies` | security admins (people, not service accounts). A JSON policy document; stored with its digest, `proposed` |
@@ -100,7 +100,7 @@ own, serving only that organization's assets.
 
 | | |
 |---|---|
-| `POST /v1/assets` | `{organization, kind, name, digest, size_bytes?, media_type?, storage_uri?, policy?, parents?, key_ref?, privacy_budget?}`. Metadata only |
+| `POST /v1/assets` | `{organization, kind, name, digest, size_bytes?, media_type?, storage_uri?, policy?, parents?, key_ref?, privacy_budget?, series?, version?}`. Metadata only. With `series` and `version` (both or neither; `name` is then `series@version`) the asset is a dataset version: the reply adds its content-addressed `version_id`, and the version is immutable (its digest, owner, lineage and policy never change, it is never deleted, a revoked version stays revoked). The same series and version with another digest is refused (ENC2704) |
 | `GET /v1/assets`, `GET /v1/assets/{id}` | owned, or approved for a project the caller takes part in. The owner's members see every field (and, on `GET /v1/assets/{id}`, its `approvals`). Other organizations see only `id`, `organization`, `kind`, `name`, `digest`, `status`, `lineage_root`, `parents` and `policy` reduced to `require_job_approval` (when the owner set it): never `key_ref`, `storage_uri`, `size_bytes`, `media_type` or the rest of the policy |
 | `POST /v1/assets/{id}/approvals` | owners. `{project, purpose}`. Covers the organizations that are active project members now (returned as `members`); an organization that joins later needs a new approval. Approving again after a withdrawal makes a new approval (a new ID), never the withdrawn one |
 | `POST /v1/assets/{id}/approvals/withdraw` | owners. `{project, purpose}`. Other members no longer see or use the asset for that purpose; their jobs using it there that have not started fail (returned as `failed_jobs`). The withdrawal is anchored before the reply: a restored database that still holds the approval is refused at startup (APPROVAL STATE ROLLBACK) until `encompute-control recover` withdraws it again |
@@ -143,6 +143,38 @@ broker of the platform or of the asset's organization (409 otherwise). `privacy_
 | `GET /v1/privacy/{asset}/ledger` | auditors and data owners. The full hash-chained ledger |
 | `POST /v1/privacy/{asset}/events` | the owner's data owners and operators, and SecAgg services the owner authorized for this asset. A privacy event (reserve or commit): race-safe, idempotent, anchored before the reply. Refused: a reservation whose declared sensitivity is below what its own noise implies for the ledger's unit, or, in production, not drawn with `csprng` (ENC2204); a ledger that no longer extends the state anchor (ENC2202 PRIVACY STATE ROLLBACK); a ledger frozen in the anchor, whatever the database says (ENC2201) |
 | `POST /v1/privacy/{asset}/spenders` | the owner's data owners and organization admins. `{service}`: authorizes an active SecAgg service to record privacy events for this asset |
+
+### Governed projects
+
+A governed project computes across organizations for declared purposes,
+under authorizations each owner signs with its own governance key. The
+control plane holds only the public keys; signing happens outside it
+(`encompute governance sign`). Every step is taken by people of the
+organization concerned: never a service account, an auditor, or someone
+homed in another organization (ENC2707 when a service account tries).
+Approvals take a different person than the one who proposed (ENC2707).
+In this release jobs in governed projects, and v1 asset approvals there,
+are refused (ENC2701): authorizations are registered, not yet enforced at
+execution.
+
+| | |
+|---|---|
+| `POST /v1/organizations/{id}/governance-keys` | organization or security admins. `{public_key, kms_key_ref?}` (hex Ed25519; `kms_key_ref` names where the private key lives, never key material). `proposed`, with its `key_id` |
+| `GET /v1/organizations/{id}/governance-keys` | the organization's members |
+| `POST /v1/organizations/{id}/governance-keys/{key}/approve` | a security admin other than the proposer. One active key per organization (409 while another is active) |
+| `POST /v1/organizations/{id}/governance-keys/{key}/revoke` | security or organization admins. Final; the key activates nothing any more (ENC2708) |
+| `POST /v1/projects/{id}/purposes` | a security admin of a member. `{organization, name, revision?, description?, legal_basis_ref?, modes, allowed_release_classes, recipients, linkage_policy_id?, min_aggregate_parties?, valid_from, valid_until}`. The ID is the PurposeId of the document (project included); `proposed`. 409 in a standard project |
+| `GET /v1/projects/{id}/purposes`, `GET /v1/purposes/{id}` | project members; a purpose shows its document and the organizations that `accepted_by` it |
+| `POST /v1/purposes/{id}/approve` | a security admin of the proposing organization other than the proposer: `active` |
+| `POST /v1/purposes/{id}/accept` | a security or organization admin of a member. `{acceptance}`: a `PurposeAcceptance {version, organization, project, purpose_id, accepted_at}` signed with the organization's active governance key (ENC2708 without one, ENC2701 under another key) |
+| `POST /v1/purposes/{id}/retire` | a security admin of the proposing organization. Final: the purpose takes no new authorization (ENC2706) |
+| `POST /v1/authorizations` | a data owner or security admin of the owner. `{body}`: an `AuthorizationV2` without approvals. It must name an active purpose of the project that its organization accepted (ENC2702), a dataset version the organization registered (ENC2704), a release class and recipients the purpose allows (ENC2709), the purpose's linkage policy (ENC2711), and a window inside the purpose's that is not over (ENC2705); one program or one program set, never a wildcard |
+| `GET /v1/authorizations/{id}` | the owner's members only. `body` is the document to sign, approvals included; once active, `authorization_id` and the `signed` document |
+| `POST /v1/authorizations/{id}/approve` | a person of the owner, in a role it holds there: `{role}`. One approval per person. By default two people, a data owner and a security admin, make it `approved` |
+| `POST /v1/authorizations/{id}/signature` | a data owner or security admin of the owner. `{public_key, signature}` over `body`, by the organization's active governance key: `active`. Refused before four eyes (ENC2707), under another key or over another body (ENC2701), under a revoked key (ENC2708), after revocation (ENC2706) or once over (ENC2705) |
+| `POST /v1/authorizations/{id}/revoke` | a data owner or security admin of the owner. `{reason, revocation?}` (the owner's signed `RevocationV2`, checked under its governance key). Final |
+
+Expiry is strict: `valid_from <= now < valid_until`, with no margin.
 
 ### Security
 

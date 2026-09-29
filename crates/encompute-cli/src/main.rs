@@ -3,6 +3,7 @@
 mod aggregate;
 mod attest;
 mod control;
+mod governance;
 mod launcher_sim;
 mod migrate;
 mod plan;
@@ -173,6 +174,13 @@ enum Cmd {
     Jobs {
         #[command(subcommand)]
         cmd: control::JobsCmd,
+    },
+    /// Governed projects: create a governance key file and sign
+    /// authorizations, purpose acceptances and revocations with it, outside
+    /// the control plane.
+    Governance {
+        #[command(subcommand)]
+        cmd: governance::GovernanceCmd,
     },
     /// Security checks on the control plane (`security legacy-service-admins`
     /// exits 1 while any service account still holds security_admin).
@@ -686,6 +694,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Security { cmd } => control::security(cmd),
+        Cmd::Governance { cmd } => governance::governance(cmd),
         Cmd::Audit {
             model,
             keys,

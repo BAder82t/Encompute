@@ -1,0 +1,1085 @@
+//! Governed projects: governance keys, purposes and owner authorizations
+//! (public-sector confidential data collaboration, phase 1).
+//!
+//! The control plane coordinates and enforces; it is not the authority.
+//! Each organization's consent is a signature by its own governance key,
+//! which stays in the organization's KMS or HSM (signing happens outside
+//! the control plane, e.g. `encompute governance sign`); only the public
+//! key, its fingerprint and its state are held here.
+//!
+//! Every step is taken by people of the organization concerned, never by a
+//! service account, an auditor, or someone homed in another organization
+//! ([`require_human`]); approvals take a different person than the one who
+//! proposed (four eyes, ENC2707).
+//!
+//! Not yet (later phases): enforcement of authorizations at job
+//! submission, scheduling, start and key release (jobs in governed
+//! projects are refused meanwhile), release tickets, and anchoring of
+//! revocations and retirements against database rollback.
+
+use std::collections::BTreeMap;
+
+use serde_json::{json, Value};
+
+use encompute_ir::{Code, Error, Result};
+use encompute_trust::authz::{governance_key_id, ApprovalEvidence, AuthorizationV2, Signed};
+use encompute_verification::governance::{Purpose, PURPOSE_VERSION};
+use encompute_verification::service::now;
+
+use crate::audit::{self, Outcome};
+use crate::authn::PrincipalKind;
+use crate::authz::{
+    conflict, forbidden, not_found, project_visible, require_human, require_other_person,
+    ProjectRow,
+};
+use crate::control::{Control, Ctx};
+use crate::db::db_err;
+use crate::model::{
+    bad, check_name, new_id, AcceptPurpose, ApproveAuthorization, AuthorizationSignature,
+    ProposeAuthorization, ProposeGovernanceKey, ProposePurpose, RevokeAuthorization, Role,
+};
+
+fn gov(code: Code, msg: impl Into<String>) -> Error {
+    Error::new(code, msg)
+}
+
+fn unique_violation(e: &postgres::Error) -> bool {
+    e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION)
+}
+
+/// A governed project the principal's organization collaborates in.
+fn governed_project(t: &mut postgres::Transaction<'_>, ctx: &Ctx, id: &str) -> Result<ProjectRow> {
+    let p = project_visible(t, &ctx.principal, id)?;
+    if !p.governed() {
+        return Err(conflict(format!(
+            "project {id} is a standard project: purposes and authorizations belong to governed projects"
+        )));
+    }
+    Ok(p)
+}
+
+/// The organization's active governance key: (public key, key ID).
+fn active_key(t: &mut postgres::Transaction<'_>, org: &str) -> Result<(String, String)> {
+    t.query_opt(
+        "SELECT public_key, key_id FROM governance_keys WHERE organization_id = $1 AND status = 'active'",
+        &[&org],
+    )
+    .map_err(db_err)?
+    .map(|r| (r.get(0), r.get(1)))
+    .ok_or_else(|| {
+        gov(
+            Code::GovernanceKeyRevoked,
+            format!("{org} has no active governance key"),
+        )
+    })
+}
+
+/// Verifies `check` (a signature check under `org`'s active key), naming
+/// a refusal by a revoked or unapproved key of `org` ENC2708, and any other
+/// ENC2701.
+fn under_active_key(
+    t: &mut postgres::Transaction<'_>,
+    org: &str,
+    presented: &str,
+    check: impl FnOnce(&str) -> Result<()>,
+) -> Result<String> {
+    let (active, key_id) = active_key(t, org)?;
+    if presented != active {
+        let state: Option<String> = t
+            .query_opt(
+                "SELECT status FROM governance_keys WHERE organization_id = $1 AND public_key = $2",
+                &[&org, &presented],
+            )
+            .map_err(db_err)?
+            .map(|r| r.get(0));
+        return Err(match state {
+            Some(s) => gov(
+                Code::GovernanceKeyRevoked,
+                format!("signed by a governance key of {org} that is {s}, not active"),
+            ),
+            None => gov(
+                Code::GovernanceAuthorizationMissing,
+                format!("signed by a key that is not {org}'s governance key"),
+            ),
+        });
+    }
+    check(&active).map_err(|e| {
+        gov(
+            Code::GovernanceAuthorizationMissing,
+            format!(
+                "the signature does not verify under {org}'s governance key: {}",
+                e.message
+            ),
+        )
+    })?;
+    Ok(key_id)
+}
+
+/// Window bounds are stored as signed 64-bit seconds.
+fn check_window(from: u64, until: u64) -> Result<()> {
+    if from > i64::MAX as u64 || until > i64::MAX as u64 {
+        return Err(bad("validity times are Unix seconds below 2^63"));
+    }
+    Ok(())
+}
+
+fn approver(ctx: &Ctx) -> Result<(String, String)> {
+    match &ctx.principal.kind {
+        PrincipalKind::User { issuer, subject } => Ok((issuer.clone(), subject.clone())),
+        PrincipalKind::Service { .. } => Err(gov(
+            Code::GovernanceFourEyesIncomplete,
+            "approvals are given by people, not services",
+        )),
+    }
+}
+
+impl Control {
+    // --- governance keys ---------------------------------------------------------
+
+    /// Registers `org`'s governance public key, for a different security
+    /// admin to approve. Only public keys: signing stays with the
+    /// organization.
+    pub fn propose_governance_key(
+        &self,
+        ctx: &Ctx,
+        org: &str,
+        r: ProposeGovernanceKey,
+    ) -> Result<Value> {
+        require_human(
+            &ctx.principal,
+            org,
+            &[Role::OrganizationAdmin, Role::SecurityAdmin],
+            "registering a governance key",
+        )?;
+        encompute_verification::EvaluatorIdentity::from_public_key_hex(&r.public_key)
+            .map_err(|_| bad("public_key must be a 32-byte Ed25519 key in lowercase hex"))?;
+        if let Some(k) = &r.kms_key_ref {
+            check_name("kms_key_ref", k)?;
+        }
+        let key_id = governance_key_id(&r.public_key);
+        let id = new_id("gky");
+        self.db.tx(|t| {
+            t.execute(
+                "INSERT INTO governance_keys (id, organization_id, key_id, public_key, kms_key_ref, status, proposed_by)
+                 VALUES ($1, $2, $3, $4, $5, 'proposed', $6)",
+                &[&id, &org, &key_id, &r.public_key, &r.kms_key_ref, &ctx.actor()],
+            )
+            .map_err(|e| {
+                if unique_violation(&e) {
+                    conflict("this governance key is registered already")
+                } else {
+                    db_err(e)
+                }
+            })?;
+            audit::append(
+                t,
+                ctx.draft("governance_key.proposed", "governance_key", &id, Outcome::Succeeded)
+                    .org(org)
+                    .r#ref("key_id", key_id.clone()),
+            )?;
+            Ok(json!({"id": id, "organization": org, "key_id": key_id, "status": "proposed"}))
+        })
+    }
+
+    /// A different person, a security admin of `org`, approves the key: it
+    /// becomes the organization's one active governance key.
+    pub fn approve_governance_key(&self, ctx: &Ctx, org: &str, id: &str) -> Result<Value> {
+        require_human(
+            &ctx.principal,
+            org,
+            &[Role::SecurityAdmin],
+            "approving a governance key",
+        )?;
+        self.db.tx(|t| {
+            let r = t
+                .query_opt(
+                    "SELECT status, proposed_by, key_id FROM governance_keys
+                      WHERE id = $1 AND organization_id = $2 FOR UPDATE",
+                    &[&id, &org],
+                )
+                .map_err(db_err)?
+                .ok_or_else(|| not_found("governance key", id))?;
+            let (status, proposer, key_id): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+            require_other_person(ctx.actor(), &[proposer.as_str()], "approving a governance key")?;
+            if status != "proposed" {
+                return Err(conflict(format!("governance key {id} is {status}")));
+            }
+            let active = t
+                .query_opt(
+                    "SELECT id FROM governance_keys WHERE organization_id = $1 AND status = 'active' FOR UPDATE",
+                    &[&org],
+                )
+                .map_err(db_err)?;
+            if active.is_some() {
+                return Err(conflict(format!(
+                    "{org} has an active governance key: revoke it before approving another"
+                )));
+            }
+            t.execute(
+                "UPDATE governance_keys SET status = 'active', approved_by = $2, approved_at = now() WHERE id = $1",
+                &[&id, &ctx.actor()],
+            )
+            .map_err(|e| {
+                if unique_violation(&e) {
+                    conflict(format!("{org} has an active governance key"))
+                } else {
+                    db_err(e)
+                }
+            })?;
+            audit::append(
+                t,
+                ctx.draft("governance_key.approved", "governance_key", id, Outcome::Succeeded)
+                    .org(org)
+                    .r#ref("key_id", key_id.clone()),
+            )?;
+            Ok(json!({"id": id, "organization": org, "key_id": key_id, "status": "active"}))
+        })
+    }
+
+    /// Revokes a governance key (proposed or active); never undone.
+    /// Signatures by it no longer activate anything.
+    pub fn revoke_governance_key(&self, ctx: &Ctx, org: &str, id: &str) -> Result<Value> {
+        require_human(
+            &ctx.principal,
+            org,
+            &[Role::SecurityAdmin, Role::OrganizationAdmin],
+            "revoking a governance key",
+        )?;
+        self.db.tx(|t| {
+            let r = t
+                .query_opt(
+                    "SELECT status, key_id FROM governance_keys WHERE id = $1 AND organization_id = $2 FOR UPDATE",
+                    &[&id, &org],
+                )
+                .map_err(db_err)?
+                .ok_or_else(|| not_found("governance key", id))?;
+            let (status, key_id): (String, String) = (r.get(0), r.get(1));
+            if status != "revoked" {
+                t.execute(
+                    "UPDATE governance_keys SET status = 'revoked', revoked_by = $2, revoked_at = now() WHERE id = $1",
+                    &[&id, &ctx.actor()],
+                )
+                .map_err(db_err)?;
+                audit::append(
+                    t,
+                    ctx.draft("governance_key.revoked", "governance_key", id, Outcome::Succeeded)
+                        .org(org)
+                        .r#ref("key_id", key_id.clone()),
+                )?;
+            }
+            Ok(json!({"id": id, "organization": org, "key_id": key_id, "status": "revoked"}))
+        })
+    }
+
+    /// `org`'s governance keys, to its members.
+    pub fn list_governance_keys(&self, ctx: &Ctx, org: &str) -> Result<Value> {
+        if !ctx.principal.member_of(org) {
+            return Err(not_found("organization", org));
+        }
+        let mut c = self.db.conn()?;
+        let rows = c
+            .query(
+                "SELECT id, key_id, public_key, kms_key_ref, status FROM governance_keys
+                  WHERE organization_id = $1 ORDER BY created_at, id",
+                &[&org],
+            )
+            .map_err(db_err)?;
+        Ok(Value::Array(
+            rows.iter()
+                .map(|r| {
+                    json!({"id": r.get::<_, String>(0), "organization": org,
+                           "key_id": r.get::<_, String>(1), "public_key": r.get::<_, String>(2),
+                           "kms_key_ref": r.get::<_, Option<String>>(3), "status": r.get::<_, String>(4)})
+                })
+                .collect(),
+        ))
+    }
+
+    // --- purposes ----------------------------------------------------------------
+
+    /// A security admin of a member organization proposes a purpose; its ID
+    /// is the PurposeId of the document (project included).
+    pub fn propose_purpose(&self, ctx: &Ctx, project: &str, r: ProposePurpose) -> Result<Value> {
+        require_human(
+            &ctx.principal,
+            &r.organization,
+            &[Role::SecurityAdmin],
+            "proposing a purpose",
+        )?;
+        let purpose = Purpose {
+            version: PURPOSE_VERSION,
+            project_id: project.to_owned(),
+            name: r.name.clone(),
+            revision: r.revision,
+            description: r.description.clone(),
+            legal_basis_ref: r.legal_basis_ref.clone(),
+            modes: r.modes.clone(),
+            allowed_release_classes: r.allowed_release_classes.clone(),
+            recipients: r.recipients.clone(),
+            linkage_policy_id: r.linkage_policy_id.clone(),
+            min_aggregate_parties: r.min_aggregate_parties,
+            valid_from: r.valid_from,
+            valid_until: r.valid_until,
+            created_by_org: r.organization.clone(),
+        };
+        check_window(purpose.valid_from, purpose.valid_until)?;
+        let id = purpose.id().hex();
+        let document = serde_json::to_value(&purpose).expect("serializable");
+        self.db.tx(|t| {
+            let p = governed_project(t, ctx, project)?;
+            if !p.members.contains(&r.organization) {
+                return Err(forbidden(format!(
+                    "{} is not a member of the project",
+                    r.organization
+                )));
+            }
+            purpose.check()?;
+            for o in &purpose.recipients {
+                if !p.members.contains(o) && !p.invited.contains(o) {
+                    return Err(bad(format!("recipient {o} is not in the project")));
+                }
+            }
+            if now() >= purpose.valid_until {
+                return Err(gov(
+                    Code::GovernanceAuthorizationExpired,
+                    "the purpose's window is over",
+                ));
+            }
+            t.execute(
+                "INSERT INTO purposes (id, project_id, organization_id, name, revision, document,
+                                       valid_from, valid_until, status, proposed_by)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'proposed', $9)",
+                &[
+                    &id,
+                    &project,
+                    &r.organization,
+                    &purpose.name,
+                    &(purpose.revision as i32),
+                    &document,
+                    &(purpose.valid_from as i64),
+                    &(purpose.valid_until as i64),
+                    &ctx.actor(),
+                ],
+            )
+            .map_err(|e| {
+                if unique_violation(&e) {
+                    conflict(format!(
+                        "purpose {} revision {} exists in this project: propose a new revision",
+                        purpose.name, purpose.revision
+                    ))
+                } else {
+                    db_err(e)
+                }
+            })?;
+            audit::append(
+                t,
+                ctx.draft("purpose.proposed", "purpose", &id, Outcome::Succeeded)
+                    .org(&r.organization)
+                    .project(project)
+                    .r#ref("name", purpose.name.clone()),
+            )?;
+            Ok(json!({"id": id, "project": project, "status": "proposed", "purpose": document}))
+        })
+    }
+
+    /// A different security admin of the proposing organization approves:
+    /// the purpose becomes active (and can then be accepted).
+    pub fn approve_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        self.db.tx(|t| {
+            let (project, org, status, proposer, valid_until) = purpose_row(t, id, true)?;
+            project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
+            if !ctx.principal.member_of(&org) {
+                return Err(forbidden(format!(
+                    "a purpose is approved by a security admin of its proposer, {org}"
+                )));
+            }
+            require_human(&ctx.principal, &org, &[Role::SecurityAdmin], "approving a purpose")?;
+            require_other_person(ctx.actor(), &[proposer.as_str()], "approving a purpose")?;
+            if status != "proposed" {
+                return Err(conflict(format!("purpose {id} is {status}")));
+            }
+            if now() >= valid_until {
+                return Err(gov(Code::GovernanceAuthorizationExpired, "the purpose's window is over"));
+            }
+            t.execute(
+                "UPDATE purposes SET status = 'active', approved_by = $2, approved_at = now() WHERE id = $1",
+                &[&id, &ctx.actor()],
+            )
+            .map_err(db_err)?;
+            audit::append(
+                t,
+                ctx.draft("purpose.approved", "purpose", id, Outcome::Succeeded)
+                    .org(&org)
+                    .project(&project),
+            )?;
+            Ok(json!({"id": id, "project": project, "status": "active"}))
+        })
+    }
+
+    /// A member organization accepts an active purpose with its governance
+    /// key (the signed acceptance is kept as evidence).
+    pub fn accept_purpose(&self, ctx: &Ctx, id: &str, r: AcceptPurpose) -> Result<Value> {
+        let a = r.acceptance.body.clone();
+        self.db.tx(|t| {
+            let (project, _, status, _, _) = purpose_row(t, id, true)?;
+            let p = project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
+            require_human(
+                &ctx.principal,
+                &a.organization,
+                &[Role::SecurityAdmin, Role::OrganizationAdmin],
+                "accepting a purpose",
+            )?;
+            if !p.members.contains(&a.organization) {
+                return Err(forbidden(format!("{} is not a member of the project", a.organization)));
+            }
+            if a.purpose_id != id || a.project != project {
+                return Err(gov(
+                    Code::GovernancePurposeMismatch,
+                    "the acceptance is for another purpose or project",
+                ));
+            }
+            match status.as_str() {
+                "active" => {}
+                "retired" => {
+                    return Err(gov(Code::GovernanceAuthorizationRevoked, format!("purpose {id} is retired")))
+                }
+                s => {
+                    return Err(gov(
+                        Code::GovernancePurposeMismatch,
+                        format!("purpose {id} is {s}: it is accepted once approved"),
+                    ))
+                }
+            }
+            let key_id = under_active_key(t, &a.organization, &r.acceptance.public_key, |k| {
+                r.acceptance.verify(k)
+            })?;
+            t.execute(
+                "INSERT INTO purpose_acceptances (purpose_id, organization_id, governance_key_id, acceptance, accepted_by)
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (purpose_id, organization_id) DO NOTHING",
+                &[
+                    &id,
+                    &a.organization,
+                    &key_id,
+                    &serde_json::to_value(&r.acceptance).expect("serializable"),
+                    &ctx.actor(),
+                ],
+            )
+            .map_err(db_err)?;
+            audit::append(
+                t,
+                ctx.draft("purpose.accepted", "purpose", id, Outcome::Succeeded)
+                    .org(&a.organization)
+                    .project(&project)
+                    .r#ref("governance_key", key_id.clone()),
+            )?;
+            Ok(json!({"id": id, "organization": a.organization, "accepted": true}))
+        })
+    }
+
+    /// A security admin of the proposing organization retires the purpose;
+    /// it takes no new authorization, and is never active again.
+    pub fn retire_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        self.db.tx(|t| {
+            let (project, org, status, _, _) = purpose_row(t, id, true)?;
+            project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
+            if !ctx.principal.member_of(&org) {
+                return Err(forbidden(format!(
+                    "a purpose is retired by a security admin of its proposer, {org}"
+                )));
+            }
+            require_human(&ctx.principal, &org, &[Role::SecurityAdmin], "retiring a purpose")?;
+            if status != "retired" {
+                t.execute(
+                    "UPDATE purposes SET status = 'retired', retired_by = $2, retired_at = now() WHERE id = $1",
+                    &[&id, &ctx.actor()],
+                )
+                .map_err(db_err)?;
+                audit::append(
+                    t,
+                    ctx.draft("purpose.retired", "purpose", id, Outcome::Succeeded)
+                        .org(&org)
+                        .project(&project),
+                )?;
+            }
+            Ok(json!({"id": id, "project": project, "status": "retired"}))
+        })
+    }
+
+    pub fn get_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        self.db.tx(|t| {
+            let r = t
+                .query_opt(
+                    "SELECT project_id, organization_id, status, document FROM purposes WHERE id = $1",
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .ok_or_else(|| not_found("purpose", id))?;
+            let (project, org, status, document): (String, String, String, Value) =
+                (r.get(0), r.get(1), r.get(2), r.get(3));
+            project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
+            let accepted: Vec<String> = t
+                .query(
+                    "SELECT organization_id FROM purpose_acceptances WHERE purpose_id = $1 ORDER BY 1",
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            Ok(json!({"id": id, "project": project, "organization": org, "status": status,
+                      "purpose": document, "accepted_by": accepted}))
+        })
+    }
+
+    pub fn list_purposes(&self, ctx: &Ctx, project: &str) -> Result<Value> {
+        self.db.tx(|t| {
+            governed_project(t, ctx, project)?;
+            let rows = t
+                .query(
+                    "SELECT id, name, revision, organization_id, status FROM purposes
+                      WHERE project_id = $1 ORDER BY name, revision, id",
+                    &[&project],
+                )
+                .map_err(db_err)?;
+            Ok(Value::Array(
+                rows.iter()
+                    .map(|r| {
+                        json!({"id": r.get::<_, String>(0), "name": r.get::<_, String>(1),
+                               "revision": r.get::<_, i32>(2), "organization": r.get::<_, String>(3),
+                               "status": r.get::<_, String>(4)})
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
+    // --- owner authorizations ------------------------------------------------------
+
+    /// A person of the owning organization proposes an authorization
+    /// (without approvals). It must fit an active purpose the organization
+    /// accepted, name a version the organization registered, and lie
+    /// within the purpose's window.
+    pub fn propose_authorization(&self, ctx: &Ctx, r: ProposeAuthorization) -> Result<Value> {
+        let b = r.body;
+        if !b.approvals.is_empty() {
+            return Err(bad(
+                "propose an authorization without approvals: people approve it through /approve",
+            ));
+        }
+        b.check()?;
+        check_window(b.valid_from, b.valid_until)?;
+        require_human(
+            &ctx.principal,
+            &b.party,
+            &[Role::DataOwner, Role::SecurityAdmin],
+            "proposing an authorization",
+        )?;
+        let id = new_id("atz");
+        self.db.tx(|t| {
+            let p = governed_project(t, ctx, &b.project)?;
+            if !p.members.contains(&b.party) {
+                return Err(forbidden(format!("{} is not a member of the project", b.party)));
+            }
+            let purpose = usable_purpose(t, &b.project, &b.purpose_id)?;
+            let accepted = t
+                .query_opt(
+                    "SELECT 1 FROM purpose_acceptances WHERE purpose_id = $1 AND organization_id = $2",
+                    &[&b.purpose_id, &b.party],
+                )
+                .map_err(db_err)?;
+            if accepted.is_none() {
+                return Err(gov(
+                    Code::GovernancePurposeMismatch,
+                    format!("{} has not accepted this purpose", b.party),
+                ));
+            }
+            if b.linkage_policy_id != purpose.linkage_policy_id {
+                return Err(gov(
+                    Code::GovernanceLinkageMismatch,
+                    "the authorization's linkage policy is not the purpose's",
+                ));
+            }
+            if !purpose.allowed_release_classes.contains(&b.release_class) {
+                return Err(gov(
+                    Code::GovernanceReleaseClass,
+                    format!("the purpose does not allow release class {}", b.release_class.as_str()),
+                ));
+            }
+            if let Some(o) = b.recipients.iter().find(|o| !purpose.recipients.contains(*o)) {
+                return Err(gov(
+                    Code::GovernanceReleaseClass,
+                    format!("{o} is not a recipient the purpose allows"),
+                ));
+            }
+            let asset = t
+                .query_opt(
+                    "SELECT id, status FROM assets WHERE version_id = $1 AND organization_id = $2",
+                    &[&b.asset_version_id, &b.party],
+                )
+                .map_err(db_err)?
+                .ok_or_else(|| {
+                    gov(
+                        Code::GovernanceAssetVersionMismatch,
+                        format!("{} registered no such dataset version", b.party),
+                    )
+                })?;
+            let (asset_id, asset_status): (String, String) = (asset.get(0), asset.get(1));
+            if asset_status != "active" {
+                return Err(gov(
+                    Code::GovernanceAuthorizationRevoked,
+                    format!("dataset version {asset_id} is {asset_status}"),
+                ));
+            }
+            if now() >= b.valid_until {
+                return Err(gov(Code::GovernanceAuthorizationExpired, "the authorization's window is over"));
+            }
+            if b.valid_from < purpose.valid_from || b.valid_until > purpose.valid_until {
+                return Err(gov(
+                    Code::GovernanceAuthorizationExpired,
+                    "the authorization's window reaches outside the purpose's",
+                ));
+            }
+            t.execute(
+                "INSERT INTO authorizations (id, organization_id, project_id, purpose_id, asset_id, asset_version_id,
+                                             body, valid_from, valid_until, status, proposed_by)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'proposed', $10)",
+                &[
+                    &id,
+                    &b.party,
+                    &b.project,
+                    &b.purpose_id,
+                    &asset_id,
+                    &b.asset_version_id,
+                    &serde_json::to_value(&b).expect("serializable"),
+                    &(b.valid_from as i64),
+                    &(b.valid_until as i64),
+                    &ctx.actor(),
+                ],
+            )
+            .map_err(db_err)?;
+            for o in &b.recipients {
+                t.execute(
+                    "INSERT INTO authorization_recipients (authorization_row, organization_id) VALUES ($1, $2)",
+                    &[&id, o],
+                )
+                .map_err(db_err)?;
+            }
+            audit::append(
+                t,
+                ctx.draft("authorization.proposed", "authorization", &id, Outcome::Succeeded)
+                    .org(&b.party)
+                    .project(&b.project)
+                    .r#ref("purpose", b.purpose_id.clone())
+                    .r#ref("asset", asset_id.clone()),
+            )?;
+            Ok(json!({"id": id, "organization": b.party, "project": b.project, "status": "proposed"}))
+        })
+    }
+
+    /// A person of the owning organization approves, in a role it holds
+    /// there. Each person approves once; once the organization's rule is
+    /// met (by default two people: a data owner and a security admin) the
+    /// authorization is ready for the owner's signature.
+    pub fn approve_authorization(
+        &self,
+        ctx: &Ctx,
+        id: &str,
+        r: ApproveAuthorization,
+    ) -> Result<Value> {
+        self.db.tx(|t| {
+            let row = authorization_row(t, ctx, id)?;
+            require_human(
+                &ctx.principal,
+                &row.org,
+                &[r.role],
+                &format!("approving an authorization as {}", r.role.as_str()),
+            )?;
+            if !matches!(row.status.as_str(), "proposed" | "approved") {
+                return Err(conflict(format!("authorization {id} is {}", row.status)));
+            }
+            let (issuer, subject) = approver(ctx)?;
+            let again = t
+                .query_opt(
+                    "SELECT 1 FROM authorization_approvals WHERE authorization_row = $1
+                        AND (approver_id = $2 OR (idp_issuer = $3 AND approver_subject = $4))",
+                    &[&id, &ctx.actor(), &issuer, &subject],
+                )
+                .map_err(db_err)?;
+            if again.is_some() {
+                return Err(gov(
+                    Code::GovernanceFourEyesIncomplete,
+                    "this person has approved already: four eyes are two different people",
+                ));
+            }
+            let evidence = ApprovalEvidence {
+                statement_digest: row.body.approval_statement(&issuer, &subject, r.role.as_str()),
+                approver_subject: subject.clone(),
+                idp_issuer: issuer.clone(),
+                auth_time: None,
+                acr: None,
+                amr: None,
+                role: r.role.as_str().to_owned(),
+                organization: row.org.clone(),
+                at: now(),
+            };
+            t.execute(
+                "INSERT INTO authorization_approvals (authorization_row, approver_id, idp_issuer, approver_subject,
+                                                      role, statement_digest, evidence)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &id,
+                    &ctx.actor(),
+                    &issuer,
+                    &subject,
+                    &r.role.as_str(),
+                    &evidence.statement_digest,
+                    &serde_json::to_value(&evidence).expect("serializable"),
+                ],
+            )
+            .map_err(db_err)?;
+            let doc = with_approvals(t, id, &row.body)?;
+            let (min, roles) = approval_rule(t, &row.project, &row.org)?;
+            let status = if doc.check_quorum(min, &roles).is_ok() {
+                "approved"
+            } else {
+                "proposed"
+            };
+            t.execute(
+                "UPDATE authorizations SET status = $2 WHERE id = $1",
+                &[&id, &status],
+            )
+            .map_err(db_err)?;
+            audit::append(
+                t,
+                ctx.draft("authorization.approved", "authorization", id, Outcome::Succeeded)
+                    .org(&row.org)
+                    .project(&row.project)
+                    .r#ref("role", r.role.as_str()),
+            )?;
+            Ok(json!({"id": id, "status": status, "approvals": doc.approvals.len()}))
+        })
+    }
+
+    /// The authorization as its owner's members see it: `body` is the
+    /// document to sign (approvals included).
+    pub fn get_authorization(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        self.db.tx(|t| {
+            let row = authorization_row(t, ctx, id)?;
+            let doc = with_approvals(t, id, &row.body)?;
+            let r = t
+                .query_one(
+                    "SELECT authorization_id, signed, governance_key_id FROM authorizations WHERE id = $1",
+                    &[&id],
+                )
+                .map_err(db_err)?;
+            let mut v = json!({"id": id, "organization": row.org, "project": row.project,
+                               "purpose_id": doc.purpose_id, "asset_version_id": doc.asset_version_id,
+                               "status": row.status, "body": doc});
+            if let Some(a) = r.get::<_, Option<String>>(0) {
+                v["authorization_id"] = json!(a);
+                v["signed"] = r.get::<_, Option<Value>>(1).unwrap_or(Value::Null);
+                v["governance_key_id"] = json!(r.get::<_, Option<String>>(2));
+            }
+            Ok(v)
+        })
+    }
+
+    /// The owner's governance-key signature over the approved document:
+    /// verified against the organization's active governance key, it makes
+    /// the authorization active.
+    pub fn sign_authorization(
+        &self,
+        ctx: &Ctx,
+        id: &str,
+        r: AuthorizationSignature,
+    ) -> Result<Value> {
+        self.db.tx(|t| {
+            let row = authorization_row(t, ctx, id)?;
+            require_human(
+                &ctx.principal,
+                &row.org,
+                &[Role::SecurityAdmin, Role::DataOwner],
+                "activating an authorization",
+            )?;
+            match row.status.as_str() {
+                "revoked" => {
+                    return Err(gov(
+                        Code::GovernanceAuthorizationRevoked,
+                        format!("authorization {id} is revoked"),
+                    ))
+                }
+                "active" => return Err(conflict(format!("authorization {id} is active already"))),
+                _ => {}
+            }
+            let doc = with_approvals(t, id, &row.body)?;
+            let (min, roles) = approval_rule(t, &row.project, &row.org)?;
+            doc.check_quorum(min, &roles)?;
+            usable_purpose(t, &row.project, &doc.purpose_id)?;
+            let asset_status: String = t
+                .query_one(
+                    "SELECT status FROM assets WHERE version_id = $1",
+                    &[&doc.asset_version_id],
+                )
+                .map_err(db_err)?
+                .get(0);
+            if asset_status != "active" {
+                return Err(gov(
+                    Code::GovernanceAuthorizationRevoked,
+                    "the dataset version is revoked",
+                ));
+            }
+            if now() >= doc.valid_until {
+                return Err(gov(
+                    Code::GovernanceAuthorizationExpired,
+                    "the authorization's window is over",
+                ));
+            }
+            let signed = Signed {
+                body: doc.clone(),
+                public_key: r.public_key.clone(),
+                signature: r.signature.clone(),
+            };
+            let key_id = under_active_key(t, &row.org, &r.public_key, |k| signed.verify(k))?;
+            let authorization_id = doc.id();
+            t.execute(
+                "UPDATE authorizations SET status = 'active', authorization_id = $2, signed = $3,
+                        governance_key_id = $4, activated_at = now() WHERE id = $1",
+                &[
+                    &id,
+                    &authorization_id,
+                    &serde_json::to_value(&signed).expect("serializable"),
+                    &key_id,
+                ],
+            )
+            .map_err(db_err)?;
+            audit::append(
+                t,
+                ctx.draft(
+                    "authorization.activated",
+                    "authorization",
+                    id,
+                    Outcome::Succeeded,
+                )
+                .org(&row.org)
+                .project(&row.project)
+                .r#ref("authorization_id", authorization_id.clone())
+                .r#ref("governance_key", key_id.clone()),
+            )?;
+            Ok(json!({"id": id, "status": "active", "authorization_id": authorization_id}))
+        })
+    }
+
+    /// A person of the owning organization revokes the authorization (with
+    /// the owner's signed revocation, when it has one). Final; it blocks
+    /// new use and is not retroactive.
+    pub fn revoke_authorization(
+        &self,
+        ctx: &Ctx,
+        id: &str,
+        r: RevokeAuthorization,
+    ) -> Result<Value> {
+        check_name("reason", &r.reason)?;
+        self.db.tx(|t| {
+            let row = authorization_row(t, ctx, id)?;
+            require_human(
+                &ctx.principal,
+                &row.org,
+                &[Role::SecurityAdmin, Role::DataOwner],
+                "revoking an authorization",
+            )?;
+            if row.status == "revoked" {
+                return Ok(json!({"id": id, "status": "revoked"}));
+            }
+            let authorization_id: Option<String> = t
+                .query_one(
+                    "SELECT authorization_id FROM authorizations WHERE id = $1",
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .get(0);
+            if let Some(rev) = &r.revocation {
+                if rev.body.party != row.org
+                    || authorization_id.as_deref() != Some(rev.body.authorization.as_str())
+                {
+                    return Err(bad("the signed revocation is for another authorization"));
+                }
+                under_active_key(t, &row.org, &rev.public_key, |k| rev.verify(k))?;
+            }
+            t.execute(
+                "UPDATE authorizations SET status = 'revoked', revoked_by = $2, revoked_at = now(),
+                        revocation = $3 WHERE id = $1",
+                &[
+                    &id,
+                    &ctx.actor(),
+                    &r.revocation
+                        .as_ref()
+                        .map(|x| serde_json::to_value(x).expect("serializable")),
+                ],
+            )
+            .map_err(db_err)?;
+            let mut d = ctx
+                .draft(
+                    "authorization.revoked",
+                    "authorization",
+                    id,
+                    Outcome::Succeeded,
+                )
+                .org(&row.org)
+                .project(&row.project)
+                .r#ref("reason", r.reason.clone());
+            if let Some(a) = &authorization_id {
+                d = d.r#ref("authorization_id", a.clone());
+            }
+            audit::append(t, d)?;
+            Ok(json!({"id": id, "status": "revoked"}))
+        })
+    }
+}
+
+/// (project, organization, status, proposer, valid_until) of a purpose.
+fn purpose_row(
+    t: &mut postgres::Transaction<'_>,
+    id: &str,
+    lock: bool,
+) -> Result<(String, String, String, String, u64)> {
+    let sql = if lock {
+        "SELECT project_id, organization_id, status, proposed_by, valid_until FROM purposes WHERE id = $1 FOR UPDATE"
+    } else {
+        "SELECT project_id, organization_id, status, proposed_by, valid_until FROM purposes WHERE id = $1"
+    };
+    let r = t
+        .query_opt(sql, &[&id])
+        .map_err(db_err)?
+        .ok_or_else(|| not_found("purpose", id))?;
+    Ok((
+        r.get(0),
+        r.get(1),
+        r.get(2),
+        r.get(3),
+        r.get::<_, i64>(4) as u64,
+    ))
+}
+
+/// An active purpose of `project` (ENC2702 if there is none, ENC2706 if it
+/// is retired), locked against a concurrent retirement.
+fn usable_purpose(t: &mut postgres::Transaction<'_>, project: &str, id: &str) -> Result<Purpose> {
+    let r = t
+        .query_opt(
+            "SELECT status, document FROM purposes WHERE id = $1 AND project_id = $2 FOR SHARE",
+            &[&id, &project],
+        )
+        .map_err(db_err)?
+        .ok_or_else(|| {
+            gov(
+                Code::GovernancePurposeMismatch,
+                "no such purpose in this project",
+            )
+        })?;
+    let status: String = r.get(0);
+    match status.as_str() {
+        "active" => {}
+        "retired" => {
+            return Err(gov(
+                Code::GovernanceAuthorizationRevoked,
+                "the purpose is retired",
+            ))
+        }
+        s => {
+            return Err(gov(
+                Code::GovernancePurposeMismatch,
+                format!("the purpose is {s}, not active"),
+            ))
+        }
+    }
+    serde_json::from_value(r.get(1)).map_err(|e| db_err(format!("stored purpose: {e}")))
+}
+
+struct AuthorizationRow {
+    org: String,
+    project: String,
+    status: String,
+    body: AuthorizationV2,
+}
+
+/// An authorization, locked, visible only to its owner's members (others
+/// get "not found").
+fn authorization_row(
+    t: &mut postgres::Transaction<'_>,
+    ctx: &Ctx,
+    id: &str,
+) -> Result<AuthorizationRow> {
+    let r = t
+        .query_opt(
+            "SELECT organization_id, project_id, status, body FROM authorizations WHERE id = $1 FOR UPDATE",
+            &[&id],
+        )
+        .map_err(db_err)?
+        .ok_or_else(|| not_found("authorization", id))?;
+    let org: String = r.get(0);
+    if !ctx.principal.member_of(&org) {
+        return Err(not_found("authorization", id));
+    }
+    Ok(AuthorizationRow {
+        org,
+        project: r.get(1),
+        status: r.get(2),
+        body: serde_json::from_value(r.get(3))
+            .map_err(|e| db_err(format!("stored authorization: {e}")))?,
+    })
+}
+
+/// The proposed body with its approvals, in a fixed order: the document
+/// the owner signs.
+fn with_approvals(
+    t: &mut postgres::Transaction<'_>,
+    id: &str,
+    body: &AuthorizationV2,
+) -> Result<AuthorizationV2> {
+    let approvals = t
+        .query(
+            "SELECT evidence FROM authorization_approvals WHERE authorization_row = $1
+              ORDER BY approved_at, approver_id",
+            &[&id],
+        )
+        .map_err(db_err)?
+        .iter()
+        .map(|r| {
+            serde_json::from_value(r.get(0)).map_err(|e| db_err(format!("stored approval: {e}")))
+        })
+        .collect::<Result<Vec<ApprovalEvidence>>>()?;
+    Ok(AuthorizationV2 {
+        approvals,
+        ..body.clone()
+    })
+}
+
+/// The organization's approval rule in the project: (minimum distinct
+/// people, role → count). Default: two people, a data owner and a security
+/// admin.
+fn approval_rule(
+    t: &mut postgres::Transaction<'_>,
+    project: &str,
+    org: &str,
+) -> Result<(usize, BTreeMap<String, u32>)> {
+    let r = t
+        .query_opt(
+            "SELECT min_distinct_humans, required_roles FROM approval_rules
+              WHERE project_id = $1 AND organization_id = $2",
+            &[&project, &org],
+        )
+        .map_err(db_err)?;
+    Ok(match r {
+        Some(r) => (
+            r.get::<_, i32>(0).max(2) as usize,
+            serde_json::from_value(r.get(1))
+                .map_err(|e| db_err(format!("stored approval rule: {e}")))?,
+        ),
+        None => (
+            2,
+            BTreeMap::from([
+                (Role::DataOwner.as_str().to_owned(), 1),
+                (Role::SecurityAdmin.as_str().to_owned(), 1),
+            ]),
+        ),
+    })
+}

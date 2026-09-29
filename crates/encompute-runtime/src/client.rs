@@ -100,6 +100,7 @@ impl ClientSession {
     fn header(&self, kind: Kind) -> Header {
         let (backend, backend_version) = self.kind.label();
         Header {
+            governance_id: None,
             kind,
             scheme: self.compiled.scheme().into(),
             backend: backend.into(),
@@ -115,6 +116,7 @@ impl ClientSession {
     fn expect(&self, kind: Kind) -> Expect<'_> {
         let (backend, backend_version) = self.kind.label();
         Expect {
+            governance_id: None,
             kind,
             scheme: self.compiled.scheme(),
             backend,
@@ -207,6 +209,7 @@ impl ClientSession {
         })?;
         let (backend, backend_version) = kind.label();
         env.check(&Expect {
+            governance_id: None,
             kind: Kind::SecretKey,
             scheme: compiled.scheme(),
             backend,
