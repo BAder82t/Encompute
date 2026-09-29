@@ -33,14 +33,27 @@ another:
      custom ID. The budget requires ε > 0 and 0 < δ < 1. There are no
      implicit defaults.
    - Every release derived from the asset debits this budget.
-   - Named levels map to a budget and noise. Their clip norm is 1, and each
-     affords about 10 full-participation releases:
+   - Named levels map to a budget and noise. Their clip norm is 1:
 
-     | Level | ε | δ | Noise multiplier |
-     |---|---|---|---|
-     | `standard` | 8 | 1e-5 | 2.2 |
-     | `strong` | 3 | 1e-6 | 6 |
-     | `maximum` | 1 | 1e-7 | 18 |
+     | Level | ε | δ | Listed noise multiplier | Effective, organization | Effective, record / patient / user / device |
+     |---|---|---|---|---|---|
+     | `standard` | 8 | 1e-5 | 2.2 | 2.2 | 4.4 |
+     | `strong` | 3 | 1e-6 | 6 | 6 | 12 |
+     | `maximum` | 1 | 1e-7 | 18 | 18 | 36 |
+
+     Without Poisson sampling nothing clips one unit inside a party's
+     contribution, so a record, patient, user or device is charged twice
+     the clip norm, like an organization. A level therefore uses twice its
+     listed noise for those units. The noise-to-sensitivity ratio is then
+     the same for every unit, and each level affords about 10
+     full-participation releases of a record-, patient- or user-level
+     budget (about 2.5 of an organization-level one). The program records
+     the level next to the effective noise (`... noise_multiplier 12.0
+     preset "strong"`), the compiler refuses a level whose noise is not
+     exactly that, and `privacy explain` and the trust report show
+     `preset=strong, sensitivity_factor=2, effective_noise_multiplier=12
+     (2x preset 6.0)`. The effective noise is what is sampled, charged and
+     written in receipts and ledgers.
 
      In Python: `asset(..., privacy="strong", unit="patient")`. `DP(epsilon,
      delta)` sets an explicit budget.
@@ -57,7 +70,8 @@ another:
      ```text
      aggregate "g" sum ... dp discrete_gaussian clip_norm 1.0 noise_multiplier 6.0
      ```
-     In Python: `secure_aggregate(..., privacy="strong")` or
+     In Python: `secure_aggregate(..., privacy="strong")` (the level's
+     noise for the units of the program's budgets) or
      `DiscreteGaussian(...)`.
    - Clipping:
      - Each party's vector is clipped to L2 norm `clip_norm` before encoding.
@@ -231,3 +245,39 @@ added later, samples patients with Poisson sampling and uses a Rényi DP
 accountant for Poisson-sampled releases (`rdp-poisson-zw2019`), which does
 account for sampling. The sampling rate is part of `DpMechanism` and of the
 `PrivacyPolicyId`. See `0017-patient-level-dp.md`.
+
+## Update (2026-09-28)
+
+An external security review of 0.3.0-rc.3 found two statements above too
+permissive. The code and the threat model now follow the rules below; the
+sections above are kept as they were decided.
+
+**Section 2, sealed outputs.** Sealed outputs of encrypted computation stay
+confidential, cost nothing, and need no mechanism. A secure-aggregation
+aggregate is always a release, even when sealed: the protocol unmasks it to
+the coordinator, which writes it out. So an aggregation of a budgeted asset
+always needs `dp` and a ledger (`aggregate serve --ledger`). The compiler
+refuses such an aggregation without `dp` (ENC2203); the aggregation spec,
+each owner and the receipt verifier refuse it too.
+
+**Section 4, the value of `k`.**
+- `k = 1` only for a unit inside a party (record, user, patient, device)
+  with Poisson sampling (DP-SGD): the attested workload clips each sampled
+  unit's gradient to the clip norm.
+- `k = 2` otherwise, including every unsampled unit. Encompute clips only
+  each party's whole contribution, so one unit may move it anywhere in the
+  clipping ball.
+
+`privacy explain` shows this as the `unit bound` line. The last paragraph
+of section 4 (per-unit clipping is the contributing workload's job) no
+longer lowers the charge: without sampling, a finer unit is charged as an
+organization is. A release for such a unit costs about four times the ρ it
+cost before, so the named levels in section 1 afford fewer releases for
+it. Example 09 now uses noise multiplier 12 to keep its costs: 5 releases
+permitted, the 6th denied.
+
+**Section 5, rounding.** Each curve value carries an allowance for its
+rounding error, and each epsilon is raised by a relative margin of 1e-12
+before the final rounding up, so accounting stays at or above a
+high-precision reference. Epsilons change around the 12th significant
+digit.

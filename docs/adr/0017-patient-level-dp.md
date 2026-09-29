@@ -132,3 +132,37 @@ never be claimed for a run that does not do them.
   count is shared.
 - Not covered: Hugging Face models, LLMs, distributed noise.
 - Assurance: INV-130 to INV-135, `examples/16_patient_private_lora`.
+
+## Update (2026-09-28)
+
+After an external security review of 0.3.0-rc.3, three points above are
+refined. The sections above are kept as they were decided.
+
+**One person in several parties' data.** The neighbouring relation (2) is
+one privacy unit inside one party. A patient whose records are held by k
+hospitals is protected at group level k: the released aggregate's
+sensitivity to that person is up to k times the per-unit sensitivity (under
+zCDP about k²ρ). Encompute cannot link units across parties. Declare
+budgets with this in mind, or de-duplicate patients across parties before
+training.
+
+**Rounding (3).** The arithmetic is rounded up. Each curve value carries an
+allowance for its rounding error, and each epsilon is raised by a relative
+margin of 1e-12 (`RELATIVE_MARGIN` in
+`crates/encompute-privacy/src/accountant.rs`). The comparison with the
+reference vectors is strict: never below the reference.
+
+**Public counts and salted digests (4, 7).** A dataset commitment no longer
+has to carry its number of units, and none is ever derived from the data.
+The sampling rate is set explicitly (`Privacy(sampling_rate=...)`) or
+derived as the batch size over the smallest number of units the owners
+approved for publication (`public_units=` in `private_dataset` and
+`private_text_dataset`); without either, the run is refused (ENC2501).
+That figure, if given, is released by the owner's consent, outside the
+differential-privacy guarantee. Dataset and grouping digests are salted
+commitments whose salt stays with the owner, so a guessed dataset cannot be
+tested against them.
+
+Unsampled units are also charged differently now: see the update to
+`0013-differential-privacy.md`. Only DP-SGD with Poisson sampling, as
+decided here, charges a unit inside a party one clip norm.

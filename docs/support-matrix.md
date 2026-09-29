@@ -68,7 +68,7 @@ maturin develop --release --features openfhe
 
 | Capability | Status | Details |
 |---|---|---|
-| PyTorch LoRA fine-tuning (`method="lora"`) | **Supported subset** | Models built from a bound factory (`encompute.torch.wrap_model`), never from a pickle. Attested workers, secure aggregation of LoRA updates, DP, sealed adapters and checkpoints, crash-safe rounds. PyTorch runs in plaintext inside the attested workload. Measured only on CPU with small models (see [performance.md](performance.md)). |
+| PyTorch LoRA fine-tuning (`method="lora"`) | **Supported subset** | Models built from a factory the worker image ships (`encompute.torch.models:tiny_classifier`, or a Hugging Face package's own `config.json`), through `encompute.torch.wrap_model`, never from a pickle. Other factories are refused before anything is imported (in a training spec: ENC2501). Attested workers, secure aggregation of LoRA updates, DP, sealed adapters and checkpoints, crash-safe rounds. PyTorch runs in plaintext inside the attested workload. Measured only on CPU with small models (see [performance.md](performance.md)). |
 | Hugging Face Transformers + PEFT (`method="peft-lora"`) | **Supported subset** | Sequence classification only. Architectures: **BERT** and **DistilBERT** (tested end to end). Safetensors weights, immutable revisions, no remote code. `transformers>=4.46,<5`, `peft>=0.12,<1`; CI tests 4.46 and 0.12. |
 | Hugging Face: RoBERTa | **Experimental** | Accepted by the package check, but not tested end to end. |
 | Hugging Face: any other architecture or task | **Unsupported** | Refused on import (ENC2504, MODEL PACKAGE REFUSED). This includes decoder-only language models (GPT, Llama, Mistral), generation, token classification and vision models. |
@@ -98,7 +98,7 @@ maturin develop --release --features openfhe
 | Python SDK (`encompute`) | **Supported** | Compile, run, test, explain, policies, planner, `Project`, `Client`. Requires Python 3.11 or later; CI tests 3.11 and 3.12. See [api-stability.md](api-stability.md) for which names are stable. |
 | `encompute.torch` | **Supported** | Needs the `torch` or `huggingface` extra. |
 | `encompute` CLI | **Supported** | Development-only flags (`--development`, `--mock-root`, `attest mock-root`, `attest simulate-launcher`, `plan --allow-development`) are unsupported in production. |
-| Assurance suite (`assurance-report`) | **Supported** (release gate) | Not published. 124 invariants. |
+| Assurance suite (`assurance-report`) | **Supported** (release gate) | Not published. 150 invariants. |
 
 ## Platforms
 

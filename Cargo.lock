@@ -808,6 +808,7 @@ version = "0.3.0-rc.3"
 dependencies = [
  "clap",
  "ed25519-dalek",
+ "encompute-control",
  "encompute-evaluator",
  "encompute-ir",
  "encompute-protocol",
@@ -815,6 +816,7 @@ dependencies = [
  "encompute-verification",
  "getrandom 0.2.17",
  "jsonwebtoken",
+ "postgres",
  "serde",
  "serde_json",
  "ureq",
@@ -903,6 +905,8 @@ dependencies = [
  "encompute-ir",
  "encompute-verification",
  "getrandom 0.2.17",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -919,6 +923,7 @@ dependencies = [
  "encompute-backend",
  "encompute-ckks",
  "encompute-ir",
+ "sha2 0.10.9",
 ]
 
 [[package]]

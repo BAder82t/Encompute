@@ -33,6 +33,7 @@ pub fn spec(round: u64, assets: &[(&str, f64)]) -> ReleaseSpec {
             clip_norm: 1.0,
             noise_multiplier: 5.0,
             sampling_rate: None,
+            preset: None,
         },
         codec: FixedPointCodec {
             clip_min: -1.0,

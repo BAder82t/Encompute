@@ -25,7 +25,8 @@ Then pick a brief:
 Other references:
 
 - [Security findings process](../docs/security-findings.md): severities,
-  fix targets, and what every finding must get.
+  fix targets, and what every finding must get, with every finding so far
+  (including the independent review of 0.3.0-rc.3) and what is still open.
 - [Known limitations](../KNOWN_LIMITATIONS.md) (repository root).
 - [Assurance suite](../docs/assurance.md): the invariant matrix.
 - [Deployment guide](../docs/deployment.md) and [API v1](../docs/api.md).
@@ -106,7 +107,7 @@ The canonical boundary diagram is in the
 
 Every security claim is an invariant `INV-nnn` in
 [`crates/encompute-assurance/src/catalog.rs`](../crates/encompute-assurance/src/catalog.rs)
-(124 entries). Each has up to four kinds of evidence: positive, negative,
+(150 entries). Each has up to four kinds of evidence: positive, negative,
 adversarial and end-to-end. Evidence is an assurance check in that crate
 or a reference to an existing test or script, and the report fails if a
 referenced test no longer exists. The matrix and the known gaps are in
@@ -129,6 +130,7 @@ referenced test no longer exists. The matrix and the known gaps are in
 | Enterprise deployment (control plane) | INV-156 to INV-165 |
 | Exact optimization, backend selection, key cache | INV-166 to INV-171 |
 | Release-candidate hardening: malformed input, network attacks, restarts, backups, key lifecycle, security fixes, migration, differential gate, optimizer tests | INV-172 to INV-191 |
+| Fixes for the independent review of 0.3.0-rc.3: state anchor, sharing and grant withdrawal, broker state and grants, evaluator keys and uploads, BGV noise and output ranges, DP release and sensitivity, training workload inputs, trust report and plan floor, supply chain | INV-192 to INV-217 |
 
 Run the report:
 

@@ -81,7 +81,7 @@ evaluator always learns, and what no part of Encompute covers.
 | Client (CLI, Python SDK) | Trusted by its owner | It holds the secret key, encrypts, decrypts and verifies. Everything protects the client's data from others, not from the client. |
 | OpenFHE v1.5.1 | Trusted (library) | Correct implementation of CKKS, BinFHE and BGV, and the hardness of RLWE/LWE at the chosen parameters. Encompute does not re-verify OpenFHE. |
 | Evaluator | Untrusted for confidentiality; trusted for correctness unless a proof is required; trusted for availability | It never receives a secret key. Without an execution proof, a wrong result it signs is attributable but not detected. |
-| Control plane | Partially trusted | Trusted for coordination and authorization decisions (who may act, which job exists). Not trusted for confidentiality (it holds no key, plaintext or ciphertext) or for trust decisions (reports are rebuilt from signed evidence). See 4.2 and 4.6 for what a compromised control plane can still do. |
+| Control plane | Partially trusted | Trusted for coordination and authorization decisions (who may act, which job exists). Not trusted for confidentiality (it holds no key, plaintext or ciphertext), for trust decisions (reports are rebuilt from signed evidence), or for which evaluator key a client accepts (clients pin receipt keys themselves, section 5). See 4.2 and 4.6 for what a compromised control plane can still do. |
 | PostgreSQL | Partially trusted | Holds identities, roles, jobs, ledgers and the audit chain. Trusted for availability and for authorization state; rollback of privacy and audit state is detected against the anchor. |
 | State anchor | Trusted storage | Must be outside the database attacker's reach. It holds a signed, monotonic counter with the audit root and ledger checkpoints. |
 | Key broker | Trusted by its owner | Each owner runs its own. It decides key release against the owner's attestation policy. |
@@ -128,8 +128,10 @@ parameters; for verified execution, the client's own re-execution.
 - Decrypted results are never returned to the evaluator (section 5).
 - Inputs are within their declared ranges; the client checks this before
   encrypting.
-- The client pins the right evaluator key (`--trust-evaluator`, or the key
-  pinned in the key directory on first use).
+- The client pins the right evaluator key. For a direct remote run:
+  `--trust-evaluator`, or the key pinned in the key directory on first
+  use. For a job a control plane schedules: the client's own pin set
+  (section 5, condition 6).
 
 **Prevented or detected:**
 
@@ -138,7 +140,8 @@ parameters; for verified execution, the client's own re-execution.
 | Decrypt inputs, intermediates or outputs | The evaluator never receives a secret key: the client runs key generation (`crates/encompute-openfhe-client/cpp/client.cc`, `binclient.cc`) and sends only evaluation keys; the evaluator binary contains no Encompute client crypto (`scripts/audit-evaluator-binary.sh`) | INV-010, INV-011 |
 | Learn a branch outcome | Both branches of a `select` are computed; there is no data-dependent control flow in plans (`crates/encompute-exact/src/lower.rs`, `circuit.rs`) | INV-002, INV-166 |
 | Feed a ciphertext of another kind, scheme, parameter set, program or key | Envelope checks before any OpenFHE call (`crates/encompute-protocol/src/lib.rs` `Envelope::check`; `crates/encompute-openfhe-exact/src/lib.rs` `open`, `OpenFheGates::load`) | INV-006, INV-008, INV-152, INV-153 |
-| Run a ciphertext under another client's evaluation keys | Sessions use only keys registered with them; a ciphertext runs only under the key its envelope names (`crates/encompute-evaluator/src/session.rs`, `keycache.rs`) | INV-171 |
+| Run a ciphertext under another client's evaluation keys | Sessions use only keys registered with them; a ciphertext runs only under the key its envelope names (`crates/encompute-evaluator/src/session.rs`, `keycache.rs`); OpenFHE key tags are bound to the key material (4.3) | INV-171 |
+| Return a wrong exact result that decrypts outside the output's proven range | The client compares every decrypted exact output with the interval range analysis proves for it, and refuses the result if it lies outside (`crates/encompute-runtime/src/client.rs`) | `exact_outputs_outside_their_proven_range_are_refused` |
 | Replay or transfer a receipt to another request, output, program, policy or evaluator | The receipt signs commitments to the exact request and response bytes and the spec (`crates/encompute-verification/src/receipt.rs`, `verify.rs`); the client verifies before decrypting (`crates/encompute-runtime/src/client.rs`) | INV-020, INV-021 |
 | Return a random, replayed, skipped, substituted or mutated result for a verified program | Re-execution proof on BGV: the client re-runs the computation and decrypts only on a byte-for-byte match (`crates/encompute-vfhe/src/lib.rs`, `crates/encompute-verification/src/proof.rs`) | INV-022 (research build) |
 | Crash the client or evaluator with malformed input | Encompute's parsers are length-checked and never panic (`crates/encompute-protocol`, `crates/encompute-ir`) | INV-007 |
@@ -149,7 +152,8 @@ parameters; for verified execution, the client's own re-execution.
 - **A signed lie without a proof.** For CKKS and BinFHE programs, and for
   BGV programs without `verification="required"`, the evaluator can return
   a wrong result with a valid receipt. The receipt makes the claim
-  attributable; it does not detect it.
+  attributable; it does not detect it. The client's range check catches
+  only exact results outside their proven interval.
 - A malformed ciphertext crafted to exploit OpenFHE's deserializer in the
   client when it loads the response. Envelopes are checked first, but
   OpenFHE's parsers are not fuzzed (see [cryptography.md](cryptography.md),
@@ -177,6 +181,8 @@ is the measurement); each owner's key broker and KMS.
   evidence and development key stores.
 - Each attestation policy names the approved images, TEE types, minimum
   TCB and the approved execution spec and policy.
+- The broker keys a workload trusts are fixed before attestation: in the
+  training spec (`key_brokers`) or in the image (`/app/broker-keys`).
 
 **Prevented or detected:**
 
@@ -187,6 +193,12 @@ is the measurement); each owner's key broker and KMS.
 | Present development (mock) evidence to a production broker | Production mode refuses non-production evidence, development policies and development stores (`crates/encompute-keybroker/src/lib.rs`) | INV-043, INV-143 |
 | Replay stale evidence or reuse a challenge | Single-use challenges, 300 s challenge lifetime, freshness checks (`crates/encompute-keybroker/src/lib.rs` `verify_attestation`; `crates/encompute-attestation/src/provider.rs` `check_freshness`) | INV-040, INV-146 |
 | Read a released key while relaying it | The key is HPKE-sealed to a session key generated inside the TEE (`crates/encompute-attestation/src/grant.rs`) | INV-041 |
+| Seal a key of the host's choosing to the workload (for example, substitute a training output key), by forging a grant or pointing the workload at another broker | The broker signs every grant (Ed25519 over the header, encapsulated key and ciphertext; the header names the signing key). The workload opens only grants whose signature verifies, and accepts only a signer bound into its attested identity: the training spec's `key_brokers` (broker ID to grant-signing key, part of the spec ID), or, for the FHE workload, `/app/broker-keys` in the measured image. The operator supplies only the broker's address. With any attester other than the development (mock) one, an unpinned broker is refused; all grants of one broker session must carry one signer (`grant.rs`; `crates/encompute-keybroker/src/workload.rs` `acquire_keys`; `crates/encompute-training/src/spec.rs`; `deploy/confidential-space/run-workload.sh`) | INV-182; `a_hardware_workload_refuses_an_unpinned_broker`, `grants_from_two_signers_in_one_session_are_refused`, `only_broker_keys_from_the_attested_identity_are_trusted`, `a_spec_binds_its_key_brokers` |
+| Change a training job through its job descriptor (configuration, input adapter, plan, image) | The training configuration comes from the spec; values the descriptor repeats must equal it. The input adapter must be the spec's initial adapter (round 1) or the one the coordinator signed for the previous round. The plan must be the spec's and sample at its rate. The image digest in the worker's evidence comes from its own attestation. The descriptor sets only the round's seed, which the signed evidence records and which does not drive DP-SGD sampling, and the microbatch size, which does not change the result. The evidence commits to the input adapter, the configuration digest and the seed (`python/encompute/torch/cs_worker.py`, `worker.py`; `crates/encompute-training/src/worker.rs`) | `a_worker_trains_only_from_the_previous_recorded_adapter`, `worker_evidence_binds_its_spec_assets_and_attestation`, `test_the_descriptor_cannot_change_the_training`, `test_the_evidence_binds_what_the_worker_trained_from_and_with` |
+| Name arbitrary code as the model factory, so the worker runs it after opening the data | The spec validator accepts only the factories the worker image ships (`encompute.torch.models:tiny_classifier`, or `encompute.torch.hf:from_config` with exactly the model package's own `config.json`), with schema-checked arguments, before any key is released. A worker whose own code digest differs from the spec's `code_digest` refuses before it attests (`crates/encompute-training/src/spec.rs` `Architecture`; `python/encompute/torch/worker.py` `check_code`) | `a_spec_names_only_an_allowlisted_factory`, `test_models_build_only_allowlisted_factories`, `test_the_worker_refuses_other_code_before_any_key` |
+| Turn on test hooks (update canaries, failpoints) in a production worker | Test hooks are honoured only when the worker's own attestation is development (mock) evidence, whatever the environment says (`python/encompute/torch/worker.py` `development`) | `test_test_hooks_are_off_with_hardware_attestation` |
+| Edit a key broker's state file to change what is released to whom (release policies, mode, organization, key versions, revocations) | The state is authenticated with an HMAC under a key derived from the KEK, and a production broker refuses a store that cannot authenticate it (4.8) | `an_edited_state_file_does_not_open`, `a_production_store_must_authenticate_state` |
+| Learn an asset's release policy from a refused key request | A refusal tells the caller what its own evidence shows, never the expected spec, policies, artifact or minimum TCB; the full reason goes only to the broker's log (`crates/encompute-attestation/src/policy.rs` `public_denial`; `crates/encompute-keybroker/src/server.rs`) | `public_denials_withhold_expected_values`, `refusals_do_not_reveal_the_release_policy` |
 | Substitute the evaluator key or session key in the evidence | Both are in the binding hash that is the token's nonce (`crates/encompute-attestation/src/binding.rs`) | INV-040 |
 | Read an individual contribution while running the SecAgg coordinator | Masking (4.4) | INV-052 |
 | Exfiltrate plaintext weights, records or gradients from the training workload | Sealed inputs and outputs, bound to spec and attestation (`crates/encompute-training/src/seal.rs`, `worker.rs`) | INV-147, INV-148 (tested deployment) |
@@ -198,10 +210,8 @@ is the measurement); each owner's key broker and KMS.
   attestation service.
 - A workload image that is itself malicious but approved.
 - Denial of service, including refusing to run or restarting services.
-- **Grant authenticity.** The key broker does not sign grants, and HPKE
-  base mode does not authenticate the sender. The workload knows a grant
-  opens under its session key, not that its broker produced it. Run the
-  broker behind TLS that the workload verifies.
+- Failing a training job: the operator can always withhold or alter its
+  job descriptor so that the worker refuses.
 - Local modes: `run --mode encrypted` without `--remote` runs client and
   evaluator in one process. Anyone who compromises that process sees both.
 
@@ -234,6 +244,12 @@ stay within the declared `colluding` bound.
 | Use a program an asset owner did not approve | Owner-signed program authorizations in the trust graph (`crates/encompute-trust/src/authz.rs`, `report.rs`) | INV-102 |
 | Declassify or misuse data against its policy | Compile-time policy checks (`crates/encompute-analysis/src/confidentiality.rs`) | INV-030, INV-031, INV-032, INV-033 |
 | Run a ciphertext under another client's keys on a shared evaluator | Key-cache isolation (as in 4.1) | INV-171 |
+| Replace another client's OpenFHE evaluation keys on a shared evaluator by uploading keys under its key tag | OpenFHE looks keys up by tag alone, in process-wide maps. The shim checks an upload completely before inserting anything, requires the keys inside to carry the tag they are sent under, and binds each loaded tag to the SHA-256 of its key material: an upload naming a tag already loaded from other bytes is refused. Keys registered under key ID K are exactly the material whose SHA-256 is K (`crates/encompute-openfhe/cpp/shim.cc` `load_evaluation_keys`; `crates/encompute-evaluator/src/keycache.rs`) | INV-171; `another_clients_keys_under_the_victims_tag_are_never_used` |
+| Crash a shared evaluator with crafted BinFHE bootstrapping keys | The refresh and switching keys are checked against the vetted context (GINX method, dimensions, moduli) before any gate runs (`crates/encompute-openfhe/cpp/binfhe.cc` `bin_load_keys`) | `foreign_bootstrapping_keys_are_refused_before_any_gate` |
+| Load a program onto a shared evaluator without a grant for it | With a control plane, the upload's grant must name the program before anything is compiled or loaded; a refused upload changes nothing (`crates/encompute-evaluator/src/server.rs`) | INV-176; `a_refused_program_upload_loads_nothing` |
+| Learn which programs other tenants run, or whether their keys are registered | With a control plane, `/v1/info` lists only the program a presented grant names, and the key lookup needs a grant for the program (`server.rs`) | `with_a_control_plane_programs_and_keys_are_not_advertised` |
+| Use assets approved for a project before the organization joined it | An asset approval covers the organizations that were active project members when the owner approved it; a later member needs a new approval (`crates/encompute-control/src/ops/assets.rs`; table `asset_approval_members`, migration 0003) | `a_late_joiner_inherits_no_asset_approval` |
+| Add an organization to a project without its consent | The project owner's admins invite; the invited organization is a member only once its own admins accept. The answer to an invitation is the same whether or not the organization exists (`crates/encompute-control/src/ops/tenancy.rs`) | `membership_needs_the_invited_organizations_consent` |
 
 **Out of scope:**
 
@@ -247,6 +263,13 @@ stay within the declared `colluding` bound.
   rounds with different participant sets.
 - A client that encrypts out-of-range values: its own results are wrong;
   no other party's data is affected.
+- A targeted denial of service on a shared evaluator: a client that knows
+  another client's key tag (it is in every ciphertext) can upload its own
+  keys under it first. The victim's upload is then refused until those
+  keys are evicted. The victim's results are never computed under the
+  wrong keys.
+- Program-upload grants are reusable until they expire and are not bound
+  to one client.
 
 ### 4.4 Malicious coordinator (secure aggregation)
 
@@ -275,6 +298,9 @@ DP noise, the coordinator's attestation when the plan requires it.
 | Rerun a round with other survivors to difference two aggregates | Parties refuse rounds not newer than the last they joined (`crates/encompute-secagg/src/round.rs`) | INV-054 |
 | Release with too few contributors | Abort below the threshold and below `minimum` (`protocol.rs`, `round.rs`) | INV-051 |
 | Release without noise, or with weaker noise, where DP is declared | The release path always samples noise; weaker mechanisms are not the approved spec (`crates/encompute-privacy/src/release.rs`) | INV-062 |
+| Release a budgeted asset's aggregate exactly, with no ledger charge, by declaring the output sealed | A secure-aggregation aggregate is always a release: the protocol unmasks it to the coordinator, which writes it out. A plan with any privacy-budgeted contributor must add DP noise and charge the ledger, whatever the destination. Such a plan without `dp` does not compile, is not a valid aggregation spec, a budgeted party does not join its round, and the coordinator does not release it (`crates/encompute-analysis/src/confidentiality.rs`; `crates/encompute-secagg/src/round.rs`) | INV-062; `a_sealed_budgeted_aggregate_without_dp_is_not_a_valid_spec`, `a_budgeted_party_does_not_join_a_round_without_dp`, `a_sealed_budgeted_aggregate_without_dp_does_not_compile` |
+| Release a budgeted asset without a control-plane reservation | With a control plane, every budgeted asset must map to its control-plane asset (`--control-asset`) and hold this round's local reservation before anything is sent or released. The control plane refuses a reservation whose declared sensitivity is below what its own noise and mechanism imply for the ledger's unit (ENC2204) (`crates/encompute-cli/src/aggregate.rs`; `crates/encompute-control/src/ops/assets.rs` `check_reservation`) | INV-186; `unmapped_budgeted_assets_release_nothing`, `a_control_plane_coordinator_needs_every_budgeted_mapping_before_the_round`, `a_reservation_cannot_under_declare_its_sensitivity` |
+| Make a party rejoin a round by racing or crashing its state updates | The party's `--state` is updated under an exclusive lock, re-read, only ever raised, and replaced atomically (temporary file, fsync, rename). The last round joined is kept per aggregation spec (`crates/encompute-cli/src/aggregate.rs`) | `concurrent_state_updates_are_never_lost`, `state_is_monotonic_and_per_spec` |
 | Rewrite, truncate or roll back a ledger | Hash-chained ledgers; owners holding a later checkpoint detect rollback (`crates/encompute-privacy/src/ledger.rs`) | INV-066, INV-067 |
 | Forge a privacy receipt or aggregation receipt | Ed25519 signatures over every field (`release.rs`, `round.rs`) | INV-068, INV-054 |
 | Run unattested where the plan requires an attested coordinator | Parties check the coordinator's attestation at join (`round.rs`) | INV-043 (`attested_coordinator_round`), INV-112 |
@@ -291,6 +317,10 @@ DP noise, the coordinator's attestation when the plan requires it.
   not signed by the coordinator. Protection rests on the party-signed
   contents.
 - Timing side channels of noise sampling.
+- **Exact control-plane charges.** The control plane does not hold the
+  release's codec, so it bounds a reservation's charge instead of
+  recomputing it. The reservation's `noise_multiplier` and
+  `sampling_rate` are the coordinator's own declaration.
 
 ### 4.5 Compromised user account
 
@@ -304,17 +334,19 @@ by key brokers; FHE plaintexts.
 **Trusted components:** the OIDC provider; the control plane's
 authorization code; the key brokers; the clients' own verification.
 
-**Assumptions:** tokens are short-lived; the organization's admins can
-disable the user.
+**Assumptions:** tokens are short-lived; the organization's admins
+disable the user (`POST /v1/organizations/{id}/users/{user}/disable`).
 
 **Prevented or detected:**
 
 | Attack | Enforced by | Evidence |
 |---|---|---|
 | Read or use another organization's resources without a collaboration grant | Membership and role checks on every route, SQL filters on organization IDs (`crates/encompute-control/src/authz.rs`, `ops/*.rs`) | INV-156 |
-| Use a forged, expired, wrong-audience or wrong-issuer token, or an HMAC token against an OIDC issuer | Signature against the issuer's JWKS, issuer, audience, expiry, asymmetric algorithms only (`crates/encompute-control/src/authn.rs`) | INV-156 (`credentials_are_checked`), INV-164 |
-| Use a development token in production | Refused in configuration, at start and per token (`config.rs`, `authn.rs`) | INV-164 |
-| Approve its own policy | Four eyes: the approver must differ from the proposer (`crates/encompute-control/src/ops/policies.rs`) | `every_route_authenticates_authorizes_and_isolates` |
+| Use a forged, expired, not-yet-valid, over-long, wrong-audience or wrong-issuer token, or an HMAC token against an OIDC issuer | Signature against the issuer's JWKS, issuer, audience, expiry, `nbf`, asymmetric algorithms only; `iat` is required and not in the future, and `exp - iat` is at most `ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS` (default 86400) (`crates/encompute-control/src/authn.rs`) | INV-156 (`credentials_are_checked`), INV-164; `identity_tokens_have_bounded_lifetimes` |
+| Use a development token in production | Refused in configuration, at start and per token (`config.rs`, `authn.rs`). `ENCOMPUTE_ENV` must be `production` or `development`; unset or any other value refuses to start | INV-164; `unset_or_misspelt_environment_refuses_to_start` |
+| Approve its own policy, or meet four eyes alone with a second key | Four eyes: the approver is a different person holding `security_admin` in the project owner's organization; the author must be a person too. Service accounts cannot hold `security_admin`, propose or approve (`crates/encompute-control/src/ops/policies.rs`, `ops/tenancy.rs`) | `every_route_authenticates_authorizes_and_isolates`, `policy_four_eyes_are_two_people_of_the_projects_owner` |
+| Keep a grant after it is withdrawn | Every grant has an audited API revocation, effective from the next request: disable a user (`POST /v1/organizations/{id}/users/{user}/disable`), remove a role (`POST /v1/organizations/{id}/memberships/remove`), remove a project member (`POST /v1/projects/{id}/members/remove`), withdraw an asset approval (`POST /v1/assets/{id}/approvals/withdraw`). Jobs not yet started that lose the grant fail (`crates/encompute-control/src/api.rs`, `ops/tenancy.rs`, `ops/assets.rs`) | `every_grant_can_be_withdrawn_through_the_api` |
+| Register a key broker under another organization's broker ID, to receive its assets' revocations | An asset's key messages go to, and are accepted from, only a key broker owned by the platform or by the asset's organization (`ops/tenancy.rs`, `ops/assets.rs`, `ops/jobs.rs`) | `a_tenant_cannot_squat_another_organizations_key_broker` |
 | Obtain an asset key | Key release depends on attestation, not on the control plane (`crates/encompute-keybroker`) | INV-041 |
 | Make a job's trust report say trusted | Reports are rebuilt from signed evidence (`crates/encompute-control/src/ops/jobs.rs`) | INV-165 |
 | Keep using a revoked asset | Revocation fails queued jobs, refuses new submissions and destroys broker keys | INV-161 |
@@ -326,9 +358,15 @@ disable the user.
   `ml_developer` can submit jobs; an `organization_admin` can add users
   and service accounts.
 - A compromised identity provider.
+- **Issuers are not bound to organizations.** An organization admin can
+  register an identity (issuer and subject) that another organization
+  intends to onboard, and `create_user` answers a taken identity with a
+  conflict, which tells the caller it exists.
 - Token revocation before expiry. A disabled user is refused, but a valid
   token for an active user works until it expires. A signing key removed
-  from the provider's JWKS stays trusted until the control plane restarts.
+  from the provider's JWKS stays trusted until the control plane refetches
+  the key set, which it does only when a token names an unknown key (at
+  most once a minute), or restarts.
 
 ### 4.6 Database attacker
 
@@ -356,15 +394,27 @@ rollback.
 | Read keys, plaintext data, weights or input values | The database holds identifiers, digests and wrapped-key references only; audit records carry no payloads (`crates/encompute-control/src/audit.rs`) | INV-162 |
 | Edit records so a job looks trusted | Trust reports are rebuilt from signed evidence and trusted keys on every request (`ops/jobs.rs`) | INV-165 |
 | Restore an older database to undo privacy spending or audit events | Startup compares the database with the signed anchor and refuses a rollback until an operator freezes the affected ledgers (`crates/encompute-control/src/control.rs`, `anchor.rs`) | INV-159, INV-160 |
+| Roll a ledger or the audit chain back while the service runs, so that the fork is later anchored | The anchor only records a ledger checkpoint or audit root that extends the anchored one. A spend on a ledger that no longer extends the anchor is refused at once (ENC2202, PRIVACY STATE ROLLBACK), and an audit checkpoint over a chain that does not extend the anchored root is refused (AUDIT STATE ROLLBACK); both raise `encompute_state_rollback_total` (`ops/assets.rs` `privacy_spend`, `control.rs` `checkpoint_audit`, `anchor.rs`) | INV-160, INV-162; `online_ledger_rollback_is_refused_and_never_anchored`, `online_audit_rollback_is_never_reanchored` |
+| Unfreeze a frozen ledger, by a database update or by restoring a backup and running recovery again | Frozen ledgers are recorded in the anchor. A spend on one is refused (ENC2201) whatever the database says; startup refuses a database in which it is unfrozen (FREEZE STATE ROLLBACK); recovery freezes it again (`ops/assets.rs`, `control.rs`) | `a_frozen_ledger_stays_frozen_whatever_the_database_says` |
+| Restore a database to undo a revocation, a disabled service account or user, a cancelled or failed job, a withdrawn asset approval, an organization leaving a project, or a removed role | These transitions are anchored before they are acknowledged. Startup refuses a database that undoes one (REVOCATION, SERVICE ACCOUNT, USER, JOB, APPROVAL, MEMBERSHIP or ROLE STATE ROLLBACK); recovery re-applies them (`anchor.rs`, `control.rs`). A role granted again after its removal is a new membership, never the anchored one | INV-178; `restore_and_recovery_keep_disables_and_cancellations`, `restore_and_recovery_keep_withdrawn_approvals`, `restore_and_recovery_keep_a_left_project_left`, `restore_and_recovery_keep_a_removed_role_removed` |
+| Make a key broker destroy a key for a revocation that a restore then forgets | A key broker receives an asset's revocation only after the anchor records it (`ops/jobs.rs` `deliver_outbox`) | `broker_revocation_is_delivered_only_once_anchored` |
 | Edit, delete or reorder audit events up to the last anchored checkpoint | Hash chain, signed checkpoints, anchored root (`audit.rs`) | INV-162 |
 
 **Out of scope:**
 
 - Denial of service; hiding jobs from their owners.
-- **Changing authorization state.** Roles, memberships, service accounts
-  and approvals live in the database. A database attacker can grant
+- **Authorization changes by a database writer.** Roles, memberships,
+  service accounts and approvals live in the database, and only their
+  security-negative transitions (revocations, disables, frozen ledgers,
+  cancelled and failed jobs, withdrawn approvals, removed project
+  memberships, removed roles) are anchored. A database attacker can grant
   itself any role and act as the control plane would. It still cannot
   decrypt, release a key or forge a receipt.
+- **More than one control-plane process per anchor.** Updates are
+  compare-and-set, and a process that loses the race reloads and
+  re-applies, but only one replica per anchor is supported. The anchor is
+  rewritten whole on each update, and its sets of ended jobs, withdrawn approvals, removed project
+  memberships and removed roles grow without bound.
 - Editing audit events after the last anchored checkpoint (one every 100
   events by default, `ENCOMPUTE_AUDIT_CHECKPOINT_EVERY`). The chain hash is
   unkeyed.
@@ -394,7 +444,8 @@ deployment.
 | Attack | Enforced by | Evidence |
 |---|---|---|
 | Forge or alter a service request | Ed25519 over method, path, sender, recipient, timestamp, nonce and body hash (`crates/encompute-verification/src/service.rs`) | INV-156 (`credentials_are_checked`) |
-| Replay a service request to the control plane | ±300 s window and a nonce store in PostgreSQL (`crates/encompute-control/src/authn.rs`) | INV-156 |
+| Repeat a query parameter so that the signed request and the request the recipient acts on differ | The signature covers the sorted query, so every verifier refuses a request target that names a parameter twice, even when it was signed (`service.rs` `repeats_a_query_parameter`) | `signed_requests_bind_everything`, `duplicate_query_parameters_are_refused` |
+| Replay a service request to the control plane | ±300 s window and a nonce store in PostgreSQL. A nonce is kept until the request could no longer be accepted, plus a margin (`max(now, timestamp) + 300 s + 60 s`), by the control plane's own clock (`crates/encompute-control/src/authn.rs`) | INV-156; `nonces_outlive_their_acceptance_window` |
 | Duplicate, reorder or replay messages and job submissions | Signed messages with expiry; idempotent consumers; idempotency keys for jobs (`service.rs`, `ops/jobs.rs`, `ops/assets.rs`) | INV-158 |
 | Forge a job grant, or reuse it for another evaluator or program | Signed by the pinned control-plane key; checks evaluator, program and expiry; the control plane starts a job only once (`service.rs` `JobGrant::verify`, `ops/jobs.rs`) | INV-163 |
 | Alter ciphertexts or results in transit | Receipts bind the exact request and response bytes; the client verifies before decrypting | INV-020, INV-021 |
@@ -409,8 +460,9 @@ deployment.
 - The key broker keeps its replay cache for control-plane messages in
   memory, so it is empty after a restart.
 - The first contact with an evaluator when the client pins its key on first
-  use: an attacker on that first connection can get its own key pinned.
-  Pass `--trust-evaluator` to avoid this.
+  use (a direct remote run): an attacker on that first connection can get
+  its own key pinned. Pass `--trust-evaluator` to avoid this. Jobs a
+  control plane schedules never pin on first use (section 5).
 - Dropping or delaying traffic.
 
 ### 4.8 Artifact storage attacker
@@ -441,10 +493,19 @@ attestation policies name artifact or code digests.
 | Edit, truncate or roll back a ledger file | Hash chain and checkpoints (`crates/encompute-privacy/src/ledger.rs`) | INV-066, INV-067 |
 | Edit a trust bundle | The report rebuilds the graph from the signed evidence (`crates/encompute-trust/src/report.rs`) | INV-101 |
 | Swap files in a model package, or smuggle pickled or remote code | Content-addressed packages; only safetensors, configuration and tokenizer files (`python/encompute/torch/hf.py`, `crates/encompute-training/src/hf.rs`) | INV-136, INV-137, INV-138 |
+| Edit a key broker's state file (`broker.json`): release policies, mode, organization, key versions, revocations | Every field is covered by an HMAC-SHA256 under a key derived from the KEK by HKDF-SHA256 (domain `encompute.broker-state.v1`; formula in [protocols.md](../security-review/protocols.md), section 6); each save raises `generation`. An edited file does not open. A state without a MAC (written by 0.3.0-rc.3 or earlier) opens only through the owner's explicit `encompute keys upgrade-state --confirm`; a production broker refuses a store that cannot authenticate state (`crates/encompute-keybroker/src/lib.rs`, `store.rs`, `root.rs`) | `an_edited_state_file_does_not_open`, `an_unauthenticated_state_needs_its_owner_to_upgrade_it`, `a_production_store_must_authenticate_state`, `owner_changes_are_reauthenticated_and_generations_advance` |
 
 **Out of scope:**
 
 - Deletion and availability.
+- **Rolling a key broker's state back to an older authenticated copy.** A
+  writer without the KEK can only stop the broker, or replace its state
+  with an older copy the broker itself wrote. That copy still holds keys
+  revoked since, so it undoes those revocations. Detecting it needs the
+  generation anchored outside the file (in the KMS or the control plane),
+  which is not built. Revocation does not rotate the KEK, so old state
+  files and the unchanged KEK still yield revoked keys (no
+  crypto-shredding). Keep broker backups access-controlled.
 - Confidentiality of artifacts: program structure, public weights, shapes
   and declared ranges are not encrypted.
 - The artifact manifest is an unkeyed SHA-256 list, not a signature. Its
@@ -471,11 +532,21 @@ attestation policies name artifact or code digests.
 5. **Production mode everywhere.** Development tokens, mock attestation,
    development key stores and development root keys are refused only in
    production mode (INV-164).
-6. **Pin evaluator and coordinator keys out of band** where possible
-   (`--trust-evaluator`, `--coordinator-key`). In the SDK's control-plane
-   flow, the client takes the evaluator's URL and receipt key from the
-   control plane's job data (`python/encompute/client.py`), so for that
-   flow the control plane chooses which evaluator key the client accepts.
+6. **Pin evaluator and coordinator keys out of band** (`--trust-evaluator`,
+   `--coordinator-key`). For jobs a control plane schedules, every client
+   that decrypts (CLI `encompute jobs run`, the Python SDK, the native SDK)
+   checks the evaluator receipt key the control plane names against the
+   client's own pin set: `--trust-evaluator KEY` (repeatable),
+   `ENCOMPUTE_TRUSTED_EVALUATORS`, or `trusted_evaluators=` in the SDK. A
+   key outside the set is refused before anything is sent to the
+   evaluator (ENC2607); a set that is present but empty refuses every
+   evaluator. With no pin at all the job is refused (ENC2605) unless the
+   explicit development opt-out is given (`--allow-unpinned-evaluator`,
+   `allow_unpinned_evaluator=True` or
+   `ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1`), which is itself refused under
+   `ENCOMPUTE_ENV=production` (`crates/encompute-runtime/src/remote.rs`
+   `trusted_evaluators`, `crates/encompute-cli/src/control.rs`,
+   `python/encompute/client.py`).
 
 ## 6. What the evaluator always learns
 

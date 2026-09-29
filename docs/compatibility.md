@@ -5,7 +5,9 @@ ciphertexts, receipts, trust bundles, privacy ledgers, training records,
 database rows. This page says, for each one, which versions can read it,
 what needs a migration, and what fails closed.
 
-It describes release 0.3.0. For which capabilities are supported at all,
+It describes release 0.3.0. [Changes since 0.3.0-rc.3](#changes-since-030-rc3)
+lists what an rc.3 installation must rebuild, re-key or upgrade. For which
+capabilities are supported at all,
 see [support-matrix.md](support-matrix.md). For API and CLI stability, see
 [api-stability.md](api-stability.md).
 
@@ -62,6 +64,7 @@ changes.
 | Also checked | Every file's hash. Then the loader recompiles `program.eir` and requires the compiler, plan, parameter and crypto entries, and every generated file, to be byte-identical to what this build produces. Any difference is ENC1401. |
 | Migration | Recompile from the source (`encompute compile`). `program.eir` inside the artifact is the source of truth, so no other input is needed. |
 | Consequence | Any change to compiler output invalidates old artifacts, even when the format number stays 5. The new artifact can have a different plan, spec ID and parameters, so keys and receipts made for the old one do not carry over. |
+| Refused sources | A program whose secure aggregation combines privacy-budgeted assets without `dp` no longer compiles (ENC2203), whatever the output's destination: the aggregate is always released to the coordinator. Because the loader recompiles `program.eir`, an rc.3 artifact with such an aggregation is refused on load with the same error. Add `dp` to the aggregation. |
 
 Planned: `encompute migrate` should rebuild an artifact from its
 `program.eir`, show whether the program ID, spec ID and parameters
@@ -86,6 +89,7 @@ changed, and refuse silently changed semantics.
 | Reads | Plan version 1, through the artifact check above. |
 | On mismatch | ENC1401 (artifact). |
 | Migration | Recompile the artifact. |
+| BGV profile | The BGV profile's failure probability now reads "negligible (noise budget enforced; not zero)" instead of "0 (exact modular arithmetic)" (`crates/encompute-exact/src/bgv.rs`). The profile is hashed into `parameter_set_id`, so every BGV artifact changes parameter set ID. Plans whose worst-case noise growth exceeds the BGV budget, and bitwise logic on integers, are no longer selected for BGV. |
 
 CKKS plans use `PLAN_VERSION = 1` and `PARAMETER_SELECTOR_VERSION = 1`
 (`crates/encompute-ckks/src/lib.rs`), with the same rules.
@@ -103,9 +107,9 @@ CKKS plans use `PLAN_VERSION = 1` and `PARAMETER_SELECTOR_VERSION = 1`
 
 | | |
 |---|---|
-| Version | `SPEC_VERSION = 1` (`crates/encompute-training/src/spec.rs`). Domain tags `training-spec.v1`, `training-run.v1`, `training-participant.v1`. |
-| Reads | Version 1 only. |
-| On mismatch | ENC2501. |
+| Version | `SPEC_VERSION = 2` (`crates/encompute-training/src/spec.rs`). Domain tags `training-spec.v1`, `training-run.v1`, `training-participant.v1`. Version 2 binds the key brokers and their grant-signing keys (`key_brokers`), the coordinator's adapter-record key (`coordinator_key`) and the initial adapter (`initial_adapter_digest`). `base_model.architecture` must name a factory the worker image ships (`encompute.torch.models:tiny_classifier`, or `encompute.torch.hf:from_config` with the package's own `config.json`). A dataset's `privacy_units` is optional: when present, it is a figure the owner approved for publication, not a count of the data. |
+| Reads | Version 2 only. |
+| On mismatch | ENC2501. A spec that names another model factory is also ENC2501. |
 | Migration | **Needs `encompute migrate`** (planned). A spec binds the model package, datasets, tokenization, LoRA or PEFT configuration, layout and every DP-SGD setting. A new spec version must be derived from the old spec and the owners' existing approvals, without retraining. |
 
 ### Ciphertext and key envelopes
@@ -148,7 +152,9 @@ Clients and evaluators must run the same Encompute minor release.
 | PrivacyReceipt | `RECEIPT_VERSION = 1` (`crates/encompute-privacy/src/release.rs`). Another version: ENC2204. Signed by the coordinator. |
 | File ledgers | `LEDGER_VERSION = 1` (`crates/encompute-privacy/src/ledger.rs`), checked on the genesis entry. Another version: ENC2202. Hash-chained. |
 | Database ledgers | PostgreSQL tables, versioned by the schema migrations below. |
-| State anchor | `ANCHOR_VERSION = 1` (`crates/encompute-control/src/anchor.rs`). Another version: ENC2202, and the control plane refuses to start. |
+| State anchor | `ANCHOR_VERSION = 1` (`crates/encompute-control/src/anchor.rs`). Another version: ENC2202, and the control plane refuses to start. The anchor gains optional fields (disabled services, disabled users, ended jobs, withdrawn approvals) without a version change. |
+| Sensitivity | A unit inside a party (record, user, patient, device) without Poisson sampling is now charged sensitivity `2 × clip_norm`, as an organization is; only DP-SGD (Poisson sampling) charges `1 × clip_norm`. Receipts and ledger entries written from this release record the doubled sensitivity. An rc.3 PrivacyReceipt for such a unit no longer matches its release (ENC2204). Ledger entries rc.3 wrote keep the sensitivity they recorded, so spend recorded then was charged about half the true sensitivity. |
+| Epsilon | Each reported epsilon is raised by a relative margin of 1e-12, and the Rényi curve carries a rounding allowance, so values differ from rc.3's around the 12th significant digit. Recorded epsilons are not recomputed on read. |
 | Migration | Spent budget must never be lost or reset. **File ledgers need `encompute migrate`** (planned) if their format changes: the migration must append to the chain, not rewrite it, so owners' checkpoints still verify. A new anchor version must be written by the control plane, next to the old one, on first start. |
 
 ### Checkpoints and adapter records
@@ -160,7 +166,8 @@ Clients and evaluators must run the same Encompute minor release.
 | Sealed assets | File magic `ENCSEAL1` (in the AEAD associated data) and header `ASSET_VERSION = 1` (`crates/encompute-training/src/seal.rs`). Another magic or version: ENC2502. |
 | Adapter layout | `LAYOUT_VERSION = 1` (`crates/encompute-training/src/layout.rs`, duplicated in `python/encompute/torch/lora.py`). Another version: ENC2501. |
 | Canonical tensor files | Magic `ENCTENS1`. Another magic: ENC2501. Pickles are refused before loading. |
-| Worker evidence | `WORKER_EVIDENCE_VERSION = 1` (`crates/encompute-training/src/worker.rs`). Another version: ENC2501. |
+| Worker evidence | `WORKER_EVIDENCE_VERSION = 2` (`crates/encompute-training/src/worker.rs`). Version 2 adds the input adapter and its digest, the training configuration's digest and the seed. Another version: ENC2501. |
+| Confidential Space job descriptors | `kind` `encompute.confidential-training-job.v1`, `version` **2** (`JOB_VERSION`, `python/encompute/torch/cs_worker.py`). Version 2 carries the approved plan and, after round 1, the input adapter's signed record; the training configuration comes from the spec. Another version: the worker refuses the job ("not a confidential training job descriptor (version 2)"). Descriptors hold no secret: regenerate them. |
 | Hugging Face model packages (`enchf1:`) | `PACKAGE_VERSION = 1` (`crates/encompute-training/src/hf.rs`). Another version: ENC2504. The package also binds the major.minor versions of Transformers, PEFT and PyTorch: other library versions are refused with ENC2504. |
 | Migration | **Needs `encompute migrate`** (planned) for checkpoints, sealed-asset headers, the adapter layout, tensor files and model packages. The adapter weights inside must be carried over unchanged, and the migration must check the privacy ledgers so a resumed run can never roll back spent budget. Adapter records and worker evidence are signed and stay readable instead. |
 
@@ -175,26 +182,28 @@ model (a new package, a new spec). Existing adapters keep their lineage.
 |---|---|
 | Versions | Plan, spec, round, receipt and protocol versions are all 1; protocol `secagg-bonawitz17` (`crates/encompute-secagg/src/round.rs`). |
 | On mismatch | Spec or protocol (`encagg1:`): ENC2106. Round (`encround1:`): ENC2102. Aggregation receipt: ENC2104. |
-| Migration | None. A round is short-lived: start a new round with the new version. Aggregation receipts are signed and stay readable. |
+| Party state (`aggregate join --state`) | JSON: the global `sequence` and the ledger `checkpoints` as before, plus `sequences`, the last round joined per aggregation spec ID. The older global `sequence` stays a floor for every spec. A file holding only a number (the oldest format) still reads. Updates take an exclusive lock on `STATE.lock` and replace the file atomically. Sequences above 2^53 − 1 are refused (ENC2102). |
+| Migration | None. A round is short-lived: start a new round with the new version. Aggregation receipts are signed and stay readable. An rc.3 `--state` file is read as is and gains `sequences` on the next join. |
 
 ### Attestation and key broker state
 
 | | |
 |---|---|
 | Attestation | Evidence, binding and record versions are 1: another version is ENC2001. Attestation policies (`POLICY_VERSION = 1`): ENC2002. Grants (`GRANT_VERSION = 1`) are written, and the version is not checked on read yet. |
-| Broker state | No version field. Unknown fields are refused (ENC2004), so a newer broker's file does not load in an older broker. Older files with fewer fields load. |
+| Broker state | No version field. Unknown fields are refused (ENC2004), so a newer broker's file does not load in an older broker. The state now carries `generation` (incremented by every save) and `mac` (HMAC-SHA256 over the rest of the state, under a key derived from the KEK). A broker opens only a state whose MAC verifies (ENC2004). Development plaintext storage has no KEK, so its state has no MAC. |
 | Wrapped KEK | `WRAPPED_KEK_FORMAT = 1` (`crates/encompute-keybroker/src/root.rs`). Another format: ENC2004. |
-| Migration | **Broker state needs `encompute migrate`** (planned) for any future format change, with a version field added first. `encompute keys rewrap` and `keys rotate-root` re-wrap keys without changing formats. |
+| Migration | A KEK-protected state written by rc.3 has no MAC and is refused. Run `encompute keys upgrade-state --broker FILE` with the broker's usual `--kek` or `--root-key` options: it prints the release policies, mode and organization; check them against your own records, since an unauthenticated file may have been edited, then rerun with `--confirm` to add the MAC. **Broker state needs `encompute migrate`** (planned) for any future format change, with a version field added first. `encompute keys rewrap` and `keys rotate-root` re-wrap keys without changing formats. |
 
 ### Control plane: database schema and audit events
 
 | | |
 |---|---|
-| Schema | Versioned SQL migrations embedded in the binary (`crates/encompute-control/migrations/`: `0001_initial.sql`, `0002_evaluator_profiles.sql`). Each applied migration is recorded with its checksum in `schema_migrations`. Shipped migrations are never edited. |
+| Schema | Versioned SQL migrations embedded in the binary (`crates/encompute-control/migrations/`: `0001_initial.sql`, `0002_evaluator_profiles.sql`, `0003_consent_bound_sharing.sql`, `0004_approval_identity.sql`). Each applied migration is recorded with its checksum in `schema_migrations`. Shipped migrations are never edited. |
 | Applied by | `encompute-control migrate`, and automatically at `serve` and `recover`, under a PostgreSQL advisory lock. Forward only: there are no down migrations. |
 | Reads | Any older schema (it is migrated forward). |
 | On mismatch | A database newer than the binary: ENC1602, "the database schema (version N) is newer than this control plane". An applied migration whose checksum changed: ENC1602. |
 | Audit events | No version field. The version is in the hash domain `encompute.audit-event.v1`. A broken chain: ENC2301. |
+| 0003 | `0003_consent_bound_sharing.sql` adds `asset_approval_members` (an approval covers the organizations that were project members when it was given) and a `status` (`invited` or `active`) on `project_members`. Existing approvals cover the members that had joined by then, and existing memberships stay active. An organization added later sees nothing of an asset until its owner approves again. |
 | Downgrade | Unsupported. Restore the database backup taken before the upgrade, together with its anchor; the anchor check refuses an older database otherwise (ENC2202, then `encompute-control recover`). |
 
 ### Control Plane API v1
@@ -220,6 +229,7 @@ The HTTP contract is versioned by path. See
 | TrainingSpec, adapter record, layout, tensor file, worker evidence | ENC2501 |
 | Checkpoint, sealed asset | ENC2502 |
 | Hugging Face model package | ENC2504 |
+| Confidential Space job descriptor | Refused by the worker (`JobRefused`, no code) |
 | Aggregation spec / round / receipt | ENC2106 / ENC2102 / ENC2104 |
 | Attestation evidence, binding, record | ENC2001 |
 | Attestation policy | ENC2002 |
@@ -247,7 +257,24 @@ handle exactly these artifact types:
 Not migrated, by design: keys and ciphertexts (regenerate), aggregation
 rounds (start a new one), and signed evidence (receipts, PrivacyReceipts,
 authorizations, revocations, attestation records, adapter records, worker
-evidence), which later releases must keep reading.
+evidence), which later releases must keep reading. Release candidates are
+the exception: evidence an rc.3 build signed and that this release refuses
+(worker evidence version 1, PrivacyReceipts with the old sensitivity) is
+verified with rc.3.
+
+## Changes since 0.3.0-rc.3
+
+| Artifact | What changed | What to do |
+|---|---|---|
+| Compiled artifacts with budgeted aggregations and no `dp` | Refused at compile and load (ENC2203) | Add `dp` to the aggregation and recompile |
+| BGV artifacts, keys and ciphertexts | New `parameter_set_id` (the profile's failure-probability text changed); some programs no longer select BGV | Recompile, then generate new keys (`encompute keys generate`) and re-encrypt |
+| TrainingSpec | `SPEC_VERSION = 2`, new bound fields, allowlisted model factories | Regenerate the spec (new ID); owners approve it again. Checkpoints and adapter records bound to an rc.3 spec ID do not resume under it |
+| Worker evidence | `WORKER_EVIDENCE_VERSION = 2` | Verify rc.3 evidence with rc.3 |
+| Confidential Space job descriptors | Version 2 | Regenerate |
+| Key broker state | `generation` and `mac` | `encompute keys upgrade-state`, then `--confirm` |
+| PrivacyReceipts and ledgers | Doubled sensitivity for unsampled units inside a party; epsilon margin | rc.3 receipts for such units no longer verify; new entries charge the doubled sensitivity |
+| Aggregation party state | Per-spec `sequences` | None: read as is |
+| Control-plane database | Migration 0003 | Applied at `migrate`, `serve` or `recover` |
 
 ## Known inconsistencies
 

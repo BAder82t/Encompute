@@ -13,6 +13,237 @@
 - **Python 3.11 or later** is required (3.9 is end of life; 3.10 reaches it
   in October 2026). CI runs the whole SDK suite on 3.11.
 
+### Security
+
+Fixes for the independent review of 0.3.0-rc.3 (findings ENC-SF-2026-033
+to 087 in `docs/security-findings.md`; partial fixes and residuals are in
+its "Open" list and in `KNOWN_LIMITATIONS.md`):
+
+- **033:** a privacy ledger rolled back while the control plane runs is
+  refused at the next spend (PRIVACY STATE ROLLBACK) and never anchored;
+  the anchor records only checkpoints that extend the anchored one.
+- **034:** a ledger frozen in the anchor stays frozen whatever the
+  database says; startup refuses an unfrozen copy and recovery re-freezes.
+- **035:** evaluation keys are checked in full before OpenFHE loads them,
+  must carry the tag they are sent under, and a tag already loaded is
+  shared only by byte-identical key material.
+- **036:** a workload accepts key grants only from broker keys bound into
+  its attested identity (the training spec's `key_brokers`, or the keys
+  baked into the FHE workload image), one signer per session; an unpinned
+  broker is refused with a hardware attester.
+- **037:** a training spec names only a factory the worker image ships,
+  with schema-checked arguments; Hugging Face models are built only from
+  the package's own `config.json`; a worker whose code differs from the
+  spec's refuses before it attests.
+- **038:** an audit checkpoint over a chain that does not extend the
+  anchored root is refused (AUDIT STATE ROLLBACK) and raises an alarm.
+- **039, 083:** disabled service accounts and users, and cancelled and
+  failed jobs, are anchored and re-applied by recovery; a lost anchor
+  compare-and-set reloads and retries.
+- **040:** an asset approval covers only the organizations that were
+  project members when it was given.
+- **041:** a key broker named by an asset must belong to the platform or
+  to the asset's organization; key messages go to and come from that
+  broker only.
+- **042:** API routes to disable a user, remove roles and memberships,
+  remove project members and withdraw asset approvals.
+- **043:** key broker state is authenticated (a generation and an HMAC
+  keyed from the KEK); an edited state file does not open.
+- **044:** a refused program upload is refused before anything is
+  compiled or loaded.
+- **045:** BinFHE bootstrapping keys with another method, dimensions or
+  moduli than the vetted context are refused before any gate runs.
+- **046, 078:** `encompute jobs run`, the Python SDK and the native SDK
+  pin evaluator receipt keys themselves; an empty pin set refuses every
+  evaluator.
+- **047:** a secure-aggregation aggregate is always a release: a budgeted
+  contributor needs `dp` and a ledger even when the output is sealed.
+- **048:** every budgeted contributor needs a well-formed control-plane
+  mapping before the round; the control plane refuses a reservation that
+  under-declares its sensitivity.
+- **049:** DP-SGD specs publish no data-derived count; dataset and
+  grouping digests are salted commitments.
+- **050:** the training configuration comes from the spec, and the input
+  adapter must be the spec's initial one or the previous round's signed
+  adapter record; the worker evidence commits to the input adapter, the
+  configuration digest and the seed (which still comes from the job
+  descriptor).
+- **051:** a lookup table longer than its index type can reach is a type
+  error instead of a panic.
+- **052:** the threat model and review documents describe signed grants,
+  where the grant pin comes from, and client-side evaluator pinning.
+- **053, 054:** a job failed at start for a revoked asset is audited; an
+  evaluator re-registering keeps an operator's drain, and its receipt key
+  is audited.
+- **055:** `restore.sh` restores in one transaction and stops at the
+  first error.
+- **056:** policy approval needs two different people with
+  `security_admin` in the project owner's organization; no path grants
+  `security_admin` to a service account. Accounts that hold it from an
+  earlier release keep it but are never a policy's proposer or approver;
+  the control plane reports them on every start (log line, one
+  `security.legacy_service_admins` audit event per affected organization,
+  `encompute_legacy_service_admins` gauge). New
+  `GET /v1/security/legacy-service-admins` and
+  `encompute security legacy-service-admins` (exit 1 while any remain)
+  list them with the `memberships/remove` call that removes the role.
+  0.3.x accepts them with these warnings; 0.4.0 will refuse them, at
+  startup or through a migration announced in advance.
+- **057:** project membership needs the invited organization's consent;
+  invitations answer the same whether the organization exists.
+- **058:** platform automation accounts can be disabled.
+- **059:** used nonces are kept past the end of their acceptance window.
+- **060:** planning is authorized before compiling; identity-provider
+  errors are not echoed; tokens need `iat` and a bounded lifetime, and
+  `nbf` is enforced; a default password in the database URL's query string
+  is refused; `ENCOMPUTE_ENV` must be set; only the submitter learns a
+  job's evaluator; repeated query parameters are refused; production
+  `/metrics` needs a token.
+- **061:** the OpenBao client follows no redirects.
+- **062:** worker evidence names the attested image, and verification
+  compares its privacy policy and artifact with the spec.
+- **063:** an existing KEK file must be private and the OpenBao token file
+  writable by its owner only; Google's attestation keys are refreshed;
+  refusals do not reveal the release policy.
+- **064:** under a control plane, `/v1/info` and the key lookup disclose a
+  program only to a holder of its grant.
+- **065:** the client refuses decrypted exact outputs outside their proven
+  range; BGV tracks noise from additions and refuses plans above its
+  budget.
+- **066:** BGV selection admits bitwise logic on Booleans only.
+- **067:** a DP-SGD worker samples at the plan's rate and clips to the
+  plan's norm, or refuses.
+- **068:** units other than organizations are charged `2 × clip_norm`
+  unless Poisson-sampled; `privacy explain` shows the unit bound.
+  The named levels `standard`, `strong` and `maximum` now use twice their
+  listed noise (4.4, 12, 36) for a record, patient, user or device budget,
+  so each still affords about ten releases; organization-level noise is
+  unchanged. The program records the level (`preset "strong"`) beside the
+  effective noise, which is what is sampled, charged and receipted, and
+  `privacy explain` and the trust report show `preset=strong,
+  sensitivity_factor=2, effective_noise_multiplier=12 (2x preset 6.0)`.
+- **069:** a non-finite unit gradient contributes zero.
+- **070:** group privacy across parties is documented.
+- **071:** the party `--state` file is locked, written atomically and kept
+  per aggregation spec.
+- **072, 073:** Hugging Face import refuses symbolic links, and
+  tokenizer, quantization and attention-implementation settings outside
+  the allowlist.
+- **074:** `resume`, `infer`, `export_adapter` and `export_peft` take
+  owner-supplied revocations and read the check's exit code.
+- **075, 076:** the trust report honours revocations only from the asset's
+  owner or the authorization's signer, and re-validates bundle records.
+- **077:** the plan validator recomputes semantics and applies its own
+  and the caller's floor; a claimed execution proof counts only when
+  checked.
+- **079:** the commercial audit fails when it cannot read a binary's
+  symbols.
+- **080, 081:** Actions pinned by commit SHA, base images by digest, and
+  the TEE images install hash-locked Python packages and are built,
+  signed and attested by the release. The TEE images
+  (`encompute-confidential-space`, `encompute-training`) are also in the
+  release's vulnerability gate, which fails unless every required image
+  was scanned. Vulnerability exceptions are narrow and machine-checked:
+  one advisory, one package and the exact installed version per entry,
+  with a rationale, compensating controls, an upstream tracking link, an
+  added date and an expiry; a missing field, a wildcard or list, an
+  expired entry or one added after the approval fails the gate, and an
+  exception for another version covers nothing.
+- **082:** test hooks work only with development attestation.
+- **084:** a key broker hears of a revocation only once it is anchored.
+- **085:** the RDP accountant adds a relative rounding margin.
+- **086:** `THIRD_PARTY_NOTICES.md` reproduces every production crate's
+  license and notice files (`scripts/third_party_notices.py`).
+- **087:** the key cache documentation matches what it isolates.
+
+Later review of the control plane (ENC-SF-2026-088 to 092):
+
+- **088:** a job's purpose is the one its program declares; a request
+  stating another is refused, and a program that declares none cannot use
+  another organization's asset. An approval for one purpose no longer runs
+  a program written for another.
+- **089:** a job's `source_assets` are exactly the registered assets its
+  program reads (bound by asset ID in the program's `asset` declarations);
+  another organization's asset is usable only that way, so a source can be
+  neither left out nor stood in for.
+- **090:** jobs over assets that require the owner's approval are approved
+  only by a person of the asset's organization, never a service account.
+- **091:** withdrawn asset approvals, the grants an organization loses by
+  leaving a project, and the project membership itself are anchored: a
+  restored database that still holds one is refused at startup (APPROVAL
+  or MEMBERSHIP STATE ROLLBACK) and recovery withdraws or removes it again.
+  Approving, or joining, again makes a new approval or membership.
+- **092:** organizations an asset is shared with no longer see its key
+  reference, storage location, size, media type or full policy, nor the
+  submitting organization's user IDs in a job's history.
+- **093:** removing a role (`memberships/remove`) is anchored: a restored
+  database that still holds it is refused at startup (ROLE STATE
+  ROLLBACK) and recovery removes it again. A role granted again is a new
+  membership.
+- **Assurance:** invariants INV-192 to INV-217; INV-007, INV-101, INV-130,
+  INV-131, INV-137, INV-138, INV-142, INV-143, INV-147, INV-156, INV-160,
+  INV-162, INV-164, INV-170, INV-171, INV-174, INV-176, INV-178, INV-180,
+  INV-182, INV-183, INV-184, INV-186, INV-194 and INV-195 extended.
+
+### Breaking and behaviour changes
+
+- **`ENCOMPUTE_ENV` is required** by the control plane: `production` or
+  `development`. Unset or anything else refuses to start.
+- **Production `/metrics` needs a token** (`ENCOMPUTE_METRICS_TOKEN_FILE`),
+  or `ENCOMPUTE_METRICS_PUBLIC=true`. `init.sh` creates
+  `secrets/metrics-token`.
+- **Database migrations 0003** (`0003_consent_bound_sharing.sql`) **and
+  0004** (`0004_approval_identity.sql`, approval and grant IDs) run at
+  startup. Migrations are forward only.
+- **A job over another organization's asset needs a program that declares
+  its purpose and reads the asset by its registered ID** (`purpose "..."`
+  on the `program` line; `asset "<asset ID>" ...` bound to the secret
+  inputs), and `purpose` must equal the declared one. Jobs over the
+  submitter's own assets are unchanged unless their program names
+  registered assets, which must then be listed exactly.
+- **Shared assets are redacted for other organizations** (no `key_ref`,
+  `storage_uri`, `size_bytes`, `media_type`; `policy` reduced to
+  `require_job_approval`), and a job's actors appear to source owners as
+  `organization/user` or `organization/service`.
+- **Job approval (`POST /v1/jobs/{id}/approve`) takes a person** of the
+  asset's own organization; service accounts are refused.
+- **Project membership is by invitation:** the owner's admins invite, and
+  the invited organization's admins accept with the same call. Existing
+  approvals cover only the members at the time they were given.
+- **`jobs run` and `Project.run` need an evaluator pin**
+  (`--trust-evaluator`, `ENCOMPUTE_TRUSTED_EVALUATORS`,
+  `trusted_evaluators=`). Without one a job is refused unless
+  `--allow-unpinned-evaluator` / `allow_unpinned_evaluator=True` is given,
+  which production refuses.
+- **BGV parameter-set IDs change** (the profile's failure-probability text
+  is part of the ID): recompile BGV artifacts and re-key.
+- **KEK-protected key broker state needs an upgrade:** run `encompute keys
+  upgrade-state` with the broker's usual `--kek` or `--root-key` options,
+  check the printed policies, then rerun with `--confirm`. Until then an
+  rc.3 state file protected by a KEK does not open. Development plaintext
+  stores load as before.
+- **TrainingSpec v2, WorkerEvidence v2 and job descriptor v2.** Specs bind
+  `key_brokers`, `coordinator_key` and `initial_adapter_digest`;
+  `architecture` must name an allowlisted factory. rc.3 specs, evidence and
+  descriptors are refused.
+- **Doubled sensitivity for unsampled sub-organization units:** new
+  privacy receipts and ledger entries record `2 × clip_norm`, and rc.3
+  privacy receipts for such units no longer verify (ENC2204). Ledger
+  entries keep the sensitivity they recorded, so spend recorded under rc.3
+  stays charged at the old rate. Presets afford fewer releases. Example 09
+  now uses `noise_multiplier` 12.
+- **New epsilons change around the 12th significant digit** (the
+  accountant's rounding margin). Recorded epsilons are not recomputed.
+- **`aggregate serve` needs `--ledger`** whenever a participant has a
+  budget, and artifacts with a sealed budgeted aggregation without `dp`
+  are refused.
+- **`--control-asset` is strict:** malformed, duplicated or missing
+  mappings for a budgeted asset refuse the round.
+- **Party `--state` files** keep sequences per aggregation spec.
+- **New CLI flags:** `keys upgrade-state`, `jobs run --trust-evaluator`
+  and `--allow-unpinned-evaluator`, `trust --production` and
+  `--minimum-profile`.
+
 ## 0.3.0-rc.3 — 2026-09-28
 
 The first published release candidate. 0.3.0-rc.1 and 0.3.0-rc.2 were
