@@ -388,3 +388,97 @@ fn openbao_failures_never_fall_back() {
     .is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A fake OpenBao on loopback: reads each request whole, then answers a
+/// POST with `post` and a GET with a redirect to `to`.
+fn redirecting_bao(post: &'static str, to: std::net::SocketAddr) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { return };
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len: usize = text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .map(|v| v.trim().parse().unwrap())
+                        .unwrap_or(0);
+                    if raw.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            let redirect = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{to}/steal\r\nContent-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            );
+            let r = if raw.starts_with(b"POST") && post != "redirect" {
+                post.to_owned()
+            } else {
+                redirect
+            };
+            let _ = s.write_all(r.as_bytes());
+        }
+    });
+    addr
+}
+
+/// Review finding KB-4 (ENC-SF-2026-061): the OpenBao client never follows a redirect, so
+/// `X-Vault-Token` never reaches another origin (ureq strips only
+/// Authorization and Cookie on redirects); a 3xx is an error, for the
+/// Transit calls (POST) and the key-version read (GET).
+#[test]
+fn openbao_redirects_are_refused_and_the_token_stays_home() {
+    let thief = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let thief_addr = thief.local_addr().unwrap();
+    let transit = |bao: std::net::SocketAddr| {
+        OpenBaoTransit::new(
+            &format!("http://{bao}"),
+            "transit",
+            "org",
+            Zeroizing::new("s.SUPER-SECRET-TOKEN".into()),
+        )
+        .unwrap()
+    };
+
+    // Encrypt and decrypt (POST) redirected.
+    let t = transit(redirecting_bao("redirect", thief_addr));
+    let e = t.encrypt(b"kek", b"aad").unwrap_err();
+    assert_eq!(e.code, Code::KeyRelease);
+    assert!(e.message.contains("302"), "{e}");
+    let e = t.decrypt("vault:v1:abc", b"aad").unwrap_err();
+    assert!(e.message.contains("302"), "{e}");
+
+    // The rotate call succeeds; the version read (GET) is redirected.
+    let t = transit(redirecting_bao(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\
+         Connection: close\r\n\r\n{}",
+        thief_addr,
+    ));
+    let e = t.rotate().unwrap_err();
+    assert!(e.message.contains("302"), "{e}");
+
+    // Nothing ever connected to the redirect target.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    thief.set_nonblocking(true).unwrap();
+    match thief.accept() {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Ok((mut s, _)) => {
+            use std::io::Read;
+            let mut got = String::new();
+            let _ = s.read_to_string(&mut got);
+            panic!("the redirect was followed: {got}");
+        }
+        Err(e) => panic!("{e}"),
+    }
+}

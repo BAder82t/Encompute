@@ -33,8 +33,8 @@ pub use grant::{
     seal_grant, EncryptedKeyGrant, GrantHeader, GrantSigner, WorkloadSession, GRANT_VERSION,
 };
 pub use policy::{
-    AttestationPolicy, DebugPolicy, Security, TcbStatus, TeeKind, VerifiedGpu, VerifiedWorkload,
-    POLICY_VERSION,
+    public_denial, AttestationPolicy, DebugPolicy, Security, TcbStatus, TeeKind, VerifiedGpu,
+    VerifiedWorkload, POLICY_VERSION,
 };
 pub use provider::{
     check_freshness, AttestationEvidence, AttestationProvider, Attester, DynProvider, Verifier,

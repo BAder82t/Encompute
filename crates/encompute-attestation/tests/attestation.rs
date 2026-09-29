@@ -594,3 +594,96 @@ mod base64_like {
         out
     }
 }
+
+/// Review note KB-n (ENC-SF-2026-063): a long-running broker keeps Google's keys current. A
+/// token signed with a key published after startup (a rotation) is
+/// verified after one refetch; unknown key IDs refetch at most once a
+/// minute; after the maximum age a withdrawn key stops being trusted; a
+/// failed fetch keeps the keys it has.
+#[test]
+fn confidential_space_keys_are_refreshed() {
+    use encompute_attestation::gcp::JWKS_MIN_REFRESH_SECS;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    const JWKS: &str = include_str!("fixtures/jwks.json");
+    const EMPTY: &str = r#"{"keys":[]}"#;
+    let w = world();
+    let good = cs_evidence(&w, |_| {});
+    let verify_unknown = |v: &Verifier| {
+        let mut e = good.clone();
+        e.evidence = token(&cs_claims(&w.binding().nonce().unwrap()), GOOGLE, "not-yet");
+        v.verify_claims(&e, Some(NOW + 1)).unwrap_err().message
+    };
+    let verify = |p: ConfidentialSpaceProvider, e: &AttestationEvidence| {
+        Verifier::new().with(p).verify_claims(e, Some(NOW + 1))
+    };
+
+    // Rotation: the provider started before Google published test-key-1.
+    let clock = Arc::new(AtomicU64::new(NOW));
+    let fetches = Arc::new(AtomicU64::new(0));
+    let provider = |start: &str, serve: &'static str, max_age: u64| {
+        let (c, f) = (clock.clone(), fetches.clone());
+        ConfidentialSpaceProvider::new(start, AUD)
+            .unwrap()
+            .with_refresh(
+                move || {
+                    f.fetch_add(1, Ordering::SeqCst);
+                    Ok(serve.to_owned())
+                },
+                max_age,
+            )
+            .with_clock(move || c.load(Ordering::SeqCst))
+    };
+    let v = Verifier::new().with(provider(EMPTY, JWKS, 3600));
+    assert!(v.verify_claims(&good, Some(NOW + 1)).is_ok());
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    assert!(v.verify_claims(&good, Some(NOW + 1)).is_ok());
+    assert_eq!(fetches.load(Ordering::SeqCst), 1, "known keys: no refetch");
+
+    // Unknown key IDs: refetched at most once a minute (counting the
+    // fetch above), however many.
+    let e = verify_unknown(&v);
+    assert!(e.contains("unknown token signing key"), "{e}");
+    assert_eq!(fetches.load(Ordering::SeqCst), 1, "rate-limited");
+    clock.fetch_add(JWKS_MIN_REFRESH_SECS, Ordering::SeqCst);
+    let mut forged = good.clone();
+    let b = w.binding();
+    forged.evidence = token(&cs_claims(&b.nonce().unwrap()), ATTACKER, "attacker-key");
+    for _ in 0..5 {
+        let e = v.verify_claims(&forged, Some(NOW + 1)).unwrap_err();
+        assert_eq!(e.code, Code::Attestation);
+        assert!(e.message.contains("unknown token signing key"), "{e}");
+    }
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    clock.fetch_add(JWKS_MIN_REFRESH_SECS, Ordering::SeqCst);
+    assert!(v.verify_claims(&forged, Some(NOW + 1)).is_err());
+    assert_eq!(fetches.load(Ordering::SeqCst), 3);
+
+    // Withdrawal: Google stops publishing test-key-1; once the keys are
+    // older than their maximum age they are refetched and it is refused.
+    clock.store(NOW, Ordering::SeqCst);
+    fetches.store(0, Ordering::SeqCst);
+    let v = Verifier::new().with(provider(JWKS, EMPTY, 3600));
+    assert!(v.verify_claims(&good, Some(NOW + 1)).is_ok());
+    assert_eq!(fetches.load(Ordering::SeqCst), 0);
+    clock.fetch_add(3600, Ordering::SeqCst);
+    let e = v.verify_claims(&good, Some(NOW + 1)).unwrap_err();
+    assert!(e.message.contains("unknown token signing key"), "{e}");
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+    // A failed or malformed fetch keeps the current keys.
+    for bad in [Err(()), Ok("not a JWKS")] {
+        let p = ConfidentialSpaceProvider::new(JWKS, AUD)
+            .unwrap()
+            .with_refresh(
+                move || match bad {
+                    Ok(s) => Ok(s.to_owned()),
+                    Err(()) => Err(encompute_ir::Error::new(Code::Remote, "unreachable")),
+                },
+                0,
+            );
+        assert!(verify(p, &good).is_ok());
+    }
+    // Without a refresh (a JWKS file), nothing changes.
+    assert!(verify(ConfidentialSpaceProvider::new(EMPTY, AUD).unwrap(), &good).is_err());
+}

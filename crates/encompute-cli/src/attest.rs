@@ -55,7 +55,8 @@ impl TrustArgs {
     pub(crate) fn verifier(&self, default_audience: Option<&str>) -> Result<Verifier> {
         let mut v = Verifier::new();
         if let Some(j) = &self.jwks {
-            let jwks = if j == "google" {
+            let google = j == "google";
+            let jwks = if google {
                 encompute_runtime::attested::fetch_google_jwks()?
             } else {
                 String::from_utf8(read(Path::new(j))?)
@@ -68,7 +69,16 @@ impl TrustArgs {
                 .ok_or_else(|| {
                     Error::new(Code::Attestation, "Confidential Space needs --audience")
                 })?;
-            v = v.with(ConfidentialSpaceProvider::new(&jwks, aud)?);
+            let mut p = ConfidentialSpaceProvider::new(&jwks, aud)?;
+            if google {
+                // Google rotates its token-signing keys: a long-running
+                // broker refetches them (on an unknown key ID, and hourly).
+                p = p.with_refresh(
+                    encompute_runtime::attested::fetch_google_jwks,
+                    GOOGLE_JWKS_MAX_AGE_SECS,
+                );
+            }
+            v = v.with(p);
         }
         if let Some(h) = &self.mock_root {
             let b = hex32(h, "mock root")?;
@@ -84,6 +94,10 @@ impl TrustArgs {
         Ok(v)
     }
 }
+
+/// How long Google's fetched token-signing keys are used before they are
+/// fetched again (a withdrawn key then stops being trusted).
+const GOOGLE_JWKS_MAX_AGE_SECS: u64 = 3600;
 
 fn hex32(s: &str, what: &str) -> Result<[u8; 32]> {
     let s = s.trim();
@@ -527,6 +541,18 @@ pub enum BrokerCmd {
         #[arg(long)]
         report: bool,
     },
+    /// Authenticate a broker state file written by an earlier Encompute
+    /// (before states were authenticated under the KEK). Prints what the
+    /// state releases, and to whom; check it against your own records (an
+    /// unauthenticated file may have been edited), then rerun with
+    /// --confirm.
+    UpgradeState {
+        /// Authenticate the state as printed.
+        #[arg(long)]
+        confirm: bool,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
     /// Serve challenges, attestation and key release over HTTP. With
     /// ENCOMPUTE_CONTROL_PUBLIC_KEY and ENCOMPUTE_SERVICE_ID set, also accept
     /// revocations from that control plane, for the one organization this
@@ -731,6 +757,30 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        BrokerCmd::UpgradeState { confirm, file } => {
+            let b = KeyBroker::load_legacy(&file.broker, Verifier::new(), file.store()?)?;
+            print_state(&b);
+            if b.state().mac.is_some() {
+                println!("\nthe state is already authenticated under its KEK");
+                return Ok(ExitCode::SUCCESS);
+            }
+            if !confirm {
+                println!(
+                    "\nNOT AUTHENTICATED: check the policies, mode and organization above, \
+                     then rerun with --confirm"
+                );
+                return Ok(ExitCode::from(1));
+            }
+            b.save(&file.broker)?;
+            match b.state().kek_id.as_deref() {
+                Some(k) => println!("\nthe state is now authenticated under KEK {k}"),
+                None => println!(
+                    "\nDEVELOPMENT ONLY: plaintext storage has no KEK; the state is not \
+                     authenticated"
+                ),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         BrokerCmd::Serve {
             listen,
             requests_per_minute,
@@ -809,6 +859,84 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
     }
 }
 
+/// What a broker state releases, and to whom (for `keys upgrade-state`).
+fn print_state(b: &KeyBroker) {
+    let s = b.state();
+    println!("{:<14}{}", "Broker", s.broker_id);
+    println!(
+        "{:<14}{}",
+        "Mode",
+        match s.mode {
+            BrokerMode::Production => "production",
+            BrokerMode::Development => "DEVELOPMENT",
+        }
+    );
+    println!(
+        "{:<14}{}",
+        "Organization",
+        s.organization.as_deref().unwrap_or("(none)")
+    );
+    println!("{:<14}{}", "Grant key", b.grant_public_key());
+    for (asset, k) in &s.secrets {
+        let p = &k.release_policy;
+        let revoked: Vec<String> = k
+            .versions
+            .iter()
+            .filter(|(_, v)| v.revoked)
+            .map(|(n, _)| n.to_string())
+            .collect();
+        section(&format!("Asset {asset}"));
+        println!("  {:<18}{}", "Current version", k.key_version);
+        println!(
+            "  {:<18}{}",
+            "Revoked versions",
+            if revoked.is_empty() {
+                "(none)".into()
+            } else {
+                revoked.join(", ")
+            }
+        );
+        println!(
+            "  {:<18}{}",
+            "Organization",
+            k.organization.as_deref().unwrap_or("(none)")
+        );
+        println!("  {:<18}encspec1:{}", "Execution", p.execution_spec_id);
+        println!(
+            "  {:<18}{}",
+            "Policy",
+            p.policy_id.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "  {:<18}{}",
+            "Privacy policy",
+            p.privacy_policy_id.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "  {:<18}{}",
+            "Artifact",
+            p.artifact_digest.as_deref().unwrap_or("(any)")
+        );
+        for i in &p.allowed_images {
+            println!("  {:<18}{i}", "Image");
+        }
+        let tees: Vec<String> = p.allowed_tee.iter().map(|t| t.to_string()).collect();
+        println!("  {:<18}{}", "TEEs", tees.join(", "));
+        println!("  {:<18}{}", "Minimum TCB", p.minimum_tcb);
+        println!(
+            "  {:<18}{}",
+            "Debug",
+            match p.debug {
+                DebugPolicy::Allowed => "ALLOWED",
+                DebugPolicy::Forbidden => "forbidden",
+            }
+        );
+        if p.allow_development {
+            println!("  {:<18}ACCEPTED (development only)", "Mock evidence");
+        }
+    }
+}
+
 // ---- workload (TEE side) --------------------------------------------------
 
 /// The attester a workload uses.
@@ -857,9 +985,11 @@ pub enum WorkloadCmd {
         /// Backend of the execution spec (mock, openfhe, tfhe-rs).
         #[arg(long, default_value = "openfhe")]
         backend: String,
-        /// `ASSET@URL` or `ASSET@URL#BROKER_KEY`, once per asset. BROKER_KEY
-        /// pins the broker's grant-signing key (as `keys serve` prints it):
-        /// without it, a grant is checked only against the key it names.
+        /// `ASSET@URL#BROKER_KEY`, once per asset. BROKER_KEY pins the
+        /// broker's grant-signing key (as `keys serve` prints it) and must
+        /// come from the attested image, never from the host. Required with
+        /// a hardware attester; grants from two signers in one session are
+        /// refused. `ASSET@URL` without a key: development (mock) only.
         #[arg(long = "key", required = true)]
         keys: Vec<String>,
         /// The evaluator identity (created if missing), shared with

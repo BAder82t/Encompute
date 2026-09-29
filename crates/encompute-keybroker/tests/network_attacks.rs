@@ -483,3 +483,65 @@ fn slow_clients_cannot_hold_the_broker() {
     assert!(started.elapsed() < Duration::from_secs(8));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Review note KB-n (ENC-SF-2026-063): a refused release tells the unauthenticated caller
+/// what its own evidence shows, never what the asset's policy expects (its
+/// execution spec, policy, privacy policy, artifact or minimum TCB).
+#[test]
+fn refusals_do_not_reveal_the_release_policy() {
+    use encompute_attestation::{AttestationChallenge, Attester, WorkloadSession};
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let addr = server.server_addr();
+    std::thread::spawn(move || {
+        let b = Mutex::new(broker());
+        serve_with_limit(&b, server, 10_000)
+    });
+    let hw = MockHardware::from_seed(&[7; 32]);
+    let other_spec = "ee".repeat(32);
+    let other_policy = "dd".repeat(32);
+    let attempt = |image: &str, spec: &str, policy: &str| {
+        let c: AttestationChallenge =
+            serde_json::from_value(post(addr, "/v1/challenge", &[], b"").1).unwrap();
+        let session = WorkloadSession::new(
+            &encompute_verification::EvaluatorSigner::generate()
+                .unwrap()
+                .identity(),
+        );
+        let e = hw
+            .attester(image)
+            .attest(
+                &c,
+                &session.binding(&c, spec, Some(policy), &"33".repeat(32)),
+            )
+            .unwrap();
+        let (s, info) = post(addr, "/v1/attest", &[], &e.to_bytes().unwrap());
+        assert_eq!(s, 200, "{info}");
+        let body = json!({"session": info["session"], "asset_id": "patients"});
+        post(addr, "/v1/release", &[], body.to_string().as_bytes())
+    };
+    for (what, spec, policy) in [
+        ("execution spec", other_spec.as_str(), POLICY),
+        ("policy", SPEC, other_policy.as_str()),
+    ] {
+        let r = refused(attempt(IMAGE, spec, policy), 403, "ENC2002", what);
+        let m = r["message"].as_str().unwrap();
+        assert!(
+            !m.contains(SPEC) && !m.contains(POLICY),
+            "{what}: the expected value leaked: {m}"
+        );
+        // What the workload itself bound is still named.
+        assert!(m.contains(spec) || m.contains(policy), "{what}: {m}");
+    }
+    // An image that is not allowed: the caller's own image is named, the
+    // allowed ones are not.
+    let evil = "sha256:6666666666666666666666666666666666666666666666666666666666666666";
+    let r = refused(attempt(evil, SPEC, POLICY), 403, "ENC2002", "image");
+    let m = r["message"].as_str().unwrap();
+    assert!(
+        m.contains(evil) && m.contains("is not allowed") && !m.contains(IMAGE),
+        "{m}"
+    );
+    // The approved workload still gets its key.
+    let (s, g) = attempt(IMAGE, SPEC, POLICY);
+    assert_eq!(s, 200, "{g}");
+}

@@ -15,6 +15,8 @@ use std::path::Path;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -103,6 +105,16 @@ pub trait SecretStore: Send {
             s => self.wrap(ctx, &from.unwrap_for_release(ctx, s)?),
         }
     }
+
+    /// Authenticates the broker's state (release policies, mode,
+    /// organization, key versions, revocations) under a key derived from
+    /// this store's wrapping key: whoever can write the state file but does
+    /// not hold the wrapping key cannot change what is released to whom.
+    /// `None` for a store without a wrapping key (development only; a
+    /// production broker refuses a store that cannot authenticate state).
+    fn state_mac(&self, _state: &[u8]) -> Result<Option<[u8; 32]>> {
+        Ok(None)
+    }
 }
 
 fn destroyed() -> Error {
@@ -156,6 +168,7 @@ impl LocalKekStore {
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let io = |e: std::io::Error| err(format!("{}: {e}", path.display()));
         if path.exists() {
+            check_private(path)?;
             let b = Zeroizing::new(std::fs::read(path).map_err(io)?);
             let k: [u8; 32] = b
                 .as_slice()
@@ -190,6 +203,38 @@ impl LocalKekStore {
     fn cipher(&self) -> ChaCha20Poly1305 {
         ChaCha20Poly1305::new(&(*self.kek).into())
     }
+
+    /// HMAC-SHA256 of `state` under a key derived (HKDF) from the KEK for
+    /// this one purpose: the KEK itself never keys anything but the wrap.
+    pub(crate) fn mac_state(&self, state: &[u8]) -> [u8; 32] {
+        let mut k = Zeroizing::new([0u8; 32]);
+        Hkdf::<Sha256>::new(None, self.kek.as_ref())
+            .expand(b"encompute.broker-state-mac.v1", k.as_mut())
+            .expect("32 bytes is a valid HKDF-SHA256 output length");
+        let mut m = <Hmac<Sha256> as Mac>::new_from_slice(k.as_ref()).expect("any key length");
+        m.update(state);
+        m.finalize().into_bytes().into()
+    }
+}
+
+/// A file holding key material must be private to its owner: a KEK another
+/// user can read (or replace) protects nothing.
+pub(crate) fn check_private(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let m = std::fs::metadata(path).map_err(|e| err(format!("{}: {e}", path.display())))?;
+        let mode = m.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(err(format!(
+                "{} is mode {mode:o}: a key file must not be accessible to others (chmod 600)",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 impl SecretStore for LocalKekStore {
@@ -211,6 +256,10 @@ impl SecretStore for LocalKekStore {
 
     fn unwrap_for_release(&self, ctx: &KeyContext<'_>, stored: &StoredKey) -> Result<KeyMaterial> {
         self.unwrap_as(self.name(), ctx, stored)
+    }
+
+    fn state_mac(&self, state: &[u8]) -> Result<Option<[u8; 32]>> {
+        Ok(Some(self.mac_state(state)))
     }
 }
 

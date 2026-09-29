@@ -417,6 +417,12 @@ fn openbao_keys_lifecycle_through_the_cli() {
     );
     let token_file = d.p("bao.token");
     std::fs::write(&token_file, format!("{token}\n")).unwrap();
+    // As deployed: a token file only its owner can write (the umask alone
+    // leaves it group-writable on some systems, and the broker refuses that).
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let env = [
         ("BAO_ADDR", addr.as_str()),
         ("BAO_TOKEN_FILE", token_file.as_str()),
@@ -506,4 +512,53 @@ fn openbao_keys_lifecycle_through_the_cli() {
     assert!(e.contains("open it with that store"), "{e}");
     std::fs::write(&wrapped, &backup).unwrap();
     ok(&strs(&run(&["keys", "challenge"], "modelco")), &env);
+}
+
+/// Review finding KB-2 (ENC-SF-2026-043): a broker state file without its authentication tag
+/// (one written before 0.3.0-rc.4, or with the tag stripped) is refused, and
+/// opens again only after its owner has checked and confirmed it.
+#[test]
+fn an_unauthenticated_broker_state_needs_its_owner_to_upgrade_it() {
+    let d = Dir::new("upgrade");
+    setup(&d);
+    let kek = d.p("k.kek");
+    let b = d.p("b.json");
+    ok(
+        &strs(&protect(&d, "prod-policy.json", &["--kek", &kek])),
+        &[],
+    );
+    let rotate = [
+        "keys", "rotate", "--asset", "weights", "--broker", &b, "--kek", &kek,
+    ];
+
+    // Strip the tag and the generation, as in an older state file.
+    let mut state: serde_json::Value = serde_json::from_slice(&std::fs::read(&b).unwrap()).unwrap();
+    let o = state.as_object_mut().unwrap();
+    assert!(o.remove("mac").is_some(), "the saved state carries a mac");
+    o.remove("generation");
+    std::fs::write(&b, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    let legacy = std::fs::read(&b).unwrap();
+
+    let e = refused(&rotate, &[], "ENC2004");
+    assert!(e.contains("upgrade-state"), "{e}");
+    // Shown, not authenticated, without --confirm.
+    let upgrade = ["keys", "upgrade-state", "--broker", &b, "--kek", &kek];
+    let (code, out, err) = encompute(&upgrade, &[]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.contains("NOT AUTHENTICATED") && out.contains(IMAGE),
+        "{out}"
+    );
+    assert_eq!(std::fs::read(&b).unwrap(), legacy);
+    // Confirmed: authenticated, and usable again.
+    let mut confirmed = upgrade.to_vec();
+    confirmed.push("--confirm");
+    let out = ok(&confirmed, &[]);
+    assert!(out.contains("now authenticated"), "{out}");
+    ok(&rotate, &[]);
+    // A later edit is refused again.
+    let mut state: serde_json::Value = serde_json::from_slice(&std::fs::read(&b).unwrap()).unwrap();
+    state["mode"] = serde_json::json!("development");
+    std::fs::write(&b, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    refused(&rotate, &[], "ENC2004");
 }
