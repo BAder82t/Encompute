@@ -70,7 +70,7 @@ IDs and keys differ per run; they are shortened here.
 AGGREGATION COMPLETE
 Contributors    hospital-a, hospital-b, hospital-c
 Minimum         3 (threshold 3, private against 2 colluding)
-Privacy         epsilon 0.7410674902696281 spent of 3.0 (this round 0.7410674902696281)
+Privacy         epsilon 1.558066602278788 spent of 3.0 (this round 1.558066602278788)
 
 == Trust report (keys from the verifier, never from the bundle) ==
 TRUST REPORT
@@ -85,6 +85,7 @@ Workload                NOT PRESENT
 Private aggregation     VERIFIED
 Privacy budget          SATISFIED
 Execution               NOT PRESENT
+Training                NOT PRESENT
 Lineage                 COMPLETE
 
 RESULT
@@ -109,16 +110,19 @@ not present`).
 | Attack | Failing row | Reason printed |
 |---|---|---|
 | Delete `gradient-a`'s privacy receipt | Evidence FAILED | `edge aggregate:.. -ReleasedBy-> privacy:.. implied by the evidence is missing` |
-| Edit a privacy receipt (noise multiplier 6.0 → 60.0) | Evidence FAILED | `privacy:..: privacy:.. already has different evidence` |
+| Edit a privacy receipt (noise multiplier 6.0 → 60.0) | Evidence FAILED | `privacy:..: invalid evidence: the privacy receipt's signature is invalid` |
 | Hospital A revokes `gradient-a` (`trust revoke`) | Owner authorization FAILED | `gradient-a: no valid authorization from hospital-a for program:..`, plus `Revoked ... (retrain or unlearn)` |
 | Report with no trusted keys | Owner authorization, Private aggregation, Privacy budget PRESENT (not checked) | `no trusted key for hospital-a`, `coordinator .. is not trusted` |
 | Trust a different coordinator key | Private aggregation FAILED, Privacy budget FAILED | `coordinator .. is not trusted`, `signer .. is not a trusted coordinator` |
 | Approve a different plan (`plan --prefer cost`, `trust add`) | Plan FAILED | `round:.. did not run under the approved plan` |
 
 Why the edited receipt fails: the report rebuilds the graph from the signed
-evidence alone. The round's signed aggregation receipt carries the original
-privacy receipts, so an edited copy contradicts it. A deleted receipt is
-still implied by the round receipt, so its absence is detected too.
+evidence alone, and re-checks every piece of it, signature included, as if
+it had been added with `trust add`. The edited receipt no longer matches the
+coordinator's signature. The round's signed aggregation receipt also
+carries the original privacy receipts, so an edited copy would contradict
+it. A deleted receipt is still implied by the round receipt, so its
+absence is detected too.
 
 ## What Encompute guarantees
 
@@ -140,7 +144,10 @@ still implied by the round receipt, so its absence is detected too.
   a proof that the sum was computed correctly.
 - Secure aggregation and differential privacy protect individual
   gradients, not everything the aggregate reveals. With noise multiplier
-  6.0 and ε 3, the budget bounds that leakage; it does not remove it.
+  6.0 and ε 3, the budget bounds that leakage; it does not remove it. The
+  round costs ε 1.558 of the 3: Encompute clips each hospital's whole
+  contribution, not each patient's, so one patient is charged as if they
+  changed all of it (sensitivity 2 × clip_norm).
 - The answer is never better than the keys supplied. If the auditor gets
   the coordinator's key from the coordinator's own bundle, it proves
   nothing.

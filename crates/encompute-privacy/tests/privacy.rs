@@ -39,8 +39,9 @@ fn spec(round: u32, epsilon: f64) -> ReleaseSpec {
         mechanism: DpMechanism {
             kind: DpKind::DiscreteGaussian,
             clip_norm: 1.0,
-            noise_multiplier: 5.0,
+            noise_multiplier: 10.0,
             sampling_rate: None,
+            preset: None,
         },
         codec: FixedPointCodec {
             clip_min: -1.0,
@@ -131,10 +132,15 @@ fn accounting_is_deterministic_and_composes() {
     let v = ledger::read(&d.join("gradient-a.ledger")).unwrap();
     let c = v.cost().unwrap();
     assert!((c.rho - 3.0 * rho).abs() < 1e-12);
-    // Organizations are charged for replacing a whole contribution.
+    // Without per-unit clipping, a patient is charged for replacing a whole
+    // contribution, like an organization (review finding DP-4); a sampled
+    // (DP-SGD) patient, clipped per unit, for about half the swing.
     let mut org = spec(1, 3.0);
     org.charged[0].budget.unit = PrivacyUnit::Organization;
-    assert!(org.rho(&org.charged[0]).unwrap() > 3.5 * rho);
+    assert_eq!(org.rho(&org.charged[0]).unwrap(), rho);
+    let mut sampled = spec(1, 3.0);
+    sampled.mechanism.sampling_rate = Some(0.01);
+    assert!(sampled.rho(&sampled.charged[0]).unwrap() < rho / 3.5);
 }
 
 #[test]
@@ -213,7 +219,7 @@ fn tampering_rollback_and_reset_are_detected() {
     write(
         &lines
             .iter()
-            .map(|l| l.replace("\"sensitivity\":260", "\"sensitivity\":1"))
+            .map(|l| l.replace("\"sensitivity\":516", "\"sensitivity\":1"))
             .collect::<Vec<_>>()
             .iter()
             .map(String::as_str)
@@ -316,6 +322,45 @@ fn invalid_budgets_and_mechanisms() {
     );
 }
 
+/// Review finding DP-4 (ENC-SF-2026-068): without per-unit clipping (no Poisson sampling),
+/// one patient's records can move a party's clipped contribution from one
+/// side of the clipping ball to the other. The charged sensitivity must
+/// cover that full swing, as for an organization; before the fix a
+/// patient-level budget was charged half of it.
+#[test]
+fn an_unsampled_patient_is_charged_the_whole_contribution_swing() {
+    let s = spec(1, 3.0);
+    let m = &s.mechanism;
+    // Two contributions, each clipped to clip_norm, pointing in opposite
+    // directions: one patient's data decides which is sent.
+    let d = s.vector_len;
+    let c = m.clip_norm / (d as f64).sqrt();
+    let x = vec![c; d];
+    let y = vec![-c; d];
+    let code = |v: &[f64]| -> Vec<f64> { v.iter().map(|&a| s.codec.encode(a) as f64).collect() };
+    let (cx, cy) = (code(&x), code(&y));
+    let moved = cx
+        .iter()
+        .zip(&cy)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let patient = encompute_privacy::sensitivity(&PrivacyUnit::Patient, m, &s.codec, d);
+    let organization = encompute_privacy::sensitivity(&PrivacyUnit::Organization, m, &s.codec, d);
+    assert!(
+        moved <= patient as f64,
+        "one patient moved the sum by {moved} but was charged sensitivity {patient}"
+    );
+    assert_eq!(patient, organization);
+    // The receipt carries the charged sensitivity: a receipt claiming the
+    // old, halved one is not this release's.
+    let one = (m.clip_norm * s.codec.scale as f64).ceil() as u64 + 4;
+    assert!(
+        moved > one as f64,
+        "the old sensitivity {one} did not cover {moved}"
+    );
+}
+
 /// The charged sensitivity bounds how far the encoded sum can move when one
 /// unit's data changes (the contributors fixed): codes of two vectors whose
 /// L2 distance is at most k * clip_norm differ by at most the sensitivity,
@@ -328,11 +373,16 @@ fn sensitivity_bounds_the_encoded_difference() {
         getrandom::getrandom(&mut b).unwrap();
         (u64::from_le_bytes(b) as f64 / u64::MAX as f64) * 2.0 - 1.0
     };
-    for (unit, k) in [
-        (PrivacyUnit::Patient, 1.0),
-        (PrivacyUnit::Organization, 2.0),
+    let mut sampled = s.mechanism.clone();
+    sampled.sampling_rate = Some(0.01);
+    for (unit, mechanism, k) in [
+        // DP-SGD: the attested workload clips each sampled patient.
+        (PrivacyUnit::Patient, &sampled, 1.0),
+        // Unsampled: only the party's whole contribution is clipped.
+        (PrivacyUnit::Patient, &s.mechanism, 2.0),
+        (PrivacyUnit::Organization, &s.mechanism, 2.0),
     ] {
-        let delta = encompute_privacy::sensitivity(&unit, &s.mechanism, &s.codec, s.vector_len);
+        let delta = encompute_privacy::sensitivity(&unit, mechanism, &s.codec, s.vector_len);
         for _ in 0..2000 {
             // x in the clip box; x' = x + v with |v| <= k * clip_norm; the
             // codec clips each coordinate.
@@ -350,4 +400,95 @@ fn sensitivity_bounds_the_encoded_difference() {
             assert!(d2.sqrt() <= delta as f64, "{} > {delta}", d2.sqrt());
         }
     }
+}
+
+/// Review finding DP-4: without sampling a patient is charged twice the
+/// clip norm, so a named level uses twice its listed noise for it. The
+/// release samples and charges that one effective noise, and each release
+/// then costs what it did when a patient was (wrongly) charged one clip
+/// norm at the listed noise: a level's budget affords about as many
+/// releases as before. An organization's noise and cost are unchanged.
+#[test]
+fn preset_levels_charge_their_effective_noise() {
+    use encompute_ir::confidentiality::{privacy_preset, PRIVACY_PRESETS};
+    use encompute_privacy::accountant::gaussian_rho;
+    let base = spec(1, 3.0);
+    for (name, _, _, listed) in PRIVACY_PRESETS {
+        for unit in [PrivacyUnit::Patient, PrivacyUnit::Organization] {
+            let (budget, mechanism) = privacy_preset(name, unit.clone()).unwrap();
+            let organization = unit == PrivacyUnit::Organization;
+            let s = ReleaseSpec {
+                mechanism: mechanism.clone(),
+                charged: vec![Charged {
+                    asset_id: "gradient-a".into(),
+                    budget: budget.clone(),
+                }],
+                ..base.clone()
+            };
+            let rho = s.rho(&s.charged[0]).unwrap();
+            // Before the fix: the listed noise, and a patient's
+            // sensitivity one clip norm (an organization's two). Within 2%:
+            // the rounding term does not scale with k.
+            let listed_mech = DpMechanism {
+                noise_multiplier: listed,
+                preset: None,
+                ..mechanism.clone()
+            };
+            let r = (s.vector_len as f64).sqrt().ceil() as u64;
+            let k = if organization { 2.0 } else { 1.0 };
+            let old_sensitivity = (k * s.codec.scale as f64).ceil() as u64 + r;
+            let old = gaussian_rho(
+                old_sensitivity,
+                release::sigma2(&listed_mech, &s.codec).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                (rho - old).abs() <= 0.02 * old,
+                "{name} {unit}: rho {rho} vs pre-fix {old}"
+            );
+            let n = ledger::affordable(rho, None, &budget).unwrap();
+            let n_old = ledger::affordable(old, None, &budget).unwrap();
+            assert!(
+                n.abs_diff(n_old) <= 1,
+                "{name} {unit}: {n} vs pre-fix {n_old}"
+            );
+            // About ten releases of a patient-level budget, 2.5 of an
+            // organization's (the level's documented meaning).
+            let expected = if organization { 2..=3 } else { 9..=13 };
+            assert!(expected.contains(&n), "{name} {unit}: {n} releases");
+            // Without the compensation a patient would pay about 4x.
+            if !organization {
+                let uncompensated = gaussian_rho(
+                    encompute_privacy::sensitivity(&unit, &listed_mech, &s.codec, s.vector_len),
+                    release::sigma2(&listed_mech, &s.codec).unwrap(),
+                )
+                .unwrap();
+                assert!(uncompensated > 3.5 * rho, "{name}");
+            }
+        }
+    }
+    // The release itself samples and charges the effective noise, and its
+    // receipt names the level.
+    let d = dir("preset-effective");
+    let (budget, mechanism) = privacy_preset("strong", PrivacyUnit::Patient).unwrap();
+    assert_eq!(mechanism.noise_multiplier, 12.0);
+    let s = ReleaseSpec {
+        mechanism: mechanism.clone(),
+        charged: vec![Charged {
+            asset_id: "gradient-a".into(),
+            budget,
+        }],
+        ..base
+    };
+    let mut rng = Csprng::from_os().unwrap();
+    let out = release(&s, &d, &[0; 16], &mut rng, &key()).unwrap();
+    let receipt = &out.receipts[0];
+    assert_eq!(receipt.mechanism, mechanism);
+    assert_eq!(receipt.mechanism.preset.as_deref(), Some("strong"));
+    assert_eq!(
+        receipt.sigma2,
+        release::sigma2(&mechanism, &s.codec).unwrap()
+    );
+    let rho = s.rho(&s.charged[0]).unwrap();
+    assert_eq!(receipt.rho_cost.parse::<f64>().unwrap(), rho);
 }

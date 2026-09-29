@@ -79,7 +79,7 @@ train:patients-a
   estimated 91000 ms
 ...
 aggregate:update
-  across the parties, secure aggregation (threshold 3, colluding ≤ 1) + differential privacy (discrete Gaussian, noise 6.0, clip 1.0)
+  across the parties, secure aggregation (threshold 3, colluding ≤ 1) + differential privacy (discrete Gaussian, noise 12.0, clip 1.0)
   estimated 955 ms
 
 RESULT

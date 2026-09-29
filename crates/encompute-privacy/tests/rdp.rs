@@ -34,9 +34,8 @@ fn curves_match_the_reference_and_are_never_optimistic() {
     for c in &v.cases {
         let mine = release_curve(c.rho, Some(c.q));
         for (i, (m, r)) in mine.iter().zip(&c.curve).enumerate() {
-            let tol = 1e-9 * r.abs().max(1e-12);
             assert!(
-                *m >= r - tol,
+                m >= r,
                 "optimistic at order {}: {m} < {r} ({}, {})",
                 ORDERS[i],
                 c.rho,
@@ -55,11 +54,7 @@ fn curves_match_the_reference_and_are_never_optimistic() {
 fn epsilon_matches_the_reference_and_is_never_optimistic() {
     for c in &vectors().cases {
         let e = epsilon(&scaled(&release_curve(c.rho, Some(c.q)), c.steps), c.delta);
-        assert!(
-            e >= c.epsilon * (1.0 - 1e-12),
-            "optimistic: {e} < {}",
-            c.epsilon
-        );
+        assert!(e >= c.epsilon, "optimistic: {e} < {}", c.epsilon);
         assert!(
             (e - c.epsilon).abs() <= 1e-7 * c.epsilon.max(1e-9),
             "rho {} q {} steps {}: {e} vs {}",
@@ -69,6 +64,46 @@ fn epsilon_matches_the_reference_and_is_never_optimistic() {
             c.epsilon
         );
     }
+}
+
+/// Review finding DP-7 (ENC-SF-2026-085): long compositions and extreme sampling rates, off
+/// the reference grid, against a 60-digit mpmath evaluation of the same
+/// bound (scratch `rdp_check.py`, the method of rdp_reference.py). Before
+/// the relative margin, the 100000-step case came out 4e-14 relative
+/// *below* the reference: accounting was optimistic.
+#[test]
+// The references keep their 20 significant digits, as computed.
+#[allow(clippy::excessive_precision)]
+fn long_compositions_are_never_optimistic() {
+    let cases = [
+        (0.5, 0.9, 10, 1e-6, 20.952984026539917847),
+        (2.0, 0.01, 100, 1e-6, 12.963766428278909081),
+        (8.0, 0.001, 1000, 1e-5, 2301.2573242711613421),
+        (0.03125, 1e-5, 100_000, 1e-6, 0.022203701801909525954),
+        (0.3472222222222222, 0.032, 20, 1e-6, 1.6756097003442723407),
+        (50.0, 0.2, 5, 1e-6, 496.33483707250338034),
+        (0.001, 0.99, 3, 1e-9, 0.43327667863286067805),
+    ];
+    for (rho, q, n, delta, reference) in cases {
+        let e = epsilon(&scaled(&release_curve(rho, Some(q)), n), delta);
+        assert!(
+            e >= reference,
+            "optimistic: rho {rho} q {q} steps {n}: {e} < {reference}"
+        );
+        assert!(
+            (e - reference) / reference <= 1e-9,
+            "rho {rho} q {q} steps {n}: {e} vs {reference}"
+        );
+    }
+}
+
+/// The zCDP path is conservative too: never below the CKS reference value.
+#[test]
+fn zcdp_epsilon_is_never_below_the_reference() {
+    use encompute_privacy::PrivacyAccountant;
+    let e = encompute_privacy::Zcdp.epsilon(0.005, 1e-6);
+    assert!(e >= 0.4299414688369493, "{e}");
+    assert!(e - 0.4299414688369493 <= 1e-9, "{e}");
 }
 
 #[test]

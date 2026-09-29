@@ -282,16 +282,20 @@ class Project:
         owners = [d.owner for d in data]
         if len(set(owners)) != len(owners):
             raise EncomputeError("ENC2106", "each dataset must belong to a different party")
-        clip, scale, sampling = 1.0, 4096, ""
+        clip, scale, dp_tail = 1.0, 4096, ""
         if dpsgd is not None:
             eps, delta, noise = dpsgd["epsilon"], dpsgd["delta"], dpsgd["noise_multiplier"]
             clip, scale = dpsgd["clip_norm"], dpsgd["scale"]
-            sampling = f" sampling_rate {dpsgd['sampling_rate']!r}"
+            dp_tail = f" sampling_rate {dpsgd['sampling_rate']!r}"
         else:
-            presets = {p[0]: p for p in _native.privacy_presets()}
+            presets = [p[0] for p in _native.privacy_presets()]
             if privacy not in presets:
                 raise EncomputeError("ENC2203", f"privacy is one of {', '.join(presets)}")
-            _, eps, delta, noise = presets[privacy]
+            # The level's noise for this unit (twice the listed noise for a
+            # unit inside a party: without sampling it has no per-unit
+            # clipping), recorded with the level.
+            eps, delta, noise = _native.privacy_preset_mechanism(privacy, [unit])
+            dp_tail = f' preset "{privacy}"'
         n = len(data)
         c = max(0, n - 2) if colluding is None else colluding
         lines = [
@@ -333,7 +337,7 @@ class Project:
         lines.append(
             f"aggregate \"update\" sum minimum {n} colluding {c} clip [-1.0, 1.0] scale {scale} "
             f"modulus 40 dp discrete_gaussian clip_norm {clip!r} noise_multiplier {noise!r}"
-            f"{sampling}"
+            f"{dp_tail}"
         )
         return "\n".join(lines) + "\n"
 

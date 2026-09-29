@@ -53,7 +53,8 @@ pub struct PrivacyPreview {
     pub output: String,
     pub asset: String,
     pub unit: String,
-    /// `organization` (each party's whole contribution clipped) or
+    /// `organization` (each party's whole contribution clipped), a unit
+    /// inside a party without DP-SGD (charged as a whole contribution), or
     /// `example` (DP-SGD: each privacy unit clipped and Poisson-sampled).
     pub level: String,
     pub sampling_rate: Option<f64>,
@@ -160,7 +161,12 @@ impl Model {
                         (None, encompute_ir::confidentiality::PrivacyUnit::Organization) => {
                             "organization"
                         }
-                        (None, _) => "contribution (each party's whole contribution clipped)",
+                        // Review finding DP-4 (ENC-SF-2026-068): no per-unit clipping, so
+                        // one unit is charged the whole contribution.
+                        (None, _) => {
+                            "contribution (only each party's whole contribution is clipped; \
+                             each unit is charged as if it changed all of it)"
+                        }
                     }
                     .into(),
                     sampling_rate: q,
@@ -388,6 +394,10 @@ impl Model {
                 m.clip_norm,
                 m.noise_multiplier
             );
+            let units: Vec<_> = rel.charged.iter().map(|(_, b)| b.unit.clone()).collect();
+            if let Some(level) = m.preset_summary(&units) {
+                let _ = writeln!(s, "  {:<21}{level}", "privacy level");
+            }
             let boundary = r.aggregations.iter().find(|b| b.output == rel.output);
             for (asset, b) in &rel.charged {
                 let per = boundary.map(|bd| {
@@ -430,6 +440,25 @@ impl Model {
                     }
                 );
             }
+            // What bounds one privacy unit's influence (review finding
+            // DP-4): never a per-unit clip the program does not enforce.
+            let _ = writeln!(
+                s,
+                "  {:<21}{}",
+                "unit bound",
+                match m.sampling_rate {
+                    Some(_) => format!(
+                        "each sampled privacy unit's gradient clipped to L2 norm {} by the \
+                         attested workload (sensitivity 1 x clip_norm)",
+                        m.clip_norm
+                    ),
+                    None => format!(
+                        "each party's whole contribution clipped to L2 norm {}; one privacy \
+                         unit is charged as if it changed all of it (sensitivity 2 x clip_norm)",
+                        m.clip_norm
+                    ),
+                }
+            );
             let _ = writeln!(
                 s,
                 "  {:<21}{}",
@@ -523,6 +552,10 @@ impl Model {
                 m.clip_norm,
                 m.noise_multiplier
             );
+            let units: Vec<_> = spec.charged.iter().map(|c| c.budget.unit.clone()).collect();
+            if let Some(level) = m.preset_summary(&units) {
+                let _ = writeln!(s, "  {:<18}{level}", "privacy level");
+            }
             for c in &spec.charged {
                 let p = plan
                     .participants

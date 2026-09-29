@@ -4,7 +4,7 @@ Gradient sharing  -> secure aggregation
 Output release    -> differential privacy
 Key access        -> attestation (attestation-gated key release)
 mock TEE, confidential compute (mock, mock) + attestation (mock) + attestation-gated key release
-secure aggregation (threshold 3, colluding ≤ 1) + differential privacy (discrete Gaussian, noise 6.0, clip 1.0)
+secure aggregation (threshold 3, colluding ≤ 1) + differential privacy (discrete Gaussian, noise 12.0, clip 1.0)
 ALL TRUST REQUIREMENTS SATISFIED
 error[ENC2401]
 hospital-a would run a step reading base-model

@@ -283,9 +283,20 @@ pub const PRIVACY_ACCOUNTANT: &str = "zcdp-cks2020";
 /// Named privacy levels: a per-asset budget and the noise that goes with
 /// it, so applications can say `privacy="strong"` and `explain` shows what
 /// that means. `(name, epsilon, delta, noise_multiplier)`; the clip norm is
-/// 1.0 (contributions are clipped to unit L2 norm). Each level's noise
-/// affords about ten full-participation releases (no sampling
-/// amplification) of a record-, patient- or user-level budget.
+/// 1.0 (contributions are clipped to unit L2 norm).
+///
+/// The listed `noise_multiplier` is the level's noise per unit of
+/// sensitivity `clip_norm`. The mechanism a level resolves to
+/// ([`privacy_preset`], [`preset_mechanism`]) scales it by
+/// [`preset_noise_scale`]: a unit finer than the organization (record,
+/// patient, user, device) has no per-unit clipping without Poisson
+/// sampling, so one unit is charged twice the clip norm (like an
+/// organization) and the level uses twice the listed noise for it. The
+/// resolved mechanism records the level (`preset`) and carries the
+/// effective multiplier, which is what is sampled and charged. Either
+/// way, each level's noise affords about ten full-participation releases
+/// (no sampling amplification) of a record-, patient- or user-level
+/// budget, and about 2.5 of an organization-level one.
 pub const PRIVACY_PRESETS: [(&str, f64, f64, f64); 3] = [
     ("standard", 8.0, 1e-5, 2.2),
     ("strong", 3.0, 1e-6, 6.0),
@@ -302,8 +313,42 @@ pub const PATIENT_PRIVACY_PRESETS: [(&str, f64, f64, f64); 2] = [
     ("strong-patient", 3.0, 1e-6, 1.2),
 ];
 
-/// The budget and mechanism of a named privacy level.
-pub fn privacy_preset(name: &str, unit: PrivacyUnit) -> Result<(PrivacyBudget, DpMechanism)> {
+/// How strongly one privacy unit can move an aggregate, in multiples of
+/// the clip norm (the L2 sensitivity is `factor * clip_norm`).
+///
+/// With Poisson sampling (DP-SGD) the attested workload clips each sampled
+/// record, user, patient or device's gradient to `clip_norm` before
+/// summation, so one such unit moves the sum by at most `clip_norm`
+/// (factor 1). Otherwise only each party's whole contribution is clipped,
+/// and one unit (an organization, but also one patient inside it) may move
+/// it anywhere in the clipping ball: factor 2. Organizations are never
+/// sampled (which parties contribute is public).
+pub fn sensitivity_factor(unit: &PrivacyUnit, sampling_rate: Option<f64>) -> f64 {
+    if *unit != PrivacyUnit::Organization && sampling_rate.is_some() {
+        1.0
+    } else {
+        2.0
+    }
+}
+
+/// The factor a named privacy level scales its listed noise by for
+/// `unit`: 2 for a unit finer than the organization (it has no per-unit
+/// clipping without sampling, so its sensitivity factor is 2 rather than
+/// the 1 a clipped unit would have), 1 for an organization (whose factor
+/// was always 2). This keeps each level's noise-to-sensitivity ratio, and
+/// so how many releases its budget affords, the same for every unit.
+pub fn preset_noise_scale(unit: &PrivacyUnit) -> f64 {
+    let clipped_per_unit = if *unit == PrivacyUnit::Organization {
+        2.0
+    } else {
+        1.0
+    };
+    sensitivity_factor(unit, None) / clipped_per_unit
+}
+
+/// A named level's `(epsilon, delta, noise_multiplier)` as listed in
+/// [`PRIVACY_PRESETS`] (before [`preset_noise_scale`]).
+pub fn preset_level(name: &str) -> Result<(f64, f64, f64)> {
     if PATIENT_PRIVACY_PRESETS.iter().any(|p| p.0 == name) {
         return Err(Error::new(
             Code::PrivacyPolicy,
@@ -312,28 +357,45 @@ pub fn privacy_preset(name: &str, unit: PrivacyUnit) -> Result<(PrivacyBudget, D
             ),
         ));
     }
-    let (_, epsilon, delta, noise_multiplier) = PRIVACY_PRESETS
+    PRIVACY_PRESETS
         .iter()
         .find(|p| p.0 == name)
-        .copied()
+        .map(|p| (p.1, p.2, p.3))
         .ok_or_else(|| {
             Error::new(
                 Code::PrivacyPolicy,
                 format!("unknown privacy level {name:?} (standard, strong, maximum)"),
             )
-        })?;
+        })
+}
+
+/// The mechanism of a named level for a release charged to budgets of
+/// `units`: the listed noise times the largest [`preset_noise_scale`] of
+/// those units (one noise protects every charged asset). It records the
+/// level; its `noise_multiplier` is the effective one, sampled and charged.
+pub fn preset_mechanism(name: &str, units: &[PrivacyUnit]) -> Result<DpMechanism> {
+    let (_, _, listed) = preset_level(name)?;
+    let scale = units.iter().map(preset_noise_scale).fold(1.0, f64::max);
+    Ok(DpMechanism {
+        kind: DpKind::DiscreteGaussian,
+        clip_norm: 1.0,
+        noise_multiplier: listed * scale,
+        sampling_rate: None,
+        preset: Some(name.to_owned()),
+    })
+}
+
+/// The budget and mechanism of a named privacy level for `unit`.
+pub fn privacy_preset(name: &str, unit: PrivacyUnit) -> Result<(PrivacyBudget, DpMechanism)> {
+    let (epsilon, delta, _) = preset_level(name)?;
+    let mechanism = preset_mechanism(name, std::slice::from_ref(&unit))?;
     Ok((
         PrivacyBudget {
             unit,
             epsilon,
             delta,
         },
-        DpMechanism {
-            kind: DpKind::DiscreteGaussian,
-            clip_norm: 1.0,
-            noise_multiplier,
-            sampling_rate: None,
-        },
+        mechanism,
     ))
 }
 
@@ -362,6 +424,12 @@ pub struct DpMechanism {
         with = "opt_exact_f64"
     )]
     pub sampling_rate: Option<f64>,
+    /// The named privacy level this mechanism was resolved from
+    /// ([`preset_mechanism`]), shown by `explain` and the trust report. Its
+    /// `noise_multiplier` is already the effective one; the analysis checks
+    /// it is exactly the level's for the charged units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 /// The accountant for sampled (DP-SGD) releases: Rényi DP of Poisson
@@ -412,7 +480,72 @@ impl DpMechanism {
                 ));
             }
         }
+        if let Some(name) = &self.preset {
+            let (_, _, listed) = preset_level(name)?;
+            if self.clip_norm != 1.0
+                || self.sampling_rate.is_some()
+                || !(self.noise_multiplier == listed || self.noise_multiplier == 2.0 * listed)
+            {
+                return bad(format!(
+                    "a mechanism of privacy level {name:?} has clip_norm 1.0, no sampling and \
+                     noise_multiplier {listed:?} (organization) or {:?} (a unit inside a \
+                     party), got clip_norm {:?}, noise_multiplier {:?}",
+                    2.0 * listed,
+                    self.clip_norm,
+                    self.noise_multiplier
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Refuses a preset mechanism whose noise is not exactly its level's
+    /// for a release charged to budgets of `units` (so `explain` and the
+    /// trust report never name a level the noise does not match).
+    pub fn check_preset(&self, units: &[PrivacyUnit]) -> Result<()> {
+        let Some(name) = &self.preset else {
+            return Ok(());
+        };
+        self.validate()?;
+        let want = preset_mechanism(name, units)?;
+        if *self != want {
+            return Err(Error::new(
+                Code::PrivacyPolicy,
+                format!(
+                    "privacy level {name:?} for {} units has noise_multiplier {:?}, got {:?}",
+                    units
+                        .iter()
+                        .map(PrivacyUnit::name)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    want.noise_multiplier,
+                    self.noise_multiplier
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// For a preset mechanism charged to `units`, what the level means:
+    /// `preset=strong, sensitivity_factor=2, effective_noise_multiplier=12
+    /// (2x preset 6.0)`.
+    pub fn preset_summary(&self, units: &[PrivacyUnit]) -> Option<String> {
+        let name = self.preset.as_ref()?;
+        let (_, _, listed) = preset_level(name).ok()?;
+        let factor = units
+            .iter()
+            .map(|u| sensitivity_factor(u, self.sampling_rate))
+            .fold(if units.is_empty() { 2.0 } else { 0.0 }, f64::max);
+        let scale = self.noise_multiplier / listed;
+        Some(format!(
+            "preset={name}, sensitivity_factor={factor}, effective_noise_multiplier={} ({}preset {listed:?})",
+            self.noise_multiplier,
+            if scale == 1.0 {
+                String::new()
+            } else {
+                format!("{scale}x ")
+            }
+        ))
     }
 }
 

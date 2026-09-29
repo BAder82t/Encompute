@@ -255,6 +255,38 @@ impl AggregationPlan {
         }))
     }
 
+    /// Every aggregate a round of this plan produces is a release: it
+    /// leaves the protocol (to the coordinator's output, whatever the
+    /// declared destination), so a plan with any privacy-budgeted
+    /// contributor must add differential-privacy noise and charge it
+    /// (review finding DP-1: a `Sealed` aggregate was released exactly,
+    /// with no ledger and no charge).
+    pub fn check_release_privacy(&self) -> Result<()> {
+        if self.dp.is_some() {
+            return Ok(());
+        }
+        let budgeted: Vec<&str> = self
+            .participants
+            .iter()
+            .filter(|p| p.budget.is_some())
+            .map(|p| p.asset.as_str())
+            .collect();
+        if budgeted.is_empty() {
+            return Ok(());
+        }
+        Err(Error::new(
+            Code::PrivacyPolicy,
+            format!(
+                "aggregate {:?} releases privacy-budgeted asset{} {} without differential \
+                 privacy: every secure-aggregation aggregate is a release, whatever its \
+                 destination; declare `dp` on the aggregation",
+                self.output,
+                if budgeted.len() == 1 { "" } else { "s" },
+                budgeted.join(", ")
+            ),
+        ))
+    }
+
     /// The asset's ledger as found in `dir` (a genesis-only ledger if it
     /// has none yet).
     pub fn ledger_view(&self, dir: &Path, p: &PlanParticipant) -> Result<Option<LedgerView>> {
@@ -397,6 +429,7 @@ impl AggregationSpec {
         if let Some(a) = &self.attestation {
             a.validate()?;
         }
+        self.plan.check_release_privacy()?;
 
         self.plan
             .codec
@@ -747,6 +780,24 @@ impl RoundParticipant {
             check_coordinator(approved, round, policy, coordinator)?;
         }
         let plan = &approved.plan;
+        // A budgeted asset contributes only to a round that adds noise and
+        // charges its ledger (review finding DP-1), whatever the approved
+        // spec says: the budget is the owner's, not the spec's.
+        if plan.dp.is_none()
+            && plan
+                .participant(party)
+                .is_some_and(|me| me.budget.is_some())
+        {
+            return Err(Error::new(
+                Code::PrivacyPolicy,
+                format!(
+                    "party {party}'s asset has a privacy budget, but this aggregation adds no \
+                     differential privacy: its aggregate would be released exactly and \
+                     uncharged"
+                ),
+            ));
+        }
+        plan.check_release_privacy()?;
         let mut values = values.to_vec();
         if let Some(dp) = &plan.dp {
             let me = plan.participant(party).expect("checked above");
@@ -1154,6 +1205,7 @@ impl RoundCoordinator {
         }
         let round_id = self.round.id()?;
         let n = survivors.len();
+        plan.check_release_privacy()?;
         // The released aggregate: with privacy noise under a DP plan, after
         // the cost is reserved in every contributor's ledger.
         let (released, privacy): (Vec<i64>, Vec<PrivacyReceipt>) = match plan.release_spec(
@@ -1405,7 +1457,8 @@ pub fn verify_aggregation_receipt(
 /// receipt per budgeted contributor, signed by the round's coordinator and
 /// bound to this round, output, policies, mechanism and ledger event, all
 /// for one output (with the aggregate in hand: its released values).
-/// Budgeted assets released without a DP plan fail closed too.
+/// Budgeted assets released without a DP plan fail closed too, whatever
+/// the destination: every aggregate is a release (review finding DP-1).
 fn verify_release_privacy(
     receipt: &AggregationReceipt,
     spec: &AggregationSpec,
@@ -1420,9 +1473,7 @@ fn verify_release_privacy(
         &m.contributors,
     )?
     else {
-        if plan.recipient != OutputRelease::Sealed
-            && plan.participants.iter().any(|p| p.budget.is_some())
-        {
+        if plan.participants.iter().any(|p| p.budget.is_some()) {
             return err("the plan releases privacy-budgeted assets without differential privacy");
         }
         return Ok(());
@@ -1477,3 +1528,7 @@ pub fn identity_of(party: &PartyId, key: &SigningKey) -> PartyIdentity {
         public_key: hex(&key.verifying_key().to_bytes()),
     }
 }
+
+#[cfg(test)]
+#[path = "round_tests.rs"]
+mod tests;

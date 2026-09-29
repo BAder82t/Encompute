@@ -105,3 +105,21 @@ def test_plan_without_a_model():
     assert "secure_aggregation" in [m["mechanism"] for m in run.plan["steps"][0]["mechanisms"]]
     with pytest.raises(encompute.EncomputeError):
         p.plan(data=[a, b], to="carol")
+
+
+def test_privacy_levels_resolve_for_the_unit():
+    # Review finding DP-4: a record-, patient- or user-level budget
+    # aggregated without sampling has no per-unit clipping, so the level
+    # uses twice its listed noise; an organization's is the listed noise.
+    # The program records the level beside the effective noise.
+    p = encompute.Project("demo", parties=["alice", "bob"])
+    a = p.data("alice-data", owner="alice")
+    b = p.data("bob-data", owner="bob")
+    for unit, noise in (("record", 12.0), ("patient", 12.0), ("organization", 6.0)):
+        eir = p._aggregation_program([a, b], "alice", None, privacy="strong", unit=unit,
+                                     dim=4, colluding=None)
+        assert f'noise_multiplier {noise!r} preset "strong"' in eir, eir
+    run = p.plan(data=[a, b], privacy="strong")
+    dp = [m for m in run.plan["steps"][0]["mechanisms"]
+          if m["mechanism"] == "differential_privacy"]
+    assert dp and dp[0]["noise_multiplier"] == "12.0", dp
