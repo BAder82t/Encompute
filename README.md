@@ -433,7 +433,9 @@ and a development-only mock.
 ## Build
 
 Requires Rust (pinned in `rust-toolchain.toml`), CMake, a C++17 compiler
-and, on macOS, `brew install libomp`.
+and, on macOS, `brew install libomp`. On Linux, building the Python wheel
+with OpenFHE also needs `patchelf` (`apt install patchelf`), which maturin
+uses to bundle `libgomp`.
 
 ```sh
 cargo test                               # everything except OpenFHE and TFHE-rs

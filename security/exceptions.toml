@@ -868,151 +868,13 @@ expires = 2026-12-31
 # --- Containers: the training image's installer tooling (python:3.11.16-slim-bookworm base) ---
 
 [[exception]]
-id = "CVE-2026-23949"
-package = "jaraco.context"
-version = "5.3.0"
-severity = "high"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "Path traversal in jaraco.context.tarball() when extracting a malicious tar archive (the copy vendored in setuptools/_vendor). The training workload never invokes it."
-compensating_controls = [
-  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
-  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
-  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
-]
-tracking = "https://github.com/jaraco/jaraco.context/security/advisories/GHSA-58pv-8j8x-9vj2"
-added = 2026-09-29
-expires = 2026-12-31
-
-[[exception]]
-id = "CVE-2026-24049"
-package = "wheel"
-version = "0.45.1"
-severity = "high"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "File permission change outside the target through `wheel unpack` of a malicious wheel (the copy vendored in setuptools/_vendor). The training workload never invokes it."
-compensating_controls = [
-  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
-  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
-  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
-]
-tracking = "https://github.com/pypa/wheel/security/advisories/GHSA-8rrh-rw8j-w5fx"
-added = 2026-09-29
-expires = 2026-12-31
-
-[[exception]]
-id = "CVE-2026-59890"
-package = "setuptools"
-version = "79.0.1"
-severity = "medium"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "MANIFEST.in exclusion bypass through Unicode normalization when building an sdist on macOS. The training workload never invokes it."
-compensating_controls = [
-  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
-  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
-  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
-]
-tracking = "https://github.com/pypa/setuptools/security/advisories/GHSA-h35f-9h28-mq5c"
-added = 2026-09-29
-expires = 2026-12-31
-
-[[exception]]
-id = "CVE-2025-8869"
-package = "pip"
-version = "24.0"
-severity = "medium"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "pip's fallback tar extraction does not check symbolic links. The training workload never invokes it."
-compensating_controls = [
-  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
-  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
-  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
-]
-tracking = "https://nvd.nist.gov/vuln/detail/CVE-2025-8869"
-added = 2026-09-29
-expires = 2026-12-31
-
-[[exception]]
-id = "CVE-2026-13346"
-package = "pip"
-version = "24.0"
-severity = "medium"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "pip installs files to arbitrary locations from doubly-encoded URLs served by a malicious index. The training workload never invokes it."
-compensating_controls = [
-  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
-  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
-  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
-]
-tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-13346"
-added = 2026-09-29
-expires = 2026-12-31
-
-[[exception]]
-id = "CVE-2026-3219"
-package = "pip"
-version = "24.0"
-severity = "medium"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "pip treats a file that is both a tar and a ZIP archive as ZIP. The training workload never invokes it."
-compensating_controls = [
-  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
-  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
-  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
-]
-tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-3219"
-added = 2026-09-29
-expires = 2026-12-31
-
-[[exception]]
-id = "CVE-2026-6357"
-package = "pip"
-version = "24.0"
-severity = "medium"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "pip's self-update check imports modules after installing wheels. The training workload never invokes it."
-compensating_controls = [
-  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
-  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
-  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
-]
-tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-6357"
-added = 2026-09-29
-expires = 2026-12-31
-
-[[exception]]
-id = "CVE-2026-8643"
-package = "pip"
-version = "24.0"
-severity = "medium"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "pip installs entry-point scripts outside the installation directory. The training workload never invokes it."
-compensating_controls = [
-  "the production entrypoint is fixed (python -m encompute.torch.cs_worker) and the Confidential Space launch policy lets the operator override only JOB_URL: nothing in the running workload invokes the package; the worker downloads only its sealed assets (cs_worker.py, urllib) and never installs or unpacks packages",
-  "the package is installer tooling from the Python base image; the image installs its packages at build time only (pip --require-hashes --no-deps from the hash-locked requirements.lock) and nothing runs pip, setuptools or wheel afterwards",
-  "follow-up: remove pip, setuptools and wheel from the production stage (deploy/confidential-space-training/Dockerfile), after which this entry goes stale and is deleted",
-]
-tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-8643"
-added = 2026-09-29
-expires = 2026-12-31
-
-# --- Containers: OpenSSL in the training image (Debian 12; fixed in 3.0.22-1~deb12u1) ---
-
-[[exception]]
 id = "CVE-2026-63072"
 package = "libssl3"
 version = "3.0.20-1~deb12u2"
 severity = "medium"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = "Heap buffer overflow in CMS decryption (AES key unwrap) of a crafted CMS message. Nothing in the training workload decrypts CMS or runs a CMP server."
+reason = "Heap buffer overflow in CMS decryption (AES key unwrap) of a crafted CMS message. Nothing in the training workload decrypts CMS or runs a CMP server. Scope: the encompute-training image only (Debian bookworm base, pinned by digest); the encompute-confidential-space image does not report it. Upstream: fixed in Debian 3.0.22-1~deb12u1, not yet in the pinned base; rebase the image and delete this entry when it is."
 compensating_controls = [
   "the only OpenSSL user in the running workload is CPython's ssl and hashlib modules (TLS to Google Cloud Storage and the key brokers, digests); neither exposes CMS or CMP, and the encompute native module links no OpenSSL (checked with ldd in encompute-training:rc4)",
   "the openssl command-line tool is present but nothing in the image runs it; the entrypoint is fixed and the launch policy lets the operator override only JOB_URL",
@@ -1021,6 +883,8 @@ compensating_controls = [
 tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-63072"
 added = 2026-09-29
 expires = 2026-12-31
+approved_by = "BAder82t"
+approved_on = 2026-09-29
 
 [[exception]]
 id = "CVE-2026-63076"
@@ -1029,7 +893,7 @@ version = "3.0.20-1~deb12u2"
 severity = "medium"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = "Invalid pointer dereference in an OpenSSL CMP server on a crafted protectionAlg. Nothing in the training workload decrypts CMS or runs a CMP server."
+reason = "Invalid pointer dereference in an OpenSSL CMP server on a crafted protectionAlg. Nothing in the training workload decrypts CMS or runs a CMP server. Scope: the encompute-training image only (Debian bookworm base, pinned by digest); the encompute-confidential-space image does not report it. Upstream: fixed in Debian 3.0.22-1~deb12u1, not yet in the pinned base; rebase the image and delete this entry when it is."
 compensating_controls = [
   "the only OpenSSL user in the running workload is CPython's ssl and hashlib modules (TLS to Google Cloud Storage and the key brokers, digests); neither exposes CMS or CMP, and the encompute native module links no OpenSSL (checked with ldd in encompute-training:rc4)",
   "the openssl command-line tool is present but nothing in the image runs it; the entrypoint is fixed and the launch policy lets the operator override only JOB_URL",
@@ -1038,6 +902,8 @@ compensating_controls = [
 tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-63076"
 added = 2026-09-29
 expires = 2026-12-31
+approved_by = "BAder82t"
+approved_on = 2026-09-29
 
 [[exception]]
 id = "CVE-2026-63072"
@@ -1046,7 +912,7 @@ version = "3.0.20-1~deb12u2"
 severity = "medium"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = "Heap buffer overflow in CMS decryption (AES key unwrap) of a crafted CMS message. Nothing in the training workload decrypts CMS or runs a CMP server."
+reason = "Heap buffer overflow in CMS decryption (AES key unwrap) of a crafted CMS message. Nothing in the training workload decrypts CMS or runs a CMP server. Scope: the encompute-training image only (Debian bookworm base, pinned by digest); the encompute-confidential-space image does not report it. Upstream: fixed in Debian 3.0.22-1~deb12u1, not yet in the pinned base; rebase the image and delete this entry when it is."
 compensating_controls = [
   "the only OpenSSL user in the running workload is CPython's ssl and hashlib modules (TLS to Google Cloud Storage and the key brokers, digests); neither exposes CMS or CMP, and the encompute native module links no OpenSSL (checked with ldd in encompute-training:rc4)",
   "the openssl command-line tool is present but nothing in the image runs it; the entrypoint is fixed and the launch policy lets the operator override only JOB_URL",
@@ -1055,6 +921,8 @@ compensating_controls = [
 tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-63072"
 added = 2026-09-29
 expires = 2026-12-31
+approved_by = "BAder82t"
+approved_on = 2026-09-29
 
 [[exception]]
 id = "CVE-2026-63076"
@@ -1063,7 +931,7 @@ version = "3.0.20-1~deb12u2"
 severity = "medium"
 status = "not_affected"
 justification = "vulnerable_code_not_in_execute_path"
-reason = "Invalid pointer dereference in an OpenSSL CMP server on a crafted protectionAlg. Nothing in the training workload decrypts CMS or runs a CMP server."
+reason = "Invalid pointer dereference in an OpenSSL CMP server on a crafted protectionAlg. Nothing in the training workload decrypts CMS or runs a CMP server. Scope: the encompute-training image only (Debian bookworm base, pinned by digest); the encompute-confidential-space image does not report it. Upstream: fixed in Debian 3.0.22-1~deb12u1, not yet in the pinned base; rebase the image and delete this entry when it is."
 compensating_controls = [
   "the only OpenSSL user in the running workload is CPython's ssl and hashlib modules (TLS to Google Cloud Storage and the key brokers, digests); neither exposes CMS or CMP, and the encompute native module links no OpenSSL (checked with ldd in encompute-training:rc4)",
   "the openssl command-line tool is present but nothing in the image runs it; the entrypoint is fixed and the launch policy lets the operator override only JOB_URL",
@@ -1072,3 +940,5 @@ compensating_controls = [
 tracking = "https://nvd.nist.gov/vuln/detail/CVE-2026-63076"
 added = 2026-09-29
 expires = 2026-12-31
+approved_by = "BAder82t"
+approved_on = 2026-09-29

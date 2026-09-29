@@ -156,7 +156,9 @@ say what each mechanism does not protect.
 ## Build and test
 
 Requirements: Rust (pinned in `rust-toolchain.toml`), CMake, a C++17
-compiler, Python 3 and, on macOS, `brew install libomp`.
+compiler, Python 3 and, on macOS, `brew install libomp`. On Linux, the
+Python wheel with OpenFHE also needs `patchelf` (maturin bundles `libgomp`
+with it).
 
 ```sh
 # Core: everything except OpenFHE and TFHE-rs

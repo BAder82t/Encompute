@@ -134,7 +134,10 @@ release_wheel() {
   [ -f "$LOG/.release-wheel" ] && return 0
   local f=()
   [ -z "$RELEASE_FEATURES" ] || f=(--features openfhe)
-  rm -rf target/release-check-wheels
+  # A previous wheel repair (auditwheel on Linux) rewrites the cached
+  # extension in target/maturin in place to need a renamed libgomp that only
+  # exists inside that wheel; building again from it fails. Start clean.
+  rm -rf target/release-check-wheels target/maturin
   (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" \
     maturin build -q --release --locked ${f[@]+"${f[@]}"} -m crates/encompute-py/Cargo.toml -o target/release-check-wheels) &&
     touch "$LOG/.release-wheel"
