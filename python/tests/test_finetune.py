@@ -94,10 +94,11 @@ def test_export_is_denied_by_inherited_policy(run):
 
 
 def test_no_raw_update_is_ever_written(run):
-    # A hospital's directory holds its key, dataset, config, round state and
-    # attestation record: never an update, gradient or adapter.
+    # A hospital's directory holds its key, dataset, config, round state (and
+    # its lock) and attestation record: never an update, gradient or adapter.
     for h in ("hospital-a", "hospital-b"):
-        files = sorted(f.name for f in (run.workdir / h).iterdir())
+        files = sorted(f.name for f in (run.workdir / h).iterdir()
+                       if f.name != "round.state.lock")
         assert files == ["attestation.json", "dataset.bin", "party.key", "round.state",
                          "worker.json"], files
     # ModelCo sees only aggregates: each released vector is the noised sum.

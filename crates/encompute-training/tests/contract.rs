@@ -51,7 +51,7 @@ fn spec() -> TrainingSpec {
 
 fn fixture_spec() -> TrainingSpec {
     TrainingSpec {
-        version: 1,
+        version: 2,
         project: "contract".into(),
         purpose: "disease-training".into(),
         plan_id: h('a'),
@@ -62,7 +62,9 @@ fn fixture_spec() -> TrainingSpec {
         base_model: ModelCommitment {
             asset_id: "base-model".into(),
             owner: "modelco".into(),
-            architecture: "{\"factory\":\"m:f\",\"kwargs\":{}}".into(),
+            architecture:
+                "{\"factory\":\"encompute.torch.models:tiny_classifier\",\"kwargs\":{\"dim\":16}}"
+                    .into(),
             weights_digest: h('f'),
             huggingface: None,
         },
@@ -106,12 +108,16 @@ fn fixture_spec() -> TrainingSpec {
                 )
             })
             .collect(),
+        key_brokers: [("modelco".to_string(), h('5'))].into(),
+        coordinator_key: h('6'),
+        initial_adapter_digest: h('7'),
     }
 }
 
 #[test]
 fn spec_id_and_attestation_policy() {
     let s = spec();
+    s.validate().unwrap();
     golden("spec.id", &s.id().unwrap());
     golden(
         "policy.json",
@@ -197,6 +203,7 @@ fn checkpoint_resume() {
                 clip_norm: 1.0,
                 noise_multiplier: 6.0,
                 sampling_rate: None,
+                preset: None,
             },
             codec: FixedPointCodec {
                 clip_min: -1.0,

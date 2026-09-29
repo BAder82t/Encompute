@@ -123,6 +123,7 @@ The run then prints:
 |---|---|---|
 | train outside the approved workload (another image) | the key broker checks the attestation | ENC2002 |
 | different training code, LoRA rank or plan | the TrainingSpecId binds them, so the broker refuses | ENC2002 |
+| name arbitrary code as the model factory (`subprocess:run`) | a training spec names only factories the worker image ships | ENC2501 |
 | another model version, or a tampered sealed model | the sealed model must be the committed weights | ENC2501 / ENC2502 |
 | a different tensor layout | the worker checks the layout digest | refused |
 | an unauthorized dataset | the worker checks the dataset digest | refused |

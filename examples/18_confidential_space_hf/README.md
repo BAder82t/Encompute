@@ -19,7 +19,8 @@ The run:
    into a sealed package. Two hospitals tokenize their notes, keeping each
    note's patient. The run is planned for Intel TDX on Confidential Space,
    and its attestation policy fixes:
-   - the image digest and the training spec;
+   - the image digest and the training spec (which names each broker's
+     grant-signing key, so the host cannot substitute one);
    - no debugging, a supported TCB, no mock evidence.
 
    A production broker receives the model, dataset, adapter and output keys,
@@ -30,9 +31,12 @@ The run:
    broker's fresh challenge. The broker verifies the token and releases the
    keys sealed to that session.
 3. **Train.** The worker fetches the ciphertexts and opens them. It checks
-   the model's weights and package, the dataset's digest, patient grouping
-   and tokenization, and the adapter layout. It then runs one DP-SGD step
-   with per-patient clipping: the same code as example 17.
+   the model's weights and package, and builds the model only with the
+   factory the spec names from the ones the image ships. It checks the
+   dataset's digest, patient grouping and tokenization, the adapter layout,
+   and the input adapter against the spec (or, after round 1, against the
+   coordinator's signed record). It then runs one DP-SGD step with
+   per-patient clipping: the same code as example 17.
 4. **Seal.** It seals its contribution under a key only attested workloads
    receive, and signs evidence with the attested session key. The evidence
    binds the run, spec, plan, participant, round, model package, dataset,
@@ -117,8 +121,9 @@ CONFIDENTIAL SPACE` instead.
   approved training spec. They are sealed to that workload's in-memory
   session.
 - The worker trains only on the committed model, dataset, tokenization and
-  grouping, with the committed privacy settings. Per-patient clipping stays
-  on.
+  grouping, with the committed privacy settings. The training configuration
+  comes from the spec: a descriptor may repeat it, never change it
+  (`CONFIGURATION MISMATCH`). Per-patient clipping stays on.
 - The output leaves only sealed, bound by signed evidence to its spec,
   participant, round, assets and attestation.
 - A verifier needs no asset and no key.

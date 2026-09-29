@@ -48,7 +48,8 @@ RUN = textwrap.dedent(f"""
         x = torch.randint(0, 64, (n, 8), generator=g)
         x[5] = torch.tensor({DATA_CANARY})
         ids = torch.arange(n // 2).repeat_interleave(2) if patient else None
-        return et.private_dataset(x, (x[:, 0] < 32).long(), unit_ids=ids)
+        return et.private_dataset(x, (x[:, 0] < 32).long(), unit_ids=ids,
+                                  public_units=n // 2 if patient else None)
 
     p = encompute.Project("leak-lora", parties=["hospital-a", "hospital-b", "modelco"],
                           purpose="disease-training")

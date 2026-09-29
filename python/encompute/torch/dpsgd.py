@@ -131,9 +131,17 @@ def unit_grad(model: torch.nn.Module, task: tasks.Task, batch: tasks.Batch) -> t
 
 
 def clip_rows(g: torch.Tensor, clip: float) -> torch.Tensor:
-    """Scales each row to L2 norm at most ``clip``."""
+    """Scales each row to L2 norm at most ``clip``. A row with a non-finite
+    entry (a unit whose records overflow the loss) becomes zero: whatever a
+    unit's data, its contribution stays finite and bounded, so it cannot
+    make the party's contribution fail (an observable signal outside the
+    privacy accounting)."""
+    g = torch.where(torch.isfinite(g).all(dim=1, keepdim=True), g, torch.zeros_like(g))
     norms = g.norm(dim=1, keepdim=True)
-    return g * torch.clamp(clip / norms.clamp_min(1e-12), max=1.0)
+    # A finite row whose norm overflows is scaled to zero as well.
+    scale = torch.where(torch.isfinite(norms), clip / norms.clamp_min(1e-12),
+                        torch.zeros_like(norms))
+    return g * torch.clamp(scale, max=1.0)
 
 
 def _sampled_records(unit_of: torch.Tensor, sampled: torch.Tensor):
@@ -221,5 +229,7 @@ def reference_clipped_sum(model: torch.nn.Module, task: tasks.Task, batch: tasks
             gs = torch.autograd.grad(task.losses(model, one).sum(), params)
             g_unit += torch.cat([g.reshape(-1) for g in gs])
         n = float(g_unit.norm())
+        if not math.isfinite(n):
+            continue  # as clip_rows: a non-finite unit contributes zero
         total += g_unit * min(1.0, clip / max(n, 1e-12))
     return total

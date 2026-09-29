@@ -23,10 +23,11 @@ result = project.finetune(
 )
 ```
 
-Each dataset says which records belong to which patient:
+Each dataset says which records belong to which patient, and the number of
+patients its owner approves for publication:
 
 ```python
-et.private_dataset(tokens, labels, unit_ids=patient_ids)
+et.private_dataset(tokens, labels, unit_ids=patient_ids, public_units=patients)
 ```
 
 A patient with many visits is one unit: their records' gradients are summed
@@ -38,7 +39,7 @@ Encompute then:
    runs, and denies a run that would exceed the budget;
 2. **binds** every DP-SGD setting into the training spec: unit, clip,
    sampling rate, noise, delta, grouping, accountant, expected batch and
-   each hospital's patient count;
+   each hospital's approved public patient figure;
 3. **computes** per-example gradients of the LoRA parameters with
    `torch.func` (`vmap` over `grad`), in microbatches, inside each attested
    worker;
@@ -159,9 +160,13 @@ slightly between runs, because patients are sampled with fresh randomness.
 - **The patient IDs must be right.** If a hospital's records of one person
   carry two IDs, that person counts as two units. The digest makes the
   grouping fixed and auditable, but not correct.
-- **Patient counts are shared.** Each hospital's number of patients is in
-  the training spec, because it sets the sampling rate and the update's
-  scale.
+- **Patient counts are shared, as the owners approve them.** The sampling
+  rate is the batch size over the smallest `public_units` figure (or an
+  explicit `Privacy(sampling_rate=...)`), and each figure is in the training
+  spec. Encompute never computes it from the data or checks it against the
+  data, and it is released outside the privacy guarantee: a hospital that
+  does not want its exact count known should approve a rounded figure.
+  Without either, a DP-SGD run is refused (ENC2501).
 - **Accuracy costs something.** A tiny model and synthetic data show the
   mechanism, not production accuracy.
 

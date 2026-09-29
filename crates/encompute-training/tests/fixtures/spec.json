@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "project": "contract",
   "purpose": "disease-training",
   "plan_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -10,7 +10,7 @@
   "base_model": {
     "asset_id": "base-model",
     "owner": "modelco",
-    "architecture": "{\"factory\":\"m:f\",\"kwargs\":{}}",
+    "architecture": "{\"factory\":\"encompute.torch.models:tiny_classifier\",\"kwargs\":{\"dim\":16}}",
     "weights_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   },
   "datasets": [
@@ -54,5 +54,10 @@
       "party": "hospital-b",
       "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
     }
-  ]
+  ],
+  "key_brokers": {
+    "modelco": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "coordinator_key": "6666666666666666666666666666666666666666666666666666666666666666",
+  "initial_adapter_digest": "7777777777777777777777777777777777777777777777777777777777777777"
 }

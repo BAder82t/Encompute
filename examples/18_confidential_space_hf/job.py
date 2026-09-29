@@ -40,7 +40,8 @@ def project_and_assets(W: Path):
     for i, owner in enumerate(("hospital-a", "hospital-b")):
         texts, labels = hf.synthetic_notes(i + 1, PATIENTS * 2, hf.WORDS[13:])
         d = et.private_text_dataset(texts, labels, tokenizer=tok, max_length=16,
-                                    unit_ids=[j // 2 for j in range(len(texts))])
+                                    unit_ids=[j // 2 for j in range(len(texts))],
+                                    public_units=PATIENTS)
         data.append(p.data(f"notes-{'ab'[i]}", owner=owner, dataset=d))
     return p, model, data
 

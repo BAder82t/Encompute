@@ -17,14 +17,16 @@ The supply-chain boundary is the **model package**:
    gets its content digest). Credentials are used only here and are never
    stored.
 2. Every file is checked: configuration, tokenizer and safetensors files
-   only. Remote code (``*.py``, ``auto_map``, ``trust_remote_code``) and
-   pickled weights are refused.
+   only, never a symbolic link (a Hub cache's own links excepted). Remote
+   code (``*.py``, ``auto_map``, ``trust_remote_code``), tokenizer settings
+   outside an allowlist, quantization and a chosen attention implementation
+   are refused, and so are pickled weights.
 3. Every file is hashed, and the package's ID (``enchf1:``) commits to the
    revision, the files, the tokenizer and the library versions. The
    training spec binds the whole package.
-4. Workers never download: they rebuild the architecture from its
-   configuration (Transformers-native classes only) and load the sealed
-   weights.
+4. Workers never download: they rebuild the architecture from the
+   package's own ``config.json`` (its bytes are bound by digest;
+   Transformers-native classes only) and load the sealed weights.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,7 +111,8 @@ def check_versions(package: dict, installed: Optional[Dict[str, str]] = None) ->
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
-    with open(path, "rb") as f:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -175,11 +178,21 @@ def import_model(source: str, *, revision: Optional[str] = None, task: str = TAS
         raise _refuse(f"task {task!r} is not supported yet ({TASK})")
     src = Path(source)
     if src.is_dir():
-        files = _check_files([p.name for p in src.iterdir() if p.is_file()])
-        if any(p.is_dir() for p in src.iterdir()):
+        # Review finding TR-3 (ENC-SF-2026-072): a link would copy whatever file it names (any
+        # file the importing user can read) into the package.
+        entries = list(src.iterdir())
+        for p in entries:
+            if p.is_symlink():
+                raise _refuse(f"{source}: {p.name} is a symbolic link; a package is made of "
+                              "regular files only")
+            if not stat.S_ISREG(p.lstat().st_mode) and not p.is_dir():
+                raise _refuse(f"{source}: {p.name} is not a regular file")
+        if any(p.is_dir() for p in entries):
             raise _refuse(f"{source}: packages are flat directories")
+        files = _check_files([p.name for p in entries])
         repo_id = src.name
         work = src
+        root = None
     else:
         from huggingface_hub import HfApi, snapshot_download
         info = HfApi().model_info(source, revision=revision or "main", token=token)
@@ -191,16 +204,24 @@ def import_model(source: str, *, revision: Optional[str] = None, task: str = TAS
             license = info.card_data.get("license")
         work = Path(snapshot_download(source, revision=commit, allow_patterns=files, token=token,
                                       cache_dir=cache_dir))
+        # A Hub snapshot links each file to a blob of the same repository's
+        # cache: only links that stay inside it are followed.
+        root = work.parents[1].resolve()
         repo_id = source
         revision = commit
-    config = json.loads((work / "config.json").read_text())
+    paths = {f: _regular(work, f, root) for f in files}
+    config = json.loads(_read(paths["config.json"]))
     model_type = _native_call(_native.hf_check_config, json.dumps(config))
+    if "tokenizer_config.json" in files:
+        # Review finding TR-4 (ENC-SF-2026-073): known settings of a native tokenizer only.
+        _native_call(_native.hf_check_tokenizer_config,
+                     _read(paths["tokenizer_config.json"]).decode())
     if "model.safetensors.index.json" in files:
         # An index lists shard files by name; a loader opens whatever it
         # names, so it may name only this package's safetensors files.
         _native_call(_native.hf_check_index,
-                     (work / "model.safetensors.index.json").read_text(), json.dumps(files))
-    entries = [{"path": f, "sha256": _sha256(work / f), "size": (work / f).stat().st_size}
+                     _read(paths["model.safetensors.index.json"]).decode(), json.dumps(files))
+    entries = [{"path": f, "sha256": _sha256(paths[f]), "size": paths[f].lstat().st_size}
                for f in files]
     if src.is_dir():
         content = hashlib.sha256("".join(f"{e['path']}\0{e['sha256']}\n" for e in entries)
@@ -221,23 +242,47 @@ def import_model(source: str, *, revision: Optional[str] = None, task: str = TAS
     # The package: a private copy of exactly the checked files.
     dest = Path(tempfile.mkdtemp(prefix=f"enchf1-{pid[:12]}-"))
     for f in files:
-        shutil.copyfile(work / f, dest / f)
+        fd = os.open(paths[f], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as i, open(dest / f, "xb") as o:
+            for chunk in iter(lambda: i.read(1 << 20), b""):
+                o.write(chunk)
         if _sha256(dest / f) != by[f]:
             raise _refuse(f"{f} changed while it was being imported")
     return ModelPackage(dest, manifest, pid)
 
 
-def from_config(config: dict, task: str = TASK) -> torch.nn.Module:
-    """Builds a Transformers-native model from its configuration, with no
+def _regular(work: Path, name: str, root: Optional[Path]) -> Path:
+    """The path to read ``name`` from: a regular file of ``work``, or (a Hub
+    snapshot, ``root`` its cache) a link resolving inside that cache."""
+    p = work / name
+    if not p.is_symlink():
+        return p
+    target = p.resolve()
+    if root is None or not target.is_relative_to(root) or not target.is_file():
+        raise _refuse(f"{name} is a symbolic link outside the model's cache")
+    return target
+
+
+def _read(path: Path) -> bytes:
+    """Reads a file without following a symbolic link (the path was
+    checked, and a link swapped in since is refused)."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as f:
+        return f.read()
+
+
+def from_config(config: str, num_labels: int, task: str = TASK) -> torch.nn.Module:
+    """Builds a Transformers-native model from a package's ``config.json``
+    (its exact text, which the training spec binds by digest), with no
     weights and no remote code: the factory workers rebuild the base model
     with. Eager attention, so per-example gradients can vectorize."""
-    from transformers import AutoConfig, AutoModelForSequenceClassification
+    from transformers import AutoModelForSequenceClassification
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
     if task != TASK:
         raise _refuse(f"task {task!r} is not supported yet")
-    _native_call(_native.hf_check_config, json.dumps(config))
-    c = dict(config)
-    model_type = c.pop("model_type")
-    conf = AutoConfig.for_model(model_type, **c)
+    c = json.loads(config)
+    model_type = _native_call(_native.hf_check_config, json.dumps(c))
+    conf = CONFIG_MAPPING[model_type].from_dict(c, num_labels=int(num_labels))
     return AutoModelForSequenceClassification.from_config(conf, attn_implementation="eager")
 
 
@@ -264,7 +309,8 @@ def huggingface(source: str, *, revision: Optional[str] = None, task: str = TASK
         str(pkg.path), local_files_only=True, use_safetensors=True, trust_remote_code=False,
         num_labels=num_labels, attn_implementation="eager")
     model.encompute_factory = "encompute.torch.hf:from_config"
-    model.encompute_kwargs = {"config": build_config(model), "task": task}
+    model.encompute_kwargs = {"config": (pkg.path / "config.json").read_bytes().decode(),
+                              "num_labels": int(num_labels), "task": task}
     model.encompute_hf = pkg
     model.encompute_tokenizer = pkg.tokenizer()
     return model

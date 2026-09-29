@@ -17,7 +17,9 @@ Space) and writes production artifacts:
 - a production key broker (keys wrapped under a key-encryption key)
   holding the model, dataset, adapter and output keys under that policy;
 - the sealed model, adapter and datasets;
-- one job descriptor per participant (public commitments only).
+- one job descriptor per participant (public commitments only; the
+  training configuration and the broker's key are the spec's, never the
+  descriptor's).
 
 ``Local`` rehearses the job on this machine, in production mode except
 for the hardware: the broker verifies Confidential Space tokens, but they
@@ -71,11 +73,12 @@ def prepare(project, *, model, data, privacy="strong-patient", config=None, imag
     loc = dict(model=str(mc / f"{st['model_id']}.enc"), adapter=str(mc / "adapter-0.enc"),
                datasets=str(W / "staged"), output=str(W / "output"))
     loc.update(locations or {})
+    plan = json.loads((mc / "plan.json").read_text())
     jobs = {}
     for c in st["commitments"]:
         party = c["owner"]
         job = {
-            "kind": "encompute.confidential-training-job.v1", "version": 1,
+            "kind": "encompute.confidential-training-job.v1", "version": 2,
             "project": st["project"], "participant": party, "round": round,
             "training_spec": spec, "training_spec_id": st["training_spec_id"],
             "run_id": st["run_id"], "plan_id": spec["plan_id"], "policy_id": spec["policy_id"],
@@ -88,7 +91,7 @@ def prepare(project, *, model, data, privacy="strong-patient", config=None, imag
                         "ciphertext": loc["adapter"]},
             "broker": broker_id, "expected_image": image,
             "output": f"{loc['output'].rstrip('/')}/{party}",
-            "lora": st["lora"], "seed": cfg.seed * 1000 + round * 10,
+            "plan": plan, "seed": cfg.seed * 1000 + round * 10,
         }
         path = W / "jobs" / f"{party}.json"
         path.parent.mkdir(exist_ok=True)

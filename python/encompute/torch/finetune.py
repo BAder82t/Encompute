@@ -49,13 +49,14 @@ import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
 from .. import _native
 from .._frontend import EncomputeError
 from . import dpsgd, lora, models, tasks, tensors
+from .worker import SALT, grouping
 
 IMAGE = "sha256:" + "5" * 64  # the training worker image (development)
 CODE = ["worker.py", "lora.py", "tensors.py", "models.py", "finetune.py", "infer.py",
@@ -187,6 +188,18 @@ def _bundle_state(mc: Path, spec_id: str) -> Tuple[Dict[int, dict], Dict[int, st
     return accepted, released
 
 
+def _joined(state: Path, seq: int) -> bool:
+    """Whether a party's `aggregate join` state records sequence `seq` (the
+    global field, or the per-spec map)."""
+    try:
+        st = json.loads(state.read_text())
+    except (OSError, ValueError):
+        return False
+    if isinstance(st, int):
+        return st == seq
+    return st.get("sequence") == seq or seq in (st.get("sequences") or {}).values()
+
+
 def _round_of(name: str) -> int:
     return int(name.split("-")[1].split(".")[0])
 
@@ -240,14 +253,28 @@ def recover(workdir: str) -> dict:
             "next_round": max(list(released) + list(accepted) + [0]) + 1}
 
 
-def _refuse_revoked(cli: str, mc: Path, anchors: List[str], spec: dict) -> None:
-    """Refuses to go on once an owner has revoked any parent asset."""
-    out = _run([cli, "trust", "report", "--bundle", "trust.json", *anchors, "--json"], mc,
+def _revoked(cli: str, mc: Path, anchors: List[str], bundle: str) -> set:
+    """The assets a trust bundle's (signed) revocations withdraw."""
+    out = _run([cli, "trust", "report", "--bundle", str(bundle), *anchors, "--json"], mc,
                check=False)
     try:
-        revoked = set(json.loads(out).get("revoked", {}))
+        return set(json.loads(out).get("revoked", {}))
     except ValueError:
         raise TrainingFailed("the trust report could not be read", out) from None
+
+
+def _refuse_revoked(cli: str, mc: Path, anchors: List[str], spec: dict,
+                    revocations: Sequence[str] = ()) -> None:
+    """Refuses to go on once an owner has revoked any parent asset: in the
+    run's trust bundle, or in any bundle an owner hands over itself
+    (``revocations``). The run's bundle is held by the model owner, who
+    benefits from forgetting a revocation, so an owner's own bundle is the
+    source to trust (review finding TR-5)."""
+    revoked = _revoked(cli, mc, anchors, "trust.json")
+    for b in revocations:
+        if not Path(b).exists():
+            raise TrainingFailed(f"the revocation bundle {b} does not exist")
+        revoked |= _revoked(cli, mc, anchors, str(Path(b).resolve()))
     parents = {f"asset:{spec['base_model']['asset_id']}"}
     for d in spec["datasets"]:
         parents |= {f"asset:{d['asset_id']}", f"asset:{d['gradient_asset']}"}
@@ -320,12 +347,24 @@ class FineTuneResult:
         return _run([c["cli"], "lineage", self.adapter_id, "--bundle", str(c["bundle"])]
                     + c["anchors"], c["modelco"], check=False)
 
-    def export_adapter(self) -> str:
+    def export_adapter(self, revocations: Sequence[str] = ()) -> str:
         """Asks to export the adapter publicly: denied unless every parent
-        permits it and the run's trust report is satisfied."""
+        permits it, no parent is revoked (in the run's trust bundle or in
+        any owner's own bundle, ``revocations``) and the run's trust report
+        is satisfied."""
+        return self._export(revocations)[1]
+
+    def _export(self, revocations: Sequence[str] = ()) -> Tuple[bool, str]:
+        """The export decision, from the CLI's exit status."""
         c = self._ctx
-        return _run([c["cli"], "export", self.adapter_id, "--bundle", str(c["bundle"])]
-                    + c["anchors"], c["modelco"], check=False)
+        try:
+            _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]),
+                            revocations)
+        except EncomputeError as e:
+            return False, f"EXPORT DENIED: {self.adapter_id}: {e.message}"
+        p = subprocess.run([c["cli"], "export", self.adapter_id, "--bundle", str(c["bundle"])]
+                           + c["anchors"], cwd=c["modelco"], capture_output=True, text=True)
+        return p.returncode == 0, p.stdout + p.stderr
 
     def _broker(self) -> str:
         c = self._ctx
@@ -334,12 +373,16 @@ class FineTuneResult:
             c["broker_proc"], c["broker"] = _start_broker(c["cli"], c["modelco"], c["mock_root"])
         return c["broker"]
 
-    def infer(self, inputs, adapter: Optional[str] = None) -> torch.Tensor:
+    def infer(self, inputs, adapter: Optional[str] = None,
+              revocations: Sequence[str] = ()) -> torch.Tensor:
         """Runs the base model with an adapter (default: the final one) in
         an attested inference workload; returns the logits. ``inputs`` is a
         token tensor (reference models), or a ``private_text_dataset`` or
-        a dict of named tensors (Hugging Face models)."""
+        a dict of named tensors (Hugging Face models). Refused once an owner
+        has revoked a parent asset (``revocations``: owners' own trust
+        bundles, besides the run's)."""
         c = self._ctx
+        _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]), revocations)
         which = adapter or self.adapter_id
         rec = c["modelco"] / f"{which}.record.json"
         digest = (json.loads(rec.read_text())["record"]["adapter_digest"] if rec.exists()
@@ -357,14 +400,16 @@ class FineTuneResult:
             raise TrainingFailed("inference refused", out.get("error", p.stderr))
         return tensors.loads(bytes.fromhex(out["logits"]))["logits"]
 
-    def resume(self, checkpoint: str, lost_rounds: Optional[List[str]] = None) -> dict:
+    def resume(self, checkpoint: str, lost_rounds: Optional[List[str]] = None,
+               revocations: Sequence[str] = ()) -> dict:
         """Opens a checkpoint for resuming (an attested workload receives
         the checkpoint key). Refuses:
         - a stale, foreign or rolled-back checkpoint;
         - one from another run;
-        - any resume once a parent asset has been revoked."""
+        - any resume once a parent asset has been revoked (in the run's
+          trust bundle, or in an owner's own bundle, ``revocations``)."""
         c = self._ctx
-        _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]))
+        _refuse_revoked(c["cli"], c["modelco"], c["anchors"], json.loads(c["spec"]), revocations)
         keys, _ = _native.acquire_training_keys(
             c["spec"], self._broker(), ["checkpoints"], str(c["modelco"] / "coord.key"),
             str(c["hw_seed"]), IMAGE)
@@ -379,16 +424,17 @@ class FineTuneResult:
             raise EncomputeError(code, message) from None
         return json.loads(header)
 
-    def export_peft(self, path: str) -> str:
+    def export_peft(self, path: str, revocations: Sequence[str] = ()) -> str:
         """Exports the adapter as standard PEFT files
         (``adapter_config.json``, ``adapter_model.safetensors``), usable with
         ``PeftModel.from_pretrained``, plus ``encompute-adapter.json`` (its
         Encompute identity and lineage). Only if the export is permitted:
         every parent's policy allows a public adapter, no parent is revoked,
         and the trust report is satisfied. Otherwise nothing is written and
-        the refusal is returned."""
-        decision = self.export_adapter()
-        if "EXPORT PERMITTED" not in decision:
+        the refusal is returned. ``revocations``: owners' own trust
+        bundles, besides the run's."""
+        permitted, decision = self._export(revocations)
+        if not permitted:
             return decision.strip()
         c = self._ctx
         spec = json.loads(c["spec"])
@@ -454,10 +500,15 @@ def _dataset(payload) -> Tuple[Dict[str, torch.Tensor], Optional[dict]]:
 
 def _dp_settings(pv, data, cfg: lora.LoRAConfig) -> dict:
     """A DP-SGD run's settings, from ``encompute.Privacy`` and the datasets.
-    The sampling rate defaults to the batch size over the smallest
-    dataset's number of units."""
+
+    The sampling rate must be public by construction, because the
+    accountant's guarantee assumes nobody learns anything from it: it is
+    ``Privacy(sampling_rate=...)``, or, by default, the batch size over the
+    smallest of the numbers of units the owners approved for publication
+    (``public_units``). It is never computed from the data: a dataset's
+    exact number of patients would otherwise be published outside the
+    privacy guarantee (review finding DP-2)."""
     eps, delta, z = pv.resolve()
-    units = {}
     sets = [_dataset(d.payload)[0] for d in data]
     grouped = ["unit_ids" in t for t in sets]
     if any(grouped) and not all(grouped):
@@ -468,23 +519,35 @@ def _dp_settings(pv, data, cfg: lora.LoRAConfig) -> dict:
                        "to encompute.torch.private_dataset or private_text_dataset (one ID per "
                        "record), so a "
                        f"{pv.unit}'s records are clipped together")
-    for d, t in zip(data, sets):
-        units[d.id] = (len(torch.unique(t["unit_ids"])) if grouped[0]
-                       else len(next(iter(t.values()))))
-    q = pv.sampling_rate if pv.sampling_rate is not None else cfg.batch_size / min(units.values())
+    public = {d.id: getattr(d.payload, "public_units", None) for d in data}
+    declared = all(n is not None for n in public.values())
+    if pv.sampling_rate is not None:
+        q = pv.sampling_rate
+    elif declared:
+        q = cfg.batch_size / min(public.values())
+    else:
+        raise EncomputeError(
+            "ENC2501", f"DP-SGD's sampling rate must be public: set "
+                       "encompute.Privacy(sampling_rate=...), or have each owner approve a "
+                       f"public number of {pv.unit}s (public_units=... in "
+                       "encompute.torch.private_dataset or private_text_dataset). It is never "
+                       "derived from the data")
     if not 0 < q < 1:
         raise EncomputeError("ENC2501", f"sampling rate {q} is not below 1: a dataset has fewer "
                                         f"{pv.unit}s than the batch size")
     q = float(f"{q:.6g}")
+    # The server update's denominator (utility only): the expected sample
+    # under the public figures, else the configured batch per dataset.
+    expected = q * sum(public.values()) if declared else float(cfg.batch_size * len(data))
     return {
         "privacy_unit": pv.unit, "per_example_clip": _exact(pv.per_example_clip),
         "sampling": "poisson", "sampling_rate": _exact(q), "noise_multiplier": _exact(z),
         "delta": _exact(delta), "grouping": "unit_ids" if grouped[0] else "none",
         "accountant": "rdp-poisson-zw2019",
-        "expected_batch": _exact(float(f"{q * sum(units.values()):.6g}")),
-        "epsilon": eps, "delta_f": delta, "noise_f": z, "q": q, "units": units,
+        "expected_batch": _exact(float(f"{expected:.6g}")),
+        "epsilon": eps, "delta_f": delta, "noise_f": z, "q": q,
+        "units": {k: v for k, v in public.items() if v is not None},
     }
-
 
 
 def _setup(project, model, data, privacy, verification, cfg, infrastructure,
@@ -624,11 +687,15 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
     spec_node = next(k for k in bundle["nodes"] if k.startswith("spec:"))
     agg_spec = bundle["nodes"][spec_node]["evidence"]["value"]
 
-    # 4. Datasets stay with their owners; only digests are shared. The
-    # digest covers every sample and label, in order.
+    # 4. Datasets stay with their owners; only commitments are shared. The
+    # digest covers every sample and label, in order, and a random salt the
+    # owner keeps (in its dataset file), so it hides the data: nobody can
+    # test a guessed dataset or patient list against it (review finding
+    # DP-2).
     commitments = []
     for d in data:
         t, pre = _dataset(d.payload)
+        t[SALT] = torch.tensor(list(os.urandom(32)), dtype=torch.int64)
         blob = tensors.dumps(t)
         (W / d.owner / "dataset.bin").write_bytes(blob)
         c = {"asset_id": d.id, "owner": d.owner, "gradient_asset": f"gradient-{d.id}",
@@ -636,16 +703,24 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
         if pre is not None:
             c["preprocessing"] = pre
         if dp is not None:
-            c["privacy_units"] = dp["units"][d.id]
+            if d.id in dp["units"]:
+                c["privacy_units"] = dp["units"][d.id]
             if "unit_ids" in t:
                 c["grouping_digest"] = _native.sha256_hex(
-                    tensors.dumps({"unit_ids": t["unit_ids"]}))
+                    tensors.dumps(grouping(t["unit_ids"], t[SALT])))
         commitments.append(c)
     commitments.sort(key=lambda c: c["asset_id"])
 
-    # 5. The training spec every worker attests to.
+    # 5. The training spec every worker attests to. It names the key broker
+    # and its grant-signing key (workers accept grants only under it), the
+    # coordinator's key (a later round starts only from an adapter it
+    # recorded) and the initial adapter.
+    broker_id = model.owner if dev else target["broker_id"]
+    grant_key = _native.training_broker_key(str(mc / "broker.json"), broker_id,
+                                            None if dev else str(target["kek"]))
+    a0 = tensors.dumps({"adapter": adapter0})
     spec = {
-        "version": 1, "project": project.name, "purpose": project.purpose,
+        "version": 2, "project": project.name, "purpose": project.purpose,
         "plan_id": plan_id.split(":", 1)[1],
         "program_id": agg_spec["plan"]["program_id"],
         "policy_id": agg_spec["plan"]["policy_id"],
@@ -672,6 +747,9 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
             **({} if peft is None else {"peft": peft}),
         },
         "participants": agg_spec["parties"],
+        "key_brokers": {broker_id: grant_key},
+        "coordinator_key": coord,
+        "initial_adapter_digest": _native.sha256_hex(a0),
     }
     spec_json = json.dumps(spec)
     spec_id = _native.training_spec_id(spec_json)
@@ -709,8 +787,8 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
             scoped[f"contribution-{party}"] = (secrets.token_bytes(32), policy)
             scoped[f"{model.id}.{party}"] = (keys[model.id], policy)
             scoped[f"adapters.{party}"] = (keys["adapters"], policy)
-    broker_args = (["--broker-id", model.owner, "--development"] if dev else
-                   ["--broker-id", target["broker_id"], "--kek", str(target["kek"])])
+    broker_args = (["--broker-id", broker_id, "--development"] if dev else
+                   ["--broker-id", broker_id, "--kek", str(target["kek"])])
     for asset, (key, policy) in scoped.items():
         kf = mc / f"{asset}.key"
         kf.write_bytes(key)
@@ -722,8 +800,7 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
         (W / "staged").mkdir(exist_ok=True)
         for asset_id, blob in staged.items():
             (W / "staged" / f"{asset_id}.enc").write_bytes(bytes(blob))
-    # adapter-0, sealed under the adapters key (accepted by definition).
-    a0 = tensors.dumps({"adapter": adapter0})
+    # adapter-0, sealed under the adapters key (the spec's initial adapter).
     (mc / "adapter-0.enc").write_bytes(
         _native.seal_asset(keys["adapters"], "adapter", project.name, "adapter-0", a0))
     del keys, model_key
@@ -994,9 +1071,7 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
                 # sequence as joined: a resume must not reuse it.
                 states = [W / d["owner"] / "round.state" for d, _ in workers]
                 deadline = time.time() + 60
-                while time.time() < deadline and not all(
-                        f.exists() and f'"sequence":{seq}' in f.read_text().replace(" ", "")
-                        for f in states):
+                while time.time() < deadline and not all(_joined(f, seq) for f in states):
                     time.sleep(0.05)
                 cp.send_signal(signal.SIGKILL)
             replies = []

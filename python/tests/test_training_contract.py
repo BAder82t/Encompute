@@ -77,3 +77,23 @@ def test_adapter_record_fixture_is_well_formed():
     r = json.loads(text("adapter-record.json"))
     assert r["record"]["version"] == 1
     assert r["record"]["training_spec_id"] == text("spec.id")
+
+
+def test_models_build_only_allowlisted_factories(tmp_path):
+    """Review finding TR-1 (ENC-SF-2026-037): a spec's factory is not any importable callable.
+    `models.build` (what every worker runs first) refuses anything the
+    worker image does not ship, with the same native check the training
+    spec validator applies, before importing it."""
+    pytest.importorskip("torch")
+    from encompute.torch import models
+    marker = tmp_path / "factory-ran"
+    stmt = f"open({str(marker)!r}, 'w').write('x')"
+    for factory, kwargs in (("subprocess:run", {"args": f"touch {marker}", "shell": True}),
+                            ("timeit:timeit", {"stmt": stmt, "number": 1}),
+                            ("os:system", {"command": f"touch {marker}"}),
+                            ("encompute.torch.models:TinyClassifier", {}),
+                            ("encompute.torch.models:tiny_classifier", {"stmt": stmt})):
+        with pytest.raises(ValueError):
+            models.build(factory, kwargs)
+        assert not marker.exists(), factory
+    models.build("encompute.torch.models:tiny_classifier", {"vocab": 64, "dim": 8})

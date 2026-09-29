@@ -19,6 +19,7 @@ from .. import _native
 import torch
 
 from . import lora, tasks, tensors
+from .worker import check_code
 
 
 def main() -> None:
@@ -26,6 +27,7 @@ def main() -> None:
     try:
         spec = json.loads(cfg["spec"])
         base = spec["base_model"]
+        check_code(spec)  # this workload's own code is the code the spec binds
         keys, _ = _native.acquire_training_keys(
             cfg["spec"], cfg["broker"], [base["asset_id"], "adapters"],
             cfg["identity"], cfg["mock_seed"], cfg["image"])

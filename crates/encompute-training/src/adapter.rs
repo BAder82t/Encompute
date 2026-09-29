@@ -117,6 +117,51 @@ impl SignedAdapterRecord {
     }
 }
 
+/// The adapter a worker trains from in `round` of `run_id`: round 1 starts
+/// from the spec's initial adapter; a later round only from the adapter the
+/// coordinator (the spec's `coordinator_key`) recorded for the round
+/// before, in the same run. So whoever hands the worker its adapter cannot
+/// choose the starting point (another run's, an older round's, its own).
+pub fn check_input_adapter(
+    spec: &TrainingSpec,
+    run_id: &str,
+    round: u32,
+    adapter_id: &str,
+    adapter_digest: &str,
+    record: Option<&SignedAdapterRecord>,
+) -> Result<()> {
+    if round == 0 || round > spec.config.rounds {
+        return Err(err("a round outside the training spec"));
+    }
+    if round == 1 {
+        if adapter_id != "adapter-0" || adapter_digest != spec.initial_adapter_digest {
+            return Err(err(
+                "INPUT ADAPTER MISMATCH: round 1 starts from the training spec's initial adapter",
+            ));
+        }
+        return Ok(());
+    }
+    let r = record.ok_or_else(|| {
+        err("INPUT ADAPTER MISMATCH: a later round needs the previous round's adapter record")
+    })?;
+    r.verify(Some(&spec.coordinator_key))?;
+    let rec = &r.record;
+    let ok = rec.training_spec_id == spec.id()?
+        && rec.project == spec.project
+        && rec.run_id == run_id
+        && rec.round + 1 == round
+        && rec.adapter_id == adapter_id
+        && rec.adapter_digest == adapter_digest;
+    if !ok {
+        return Err(err(format!(
+            "INPUT ADAPTER MISMATCH: {adapter_id} is not the adapter the coordinator recorded for \
+             round {} of this run",
+            round - 1
+        )));
+    }
+    Ok(())
+}
+
 /// The adapter's release: the most restrictive of what each parent (the
 /// model, the datasets and the gradients aggregated) permits for adapters
 /// derived from it (its `derive [adapter ...]` permission, else its own

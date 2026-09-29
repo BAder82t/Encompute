@@ -80,10 +80,16 @@ def test_model_digest_covers_weights_architecture_and_config():
     spec = json.loads((ft.Path(__file__).resolve().parents[2] / "crates" /
                        "encompute-training" / "tests" / "fixtures" / "spec.json").read_text())
     base = _native.training_spec_id(json.dumps(spec))
-    for arch in ('{"factory":"other:f","kwargs":{}}', '{"factory":"m:f","kwargs":{"dim":8}}'):
-        s = json.loads(json.dumps(spec))
+    s = json.loads(json.dumps(spec))
+    s["base_model"]["architecture"] = json.dumps({"factory": FACTORY, "kwargs": {"dim": 8}})
+    assert _native.training_spec_id(json.dumps(s)) != base
+    # Review finding TR-1 (ENC-SF-2026-037): a factory the worker image does not ship is not
+    # a spec at all (no ID, so no key is ever released for it).
+    for arch in ('{"factory":"other:f","kwargs":{}}',
+                 '{"factory":"subprocess:run","kwargs":{"args":"true"}}'):
         s["base_model"]["architecture"] = arch
-        assert _native.training_spec_id(json.dumps(s)) != base
+        with pytest.raises(_native.NativeError, match="worker image"):
+            _native.training_spec_id(json.dumps(s))
 
 
 # --- datasets ------------------------------------------------------------------
@@ -201,6 +207,15 @@ def test_export_denied_after_revocation_or_tampering(run, tmp_path):
     t2.write_text(json.dumps(b))
     out = cli_export(run, t2)
     assert out.returncode == 1 and "EXPORT DENIED" in out.stdout, out.stdout
+    # Review finding TR-5 (ENC-SF-2026-074): the owner's own bundle is enough; the run's
+    # bundle, held by the model owner who benefits, need not carry it.
+    assert "EXPORT DENIED" in run.export_adapter(revocations=[str(t)])
+    assert "EXPORT PERMITTED" in run.export_adapter() or "EXPORT DENIED" in run.export_adapter()
+    with pytest.raises(encompute.EncomputeError, match="revoked patients-a"):
+        run.infer(dataset(3)[0][:2], revocations=[str(t)])
+    with pytest.raises(encompute.EncomputeError, match="revoked patients-a"):
+        run.resume(str(run.workdir / "modelco" / "checkpoints" / "round-2.enc"),
+                   revocations=[str(t)])
 
 
 def test_resume_matrix(run, tmp_path):
