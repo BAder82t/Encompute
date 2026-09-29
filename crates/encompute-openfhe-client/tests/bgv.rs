@@ -93,3 +93,65 @@ fn bgv_equals_clear_and_is_reproducible() {
         }
     }
 }
+
+/// Runs `p` on OpenFHE BGV (whatever the selector would choose) and
+/// decrypts its outputs.
+fn run_on_bgv(p: &Program, inputs: &Inputs) -> Vec<i128> {
+    let plan = compile(p).unwrap().plan;
+    let depth = bgv::mult_depth(&plan);
+    let client = BgvClient::generate(depth).unwrap();
+    let mut ev = BgvEvaluator::new(depth).unwrap();
+    ev.load_keys(&client.evaluation_keys().unwrap()).unwrap();
+    let cts = plan
+        .inputs
+        .iter()
+        .map(|i| {
+            let ct = client.encrypt(i.elem, inputs[&i.name][0] as i128).unwrap();
+            ev.load(i.elem, &ct).unwrap()
+        })
+        .collect();
+    let out = evaluate_exact(&ev, &plan, cts).unwrap();
+    plan.outputs
+        .iter()
+        .zip(out)
+        .map(|(o, ct)| client.decrypt(o.elem, &ev.store(&ct).unwrap()).unwrap())
+        .collect()
+}
+
+/// Review finding EX-3 (ENC-SF-2026-065): additions were free in the BGV noise model, so
+/// 18 or more doublings of a product decrypted to garbage with no error.
+/// The budget (`bgv::MAX_NOISE_MULTIPLIER`) is calibrated on this OpenFHE:
+/// the worst case within the budget (one product added to itself) still
+/// decrypts exactly, and so does 8x more (the margin); one doubling more
+/// than the budget admits is not run on BGV.
+#[test]
+fn the_noise_budget_holds_on_openfhe() {
+    let doubled = |k: u32| {
+        let mut b = Builder::new("noise", 1e-3).unwrap();
+        let zero = b
+            .input_exact("zero", Elem::U16, Some(Range::new(0.0, 0.0)))
+            .unwrap();
+        let y = b
+            .input_exact("y", Elem::U16, Some(Range::new(0.0, 100.0)))
+            .unwrap();
+        let mut z = b.mul(zero, y).unwrap();
+        for _ in 0..k {
+            z = b.add(z, z).unwrap();
+        }
+        let out = b.add(z, y).unwrap();
+        b.output("out", out).unwrap();
+        b.finish().unwrap()
+    };
+    let at_budget = bgv::MAX_NOISE_MULTIPLIER.trailing_zeros();
+    let inputs: Inputs = [("zero", 0.0), ("y", 77.0)]
+        .iter()
+        .map(|(k, v)| (k.to_string(), vec![*v]))
+        .collect();
+    // The largest admitted (2^(budget - 1) + 1) and 8x the budget.
+    for k in [at_budget - 1, at_budget + 3] {
+        assert_eq!(run_on_bgv(&doubled(k), &inputs), vec![77], "{k} doublings");
+    }
+    let plan = |k| compile(&doubled(k)).unwrap().plan;
+    assert_eq!(bgv::noise_unsupported(&plan(at_budget - 1)), None);
+    assert!(bgv::noise_unsupported(&plan(at_budget)).is_some());
+}

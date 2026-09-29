@@ -22,9 +22,7 @@ use zeroize::Zeroizing;
 use encompute_ir::{Code, Error, Result};
 use encompute_runtime::{ClientSession, Model, Remote};
 use encompute_verification::service::signed_call;
-use encompute_verification::{
-    output_commitment, request_commitment, EvaluatorIdentity, JobGrant, ServiceSigner,
-};
+use encompute_verification::{output_commitment, request_commitment, JobGrant, ServiceSigner};
 
 fn cfg_err(m: impl Into<String>) -> Error {
     Error::new(Code::Unauthenticated, m)
@@ -349,6 +347,15 @@ pub enum JobsCmd {
         keys: PathBuf,
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Receipt key (hex) of an evaluator you trust; repeat for several.
+        /// Default: `ENCOMPUTE_TRUSTED_EVALUATORS`. A job scheduled on any
+        /// other key is refused before anything is sent to the evaluator.
+        #[arg(long = "trust-evaluator", value_name = "KEY")]
+        trust_evaluators: Vec<String>,
+        /// Development only (refused under `ENCOMPUTE_ENV=production`):
+        /// without a pin, accept the evaluator key the control plane names.
+        #[arg(long)]
+        allow_unpinned_evaluator: bool,
     },
 }
 
@@ -474,7 +481,15 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
             inputs,
             keys,
             idempotency_key,
+            trust_evaluators,
+            allow_unpinned_evaluator,
         } => {
+            // Which evaluator keys to accept is the client's decision, not
+            // the control plane's: settled before anything is submitted.
+            let trusted = Remote::trusted_evaluators(
+                (!trust_evaluators.is_empty()).then_some(trust_evaluators),
+                allow_unpinned_evaluator,
+            )?;
             let m = load(&model)?;
             let inputs = crate::parse_inputs(&inputs, None)?;
             let job = submit(&c, &m, &project, &purpose, &sources, "out", idempotency_key)?;
@@ -495,12 +510,13 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
                     format!("job {id} is {}, not scheduled", v["state"]),
                 ));
             }
+            // Before any input, key or program leaves: the evaluator's
+            // receipt key must be pinned here (the control plane names it).
+            let receipt_key = v["evaluator_receipt_key"].as_str().unwrap_or_default();
+            Remote::check_trusted_evaluator(trusted.as_ref(), receipt_key)?;
             let grant: JobGrant = serde_json::from_value(v["grant"].clone())
                 .map_err(|e| Error::new(Code::Remote, format!("job grant: {e}")))?;
             let url = v["evaluator_url"].as_str().unwrap_or_default().to_owned();
-            let receipt_key = v["evaluator_receipt_key"].as_str().unwrap_or_default();
-            // Trust the receipt key the evaluator registered with the control plane.
-            let trusted = EvaluatorIdentity::from_public_key_hex(receipt_key)?;
             eprintln!("scheduled on {} ({url})", grant.evaluator);
             let read = |f: &str| {
                 std::fs::read(keys.join(f)).map_err(|e| {
@@ -512,14 +528,22 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
             if let Some(k) = &eval_keys {
                 client.attach_evaluation_keys(k)?;
             }
-            let run = Remote::new(&url).with_grant(&grant).run(
+            let run = Remote::new(&url).with_grant(&grant).run_scheduled(
                 &client,
                 m.program(),
                 eval_keys.as_deref(),
                 &inputs,
-                &trusted,
+                receipt_key,
+                trusted.as_ref(),
             )?;
-            eprintln!("Evaluator receipt       verified (registered key)");
+            eprintln!(
+                "Evaluator receipt       verified ({})",
+                if trusted.is_some() {
+                    "pinned key"
+                } else {
+                    "UNPINNED: key named by the control plane"
+                }
+            );
             let done = c.post(
                 &format!("/v1/jobs/{id}/complete"),
                 json!({"receipt": run.receipt, "request_commitment": request_commitment(&run.request),
@@ -583,4 +607,71 @@ pub fn audit_list(organization: Option<&str>, after: u64) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[derive(Subcommand)]
+pub enum SecurityCmd {
+    /// Lists the service accounts that still hold security_admin (granted
+    /// before 0.3.0 refused it; refused from 0.4.0), with the call that
+    /// removes the role. Exits 0 when there are none, 1 when there are any
+    /// (for CI and runbooks), 2 on an error.
+    LegacyServiceAdmins {
+        /// Prints the control plane's JSON answer instead.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `encompute security ...`: the exit code is the check's result.
+pub fn security(cmd: SecurityCmd) -> Result<std::process::ExitCode> {
+    match cmd {
+        SecurityCmd::LegacyServiceAdmins { json } => {
+            let c = ControlClient::from_env(None)?;
+            let v = c.get("/v1/security/legacy-service-admins")?;
+            let accounts = v["service_accounts"].as_array().ok_or_else(|| {
+                Error::new(Code::Remote, "unexpected answer from the control plane")
+            })?;
+            if json {
+                print(&v);
+            } else if accounts.is_empty() {
+                println!("OK: no service account holds security_admin");
+            } else {
+                let refused = v["refused_from"].as_str().unwrap_or("0.4.0");
+                println!(
+                    "LEGACY: {} service account(s) hold security_admin: accepted in 0.3.x with a warning, refused from {refused}",
+                    accounts.len()
+                );
+                println!(
+                    "{:<20} {:<28} {:<11} {:<9} {:<21} LAST ACTIVITY",
+                    "ORGANIZATION", "SERVICE ACCOUNT", "KIND", "STATUS", "CREATED"
+                );
+                for a in accounts {
+                    let s = |k: &str| a[k].as_str().unwrap_or("-").to_owned();
+                    println!(
+                        "{:<20} {:<28} {:<11} {:<9} {:<21} {}",
+                        s("organization"),
+                        s("id"),
+                        s("kind"),
+                        s("status"),
+                        s("created_at"),
+                        s("last_activity"),
+                    );
+                }
+                println!("\nRemove the role (an organization admin of that organization):");
+                for a in accounts {
+                    println!(
+                        "  {} {} {}",
+                        a["remove"]["method"].as_str().unwrap_or("POST"),
+                        a["remove"]["path"].as_str().unwrap_or(""),
+                        a["remove"]["body"]
+                    );
+                }
+            }
+            Ok(if accounts.is_empty() {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::from(1)
+            })
+        }
+    }
 }

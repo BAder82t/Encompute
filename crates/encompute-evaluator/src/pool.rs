@@ -251,9 +251,18 @@ impl Pool {
         for (_, eir) in self.programs.lock().unwrap().iter() {
             w.call(ADD_PROGRAM, eir.as_bytes())?;
         }
+        // Oldest registration first. A key the new worker refuses (OpenFHE
+        // keys under a tag another key set holds there) is left out, never
+        // loaded in its place: its client uploads it again, and the worker
+        // still starts.
         for e in self.keys.values() {
             let (pid, env) = &*e;
-            w.call(REGISTER_KEYS, &with_pid(pid, env))?;
+            if let Err(e) = w.call(REGISTER_KEYS, &with_pid(pid, env)) {
+                if e.message.starts_with("worker I/O") || e.message == "worker exited" {
+                    return Err(e);
+                }
+                eprintln!("worker restart: a key set was not replayed: {}", e.message);
+            }
         }
         Ok(w)
     }

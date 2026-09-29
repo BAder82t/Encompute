@@ -606,6 +606,10 @@ impl<G: Gates> BitEvaluator<G> {
         } else {
             (usize::BITS - (table.len() - 1).leading_zeros()) as usize
         };
+        // The index has only its type's bits: a table longer than that
+        // reaches (the builder and plan validation refuse one) never
+        // indexes a bit the word does not have.
+        let k = k.min(x.bits.len());
         if k as u32 > MAX_LOOKUP_BITS {
             return Err(Error::new(
                 Code::Backend,

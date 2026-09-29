@@ -146,12 +146,18 @@ impl Model {
         self.inner.save(Path::new(path)).map_err(err)
     }
 
-    /// Runs on a remote evaluator with a control plane's job grant (JSON),
-    /// trusting the receipt key the evaluator registered. Keys come from
-    /// `keys_dir` (`encompute keys generate`) or are generated for this run.
-    /// Returns JSON: outputs, the verified receipt, and the commitments the
-    /// control plane checks.
-    #[pyo3(signature = (url, inputs, grant_json, receipt_key, keys_dir=None))]
+    /// Runs on a remote evaluator with a control plane's job grant (JSON).
+    /// `receipt_key` (named by the control plane) must be among
+    /// `trusted_evaluators` (else `ENCOMPUTE_TRUSTED_EVALUATORS`; an empty
+    /// list refuses every key), checked before anything is sent; with no
+    /// pin only `allow_unpinned_evaluator` (development, never under
+    /// `ENCOMPUTE_ENV=production`) accepts it. Keys come from `keys_dir`
+    /// (`encompute keys generate`) or are generated for this run. Returns
+    /// JSON: outputs, the verified receipt, and the commitments the control
+    /// plane checks.
+    #[pyo3(signature = (url, inputs, grant_json, receipt_key, keys_dir=None,
+                        trusted_evaluators=None, allow_unpinned_evaluator=false))]
+    #[allow(clippy::too_many_arguments)]
     fn run_remote_json(
         &self,
         url: &str,
@@ -159,10 +165,17 @@ impl Model {
         grant_json: &str,
         receipt_key: &str,
         keys_dir: Option<&str>,
+        trusted_evaluators: Option<Vec<String>>,
+        allow_unpinned_evaluator: bool,
     ) -> PyResult<String> {
-        use encompute_verification::{
-            output_commitment, request_commitment, EvaluatorIdentity, JobGrant,
-        };
+        use encompute_verification::{output_commitment, request_commitment, JobGrant};
+        let trusted = encompute_runtime::Remote::trusted_evaluators(
+            trusted_evaluators,
+            allow_unpinned_evaluator,
+        )
+        .map_err(err)?;
+        encompute_runtime::Remote::check_trusted_evaluator(trusted.as_ref(), receipt_key)
+            .map_err(err)?;
         let m = &self.inner;
         let grant: JobGrant = serde_json::from_str(grant_json).map_err(|e| {
             err(encompute_ir::Error::new(
@@ -170,7 +183,6 @@ impl Model {
                 format!("job grant: {e}"),
             ))
         })?;
-        let trusted = EvaluatorIdentity::from_public_key_hex(receipt_key).map_err(err)?;
         let (client, eval_keys) = match keys_dir {
             Some(d) => {
                 let d = Path::new(d);
@@ -198,12 +210,13 @@ impl Model {
         };
         let run = encompute_runtime::Remote::new(url)
             .with_grant(&grant)
-            .run(
+            .run_scheduled(
                 &client,
                 m.program(),
                 eval_keys.as_deref(),
                 &inputs,
-                &trusted,
+                receipt_key,
+                trusted.as_ref(),
             )
             .map_err(err)?;
         Ok(serde_json::json!({
@@ -245,6 +258,23 @@ fn privacy_presets() -> Vec<(String, f64, f64, f64)> {
         .collect()
 }
 
+/// A named level resolved for a release charged to budgets of `units`:
+/// `(epsilon, delta, effective noise_multiplier)`. The effective noise is
+/// the listed one scaled for units without per-unit clipping; the
+/// program records the level (`preset`) next to it.
+#[pyfunction]
+fn privacy_preset_mechanism(name: &str, units: Vec<String>) -> PyResult<(f64, f64, f64)> {
+    use encompute_ir::confidentiality::{preset_level, preset_mechanism, PrivacyUnit};
+    let units = units
+        .iter()
+        .map(|u| PrivacyUnit::parse(u))
+        .collect::<encompute_ir::Result<Vec<_>>>()
+        .map_err(err)?;
+    let (epsilon, delta, _) = preset_level(name).map_err(err)?;
+    let m = preset_mechanism(name, &units).map_err(err)?;
+    Ok((epsilon, delta, m.noise_multiplier))
+}
+
 /// DP-SGD privacy levels: `(name, epsilon, delta, noise_multiplier)`.
 #[pyfunction]
 fn patient_privacy_presets() -> Vec<(String, f64, f64, f64)> {
@@ -280,7 +310,11 @@ fn from_json<T: serde::de::DeserializeOwned>(what: &str, s: Option<&str>) -> PyR
 
 /// Plans `.eir` text (ADR-015). Returns `(plan_json, text, plan_id)`; on
 /// PLANNING FAILED, `plan_json` and `plan_id` are `None` and `text` says
-/// why. Every returned plan passed the independent validator.
+/// why. Every returned plan passed the independent validator; under
+/// `ENCOMPUTE_ENV=production` against the production floor, with the
+/// program's facts and the backends recomputed here rather than taken from
+/// the planning context: no development attestation, no research backend,
+/// nothing weaker than the requested profile.
 #[pyfunction]
 #[pyo3(signature = (eir, profile="standard", infrastructure=None, training=None, preferences=None, deep=false))]
 fn plan(
@@ -291,7 +325,7 @@ fn plan(
     preferences: Option<&str>,
     deep: bool,
 ) -> PyResult<(Option<String>, String, Option<String>)> {
-    use encompute_runtime::planner::{render, verify_plan, Profile};
+    use encompute_runtime::planner::{render, verify_plan_with, PlanFloor, Profile};
     let program = encompute_ir::parse(eir).map_err(err)?;
     let profile = Profile::parse(profile).ok_or_else(|| {
         err(encompute_ir::Error::new(
@@ -316,7 +350,18 @@ fn plan(
     match &planned.plan {
         None => Ok((None, render::failure(&planned) + &extra, None)),
         Some(p) => {
-            verify_plan(&program, p).map_err(err)?;
+            let floor = if std::env::var("ENCOMPUTE_ENV").as_deref() == Ok("production") {
+                PlanFloor {
+                    facts: Some(
+                        encompute_runtime::planning::planning_facts(&program).map_err(err)?,
+                    ),
+                    catalog: Some(encompute_runtime::planning::available_catalog()),
+                    ..PlanFloor::production(profile)
+                }
+            } else {
+                PlanFloor::default()
+            };
+            verify_plan_with(&program, p, &floor).map_err(err)?;
             let id = p.id().map_err(err)?.to_string();
             Ok((
                 Some(String::from_utf8(p.to_bytes().map_err(err)?).expect("JSON")),
@@ -332,6 +377,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Model>()?;
     m.add_function(wrap_pyfunction!(privacy_presets, m)?)?;
     m.add_function(wrap_pyfunction!(patient_privacy_presets, m)?)?;
+    m.add_function(wrap_pyfunction!(privacy_preset_mechanism, m)?)?;
     m.add_function(wrap_pyfunction!(privacy_preview, m)?)?;
     m.add_function(wrap_pyfunction!(plan, m)?)?;
     training::register(m)?;

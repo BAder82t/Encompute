@@ -177,9 +177,12 @@ impl ExactPlan {
                 CmpScalar(_, a, c) => fits(t(a), *c) && out == Elem::Bool,
                 Shift { x, by, .. } => t(x) == out && *by < out.bits(),
                 Select(c, a, b) => t(c) == Elem::Bool && t(a) == out && t(b) == out,
-                Lookup { table, .. } => {
+                // An index of `bits` bits reaches 2^bits entries at most
+                // (a Boolean index: two).
+                Lookup { x, table } => {
                     !table.is_empty()
                         && table.len() <= MAX_TABLE
+                        && (t(x).bits() >= 16 || table.len() <= 1 << t(x).bits())
                         && table.iter().all(|v| fits(out, *v))
                 }
                 Cast(_) => true,

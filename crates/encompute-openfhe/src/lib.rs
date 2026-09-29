@@ -37,7 +37,11 @@ mod ffi {
         fn new_bgv_context(mult_depth: u32) -> Result<UniquePtr<Context>>;
         fn ring_dimension(ctx: &Context) -> Result<u32>;
         fn log_qp(ctx: &Context) -> Result<u32>;
-        fn load_evaluation_keys(ctx: Pin<&mut Context>, bytes: &[u8]) -> Result<String>;
+        fn load_evaluation_keys(
+            ctx: Pin<&mut Context>,
+            bytes: &[u8],
+            digest: &str,
+        ) -> Result<String>;
         fn load_ciphertext(ctx: &Context, bytes: &[u8]) -> Result<UniquePtr<Ciphertext>>;
         fn store_ciphertext(ct: &Ciphertext) -> Result<Vec<u8>>;
 
@@ -66,11 +70,28 @@ unsafe impl Send for ffi::Context {}
 #[allow(unsafe_code)]
 unsafe impl Send for ffi::Ciphertext {}
 
+/// Loads evaluation keys into `ctx`. OpenFHE keeps them in process-wide
+/// maps keyed by the secret key's tag, so the shim binds each tag to the
+/// SHA-256 of the bytes it was loaded from (the key ID) and refuses a tag
+/// already loaded from other bytes: keys relabelled with another client's
+/// tag are never used for that client's ciphertexts.
+fn load_evaluation_keys(ctx: &mut cxx::UniquePtr<ffi::Context>, bytes: &[u8]) -> Result<String> {
+    use sha2::Digest;
+    let digest: String = sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    ffi::load_evaluation_keys(ctx.pin_mut(), bytes, &digest).map_err(backend_err)
+}
+
 fn backend_err(e: cxx::Exception) -> Error {
     let msg = e.what();
     let code = if msg.contains("another parameter set") {
         Code::WrongParameters
-    } else if msg.contains("evaluation keys are not loaded") {
+    } else if msg.contains("evaluation keys are not loaded")
+        || msg.contains("different key material")
+        || msg.contains("key tag")
+    {
         Code::WrongKey
     } else {
         Code::Backend
@@ -157,7 +178,7 @@ impl OpenFheEvaluator {
 
     /// Load evaluation keys exported by `CkksClient::evaluation_keys`.
     pub fn load_keys(&mut self, bytes: &[u8]) -> Result<()> {
-        let tag = ffi::load_evaluation_keys(self.ctx.pin_mut(), bytes).map_err(backend_err)?;
+        let tag = load_evaluation_keys(&mut self.ctx, bytes)?;
         self.key_tags.push(tag);
         Ok(())
     }
@@ -292,7 +313,7 @@ impl BgvEvaluator {
 
     /// Load evaluation keys exported by the BGV client.
     pub fn load_keys(&mut self, bytes: &[u8]) -> Result<()> {
-        ffi::load_evaluation_keys(self.ctx.pin_mut(), bytes).map_err(backend_err)?;
+        load_evaluation_keys(&mut self.ctx, bytes)?;
         self.loaded = true;
         Ok(())
     }

@@ -19,8 +19,11 @@ Evaluator keys: the control plane says which evaluator runs a job and
 which receipt key it signs with. Pin the evaluator keys you trust with
 ``trusted_evaluators=`` (hex Ed25519 receipt keys) or
 ``ENCOMPUTE_TRUSTED_EVALUATORS`` (comma-separated): a job scheduled on any
-other key is refused before inputs are sent. Without a pin, the key the
-control plane names is accepted, with a warning.
+other key is refused before inputs are sent, and an empty pin set refuses
+every evaluator. Without a pin a job is refused; for development only,
+``allow_unpinned_evaluator=True`` (or
+``ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1``) accepts the key the control plane
+names, with a warning, except under ``ENCOMPUTE_ENV=production``.
 """
 
 from __future__ import annotations
@@ -72,6 +75,7 @@ class Client:
         *,
         timeout: float = 60.0,
         trusted_evaluators: Optional[Iterable[str]] = None,
+        allow_unpinned_evaluator: Optional[bool] = None,
     ):
         saved = _saved_login()
         self.url = (url or os.environ.get("ENCOMPUTE_CONTROL_URL") or saved.get("url") or "").rstrip("/")
@@ -81,16 +85,29 @@ class Client:
         if not self._token:
             raise ControlError("ENC2601", "no credentials: pass token= or run `encompute login`")
         self.timeout = timeout
-        if trusted_evaluators is None:
-            env = os.environ.get("ENCOMPUTE_TRUSTED_EVALUATORS", "")
-            trusted_evaluators = [k for k in env.replace(",", " ").split() if k]
-        self.trusted_evaluators = frozenset(k.strip().lower() for k in trusted_evaluators)
+        if isinstance(trusted_evaluators, str):
+            trusted_evaluators = [trusted_evaluators]
+        if trusted_evaluators is None and "ENCOMPUTE_TRUSTED_EVALUATORS" in os.environ:
+            trusted_evaluators = [os.environ["ENCOMPUTE_TRUSTED_EVALUATORS"]]
+        # None: nothing pinned. A pin set, even an empty one, is enforced
+        # (empty refuses every evaluator).
+        self.trusted_evaluators: Optional[frozenset] = (
+            None
+            if trusted_evaluators is None
+            else frozenset(
+                k.lower() for entry in trusted_evaluators for k in str(entry).replace(",", " ").split() if k
+            )
+        )
+        if allow_unpinned_evaluator is None:
+            allow_unpinned_evaluator = os.environ.get("ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR", "") in ("1", "true", "yes")
+        self.allow_unpinned_evaluator = bool(allow_unpinned_evaluator)
 
     def check_evaluator(self, receipt_key: str) -> None:
-        """Refuses an evaluator receipt key outside the pinned set (if one
-        is configured); without a pin, warns that the control plane chose
-        the key."""
-        if self.trusted_evaluators:
+        """Refuses an evaluator receipt key outside the pinned set (an empty
+        set refuses every key). Without a pin, refuses too, unless the
+        development opt-out is set (never under ``ENCOMPUTE_ENV=production``):
+        then warns that the control plane chose the key."""
+        if self.trusted_evaluators is not None:
             if str(receipt_key).lower() not in self.trusted_evaluators:
                 raise ControlError(
                     "ENC2607",
@@ -98,9 +115,24 @@ class Client:
                     "among the trusted evaluators",
                 )
             return
+        if not self.allow_unpinned_evaluator:
+            raise ControlError(
+                "ENC2605",
+                "no trusted evaluator keys are pinned: pass trusted_evaluators= (or set "
+                "ENCOMPUTE_TRUSTED_EVALUATORS) with the receipt keys of the evaluators you trust; "
+                "for development only, allow_unpinned_evaluator=True accepts the key the control "
+                "plane names",
+            )
+        if os.environ.get("ENCOMPUTE_ENV") == "production":
+            raise ControlError(
+                "ENC2605",
+                "ENCOMPUTE_ENV=production requires pinned evaluator keys: an unpinned evaluator "
+                "is for development only",
+            )
         warnings.warn(
-            "the evaluator's receipt key comes from the control plane and is not pinned: "
-            "pass trusted_evaluators= (or set ENCOMPUTE_TRUSTED_EVALUATORS)",
+            "the evaluator's receipt key comes from the control plane and is not pinned "
+            "(allow_unpinned_evaluator): pass trusted_evaluators= (or set "
+            "ENCOMPUTE_TRUSTED_EVALUATORS)",
             UserWarning,
             stacklevel=3,
         )
@@ -326,6 +358,9 @@ class Project:
                 json.dumps(d["grant"]),
                 d["evaluator_receipt_key"],
                 None if keys_dir is None else str(keys_dir),
+                # Enforced again natively, before anything is sent.
+                None if self._client.trusted_evaluators is None else sorted(self._client.trusted_evaluators),
+                self._client.allow_unpinned_evaluator,
             )
         )
         self._client.post(

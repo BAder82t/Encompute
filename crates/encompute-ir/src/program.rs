@@ -605,6 +605,16 @@ impl Builder {
         if table.is_empty() || table.len() > 1 << 16 {
             return Err(type_error("lookup table needs 1 to 65536 entries"));
         }
+        // An index of this type reaches 2^bits entries at most (a Boolean
+        // index: two); longer tables would index bits the index lacks.
+        if t.elem.bits() < 16 && table.len() > 1 << t.elem.bits() {
+            return Err(type_error(format!(
+                "a lookup indexed by {} has at most {} entries, not {}",
+                t.elem,
+                1 << t.elem.bits(),
+                table.len()
+            )));
+        }
         if let Some(v) = table.iter().find(|v| {
             !v.is_finite() || v.fract() != 0.0 || (**v as i128) < min || (**v as i128) > max
         }) {

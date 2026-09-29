@@ -209,3 +209,150 @@ fn local_uploads_need_no_grant_and_job_ids_are_random() {
     assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
     assert_ne!(a, b);
 }
+
+fn get(url: &str, path: &str, grant: Option<&str>) -> (u16, serde_json::Value) {
+    let mut r = ureq::get(&format!("{url}{path}"));
+    if let Some(g) = grant {
+        r = r.set(H_JOB_GRANT, g);
+    }
+    match r.call() {
+        Ok(r) => (r.status(), r.into_json().unwrap_or_default()),
+        Err(ureq::Error::Status(s, r)) => (s, r.into_json().unwrap_or_default()),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+fn listed(info: &serde_json::Value) -> Vec<String> {
+    info["programs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["program_id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn controlled(control: &ServiceSigner) -> String {
+    let link = ControlLink::new(
+        "http://127.0.0.1:9",
+        "control-plane",
+        &control.public_key_hex(),
+        ServiceSigner::from_seed("evaluator-1", &[6; 32]).unwrap(),
+    );
+    start(Evaluator::new(Backends::MOCK, Limits::default()).with_control(Arc::new(link)))
+}
+
+/// Review finding EV-1 (ENC-SF-2026-044): a program upload with a grant for another program
+/// was refused (401) only after the program had been compiled and loaded
+/// into every worker and the replay list, and listed in `/v1/info`. The
+/// grant is now checked against the program's ID before anything is
+/// compiled: a refused upload changes no state.
+#[test]
+fn a_refused_program_upload_loads_nothing() {
+    let f = fixture();
+    let control = ServiceSigner::from_seed("control-plane", &[5; 32]).unwrap();
+    let url = controlled(&control);
+    let pid = &f.ids.program_id;
+    let other_program = grant(&control, "evaluator-1", &"0".repeat(64));
+    let good = grant(&control, "evaluator-1", pid);
+    for g in [None, Some(other_program.as_str())] {
+        assert_eq!(post(&url, "/v1/programs", f.eir.as_bytes(), g), 401);
+    }
+    // Garbage with a valid grant: refused as unparsable, not compiled.
+    assert_eq!(
+        post(&url, "/v1/programs", b"not a program", Some(&good)),
+        400
+    );
+    let (_, info) = get(&url, "/v1/info", Some(&good));
+    assert!(
+        listed(&info).is_empty(),
+        "a refused program was loaded: {info}"
+    );
+    // Its keys cannot be registered either: the program is not there.
+    assert_eq!(
+        post(
+            &url,
+            &format!("/v1/programs/{pid}/keys"),
+            &f.keys,
+            Some(&good)
+        ),
+        404
+    );
+    assert_eq!(
+        post(&url, "/v1/programs", f.eir.as_bytes(), Some(&good)),
+        200
+    );
+    let (_, info) = get(&url, "/v1/info", Some(&good));
+    assert_eq!(listed(&info), vec![pid.clone()]);
+}
+
+/// Review finding EV-5 (ENC-SF-2026-064): with a control plane, `/v1/info` listed every
+/// tenant's programs to anyone, and `GET /v1/programs/{p}/keys/{k}` told
+/// anyone whether a client's key was registered. The listing now shows only
+/// the program a presented grant names, and the key lookup needs a grant
+/// for the program.
+#[test]
+fn with_a_control_plane_programs_and_keys_are_not_advertised() {
+    let f = fixture();
+    let control = ServiceSigner::from_seed("control-plane", &[5; 32]).unwrap();
+    let url = controlled(&control);
+    let pid = &f.ids.program_id;
+    let good = grant(&control, "evaluator-1", pid);
+    let other_program = grant(&control, "evaluator-1", &"0".repeat(64));
+    let forged = grant(
+        &ServiceSigner::from_seed("control-plane", &[7; 32]).unwrap(),
+        "evaluator-1",
+        pid,
+    );
+    assert_eq!(
+        post(&url, "/v1/programs", f.eir.as_bytes(), Some(&good)),
+        200
+    );
+    assert_eq!(
+        post(
+            &url,
+            &format!("/v1/programs/{pid}/keys"),
+            &f.keys,
+            Some(&good)
+        ),
+        200
+    );
+    // The evaluator's identity and backends are public; programs are not.
+    for g in [None, Some(forged.as_str()), Some(other_program.as_str())] {
+        let (status, info) = get(&url, "/v1/info", g);
+        assert_eq!(status, 200);
+        assert!(info["evaluator"]["public_key"].is_string());
+        assert!(listed(&info).is_empty(), "{info}");
+    }
+    assert_eq!(
+        listed(&get(&url, "/v1/info", Some(&good)).1),
+        vec![pid.clone()]
+    );
+    // The key-presence oracle.
+    let key_id = Envelope::decode(&f.keys).unwrap().header.key_id.unwrap();
+    let path = format!("/v1/programs/{pid}/keys/{key_id}");
+    for g in [None, Some(forged.as_str()), Some(other_program.as_str())] {
+        assert_eq!(get(&url, &path, g).0, 401);
+    }
+    assert_eq!(get(&url, &path, Some(&good)).0, 200);
+    let absent = format!("/v1/programs/{pid}/keys/{}", "f".repeat(64));
+    assert_eq!(get(&url, &absent, Some(&good)).0, 404);
+}
+
+/// Without a control plane (local development) nothing changes: every
+/// program is listed and key lookups need no grant.
+#[test]
+fn local_info_lists_every_program() {
+    let f = fixture();
+    let url = start(Evaluator::new(Backends::MOCK, Limits::default()));
+    let pid = &f.ids.program_id;
+    assert_eq!(post(&url, "/v1/programs", f.eir.as_bytes(), None), 200);
+    assert_eq!(listed(&get(&url, "/v1/info", None).1), vec![pid.clone()]);
+    let key_id = Envelope::decode(&f.keys).unwrap().header.key_id.unwrap();
+    let path = format!("/v1/programs/{pid}/keys/{key_id}");
+    assert_eq!(get(&url, &path, None).0, 404);
+    assert_eq!(
+        post(&url, &format!("/v1/programs/{pid}/keys"), &f.keys, None),
+        200
+    );
+    assert_eq!(get(&url, &path, None).0, 200);
+}

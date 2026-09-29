@@ -22,6 +22,10 @@ pub struct ExactProgram {
     /// estimated cost); `None` for verified programs (always BGV), an
     /// explicit BinFHE request and research backends.
     pub selection: Option<crate::cost::ExactSelection>,
+    /// The interval range analysis proves for each output (plan order): a
+    /// decrypted value outside it is a wrong result, never a valid one.
+    #[serde(skip)]
+    pub output_ranges: Vec<(i128, i128)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,15 +98,36 @@ pub fn compile_program(program: &Program) -> Result<CompiledProgram> {
                     ExactChoice::Research(profile) => (profile, None),
                 }
             };
+            let output_ranges = output_ranges(program, &c.plan)?;
             CompiledProgram::Exact(ExactProgram {
                 plan: c.plan,
                 privacy: c.privacy,
                 profile,
                 proof_required: required,
                 selection,
+                output_ranges,
             })
         }
     })
+}
+
+/// The proven interval of each output of `plan` (declared ranges through
+/// range analysis), within its type's bounds.
+fn output_ranges(program: &Program, plan: &ExactPlan) -> Result<Vec<(i128, i128)>> {
+    let ranges = encompute_analysis::int_ranges(program)?;
+    Ok(plan
+        .outputs
+        .iter()
+        .map(|o| {
+            let (lo, hi) = o.elem.bounds();
+            program
+                .outputs()
+                .iter()
+                .find(|out| out.name == o.name)
+                .and_then(|out| ranges.get(out.value.index()).copied().flatten())
+                .map_or((lo, hi), |(a, b)| (a.max(lo), b.min(hi)))
+        })
+        .collect())
 }
 
 /// Selects TFHE-rs for exact programs, in research builds only.
@@ -174,6 +199,7 @@ pub(crate) fn bgv_unsupported(plan: &ExactPlan) -> Option<String> {
     let t = encompute_exact::semantic_transcript(plan, &"0".repeat(64));
     caps.first_unsupported(&t)
         .map(|e| format!("{} on {} (instruction {})", e.op, e.ty, e.index))
+        .or_else(|| encompute_exact::bgv::noise_unsupported(plan))
 }
 
 /// Fail unless the proof backend covers every instruction of `plan`.
@@ -196,6 +222,15 @@ fn check_coverage(plan: &ExactPlan) -> Result<()> {
                 100 * covered / total.max(1),
                 caps.protocol
             ),
+        ));
+    }
+    // Every operation is covered; the BGV profile must also decrypt it
+    // correctly: its noise budget covers the plan's multiplicative depth,
+    // not unbounded additions.
+    if let Some(why) = encompute_exact::bgv::noise_unsupported(plan) {
+        return Err(Error::new(
+            Code::Unverified,
+            format!("this program cannot be verified on the BGV profile: {why}"),
         ));
     }
     Ok(())

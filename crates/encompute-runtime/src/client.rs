@@ -525,11 +525,67 @@ impl ClientSession {
                 .outputs
                 .iter()
                 .zip(items)
-                .map(|(o, (_, ct))| {
+                .enumerate()
+                .map(|(i, (o, (_, ct)))| {
                     let v = self.client.exact().decrypt(o.elem, ct)?;
+                    // Range analysis proved every output's interval: a value
+                    // outside it is a wrong result (tampering, other keys, or
+                    // noise), never a valid one.
+                    if let Some(&(lo, hi)) = e.output_ranges.get(i) {
+                        if v < lo || v > hi {
+                            return Err(Error::new(
+                                Code::Backend,
+                                format!(
+                                    "output {:?} decrypted to {v}, outside its proven range \
+                                     [{lo}, {hi}]: the result is wrong",
+                                    o.name
+                                ),
+                            ));
+                        }
+                    }
                     Ok((o.name.clone(), vec![v as f64]))
                 })
                 .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encompute_ir::{Builder, Elem, Range};
+
+    /// Review finding EV-6 (ENC-SF-2026-065): the client decrypted exact outputs without
+    /// comparing them with the interval range analysis proves, so a wrong
+    /// result inside the output's type (another client's keys, tampering,
+    /// BGV noise) was returned as if correct.
+    #[test]
+    fn exact_outputs_outside_their_proven_range_are_refused() {
+        let mut b = Builder::new("r", 1e-3).unwrap();
+        let x = b
+            .input_exact("x", Elem::U8, Some(Range::new(0.0, 10.0)))
+            .unwrap();
+        let one = b.constant_exact(Elem::U8, 1.0).unwrap();
+        let y = b.add(x, one).unwrap();
+        b.output("y", y).unwrap();
+        let p = b.finish().unwrap();
+        let compiled = encompute_evaluator::compile_program(&p).unwrap();
+        let s = ClientSession::generate(Ids::of(&p, &compiled), &compiled, BackendKind::Mock, 1)
+            .unwrap();
+        let outputs = |v: i128| {
+            let ct = s.client.exact().encrypt(Elem::U8, v).unwrap();
+            Envelope::new(s.header(Kind::Outputs), vec![("y".into(), ct)]).encode()
+        };
+        for v in [1, 11] {
+            assert_eq!(s.decrypt(&outputs(v)).unwrap()["y"], vec![v as f64]);
+        }
+        for v in [0, 12, 200, 255] {
+            let e = s.decrypt(&outputs(v)).unwrap_err();
+            assert_eq!(e.code, Code::Backend);
+            assert!(
+                e.message.contains("outside its proven range [1, 11]"),
+                "{e}"
+            );
         }
     }
 }
