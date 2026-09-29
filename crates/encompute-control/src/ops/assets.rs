@@ -181,15 +181,15 @@ impl Control {
                 _ => id.clone(),
             };
             // A broker key belongs to one organization: another
-            // organization's asset naming it could have it revoked. (The
-            // advisory lock serializes concurrent registrations of the
-            // same key; it is taken before the audit head.)
+            // organization's asset naming it could have it revoked. The
+            // advisory lock is the broker ID's, the same one registering a
+            // service account takes (`crate::ops::keybroker_lock`): it
+            // serializes this check against a concurrent registration of
+            // the broker, and against concurrent registrations naming the
+            // same key (same key, same broker). It is the only advisory
+            // lock either transaction takes, before the audit head.
             if let Some(k) = &r.key_ref {
-                t.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
-                    &[&k.broker, &k.key_ref],
-                )
-                .map_err(db_err)?;
+                crate::ops::keybroker_lock(t, &k.broker)?;
                 // The broker, once registered, is the platform's or this
                 // organization's own: another tenant's service account of
                 // that name never receives this asset's revocation.

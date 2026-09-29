@@ -162,12 +162,16 @@ pub struct BrokerState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_signing_key: Option<StoredKey>,
     /// Incremented by every save: of two copies of a broker's state, the
-    /// one with the lower generation is older.
+    /// one with the lower generation is older. Informational only: it is
+    /// not compared against anything persistent, so restoring an older
+    /// authentic copy is not detected (a known limitation).
     #[serde(default)]
     pub generation: u64,
     /// Hex HMAC-SHA256 over every other field, under a key derived from
     /// the store's KEK ([`SecretStore::state_mac`]): an edited state file
-    /// does not open. Absent only for development plaintext storage.
+    /// does not open, but an older authentic copy (one saved before a
+    /// revocation, say) still does. Absent only for development plaintext
+    /// storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
 }
@@ -185,8 +189,15 @@ fn state_bytes(state: &BrokerState) -> Result<Zeroizing<Vec<u8>>> {
     Ok(b)
 }
 
-fn same_mac(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+/// Compares a stored state MAC with the expected one in constant time
+/// (the `hmac` crate's [`CtOutput`](hmac::digest::CtOutput) equality); a
+/// tag of the wrong length never matches.
+fn same_mac(a: &[u8], b: &[u8; 32]) -> bool {
+    use hmac::digest::{generic_array::GenericArray, CtOutput};
+    type StateMac = hmac::Hmac<sha2::Sha256>;
+    a.len() == b.len()
+        && CtOutput::<StateMac>::new(GenericArray::clone_from_slice(a))
+            == CtOutput::<StateMac>::new((*b).into())
 }
 
 /// How [`KeyBroker::open`] treats the state's MAC.
@@ -587,7 +598,9 @@ impl KeyBroker {
     }
 
     /// Revokes a version (default: the current one). A revoked current key
-    /// is never released; rotate to release again.
+    /// is never released; rotate to release again. Restoring a state file
+    /// saved before the revocation undoes it, undetected (see
+    /// [`load`](KeyBroker::load)).
     pub fn revoke(&mut self, asset_id: &str, version: Option<u64>) -> Result<u64> {
         let broker_id = self.state.broker_id.clone();
         let s = self
@@ -824,7 +837,8 @@ impl KeyBroker {
 
     /// Writes the state (secrets included) to `path`, readable by the owner
     /// only, under the next generation and authenticated under the store's
-    /// KEK.
+    /// KEK. The MAC stops edits, not a later restore of this file over a
+    /// newer one (see [`load`](KeyBroker::load)).
     pub fn save(&self, path: &Path) -> Result<()> {
         let io = |e: std::io::Error| err(Code::KeyRelease, format!("{}: {e}", path.display()));
         let mut state = self.state.clone();
@@ -863,7 +877,11 @@ impl KeyBroker {
 
     /// Opens the state at `path`: it must be authenticated under `store`'s
     /// KEK, so an edited file (a widened release policy, a flipped mode, a
-    /// cleared revocation) is refused.
+    /// cleared revocation) is refused. A rollback is not: restoring an
+    /// older authentic copy of the file (one saved before a revocation)
+    /// is not detected, and its revoked versions are released again (a
+    /// known limitation; the generation is not checked against anything
+    /// persistent).
     pub fn load(path: &Path, verifier: Verifier, store: Box<dyn SecretStore>) -> Result<Self> {
         Self::open(Self::read(path)?, verifier, store, StateAuth::Required)
     }
@@ -891,5 +909,22 @@ impl KeyBroker {
             .map_err(|e| err(Code::KeyRelease, format!("{}: {e}", path.display())))?;
         check_broker_id(&state.broker_id)?;
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_mac;
+
+    #[test]
+    fn a_state_mac_matches_only_itself() {
+        let m = [7u8; 32];
+        assert!(same_mac(&m, &m));
+        let mut other = m;
+        other[31] ^= 1;
+        assert!(!same_mac(&other, &m));
+        assert!(!same_mac(&m[..31], &m));
+        assert!(!same_mac(&[7u8; 33], &m));
+        assert!(!same_mac(&[], &m));
     }
 }

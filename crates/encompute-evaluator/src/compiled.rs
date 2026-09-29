@@ -24,8 +24,43 @@ pub struct ExactProgram {
     pub selection: Option<crate::cost::ExactSelection>,
     /// The interval range analysis proves for each output (plan order): a
     /// decrypted value outside it is a wrong result, never a valid one.
-    #[serde(skip)]
+    /// Serialized with the rest of the program, so a serialized form is
+    /// never missing it; a client refuses a program without one entry per
+    /// output ([`ExactProgram::output_range`]).
     pub output_ranges: Vec<(i128, i128)>,
+}
+
+impl ExactProgram {
+    /// Fail unless there is exactly one proven range per output: a program
+    /// without them (built by hand, or read back from a form that lost
+    /// them) cannot have its decrypted outputs checked, so it is refused,
+    /// never run unchecked.
+    pub fn check_output_ranges(&self) -> Result<()> {
+        if self.output_ranges.len() != self.plan.outputs.len() {
+            return Err(Error::new(
+                Code::Backend,
+                format!(
+                    "exact program carries {} proven output ranges for {} outputs: decrypted \
+                     outputs cannot be checked, so the program is refused",
+                    self.output_ranges.len(),
+                    self.plan.outputs.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The proven range of output `i` (plan order); an error, never a
+    /// skipped check, when it is missing.
+    pub fn output_range(&self, i: usize) -> Result<(i128, i128)> {
+        self.check_output_ranges()?;
+        self.output_ranges.get(i).copied().ok_or_else(|| {
+            Error::new(
+                Code::Backend,
+                format!("exact program has no output {i}: its decrypted value cannot be checked"),
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -337,6 +372,58 @@ impl CompiledProgram {
         match self {
             CompiledProgram::Approx(c) => c.plan.inputs.iter().map(|i| i.name.as_str()).collect(),
             CompiledProgram::Exact(e) => e.plan.inputs.iter().map(|i| i.name.as_str()).collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encompute_ir::{Builder, Elem, Range};
+
+    fn exact_program() -> ExactProgram {
+        let mut b = Builder::new("r", 1e-3).unwrap();
+        let x = b
+            .input_exact("x", Elem::U8, Some(Range::new(0.0, 10.0)))
+            .unwrap();
+        let one = b.constant_exact(Elem::U8, 1.0).unwrap();
+        let y = b.add(x, one).unwrap();
+        b.output("y", y).unwrap();
+        match compile_program(&b.finish().unwrap()).unwrap() {
+            CompiledProgram::Exact(e) => e,
+            CompiledProgram::Approx(_) => unreachable!("exact program"),
+        }
+    }
+
+    /// ENC-SF-2026-065 follow-up: the proven output ranges were
+    /// `#[serde(skip)]`, so a serialized exact program silently lost them.
+    /// They are now part of the serialized form.
+    #[test]
+    fn exact_output_ranges_are_serialized() {
+        let e = exact_program();
+        assert_eq!(e.output_ranges, vec![(1, 11)]);
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(v["output_ranges"], serde_json::json!([[1, 11]]));
+    }
+
+    /// A program without one proven range per output is refused, never
+    /// run with its range check skipped.
+    #[test]
+    fn exact_program_without_output_ranges_is_refused() {
+        let mut e = exact_program();
+        assert_eq!(e.output_range(0).unwrap(), (1, 11));
+        assert!(e.output_range(1).is_err());
+        e.output_ranges.clear();
+        for err in [
+            e.check_output_ranges().unwrap_err(),
+            e.output_range(0).unwrap_err(),
+        ] {
+            assert_eq!(err.code, Code::Backend);
+            assert!(
+                err.message.contains("0 proven output ranges for 1 outputs"),
+                "{err}"
+            );
         }
     }
 }

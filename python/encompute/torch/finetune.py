@@ -22,7 +22,9 @@ A round becomes trusted at one commit point, in this order:
 After a crash, ``recover`` finalizes rounds that reached the commit point
 and discards the rest. A released but uncommitted round stays charged: its
 privacy is spent, only its progress is lost. ``finetune(resume=workdir)``
-continues from the last accepted adapter.
+continues from the last accepted adapter, unless an owner has revoked a
+parent asset, in the run's trust bundle or in its own bundle passed as
+``revocations=[...]``.
 
 Privacy unit: organization by default (each hospital's whole update is
 clipped). With ``privacy="strong-patient"`` (or ``encompute.Privacy``), the
@@ -253,14 +255,27 @@ def recover(workdir: str) -> dict:
             "next_round": max(list(released) + list(accepted) + [0]) + 1}
 
 
-def _revoked(cli: str, mc: Path, anchors: List[str], bundle: str) -> set:
-    """The assets a trust bundle's (signed) revocations withdraw."""
-    out = _run([cli, "trust", "report", "--bundle", str(bundle), *anchors, "--json"], mc,
-               check=False)
-    try:
-        return set(json.loads(out).get("revoked", {}))
-    except ValueError:
-        raise TrainingFailed("the trust report could not be read", out) from None
+def _revocation_nodes(bundle: dict, source: str) -> Dict[str, dict]:
+    """A trust bundle's revocation nodes (node ID → node). Anything that
+    does not read as one is refused: a revocation bundle that cannot be
+    evaluated must not count as "nothing revoked"."""
+    nodes = bundle.get("nodes") if isinstance(bundle, dict) else None
+    if not isinstance(nodes, dict):
+        raise TrainingFailed(f"the revocation bundle {source} is not a trust bundle")
+    out = {}
+    for k, n in nodes.items():
+        if not (isinstance(n, dict) and (n.get("kind") == "revocation"
+                                         or str(k).startswith("revocation:"))):
+            continue
+        ev = n.get("evidence")
+        body = (ev.get("value") or {}).get("body") if isinstance(ev, dict) else None
+        if (n.get("kind") != "revocation" or not isinstance(ev, dict)
+                or ev.get("type") != "revocation"
+                or not isinstance(body, dict) or not isinstance(body.get("asset"), str)):
+            raise TrainingFailed(f"the revocation bundle {source} holds an unreadable "
+                                 f"revocation {k}")
+        out[k] = n
+    return out
 
 
 def _refuse_revoked(cli: str, mc: Path, anchors: List[str], spec: dict,
@@ -269,18 +284,88 @@ def _refuse_revoked(cli: str, mc: Path, anchors: List[str], spec: dict,
     run's trust bundle, or in any bundle an owner hands over itself
     (``revocations``). The run's bundle is held by the model owner, who
     benefits from forgetting a revocation, so an owner's own bundle is the
-    source to trust (review finding TR-5)."""
-    revoked = _revoked(cli, mc, anchors, "trust.json")
+    source to trust (review finding TR-5).
+
+    An owner's bundle may hold nothing but its signed revocation: ownership
+    comes from the run's program, so the supplied revocations are merged
+    into (a copy of) the run's bundle and the trust report judges them
+    there. Fail closed: a bundle that cannot be read or evaluated refuses,
+    and so does any revocation naming a parent asset that the report does
+    not honour as that asset's revocation (signed by someone other than its
+    owner, a signature that does not verify, or one withdrawing a single
+    authorization). The trust report itself still ignores a non-owner's
+    revocation (it withholds nothing there); here, where the only effect
+    is to stop, an unexplained revocation of a parent stops the run until
+    it is resolved, so an owner's revocation is never silently dropped."""
+    run_bundle = mc / "trust.json"
+    try:
+        merged = json.loads(run_bundle.read_text())
+    except (OSError, ValueError):
+        raise TrainingFailed("the run's trust bundle could not be read") from None
+    nodes = merged.get("nodes")
+    if not isinstance(nodes, dict):
+        raise TrainingFailed("the run's trust bundle could not be read")
+    supplied = 0
     for b in revocations:
         if not Path(b).exists():
             raise TrainingFailed(f"the revocation bundle {b} does not exist")
-        revoked |= _revoked(cli, mc, anchors, str(Path(b).resolve()))
+        try:
+            theirs = json.loads(Path(b).read_text())
+        except (OSError, ValueError):
+            raise TrainingFailed(f"the revocation bundle {b} could not be read") from None
+        for k, n in _revocation_nodes(theirs, b).items():
+            if k in nodes and nodes[k] != n:
+                raise TrainingFailed(f"the revocation bundle {b} disagrees with the run's "
+                                     f"trust bundle about {k}")
+            nodes[k] = n
+            supplied += 1
+            # The edges its evidence implies (the report checks them against
+            # the graph it rebuilds from the evidence), not the bundle's own.
+            body = n["evidence"]["value"]["body"]
+            edges = [{"from": f"party:{body.get('party')}", "kind": "signed", "to": k},
+                     {"from": k, "kind": "revokes", "to": f"asset:{body['asset']}"}]
+            if body.get("authorization"):
+                an = f"authorization:{body['authorization']}"
+                if an in nodes:
+                    edges.append({"from": k, "kind": "revokes", "to": an})
+            merged["edges"] = merged.get("edges", []) + [
+                e for e in edges if e not in merged.get("edges", [])]
+    if supplied:
+        fd, path = tempfile.mkstemp(prefix=".revocations-", suffix=".json", dir=mc)
+        with os.fdopen(fd, "w") as f:
+            json.dump(merged, f)
+    else:
+        path = str(run_bundle)
+    try:
+        out = _run([cli, "trust", "report", "--bundle", path, *anchors, "--json"], mc,
+                   check=False)
+    finally:
+        if supplied:
+            os.unlink(path)
+    try:
+        report = json.loads(out)
+        revoked = set(report.get("revoked", {}))
+    except (ValueError, AttributeError):
+        raise TrainingFailed("the trust report could not be read", out) from None
     parents = {f"asset:{spec['base_model']['asset_id']}"}
     for d in spec["datasets"]:
         parents |= {f"asset:{d['asset_id']}", f"asset:{d['gradient_asset']}"}
     hit = sorted(p.split(":", 1)[1] for p in revoked & parents)
     if hit:
         raise EncomputeError("ENC2302", f"training cannot resume: its owners revoked {', '.join(hit)}")
+    # Nothing is revoked, so every revocation naming a parent went unhonoured.
+    details = [d for row in report.get("rows", []) for d in row.get("details", [])]
+    for k, n in sorted(_revocation_nodes(merged, "trust.json").items()):
+        body = n["evidence"]["value"]["body"]
+        if f"asset:{body['asset']}" not in parents:
+            continue
+        why = "; ".join(d for d in details if k in d)
+        what = (f"an authorization for {body['asset']}" if body.get("authorization")
+                else body["asset"])
+        raise EncomputeError(
+            "ENC2302", f"training cannot resume: {body.get('party')}'s revocation of {what} "
+                       f"is not honoured by the trust report"
+                       + (f" ({why})" if why else "") + "; refusing until it is resolved")
 
 
 def _start_broker(cli: str, mc: Path, mock_root: str) -> Tuple[subprocess.Popen, str]:
@@ -836,7 +921,7 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
              verification="required", config: Optional[lora.LoRAConfig] = None,
              infrastructure: Optional[dict] = None, allow_development: bool = False,
              workdir: Optional[str] = None, resume: Optional[str] = None,
-             verbose: bool = True) -> FineTuneResult:
+             revocations: Sequence[str] = (), verbose: bool = True) -> FineTuneResult:
     say = print if verbose else (lambda *a, **k: None)
     t0 = time.perf_counter()
     if not resume:
@@ -905,13 +990,18 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
     say(f"{'Training':<24}LoRA (rank {cfg.rank}, {st['dim']} adapter parameters)")
     say(f"{'Participants':<24}{len(st['data'])}")
 
+    anchors = ["--parties", parties, "--coordinator-key", st["coord_key"], "--mock-root",
+               mock_root, "--execution-policy", str(mc / "training-policy.json")]
+    if recovery:
+        # Before any key is released or worker started: no resume once an
+        # owner has revoked a parent (in the run's bundle or its own).
+        _refuse_revoked(cli, mc, anchors, spec, revocations)
     broker, broker_url = _start_broker(cli, mc, mock_root)
     ctx: Dict[str, Any] = dict(cli=cli, bundle=mc / "trust.json", modelco=mc, spec=spec_json,
                                broker=broker_url, broker_proc=broker, hw_seed=W / "hw.seed",
                                env=env, mock_root=mock_root, adapter0_digest=st["adapter0_digest"],
                                dp_sgd=dp)
-    ctx["anchors"] = ["--parties", parties, "--coordinator-key", st["coord_key"], "--mock-root",
-                      mock_root, "--execution-policy", str(mc / "training-policy.json")]
+    ctx["anchors"] = anchors
     ctx.update(base_module=None if resume else model.payload, seed=cfg.seed,
                package_id=st.get("package_id"))
     ctx["infer"] = dict(spec=spec_json, identity=str(mc / "coord.key"),
@@ -1019,7 +1109,6 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
             st["adapter0_digest"])))["adapter"]
         previous, r = None, 1
         if recovery:
-            _refuse_revoked(cli, mc, ctx["anchors"], spec)
             if recovery["accepted"]:
                 last = recovery["accepted"][-1]
                 _, payload = _native.resume_checkpoint(

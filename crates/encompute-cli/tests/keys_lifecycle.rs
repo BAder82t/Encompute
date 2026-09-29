@@ -536,6 +536,10 @@ fn an_unauthenticated_broker_state_needs_its_owner_to_upgrade_it() {
     let o = state.as_object_mut().unwrap();
     assert!(o.remove("mac").is_some(), "the saved state carries a mac");
     o.remove("generation");
+    // Non-default release gates, which the owner must be shown before confirming.
+    let p = &mut state["secrets"]["weights"]["release_policy"];
+    p["require_gpu_attestation"] = serde_json::json!(true);
+    p["max_evidence_age_secs"] = serde_json::json!(90);
     std::fs::write(&b, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     let legacy = std::fs::read(&b).unwrap();
 
@@ -549,6 +553,27 @@ fn an_unauthenticated_broker_state_needs_its_owner_to_upgrade_it() {
         out.contains("NOT AUTHENTICATED") && out.contains(IMAGE),
         "{out}"
     );
+    // Every field that gates release is shown, so --confirm authenticates
+    // only what the owner saw.
+    for shown in [
+        "Mode",
+        "Organization",
+        "Current version",
+        "Revoked versions",
+        "Execution",
+        "Policy ",
+        "Privacy policy",
+        "Artifact",
+        "TEEs",
+        "Minimum TCB",
+        "Debug",
+        "GPU attestation   required",
+        "Max evidence age  90 s",
+        "Mock evidence     refused",
+        "Policy format",
+    ] {
+        assert!(out.contains(shown), "{shown:?} not shown:\n{out}");
+    }
     assert_eq!(std::fs::read(&b).unwrap(), legacy);
     // Confirmed: authenticated, and usable again.
     let mut confirmed = upgrade.to_vec();

@@ -26,7 +26,8 @@ Related: [support matrix](docs/support-matrix.md),
   authorization without a purpose or policy applies to every purpose or
   policy, and authorizations name no project.
 - **An independent security review of 0.3.0-rc.3 has reported.** Its
-  55 findings and their fixes are listed in
+  55 findings, 7 more from a later review of their fixes
+  (ENC-SF-2026-033 to 094), and the fixes are listed in
   [docs/security-findings.md](docs/security-findings.md). Some are only
   partly fixed; the remainders are listed below and in that page's
   "Open" list.
@@ -165,7 +166,27 @@ Related: [support matrix](docs/support-matrix.md),
   registered asset ID names a real asset also tells a submitter who
   already knows an ID that it exists.
 - **The anchor's sets of ended jobs, withdrawn approvals, removed
-  project memberships and removed roles grow without bound.**
+  project memberships and removed roles grow without bound.** Every
+  spend, cancellation, withdrawal and removal rewrites and re-signs the
+  whole anchor. OpenBao's KV store refuses entries above its raft
+  `max_entry_size` (1 MiB by default), which is roughly 25,000 to 30,000
+  ended jobs; past it anchor writes fail, and the control plane fails
+  closed: privacy spends, cancellations and revocation acknowledgements
+  stop. Watch the `encompute_anchor_bytes` gauge (the control plane also
+  logs `anchor_size_warning` above 512 KiB) and raise `max_entry_size` before it is
+  reached. The anchoring cost also grows with the deployment's age: each
+  privacy spend re-loads and re-verifies the whole ledger to anchor it
+  (besides verifying it inside the spend), and every revocation, disable,
+  cancellation, withdrawal or removal rescans all the anchored-state
+  tables. Both fail closed. A hash-chained governance event log will
+  replace these sets, and these costs, before general availability.
+- **An anchor restored from the same backup forgets later spend.** When
+  the database and the anchor are restored together, privacy spend rolls
+  back to the backup. Keep the anchor outside the backup set, in the
+  customer's vault.
+- **The evaluator program table has no eviction.** Uploaded programs stay
+  in memory until the evaluator restarts.
+- **Trust Graph queries are quadratic** in the number of records.
 - **The control plane bounds privacy reservations, but does not recompute
   them.** A reservation whose declared sensitivity is below what its own
   noise implies is refused, but its noise multiplier and sampling rate are
@@ -199,6 +220,10 @@ Related: [support matrix](docs/support-matrix.md),
   for every evaluator, whatever its hardware.
 - **Platforms.** Supported: Linux x86_64 and macOS arm64. Linux arm64 is
   experimental. macOS x86_64 and Windows are not supported.
+- **macOS loads two OpenMP runtimes** when OpenFHE and torch run in one
+  process.
+- **The Linux wheel may bundle libgomp**, which THIRD_PARTY_NOTICES does
+  not list. (Not yet checked against a built Linux wheel.)
 - **Benchmarks come from one machine type** (Apple M3 Max). Linux servers
   and real TEEs have not been benchmarked.
 
@@ -246,6 +271,8 @@ Related: [support matrix](docs/support-matrix.md),
 - **DP bounds what the released aggregate reveals** within (ε, δ). It
   does not hide the model architecture, the number of rounds or the
   training configuration, which are shared as metadata.
+- **A DP plan with no budgeted asset produces no privacy receipt**, so an
+  aggregation receipt has nothing to bind.
 - **Randomness must be production randomness.** The deterministic noise
   feature exists for tests only and is refused in releases (ENC2204).
 - **A person held by several parties is protected at group level.** The
@@ -290,7 +317,11 @@ Related: [support matrix](docs/support-matrix.md),
   read the model owner's trust bundle plus any owner-supplied bundles
   (`revocations=`); the model owner benefits from forgetting a revocation,
   so enforcement relies on owners revoking at their key brokers or control
-  plane.
+  plane. In these checks a revocation of a parent asset that the trust
+  report does not honour (signed by a non-owner, with an invalid
+  signature, or revoking a single authorization) also refuses, so anyone
+  whose bundle is passed in can stop the run until it is resolved; the
+  trust report itself still honours only the owner's revocation.
 - **The training image ships PyTorch 2.3 and Transformers 4.46, which
   have open CVEs.** The release's vulnerability gate scans the TEE images
   like every other image; these findings pass only through exceptions for

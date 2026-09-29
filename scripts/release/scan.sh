@@ -135,10 +135,18 @@ else fail "OpenFHE review" "$(tail -n 1 "$OUT/openfhe-review.txt") (security/ope
 if python3 -m unittest discover -s scripts/release -p 'test_vuln_policy.py' > "$OUT/policy-tests.txt" 2>&1; then
   row "severity policy tests" "PASS ($(grep -E '^Ran ' "$OUT/policy-tests.txt"))"
 else fail "severity policy tests" "see $OUT/policy-tests.txt"; fi
-unused='torch\.(load|jit|compile|export|distributed|_inductor)\b|from torch(\.[a-z_]+)* import [^#]*\b(load|jit|compile|export|distributed)\b|\bTrainer\b|load_checkpoint_(in_model|and_dispatch)|trust_remote_code *= *True|weights_only'
-if grep -rnE "$unused" python/encompute --include='*.py' > "$OUT/exception-controls.txt" 2>&1; then
-  fail "exception controls" "python/encompute calls an entry point an exception declares unused (see $OUT/exception-controls.txt)"
-else row "exception controls" "PASS (no torch.load/jit/compile/export/distributed, Trainer, load_checkpoint, trust_remote_code)"; fi
+# A syntax-tree scan, not a text search: import aliases, from-imports and
+# getattr with a literal name are seen. Exit 1 is a finding, 2 a scan that
+# could not run (a missing path, a file that does not parse): neither passes.
+if python3 -m unittest discover -s scripts/release -p 'test_scan_torch_usage.py' > "$OUT/exception-controls-tests.txt" 2>&1; then
+  row "exception controls tests" "PASS ($(grep -E '^Ran ' "$OUT/exception-controls-tests.txt"))"
+else fail "exception controls tests" "see $OUT/exception-controls-tests.txt"; fi
+python3 scripts/release/scan_torch_usage.py python/encompute > "$OUT/exception-controls.txt" 2>&1
+case $? in
+  0) row "exception controls" "PASS ($(tail -n 1 "$OUT/exception-controls.txt"))" ;;
+  1) fail "exception controls" "python/encompute uses an entry point an exception declares unused (see $OUT/exception-controls.txt)" ;;
+  *) fail "exception controls" "the scan did not complete: $(tail -n 1 "$OUT/exception-controls.txt")" ;;
+esac
 if [ ${#policy_args[@]} -gt 0 ]; then
   if python3 scripts/release/vuln_policy.py "${policy_args[@]}" --exceptions security/exceptions.toml \
       --osv-cache "$OUT/osv-cache.json" --report "$OUT/vulnerabilities.md" > "$OUT/policy.txt" 2>&1; then

@@ -919,3 +919,60 @@ fn approvals_from_before_version_4_get_stable_ids() {
         "{a:?}"
     );
 }
+
+/// An rc.3 database (schema version 2) has no approval members: version 3
+/// fills them in from the approvals. Restoring the same rc.3 backup into a
+/// fresh database and migrating it again must give every row the same ID,
+/// or the anchor's withdrawn grants would no longer match (ENC-SF-2026-091).
+#[test]
+fn a_schema_2_backup_migrated_twice_gets_the_same_ids() {
+    let ids = || -> Option<Vec<String>> {
+        let url = fresh_database()?;
+        let db = encompute_control::db::Db::connect(&url).unwrap();
+        assert_eq!(db.migrate_to(2).unwrap(), 2);
+        db.conn()
+            .unwrap()
+            .batch_execute(
+                "INSERT INTO organizations (id, display_name, status, policy_namespace)
+                      VALUES ('o', 'o', 'active', 'o'), ('q', 'q', 'active', 'q');
+                 INSERT INTO memberships (principal_id, organization_id, role, created_at)
+                      VALUES ('usr_1', 'o', 'ml_developer', '2026-07-01T00:00:00Z'),
+                             ('usr_2', 'q', 'organization_admin', '2026-07-02T00:00:00Z');
+                 INSERT INTO projects (id, organization_id, name, status) VALUES ('p', 'o', 'p', 'active');
+                 INSERT INTO project_members (project_id, organization_id, added_by, created_at)
+                      VALUES ('p', 'o', 'usr_1', '2026-08-01T00:00:00Z'),
+                             ('p', 'q', 'usr_1', '2026-08-02T00:00:00Z');
+                 INSERT INTO assets (id, organization_id, kind, name, digest, policy, lineage_root, parents, status, created_by)
+                      VALUES ('a', 'o', 'dataset', 'a', 'd', '{}', 'a', '[]', 'active', 'u'),
+                             ('b', 'q', 'dataset', 'b', 'd', '{}', 'b', '[]', 'active', 'u');
+                 INSERT INTO asset_approvals (asset_id, project_id, purpose, approved_by, created_at)
+                      VALUES ('a', 'p', 'x', 'usr_1', '2026-09-01T00:00:00Z'),
+                             ('b', 'p', 'y', 'usr_2', '2026-09-02T00:00:00Z');",
+            )
+            .unwrap();
+        assert_eq!(db.migrate().unwrap(), 4);
+        let mut out = Vec::new();
+        for q in [
+            "SELECT approval_id FROM asset_approvals ORDER BY asset_id",
+            "SELECT grant_id FROM asset_approval_members ORDER BY asset_id, organization_id",
+            "SELECT membership_id FROM project_members ORDER BY organization_id",
+            "SELECT membership_id FROM memberships ORDER BY principal_id",
+        ] {
+            for r in db.conn().unwrap().query(q, &[]).unwrap() {
+                out.push(r.get::<_, String>(0));
+            }
+        }
+        Some(out)
+    };
+    let Some(a) = ids() else { return };
+    // A later restore of the same backup, migrated at another time.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let b = ids().unwrap();
+    assert_eq!(a, b, "the same backup migrated twice gets the same IDs");
+    let count = |p: &str| a.iter().filter(|id| id.starts_with(p)).count();
+    assert_eq!(
+        (count("apv_"), count("apg_"), count("pmb_"), count("rol_")),
+        (2, 4, 2, 2),
+        "{a:?}"
+    );
+}

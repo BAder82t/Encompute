@@ -27,6 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,36 @@ use encompute_verification::service::{verify_signed, ServiceSigner, STATE_ANCHOR
 use crate::config::AnchorConfig;
 
 pub const ANCHOR_VERSION: u32 = 1;
+
+/// Serialized anchor size above which every anchor write (and the start)
+/// logs an `anchor_size_warning`. The anchor holds every ended job and
+/// every disable, withdrawal and removal, and each write re-signs all of
+/// it; an OpenBao KV entry is limited by the raft `max_entry_size` (1 MiB
+/// by default), past which anchor writes fail and the control plane fails
+/// closed. Half of that leaves time to act.
+pub const ANCHOR_WARN_BYTES: u64 = 512 * 1024;
+
+/// The anchor's size as written: its compact JSON serialization (what the
+/// OpenBao KV store holds as one string; the directory store writes it
+/// pretty-printed, somewhat larger).
+pub fn serialized_len(a: &StateAnchor) -> u64 {
+    serde_json::to_vec(a).map_or(0, |v| v.len() as u64)
+}
+
+/// Logs that the anchor outgrew [`ANCHOR_WARN_BYTES`] (nothing otherwise).
+pub fn warn_if_large(service: &str, when: &str, bytes: u64) {
+    if bytes > ANCHOR_WARN_BYTES {
+        crate::log::LogLine::new(service, "anchor_size_warning")
+            .field("when", when)
+            .field("anchor_bytes", bytes)
+            .field("threshold_bytes", ANCHOR_WARN_BYTES)
+            .field(
+                "action",
+                "the state anchor is growing towards the anchor store's entry size limit (OpenBao raft max_entry_size, 1 MiB by default), past which anchor writes fail and the control plane refuses privacy spends and other anchored operations; raise max_entry_size, and plan for the governance event log that replaces the anchored sets (see docs/deployment.md)",
+            )
+            .emit();
+    }
+}
 
 fn anchor_err(m: impl Into<String>) -> Error {
     Error::new(Code::PrivacyLedger, m)
@@ -313,6 +344,8 @@ pub fn open_store(c: &AnchorConfig) -> Result<Box<dyn AnchorStore>> {
 pub struct Anchor {
     store: Box<dyn AnchorStore>,
     state: Mutex<StateAnchor>,
+    /// [`serialized_len`] of the anchor as last loaded or written.
+    bytes: AtomicU64,
 }
 
 impl Anchor {
@@ -325,13 +358,21 @@ impl Anchor {
             }
             None => (StateAnchor::empty(signer), false),
         };
+        let bytes = AtomicU64::new(serialized_len(&state));
         Ok((
             Self {
                 store,
                 state: Mutex::new(state),
+                bytes,
             },
             existed,
         ))
+    }
+
+    /// The anchor's serialized size as last loaded or written (the
+    /// `encompute_anchor_bytes` gauge).
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> StateAnchor {
@@ -376,8 +417,13 @@ impl Anchor {
             }
             next.counter = g.counter + 1;
             next.sign(signer)?;
+            // Measured before the write, so a write the store refuses for
+            // its size is still reported.
+            let bytes = serialized_len(&next);
+            warn_if_large(signer.id(), "write", bytes);
             match self.store.store(&next, g.counter) {
                 Ok(()) => {
+                    self.bytes.store(bytes, Ordering::Relaxed);
                     *g = next.clone();
                     return Ok(next);
                 }

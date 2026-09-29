@@ -213,7 +213,7 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
                 Response {
                     status: 200,
                     content_type: "text/plain; version=0.0.4",
-                    body: control.metrics.render().into_bytes(),
+                    body: control.render_metrics().into_bytes(),
                 },
                 None,
             );

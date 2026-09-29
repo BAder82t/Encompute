@@ -121,18 +121,26 @@ fn check_floor(
     p: &mut Vec<String>,
 ) {
     let ctx = &plan.context;
-    // The semantics follow from the program's types alone.
-    if let Ok(s) = encompute_analysis::semantics(program) {
-        let want = match s {
-            Semantics::Exact => "exact",
-            Semantics::Approximate => "approximate",
-        };
-        if ctx.facts.semantics != want {
-            p.push(format!(
-                "the plan declares {} semantics, but the program is {want}",
-                ctx.facts.semantics
-            ));
+    // The semantics follow from the program's types alone. A program whose
+    // semantics cannot be determined has no valid plan: fail closed.
+    match encompute_analysis::semantics(program) {
+        Ok(s) => {
+            let want = match s {
+                Semantics::Exact => "exact",
+                Semantics::Approximate => "approximate",
+            };
+            if ctx.facts.semantics != want {
+                p.push(format!(
+                    "the plan declares {} semantics, but the program is {want}",
+                    ctx.facts.semantics
+                ));
+            }
         }
+        Err(e) => p.push(format!(
+            "the program's semantics cannot be determined, so the plan's {} semantics \
+             cannot be checked: {}",
+            ctx.facts.semantics, e.message
+        )),
     }
     if let Some(f) = &floor.facts {
         if ctx.facts.semantics != f.semantics

@@ -136,8 +136,8 @@ def test_unsafe_repositories_are_refused(repo, tmp_path):
 
 
 def test_package_settings_outside_the_allowlist_are_refused(repo, tmp_path):
-    """Review finding TR-4 (ENC-SF-2026-073): a tokenizer configuration with custom code or an
-    unknown class or setting, and a model configuration asking for
+    """Review finding TR-4 (ENC-SF-2026-073): a tokenizer configuration with custom code, an
+    unknown class or setting, or a key naming a file, and a model configuration asking for
     quantization or choosing the attention implementation, are refused at
     import."""
     edits = {
@@ -145,6 +145,10 @@ def test_package_settings_outside_the_allowlist_are_refused(repo, tmp_path):
             ("auto_map", {"AutoTokenizer": ["tok.Custom", None]}),
             ("tokenizer_class", "CustomTokenizer"),
             ("processor_class", "x.Processor"),
+            # Keys naming a file: Transformers would open whatever path they name.
+            ("tokenizer_file", "/etc/passwd"),
+            ("full_tokenizer_file", "../other/tokenizer.json"),
+            ("special_tokens_map_file", "/home/x/special_tokens_map.json"),
         ],
         "config.json": [
             ("quantization_config", {"quant_method": "bitsandbytes", "load_in_8bit": True}),

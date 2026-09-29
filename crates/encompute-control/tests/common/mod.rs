@@ -25,7 +25,65 @@ pub const SECRET: &str = "test-development-secret";
 
 static N: AtomicU64 = AtomicU64::new(0);
 
-/// A database for one test, or `None` (skipped).
+/// The databases the running test created (fresh ones and backups). Each
+/// test runs on its own thread, so this thread-local is dropped when the
+/// test ends, passing or panicking (unwinding drops the test's control
+/// planes first); dropping it drops the databases. Tests move the parts of
+/// their worlds around freely (`let env0 = t.env0`), so the cleanup cannot
+/// hang off one struct.
+struct TestDatabases {
+    admin: String,
+    names: Vec<String>,
+}
+
+impl Drop for TestDatabases {
+    fn drop(&mut self) {
+        if self.names.is_empty() {
+            return;
+        }
+        // Never panic here: a panicking thread-local destructor aborts.
+        let mut c = match postgres::Client::connect(&self.admin, postgres::NoTls) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("test databases {:?} not dropped: {e}", self.names);
+                return;
+            }
+        };
+        for name in self.names.iter().rev() {
+            // End the sessions first (a pool, a spawned server or a leaked
+            // client may still hold one); FORCE ends any that reconnect.
+            let _ = c.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                  WHERE datname = $1 AND pid <> pg_backend_pid()",
+                &[name],
+            );
+            if let Err(e) = c.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+            {
+                eprintln!("test database {name} not dropped: {e}");
+            }
+        }
+    }
+}
+
+thread_local! {
+    static CREATED: std::cell::RefCell<Option<TestDatabases>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Drops database `name` when the current test ends.
+fn drop_at_test_end(admin: &str, name: &str) {
+    CREATED.with(|c| {
+        c.borrow_mut()
+            .get_or_insert_with(|| TestDatabases {
+                admin: admin.to_owned(),
+                names: vec![],
+            })
+            .names
+            .push(name.to_owned())
+    });
+}
+
+/// A database for one test, or `None` (skipped). It is dropped when the
+/// test ends.
 pub fn fresh_database() -> Option<String> {
     let admin = match std::env::var("ENCOMPUTE_TEST_DATABASE_URL") {
         Ok(u) => u,
@@ -49,6 +107,7 @@ pub fn fresh_database() -> Option<String> {
     );
     let mut c = postgres::Client::connect(&admin, postgres::NoTls).expect("test database");
     c.batch_execute(&format!("CREATE DATABASE {name}")).unwrap();
+    drop_at_test_end(&admin, &name);
     // Replace the database name in the URL.
     let url = match admin.rsplit_once('/') {
         Some((base, _)) if admin.starts_with("postgres") => format!("{base}/{name}"),
@@ -61,13 +120,14 @@ fn admin_url() -> String {
     std::env::var("ENCOMPUTE_TEST_DATABASE_URL").unwrap()
 }
 
-fn db_name(url: &str) -> String {
+pub fn db_name(url: &str) -> String {
     url.rsplit('/').next().unwrap().to_owned()
 }
 
 /// "Backs up" `url` into database `backup` (a template copy; no connection
-/// to the source may be open).
+/// to the source may be open). The backup is dropped when the test ends.
 pub fn backup_database(url: &str, backup: &str) {
+    drop_at_test_end(&admin_url(), backup);
     let mut c = postgres::Client::connect(&admin_url(), postgres::NoTls).unwrap();
     let live = db_name(url);
     // A dropped pool closes its connections asynchronously: end them first.

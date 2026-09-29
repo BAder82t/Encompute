@@ -284,11 +284,14 @@ impl Control {
             // An organization's key broker cannot take the name another
             // organization's assets give their broker (it would receive
             // their revocations). The platform's brokers serve every
-            // organization. (Same answer as a taken ID: no oracle.)
+            // organization. (Same answer as a taken ID: no oracle.) The
+            // broker ID's lock, taken by asset registrations naming it
+            // too, serializes the two checks; it is taken for every kind,
+            // since an asset naming a service that is not a key broker is
+            // refused as well.
+            crate::ops::keybroker_lock(t, &r.id)?;
             if r.kind == ServiceKind::Keybroker {
                 if let Some(o) = owner {
-                    t.execute("SELECT pg_advisory_xact_lock(hashtext('keybroker'), hashtext($1))", &[&r.id])
-                        .map_err(db_err)?;
                     let named = t
                         .query_opt(
                             "SELECT 1 FROM assets WHERE key_ref->>'broker' = $1 AND organization_id <> $2 LIMIT 1",
@@ -344,8 +347,8 @@ impl Control {
                 .execute(
                     "UPDATE service_accounts SET status = 'disabled'
                      WHERE id = $1 AND kind <> 'control'
-                       AND (organization_id = $2 OR ($2 = 'platform' AND organization_id IS NULL))",
-                    &[&id, &org],
+                       AND (organization_id = $2 OR ($2 = $3 AND organization_id IS NULL))",
+                    &[&id, &org, &PLATFORM_ORG],
                 )
                 .map_err(db_err)?;
             if n == 0 {

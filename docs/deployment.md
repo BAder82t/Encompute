@@ -251,6 +251,13 @@ encrypted assets
   above. 0.4.0 will refuse them: either the control plane refuses to
   start while any remains, or a migration strips the role. Which one will
   be announced in advance. Run the check before upgrading.
+- **No downgrade.** Take a database backup and a copy of the anchor
+  before upgrading. After the upgrade, schema version 4 refuses an rc.3
+  control plane, and once the new anchor sets (ended jobs, withdrawn
+  approvals, removed memberships and roles) are written an rc.3 binary
+  cannot read the anchor. To roll back, restore the pre-upgrade database
+  backup together with its matching anchor, then start the older
+  release.
 
 ## Privacy state and backups
 
@@ -308,7 +315,11 @@ are disabled again, and cancelled or failed jobs end again (never run
 twice). Withdrawn asset approvals are withdrawn again, organizations
 that left a project are removed from it again, and removed roles are
 removed again. It records all of this,
-and any audit gap, in the audit trail.
+and any audit gap, in the audit trail. If the database lost a frozen
+ledger's row but still holds its asset, recovery re-creates the row,
+frozen, with no entries and a placeholder budget that pays for nothing
+(audited as `privacy.ledger.frozen` with `ledger=recreated_missing_row`);
+that ledger stays exhausted.
 
 **Back up** ([backup.sh](../deploy/docker-compose/backup.sh)):
 
@@ -456,7 +467,18 @@ Every refusal is ENC2605.
   - state rollbacks found while running (`encompute_state_rollback_total`,
     labelled `privacy` or `audit`);
   - service accounts still holding `security_admin`
-    (`encompute_legacy_service_admins`, a gauge that should be 0).
+    (`encompute_legacy_service_admins`, a gauge that should be 0);
+  - the size of the signed state anchor in bytes
+    (`encompute_anchor_bytes`, a gauge). The anchor keeps every ended job,
+    disable, withdrawal and removal, and is rewritten whole on each
+    update. OpenBao's KV store refuses an entry larger than its raft
+    `max_entry_size` (1 MiB by default, roughly 25,000 to 30,000 ended
+    jobs); from then on anchor writes fail and the control plane fails
+    closed (privacy spends, cancellations and revocation acknowledgements
+    stop). Above 512 KiB every start and every anchor write logs an
+    `anchor_size_warning` line. Alert on `encompute_anchor_bytes >
+    524288`, and raise `max_entry_size` on the vault before the limit is
+    reached.
 
   Labels are closed sets: never identifiers or values.
 - **Evaluator metrics.** Evaluators also serve `GET /metrics`: requests,

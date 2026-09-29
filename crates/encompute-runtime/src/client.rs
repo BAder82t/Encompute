@@ -132,6 +132,10 @@ impl ClientSession {
         kind: BackendKind,
         seed: u64,
     ) -> Result<Self> {
+        // Refused before any key: its outputs could not be checked.
+        if let CompiledProgram::Exact(e) = compiled {
+            e.check_output_ranges()?;
+        }
         let client = match (compiled, kind) {
             (CompiledProgram::Approx(c), BackendKind::Mock) => Client::Mock(MockClient::new(
                 &c.params,
@@ -191,6 +195,9 @@ impl ClientSession {
     /// Restore a client from a secret-key envelope written by
     /// [`ClientSession::secret_key_envelope`]; the backend is taken from it.
     pub fn restore(ids: Ids, compiled: &CompiledProgram, secret: &[u8]) -> Result<Self> {
+        if let CompiledProgram::Exact(e) = compiled {
+            e.check_output_ranges()?;
+        }
         let env = Envelope::decode(secret)?;
         let kind = BackendKind::parse(&env.header.backend).ok_or_else(|| {
             Error::new(
@@ -520,32 +527,34 @@ impl ClientSession {
                     Ok((o.name.clone(), v))
                 })
                 .collect(),
-            CompiledProgram::Exact(e) => e
-                .plan
-                .outputs
-                .iter()
-                .zip(items)
-                .enumerate()
-                .map(|(i, (o, (_, ct)))| {
-                    let v = self.client.exact().decrypt(o.elem, ct)?;
-                    // Range analysis proved every output's interval: a value
-                    // outside it is a wrong result (tampering, other keys, or
-                    // noise), never a valid one.
-                    if let Some(&(lo, hi)) = e.output_ranges.get(i) {
+            CompiledProgram::Exact(e) => {
+                e.check_output_ranges()?;
+                e.plan
+                    .outputs
+                    .iter()
+                    .zip(items)
+                    .enumerate()
+                    .map(|(i, (o, (_, ct)))| {
+                        let v = self.client.exact().decrypt(o.elem, ct)?;
+                        // Range analysis proved every output's interval: a value
+                        // outside it is a wrong result (tampering, other keys, or
+                        // noise), never a valid one.
+                        // A missing range is an error, never a skipped check.
+                        let (lo, hi) = e.output_range(i)?;
                         if v < lo || v > hi {
                             return Err(Error::new(
                                 Code::Backend,
                                 format!(
                                     "output {:?} decrypted to {v}, outside its proven range \
-                                     [{lo}, {hi}]: the result is wrong",
+                                 [{lo}, {hi}]: the result is wrong",
                                     o.name
                                 ),
                             ));
                         }
-                    }
-                    Ok((o.name.clone(), vec![v as f64]))
-                })
-                .collect(),
+                        Ok((o.name.clone(), vec![v as f64]))
+                    })
+                    .collect()
+            }
         }
     }
 }
@@ -584,6 +593,62 @@ mod tests {
             assert_eq!(e.code, Code::Backend);
             assert!(
                 e.message.contains("outside its proven range [1, 11]"),
+                "{e}"
+            );
+        }
+    }
+
+    /// ENC-SF-2026-065 follow-up: the check above was skipped when the
+    /// program carried no proven range for an output (`.get(i)` on ranges
+    /// that `#[serde(skip)]` drops from a serialized program). A missing
+    /// range is now refused: no session is created for such a program, and
+    /// a session whose program lost its ranges decrypts nothing.
+    #[test]
+    fn exact_outputs_without_a_proven_range_are_refused() {
+        let mut b = Builder::new("r", 1e-3).unwrap();
+        let x = b
+            .input_exact("x", Elem::U8, Some(Range::new(0.0, 10.0)))
+            .unwrap();
+        let one = b.constant_exact(Elem::U8, 1.0).unwrap();
+        let y = b.add(x, one).unwrap();
+        b.output("y", y).unwrap();
+        let p = b.finish().unwrap();
+        let compiled = encompute_evaluator::compile_program(&p).unwrap();
+        let ids = Ids::of(&p, &compiled);
+        let mut s = ClientSession::generate(ids.clone(), &compiled, BackendKind::Mock, 1).unwrap();
+        let secret = s.secret_key_envelope().unwrap();
+        let outputs = |s: &ClientSession, v: i128| {
+            let ct = s.client.exact().encrypt(Elem::U8, v).unwrap();
+            Envelope::new(s.header(Kind::Outputs), vec![("y".into(), ct)]).encode()
+        };
+
+        // The program as a client would get it without its ranges.
+        let mut stripped = compiled.clone();
+        match &mut stripped {
+            CompiledProgram::Exact(e) => e.output_ranges.clear(),
+            CompiledProgram::Approx(_) => unreachable!("exact program"),
+        }
+        for e in [
+            ClientSession::generate(ids.clone(), &stripped, BackendKind::Mock, 1).err(),
+            ClientSession::restore(ids, &stripped, &secret).err(),
+        ] {
+            let e = e.expect("refused");
+            assert_eq!(e.code, Code::Backend);
+            assert!(
+                e.message.contains("0 proven output ranges for 1 outputs"),
+                "{e}"
+            );
+        }
+
+        // A session whose program lost its ranges refuses in-range and
+        // out-of-range values alike, instead of returning them unchecked.
+        let envs: Vec<Vec<u8>> = [5, 200].iter().map(|&v| outputs(&s, v)).collect();
+        s.compiled = stripped;
+        for env in envs {
+            let e = s.decrypt(&env).unwrap_err();
+            assert_eq!(e.code, Code::Backend);
+            assert!(
+                e.message.contains("0 proven output ranges for 1 outputs"),
                 "{e}"
             );
         }

@@ -518,11 +518,13 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:python/tests/test_huggingface.py::test_both_gradient_paths_match_the_reference"),
         (EndToEnd, "test:python/tests/test_huggingface.py::test_the_run_is_trusted_and_binds_the_package"),
     ]),
-    inv!("INV-142", "huggingface", "An adapter is exported as PEFT files only when every parent permits it, no parent is revoked and the trust report is satisfied; otherwise nothing is written. Revocations are read from the model owner's bundle and any owner-supplied bundles, and a refused check is read from its exit code (ENC-SF-2026-074).", [
+    inv!("INV-142", "huggingface", "An adapter is exported as PEFT files only when every parent permits it, no parent is revoked and the trust report is satisfied; otherwise nothing is written. Revocations are read from the model owner's bundle and any owner-supplied bundles, judged against the run's own program and ownership (an owner's revocation alone in its bundle still counts), a supplied bundle that cannot be read or a revocation of a parent that the report does not honour refuses, and a refused check is read from its exit code (ENC-SF-2026-074).", [
         (Positive, "test:python/tests/test_huggingface.py::test_exported_adapters_load_with_standard_peft"),
         (Negative, "test:python/tests/test_huggingface.py::test_private_adapters_are_never_exported"),
         (Adversarial, "test:python/tests/test_huggingface.py::test_export_after_revocation_writes_nothing"),
         (Adversarial, "test:python/tests/test_finetune_matrix.py::test_export_denied_after_revocation_or_tampering"),
+        (Adversarial, "test:python/tests/test_finetune_matrix.py::test_owner_revocation_alone_refuses_export_infer_and_resume"),
+        (Negative, "test:python/tests/test_finetune_matrix.py::test_non_owner_revocation_does_not_revoke_but_is_not_dropped"),
         (EndToEnd, "script:examples/17_huggingface_peft/attack.py"),
     ]),
     // Confidential Space training workers.
@@ -916,7 +918,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-exact/src/circuit.rs::prop_known_bits_are_sound"),
         (EndToEnd, "test:crates/encompute-exact/tests/optimizer.rs::diff_optimize_matches_reference_lowering"),
     ]),
-    // The independent review of 0.3.0-rc.3 (ENC-SF-2026-033 to 087 in
+    // The independent review of 0.3.0-rc.3 (ENC-SF-2026-033 to 094 in
     // docs/security-findings.md). Findings that extend an earlier claim
     // added their evidence to it instead.
     inv!("INV-192", "deployment", "A ledger frozen in the anchor is refused for spending whatever the database says: clearing the freeze in the database does not make it spendable, startup refuses a database in which it is unfrozen, and recovery re-freezes it (ENC-SF-2026-034).", [
@@ -990,10 +992,13 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:crates/encompute-evaluator/tests/uploads.rs::with_a_control_plane_programs_and_keys_are_not_advertised"),
         (Adversarial, "test:crates/encompute-evaluator/tests/uploads.rs::with_a_control_plane_programs_and_keys_are_not_advertised"),
     ]),
-    inv!("INV-203", "openfhe-exact", "A client never returns a decrypted exact output outside the interval that range analysis proves for it (ENC-SF-2026-065).", [
+    inv!("INV-203", "openfhe-exact", "A client never returns a decrypted exact output outside the interval that range analysis proves for it, and an exact program that lacks a range-analysis interval for any output is refused at key generation, restore and decryption: a missing range is never a skipped check (ENC-SF-2026-065).", [
         (Positive, "test:crates/encompute-runtime/src/client.rs::exact_outputs_outside_their_proven_range_are_refused"),
+        (Positive, "test:crates/encompute-evaluator/src/compiled.rs::exact_output_ranges_are_serialized"),
         (Negative, "test:crates/encompute-runtime/src/client.rs::exact_outputs_outside_their_proven_range_are_refused"),
+        (Negative, "test:crates/encompute-evaluator/src/compiled.rs::exact_program_without_output_ranges_is_refused"),
         (Adversarial, "test:crates/encompute-runtime/src/client.rs::exact_outputs_outside_their_proven_range_are_refused"),
+        (Adversarial, "test:crates/encompute-runtime/src/client.rs::exact_outputs_without_a_proven_range_are_refused"),
     ]),
     inv!("INV-204", "openfhe-exact", "Plans whose worst-case BGV noise multiplier (sums add, products multiply) exceeds the calibrated budget never run on BGV, and the budget decrypts exactly on OpenFHE with an 8x margin (ENC-SF-2026-065).", [
         (Positive, "test:crates/encompute-openfhe-client/tests/bgv.rs::the_noise_budget_holds_on_openfhe"),
@@ -1062,6 +1067,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:crates/encompute-planner/tests/planner.rs::a_production_floor_refuses_plans_that_accept_development_attestation"),
         (Negative, "test:crates/encompute-trust/tests/report_plan_floor.rs::a_claimed_execution_proof_is_unchecked_until_the_proof_is_checked"),
         (Adversarial, "test:crates/encompute-planner/tests/planner.rs::the_validator_checks_the_plans_own_context_against_the_verifiers_floor"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::the_validator_fails_closed_when_the_semantics_cannot_be_determined"),
         (Adversarial, "test:crates/encompute-trust/tests/report_plan_floor.rs::a_plan_claiming_facts_the_compiler_does_not_produce_fails_the_report"),
         (EndToEnd, "test:crates/encompute-trust/tests/report_plan_floor.rs::the_report_applies_the_callers_plan_floor"),
         (EndToEnd, "test:crates/encompute-control/tests/jobs.rs::production_plans_are_checked_against_the_control_planes_floor"),

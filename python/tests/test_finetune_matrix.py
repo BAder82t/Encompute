@@ -218,6 +218,96 @@ def test_export_denied_after_revocation_or_tampering(run, tmp_path):
                    revocations=[str(t)])
 
 
+def revocation_only(run, tmp_path, name, party, asset, owns=False):
+    """A bundle holding nothing but ``party``'s signed revocation of ``asset``
+    (no program, so no ownership). ``owns``: sign it through a scratch copy
+    of the run's bundle that pretends ``party`` owns ``asset``, which is how
+    a non-owner's validly signed revocation is made."""
+    scratch = tmp_path / f"{name}-scratch.json"
+    b = json.loads(run._ctx["bundle"].read_text())
+    if owns:
+        b["edges"].append({"from": f"party:{party}", "kind": "owns", "to": f"asset:{asset}"})
+    scratch.write_text(json.dumps(b))
+    subprocess.run([CLI, "trust", "revoke", "--party", party, "--key",
+                    str(run.workdir / party / "party.key"), "--asset", asset,
+                    "--reason", "consent withdrawn", "--bundle", str(scratch)], check=True,
+                   capture_output=True)
+    full = json.loads(scratch.read_text())
+    nodes = {k: n for k, n in full["nodes"].items() if k.startswith("revocation:")}
+    assert len(nodes) == 1
+    out = tmp_path / f"{name}.json"
+    out.write_text(json.dumps({"version": full["version"], "nodes": nodes,
+                               "edges": [e for e in full["edges"]
+                                         if e["from"] in nodes or e["to"] in nodes]}))
+    return out, next(iter(nodes))
+
+
+def report_json(run, bundle):
+    c = run._ctx
+    out = subprocess.run([CLI, "trust", "report", "--bundle", str(bundle), *c["anchors"],
+                          "--json"], capture_output=True, text=True, cwd=c["modelco"])
+    return json.loads(out.stdout)
+
+
+def test_owner_revocation_alone_refuses_export_infer_and_resume(run, tmp_path):
+    # ENC-SF-2026-074 follow-up: an owner hands over a bundle holding only its
+    # signed revocation. Alone, it has no program and so no ownership: the
+    # report ignores it (the gap). Judged against the run's program, it revokes.
+    owner, _ = revocation_only(run, tmp_path, "owner", "hospital-a", "patients-a")
+    assert "patients-a" not in report_json(run, owner).get("revoked", {})
+    before = run._ctx["bundle"].read_bytes()
+    decision = run.export_adapter(revocations=[str(owner)])
+    assert "EXPORT DENIED" in decision and "revoked patients-a" in decision, decision
+    with pytest.raises(encompute.EncomputeError, match="revoked patients-a"):
+        run.infer(dataset(3)[0][:2], revocations=[str(owner)])
+    with pytest.raises(encompute.EncomputeError, match="revoked patients-a"):
+        run.resume(str(run.workdir / "modelco" / "checkpoints" / "round-2.enc"),
+                   revocations=[str(owner)])
+    with pytest.raises(encompute.EncomputeError, match="revoked patients-a"):
+        ft.finetune(resume=str(run.workdir), revocations=[str(owner)], verbose=False)
+    # The run's own bundle is untouched, and without the owner's bundle
+    # nothing is refused for revocation.
+    assert run._ctx["bundle"].read_bytes() == before
+    assert "revoked" not in run.export_adapter()
+    # A bundle that cannot be evaluated refuses rather than counting as
+    # "nothing revoked".
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert "EXPORT DENIED" in run.export_adapter(revocations=[str(bad)])
+    with pytest.raises(encompute.EncomputeError, match="could not be read"):
+        run.infer(dataset(3)[0][:2], revocations=[str(bad)])
+    with pytest.raises(encompute.EncomputeError, match="does not exist"):
+        run.resume(str(run.workdir / "modelco" / "checkpoints" / "round-2.enc"),
+                   revocations=[str(tmp_path / "missing.json")])
+
+
+def test_non_owner_revocation_does_not_revoke_but_is_not_dropped(run, tmp_path):
+    # Hospital-b validly signs a revocation of hospital-a's dataset.
+    other, rid = revocation_only(run, tmp_path, "non-owner", "hospital-b", "patients-a",
+                                 owns=True)
+    # The trust report (TG-1): not honoured as a revocation, only noted.
+    merged = json.loads(run._ctx["bundle"].read_text())
+    theirs = json.loads(other.read_text())
+    merged["nodes"].update(theirs["nodes"])
+    merged["edges"] += theirs["edges"]
+    m = tmp_path / "merged.json"
+    m.write_text(json.dumps(merged))
+    r = report_json(run, m)
+    assert "patients-a" not in r.get("revoked", {})
+    notes = [d for row in r["rows"] for d in row["details"]]
+    assert any(rid in d and "hospital-b does not own patients-a" in d for d in notes), notes
+    # The fine-tuning refusal path fails closed: an unhonoured revocation of
+    # a parent stops export, inference and resume until it is resolved.
+    decision = run.export_adapter(revocations=[str(other)])
+    assert "EXPORT DENIED" in decision and "not honoured" in decision, decision
+    assert "does not own patients-a" in decision, decision
+    with pytest.raises(encompute.EncomputeError, match="not honoured"):
+        run.infer(dataset(3)[0][:2], revocations=[str(other)])
+    with pytest.raises(encompute.EncomputeError, match="not honoured"):
+        run.resume(str(run.workdir / "modelco" / "checkpoints" / "round-2.enc"),
+                   revocations=[str(other)])
+
+
 def test_resume_matrix(run, tmp_path):
     ck = run.workdir / "modelco" / "checkpoints"
     latest, older = ck / "round-2.enc", ck / "round-1.enc"

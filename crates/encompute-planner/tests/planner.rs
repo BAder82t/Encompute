@@ -556,6 +556,39 @@ fn the_validator_accepts_unverified_bgv_only_in_the_subset() {
 /// from the program, and a verifier's floor (its compiler's facts, the
 /// backends it accepts, a minimum profile, production) refuses a plan whose
 /// self-declared context would weaken it.
+/// A program whose semantics cannot be determined (it mixes exact and
+/// approximate encrypted values) has no valid plan: the validator fails
+/// closed instead of skipping the semantics check.
+#[test]
+fn the_validator_fails_closed_when_the_semantics_cannot_be_determined() {
+    let v = prog(ELIGIBILITY);
+    let plan = planned(&v, &ctx("exact", Profile::Standard));
+    let mixed = prog(
+        "encompute 0.1
+program eligibility precision 0.001 verification required
+%0 = input \"age\" [0.0, 120.0] : secret u8
+%1 = const [18.0] : public u8
+%2 = add %0, %1 : secret u8
+%3 = input \"score\" [0.0, 1.0] : secret scalar
+output \"x\" = %2
+output \"y\" = %3
+",
+    );
+    assert!(encompute_analysis::semantics(&mixed).is_err());
+    for f in [
+        PlanFloor::default(),
+        PlanFloor::production(Profile::Standard),
+    ] {
+        let e = verify_plan_with(&mixed, &plan, &f).unwrap_err();
+        assert_eq!(e.code, Code::PlanInvalid);
+        assert!(
+            e.message.contains("semantics cannot be determined"),
+            "{}",
+            e.message
+        );
+    }
+}
+
 #[test]
 fn the_validator_checks_the_plans_own_context_against_the_verifiers_floor() {
     let v = prog(ELIGIBILITY);

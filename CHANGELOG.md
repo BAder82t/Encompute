@@ -23,7 +23,11 @@ its "Open" list and in `KNOWN_LIMITATIONS.md`):
   refused at the next spend (PRIVACY STATE ROLLBACK) and never anchored;
   the anchor records only checkpoints that extend the anchored one.
 - **034:** a ledger frozen in the anchor stays frozen whatever the
-  database says; startup refuses an unfrozen copy and recovery re-freezes.
+  database says; startup refuses an unfrozen copy and recovery re-freezes,
+  re-creating the ledger row, frozen, if the database lost it.
+- **Anchor size:** the `encompute_anchor_bytes` gauge and an
+  `anchor_size_warning` log line above 512 KiB (the anchor's sets grow
+  without bound; see `KNOWN_LIMITATIONS.md`).
 - **035:** evaluation keys are checked in full before OpenFHE loads them,
   must carry the tag they are sent under, and a tag already loaded is
   shared only by byte-identical key material.
@@ -44,11 +48,14 @@ its "Open" list and in `KNOWN_LIMITATIONS.md`):
   project members when it was given.
 - **041:** a key broker named by an asset must belong to the platform or
   to the asset's organization; key messages go to and come from that
-  broker only.
+  broker only. Registering a service and registering an asset that names
+  it serialize on the broker ID, so they cannot race past each other.
 - **042:** API routes to disable a user, remove roles and memberships,
   remove project members and withdraw asset approvals.
-- **043:** key broker state is authenticated (a generation and an HMAC
-  keyed from the KEK); an edited state file does not open.
+- **043:** key broker state is authenticated (an HMAC keyed from the
+  KEK); an edited state file does not open. An older copy that was
+  genuinely authenticated still opens (rollback is not detected; see
+  `KNOWN_LIMITATIONS.md`).
 - **044:** a refused program upload is refused before anything is
   compiled or loaded.
 - **045:** BinFHE bootstrapping keys with another method, dimensions or
@@ -104,12 +111,17 @@ its "Open" list and in `KNOWN_LIMITATIONS.md`):
   compares its privacy policy and artifact with the spec.
 - **063:** an existing KEK file must be private and the OpenBao token file
   writable by its owner only; Google's attestation keys are refreshed;
-  refusals do not reveal the release policy.
+  refusals do not reveal the release policy. `keys upgrade-state` prints
+  every release gate (GPU attestation, maximum evidence age, mock
+  evidence, policy format) before `--confirm`, and the state MAC is
+  compared in constant time.
 - **064:** under a control plane, `/v1/info` and the key lookup disclose a
   program only to a holder of its grant.
 - **065:** the client refuses decrypted exact outputs outside their proven
-  range; BGV tracks noise from additions and refuses plans above its
-  budget.
+  range, and an exact program without one proven range per output is
+  refused at key generation, restore and decryption (a missing range was
+  skipped, and the ranges were left out of the serialized program); BGV
+  tracks noise from additions and refuses plans above its budget.
 - **066:** BGV selection admits bitwise logic on Booleans only.
 - **067:** a DP-SGD worker samples at the plan's rate and clips to the
   plan's norm, or refuses.
@@ -128,16 +140,28 @@ its "Open" list and in `KNOWN_LIMITATIONS.md`):
   per aggregation spec.
 - **072, 073:** Hugging Face import refuses symbolic links, and
   tokenizer, quantization and attention-implementation settings outside
-  the allowlist.
+  the allowlist. `tokenizer_config.json` may not name files
+  (`tokenizer_file`, `full_tokenizer_file`, `special_tokens_map_file`):
+  Transformers prefers them to the package's own files and opens the path
+  they name. Current Transformers never saves them; re-save an older
+  tokenizer that carries them.
 - **074:** `resume`, `infer`, `export_adapter` and `export_peft` take
-  owner-supplied revocations and read the check's exit code.
+  owner-supplied revocations and read the check's exit code. Supplied
+  revocations are judged against the run's own program and ownership, so
+  an owner's bundle holding only its signed revocation counts (it was
+  ignored); a bundle that cannot be read, or a revocation of a parent
+  asset that the trust report does not honour, refuses instead of being
+  dropped. `finetune(resume=...)` takes `revocations=` too and checks them
+  before any key is released.
 - **075, 076:** the trust report honours revocations only from the asset's
   owner or the authorization's signer, and re-validates bundle records.
 - **077:** the plan validator recomputes semantics and applies its own
-  and the caller's floor; a claimed execution proof counts only when
+  and the caller's floor, and refuses a plan whose program's semantics
+  cannot be determined; a claimed execution proof counts only when
   checked.
 - **079:** the commercial audit fails when it cannot read a binary's
-  symbols.
+  symbols, when it audits nothing, when listing an image's files fails,
+  and when the training image carries no SDK native extension.
 - **080, 081:** Actions pinned by commit SHA, base images by digest, and
   the TEE images install hash-locked Python packages and are built,
   signed and attested by the release. The TEE images
@@ -148,7 +172,11 @@ its "Open" list and in `KNOWN_LIMITATIONS.md`):
   with a rationale, compensating controls, an upstream tracking link, an
   added date and an expiry; a missing field, a wildcard or list, an
   expired entry or one added after the approval fails the gate, and an
-  exception for another version covers nothing.
+  exception for another version covers nothing. The exceptions'
+  compensating control is a scan of the SDK's syntax tree
+  (`scripts/release/scan_torch_usage.py`), which also catches aliased
+  imports, from-imports and lookups by literal name, and fails the gate
+  when it cannot complete.
 - **082:** test hooks work only with development attestation.
 - **084:** a key broker hears of a revocation only once it is anchored.
 - **085:** the RDP accountant adds a relative rounding margin.
@@ -156,7 +184,7 @@ its "Open" list and in `KNOWN_LIMITATIONS.md`):
   license and notice files (`scripts/third_party_notices.py`).
 - **087:** the key cache documentation matches what it isolates.
 
-Later review of the control plane (ENC-SF-2026-088 to 092):
+Later review of the control plane (ENC-SF-2026-088 to 094):
 
 - **088:** a job's purpose is the one its program declares; a request
   stating another is refused, and a program that declares none cannot use
@@ -221,8 +249,29 @@ Later review of the control plane (ENC-SF-2026-088 to 092):
 - **Job approval (`POST /v1/jobs/{id}/approve`) takes a person** of the
   asset's own organization; service accounts are refused.
 - **Project membership is by invitation:** the owner's admins invite, and
-  the invited organization's admins accept with the same call. Existing
-  approvals cover only the members at the time they were given.
+  the invited organization's admins accept with the same call. `POST
+  /v1/projects/{id}/members` answers `200 {"status": "invited"}`, also for
+  an organization that does not exist (was 404), and its response gains
+  `status`; `GET /v1/projects/{id}` gains `invited`, and its
+  `approved_assets` lists only the approvals that cover the caller's
+  organizations, or of its own assets. Existing approvals cover only the
+  members at the time they were given.
+- **Identity tokens need `iat`** and a lifetime no longer than
+  `ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS` (default 24 hours); otherwise 401.
+- **Service accounts cannot hold `security_admin`:** `POST
+  .../service-accounts` with it answers 400. Policies are proposed and
+  approved only by people, and the approver is a security admin of the
+  project owner's organization.
+- **A query string that names a parameter twice** is refused (400).
+- **`evaluator_url` and `evaluator_receipt_key`** in `GET /v1/jobs/{id}`
+  are `null` for every organization but the submitter's.
+- **Privacy reservations** that under-declare their sensitivity, or in
+  production are not drawn with `csprng`, are refused.
+- **Production trust reports apply the verifier's plan floor**
+  (`--production`, the default under `ENCOMPUTE_ENV=production`, and
+  `--minimum-profile`, default `standard`): a job or model whose plan
+  uses development attestation, a research backend or a weaker profile,
+  as older plans may, now reports FAILED (ENC2402).
 - **`jobs run` and `Project.run` need an evaluator pin**
   (`--trust-evaluator`, `ENCOMPUTE_TRUSTED_EVALUATORS`,
   `trusted_evaluators=`). Without one a job is refused unless
@@ -235,6 +284,17 @@ Later review of the control plane (ENC-SF-2026-088 to 092):
   check the printed policies, then rerun with `--confirm`. Until then an
   rc.3 state file protected by a KEK does not open. Development plaintext
   stores load as before.
+- **The key broker's KEK file must be owner-only.** An existing KEK file
+  readable or writable by group or others (mode bits `077`), for example a
+  Kubernetes secret mounted with the default `0644` or with `0440`, is
+  refused at startup. Fix it with `chmod 600` (or `400`), or mount the
+  secret with `defaultMode: 0400` (or `0600`) and run the broker as the
+  user that owns the file.
+- **Downgrading after the upgrade is not supported.** Schema version 4
+  refuses an rc.3 binary, and once the control plane writes the new anchor
+  sets (ended jobs, withdrawn approvals, removed memberships and roles) an
+  rc.3 binary cannot read the anchor. To roll back, restore the backup
+  taken before the upgrade together with its matching anchor.
 - **TrainingSpec v2, WorkerEvidence v2 and job descriptor v2.** Specs bind
   `key_brokers`, `coordinator_key` and `initial_adapter_digest`;
   `architecture` must name an allowlisted factory. rc.3 specs, evidence and

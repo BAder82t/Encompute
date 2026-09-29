@@ -210,7 +210,11 @@ vector (through OSV). Exceptions:
   apart and from today);
 - are approved: `[approval] approved_by` and `approved_on` cover the
   entries added on or before that date; an entry added later needs a new
-  review (move `approved_on`) or its own `approved_by` and `approved_on`;
+  review (move `approved_on`) or its own `approved_by` and `approved_on`.
+  These fields are text in the file, not signatures: an approval counts
+  only through git review. Each change to `approved_by` or `approved_on`
+  must be in a commit authored or reviewed by the release manager, in a
+  pull request the owner named in `approved_by` approved;
 - fail the gate when invalid (a missing field, a wildcard or list where one
   exact value is required, expired, unapproved), whether or not they match a
   finding; `scripts/release/test_vuln_policy.py` tests these rules and
@@ -308,6 +312,14 @@ is no key to store or leak.
   and attested like the service images. Their digests, the ones key brokers'
   attestation policies approve, are listed in `encompute-<V>-tee-images.txt`
   (signed with the other files) and in the release notes.
+- The released `encompute-confidential-space` image is a base reference,
+  not a deployable workload: it is built without `broker-keys` (the
+  Dockerfile's `COPY broker-key[s]` is optional), so its `run-workload.sh`
+  refuses to start (the image names no broker keys). A deployment builds
+  its own image with `deploy/confidential-space/deploy.sh`, which writes
+  the broker's grant-signing key into `broker-keys`; the digest its key
+  broker approves is that build's, not the released one. Compare the
+  release digest to check the build inputs, not to approve a workload.
 
 The workflow's permissions are per job: only the jobs that sign get
 `id-token: write`; only the release job gets `contents: write`; only the

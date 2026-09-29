@@ -87,7 +87,9 @@ pub trait SecretStore: Send {
     fn unwrap_for_release(&self, ctx: &KeyContext<'_>, stored: &StoredKey) -> Result<KeyMaterial>;
 
     /// Revokes a stored key: its material is destroyed, not merely flagged.
-    /// A KMS store would schedule the key version's destruction here.
+    /// A KMS store would schedule the key version's destruction here. An
+    /// older copy of the state file still holds the wrapped key, and the
+    /// broker does not detect it being restored (a known limitation).
     fn revoke(&self, _ctx: &KeyContext<'_>, _stored: &StoredKey) -> Result<StoredKey> {
         Ok(StoredKey::Destroyed)
     }
@@ -109,7 +111,9 @@ pub trait SecretStore: Send {
     /// Authenticates the broker's state (release policies, mode,
     /// organization, key versions, revocations) under a key derived from
     /// this store's wrapping key: whoever can write the state file but does
-    /// not hold the wrapping key cannot change what is released to whom.
+    /// not hold the wrapping key cannot edit what is released to whom. It
+    /// does not stop a rollback: an older authentic state file (one saved
+    /// before a revocation) still verifies (a known limitation).
     /// `None` for a store without a wrapping key (development only; a
     /// production broker refuses a store that cannot authenticate state).
     fn state_mac(&self, _state: &[u8]) -> Result<Option<[u8; 32]>> {

@@ -200,6 +200,12 @@ pub fn check_config(config: &serde_json::Value) -> Result<String> {
 
 /// The keys a `tokenizer_config.json` may hold: the settings of the
 /// Transformers-native tokenizers of the supported architectures.
+///
+/// No key naming a file is allowed (`tokenizer_file`, `full_tokenizer_file`,
+/// `special_tokens_map_file`): Transformers prefers such a setting over the
+/// package's own file and opens whatever path it names, so a package could
+/// point tokenization at a file outside itself. `save_pretrained` never
+/// writes them.
 pub const TOKENIZER_CONFIG_KEYS: &[&str] = &[
     "add_bos_token",
     "add_eos_token",
@@ -214,7 +220,6 @@ pub const TOKENIZER_CONFIG_KEYS: &[&str] = &[
     "eos_token",
     "errors",
     "extra_special_tokens",
-    "full_tokenizer_file",
     "mask_token",
     "max_len",
     "model_input_names",
@@ -224,12 +229,10 @@ pub const TOKENIZER_CONFIG_KEYS: &[&str] = &[
     "pad_token",
     "padding_side",
     "sep_token",
-    "special_tokens_map_file",
     "split_special_tokens",
     "strip_accents",
     "tokenize_chinese_chars",
     "tokenizer_class",
-    "tokenizer_file",
     "trim_offsets",
     "truncation_side",
     "unk_token",

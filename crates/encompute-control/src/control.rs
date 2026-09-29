@@ -188,12 +188,30 @@ impl Control {
             // start compares against it.
             c.anchor.update(&c.signer, |_| {})?;
         }
+        c.note_anchor_size();
+        crate::anchor::warn_if_large(&c.service_id, "startup", c.anchor.bytes());
         c.warn_legacy_service_admins()?;
         LogLine::new(&c.service_id, "started")
             .field("anchor", c.anchor.describe())
             .field("env", format!("{:?}", c.env))
             .emit();
         Ok(c)
+    }
+
+    /// Sets the `encompute_anchor_bytes` gauge to the anchor's serialized
+    /// size as last loaded or written (every write measures it).
+    pub fn note_anchor_size(&self) {
+        self.metrics.set(
+            "encompute_anchor_bytes",
+            "all",
+            i64::try_from(self.anchor.bytes()).unwrap_or(i64::MAX),
+        );
+    }
+
+    /// The `/metrics` exposition, with the gauges read at scrape time.
+    pub fn render_metrics(&self) -> String {
+        self.note_anchor_size();
+        self.metrics.render()
     }
 
     /// Service accounts that still hold security_admin (granted before the
@@ -522,7 +540,8 @@ impl Control {
     /// Explicit recovery after a detected rollback. Ledgers behind the
     /// anchor are **frozen**: treated as exhausted, so spending the
     /// database forgot can never be spent again; ledgers the anchor froze
-    /// before are frozen again. A rewound audit chain is recorded as a
+    /// before are frozen again; a ledger whose row the database lost (its
+    /// asset still held) is re-created frozen. A rewound audit chain is recorded as a
     /// gap. Anchored revocations, disables, job cancellations, approval
     /// withdrawals, membership removals and role removals the database
     /// forgot are applied again. All of it is audited, then the
@@ -573,27 +592,40 @@ impl Control {
         self.db.tx(|t| {
             for (asset, cp, why) in &frozen {
                 let reason = format!("{why} {} (root {}); frozen by {operator}", cp.seq, cp.root);
-                t.execute(
-                    "UPDATE privacy_ledgers SET frozen_reason = $2 WHERE asset_id = $1",
-                    &[asset, &reason],
-                )
-                .map_err(db_err)?;
-                audit::append(
-                    t,
-                    AuditDraft::new(
-                        operator,
-                        "recovery",
-                        "privacy.ledger.frozen",
-                        "asset",
-                        asset,
-                        Outcome::Succeeded,
+                let updated = t
+                    .execute(
+                        "UPDATE privacy_ledgers SET frozen_reason = $2 WHERE asset_id = $1",
+                        &[asset, &reason],
                     )
-                    .r#ref("anchored_seq", cp.seq.to_string())
-                    .r#ref("anchored_root", cp.root.clone()),
-                )?;
-                notes.push(format!(
-                    "privacy ledger {asset}: frozen (treated as exhausted)"
-                ));
+                    .map_err(db_err)?;
+                // The database lost the ledger's row but still holds the
+                // asset: the row is re-created, frozen (see
+                // `recreate_frozen_ledger`). Without the asset nothing can
+                // spend it (asset IDs are never reissued) and the anchor's
+                // freeze holds.
+                let recreated =
+                    updated == 0 && recreate_frozen_ledger(t, asset, &reason)?.is_some();
+                let mut d = AuditDraft::new(
+                    operator,
+                    "recovery",
+                    "privacy.ledger.frozen",
+                    "asset",
+                    asset,
+                    Outcome::Succeeded,
+                )
+                .r#ref("anchored_seq", cp.seq.to_string())
+                .r#ref("anchored_root", cp.root.clone());
+                if recreated {
+                    d = d.r#ref("ledger", "recreated_missing_row");
+                }
+                audit::append(t, d)?;
+                notes.push(if recreated {
+                    format!(
+                        "privacy ledger {asset}: missing from the database; re-created frozen (treated as exhausted; its original budget is unknown)"
+                    )
+                } else {
+                    format!("privacy ledger {asset}: frozen (treated as exhausted)")
+                });
             }
             let head = t
                 .query_one("SELECT seq FROM audit_head WHERE id", &[])
@@ -1056,6 +1088,7 @@ impl Control {
                 .map(|_| ()),
         );
         self.maybe_checkpoint();
+        self.note_anchor_size();
         if let Ok(mut c) = self.db.conn() {
             if let Ok(r) = c.query_one(
                 "SELECT count(*) FROM jobs WHERE state IN ('authorized', 'queued')",
@@ -1073,6 +1106,60 @@ impl Control {
             }
         }
     }
+}
+
+/// Re-creates the `privacy_ledgers` row of `asset`, **frozen**, when the
+/// database lost it but still holds the asset (recovery). A frozen ledger
+/// never spends, so only its identity must be right: the asset, its
+/// organization and its policy's ID are the asset's; the budget, which
+/// only the lost genesis recorded, is a placeholder that could not afford
+/// any release either (the smallest positive epsilon and delta, per
+/// organization), and the freeze reason says so. It has no entries: the
+/// anchor is re-pointed to it afterwards, like any ledger recovery froze.
+/// `None` when the asset is not held either.
+fn recreate_frozen_ledger(
+    t: &mut impl GenericClient,
+    asset: &str,
+    reason: &str,
+) -> Result<Option<Genesis>> {
+    let Some(r) = t
+        .query_opt(
+            "SELECT organization_id, policy FROM assets WHERE id = $1",
+            &[&asset],
+        )
+        .map_err(db_err)?
+    else {
+        return Ok(None);
+    };
+    let org: String = r.get(0);
+    let policy: serde_json::Value = r.get(1);
+    let genesis = Genesis {
+        version: encompute_privacy::ledger::LEDGER_VERSION,
+        asset_id: asset.to_owned(),
+        budget: encompute_ir::confidentiality::PrivacyBudget {
+            unit: encompute_ir::confidentiality::PrivacyUnit::Organization,
+            epsilon: f64::MIN_POSITIVE,
+            delta: f64::MIN_POSITIVE,
+        },
+        privacy_policy_id: encompute_verification::service::sha256_hex(
+            &encompute_verification::canonical::canonical_json(&policy)?,
+        ),
+    };
+    let reason = format!(
+        "{reason}; the database had lost this ledger: re-created by recovery with its entries and budget unknown (placeholder budget)"
+    );
+    t.execute(
+        "INSERT INTO privacy_ledgers (asset_id, organization_id, genesis, frozen_reason)
+         VALUES ($1, $2, $3, $4)",
+        &[
+            &asset,
+            &org,
+            &serde_json::to_value(&genesis).map_err(db_err)?,
+            &reason,
+        ],
+    )
+    .map_err(db_err)?;
+    Ok(Some(genesis))
 }
 
 /// An asset's status, or `None` if the database does not hold it.

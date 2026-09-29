@@ -203,8 +203,8 @@ model (a new package, a new spec). Existing adapters keep their lineage.
 | Reads | Any older schema (it is migrated forward). |
 | On mismatch | A database newer than the binary: ENC1602, "the database schema (version N) is newer than this control plane". An applied migration whose checksum changed: ENC1602. |
 | Audit events | No version field. The version is in the hash domain `encompute.audit-event.v1`. A broken chain: ENC2301. |
-| 0003 | `0003_consent_bound_sharing.sql` adds `asset_approval_members` (an approval covers the organizations that were project members when it was given) and a `status` (`invited` or `active`) on `project_members`. Existing approvals cover the members that had joined by then, and existing memberships stay active. An organization added later sees nothing of an asset until its owner approves again. |
-| Downgrade | Unsupported. Restore the database backup taken before the upgrade, together with its anchor; the anchor check refuses an older database otherwise (ENC2202, then `encompute-control recover`). |
+| 0003 | `0003_consent_bound_sharing.sql` adds `asset_approval_members` (an approval covers the organizations that were project members when it was given) and a `status` (`invited` or `active`) on `project_members`. Existing approvals cover the members that had joined by then (each such grant dated from its approval, so a backup migrated twice gets the same rows), and existing memberships stay active. An organization added later sees nothing of an asset until its owner approves again. |
+| Downgrade | Unsupported. Schema version 4 refuses an 0.3.0-rc.3 control plane, and once the 0.3.0-rc.4 control plane has written its new anchor sets (ended jobs, withdrawn approvals, removed memberships and roles) an rc.3 binary cannot read the anchor. To roll back, restore the database backup taken before the upgrade together with its matching anchor; the anchor check refuses an older database otherwise (ENC2202, then `encompute-control recover`). |
 
 ### Control Plane API v1
 

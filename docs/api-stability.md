@@ -38,12 +38,15 @@ Security fixes to v1 since 0.3.0-rc.3, under this exception:
 
 - Project membership is invite and accept on the same route
   (`POST /v1/projects/{id}/members`): the owner's call returns
-  `status: invited`, and the invited organization's admins accept with the
-  same call. `GET /v1/projects/{id}` adds `invited`.
+  `200 {"status": "invited"}`, also for an organization that does not
+  exist (was 404), and the invited organization's admins accept with the
+  same call. The response gains `status`; `GET /v1/projects/{id}` adds
+  `invited`.
 - An asset approval covers only the organizations that were project
   members when it was given; `approved_assets` lists only the approvals
   that cover the caller's organizations, or of its own assets.
-- Service accounts cannot hold `security_admin`, and policies are proposed
+- Service accounts cannot hold `security_admin` (`POST
+  .../service-accounts` with it answers 400), and policies are proposed
   and approved only by people; the approver is a security admin of the
   project owner's organization.
 - An organization's key broker cannot take an ID that another
@@ -51,14 +54,26 @@ Security fixes to v1 since 0.3.0-rc.3, under this exception:
   a registered service, must be a key broker of the platform or of the
   asset's organization.
 - Identity tokens need `iat`, and a lifetime no longer than
-  `ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS`.
-- A query string that names a parameter twice is refused.
+  `ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS` (default 24 hours); otherwise 401.
+- A query string that names a parameter twice is refused (400).
 - `GET /metrics` needs the metrics token in production, unless
   `ENCOMPUTE_METRICS_PUBLIC=true`.
 - `evaluator_url` and `evaluator_receipt_key` in a job go only to the
-  submitting organization.
+  submitting organization (`null` for others in `GET /v1/jobs/{id}`).
 - A privacy reservation that under-declares its sensitivity, or in
   production is not drawn with `csprng`, is refused.
+- A job's `purpose` must equal the purpose its program declares; a
+  request stating another is refused (ENC-SF-2026-088).
+- A job's `source_assets` must be exactly the registered assets its
+  program binds, each once, and empty when it binds none; an omitted,
+  extra, repeated or substituted asset is refused, also over the
+  submitter's own data (ENC-SF-2026-089, ENC-SF-2026-094).
+- Job approval (`POST /v1/jobs/{id}/approve`) takes a person of the
+  asset's organization; service accounts are refused (ENC-SF-2026-090).
+- Organizations an asset is shared with get it redacted (no `key_ref`,
+  `storage_uri`, `size_bytes` or `media_type`; `policy` reduced to
+  `require_job_approval`), and a job's actors appear to source owners as
+  `organization/user` or `organization/service` (ENC-SF-2026-092).
 
 New routes (additions, not breaking): `POST
 /v1/organizations/{id}/users/{user}/disable`, `POST

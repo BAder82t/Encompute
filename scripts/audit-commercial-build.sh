@@ -7,7 +7,9 @@
 #   3. the Python extension (and wheels, with WHEEL=path or WHEELS="a b"),
 #      including the wheel's native symbols;
 #   4. the production containers (IMAGE=tag or IMAGES="a b"; needs docker),
-#      including the symbols of their binaries.
+#      including the symbols of their binaries, and of the SDK's native
+#      extension, which the images named in NATIVE_IMAGES (default:
+#      encompute-training) must carry.
 # Documentation strings naming TFHE-rs are allowed; code is not.
 #
 #   scripts/audit-commercial-build.sh [target/release]
@@ -17,8 +19,10 @@ BIN="${1:-target/release}"
 FEATURES="encompute-cli/openfhe,encompute-evaluator/openfhe,encompute-py/openfhe"
 # Crates published by Zama for TFHE-rs, and its runtime.
 BANNED='^(tfhe|tfhe-[a-z0-9-]+|concrete[a-z0-9-]*|zama[a-z0-9-]*)$'
+NATIVE_IMAGES="${NATIVE_IMAGES:-encompute-training}"
 SYMBOLS='_ZN4tfhe|_ZN[0-9]+tfhe_(fft|ntt|csprng|versionable|zk_pok|cuda)|[0-9]tfhe[0-9]'
 status=0
+audited=0  # binaries whose symbols were read
 row() { printf '%-46s %s\n' "$1" "$2"; }
 fail() { row "$1" "FAIL: $2"; status=1; }
 
@@ -67,6 +71,7 @@ is_object() {  # is_object FILE: ELF, Mach-O or PE (not a script or data file)
 scan() {  # scan NAME FILE [own]: "own" = an Encompute binary
   local f="$2" own="${3:-}"
   if [ ! -f "$f" ]; then row "$1" "SKIPPED (no $f)"; return; fi
+  audited=$((audited + 1))
   local syms n total ours libs deps
   syms="$(symbols "$f")"
   total="$(printf '%s' "$syms" | grep -c . || true)"
@@ -138,19 +143,39 @@ for img in ${IMAGE:-} ${IMAGES:-}; do
     fail "container $img" "could not copy its binaries out of /usr/local/bin (docker create/cp)"
   fi
   # The SDK's native extension, where an image carries it (the training
-  # worker): an Encompute binary like the others.
-  for so in $(docker run --rm --entrypoint sh "$img" -c \
-      "find / -xdev -path '*/encompute/_native*' \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null" || true); do
-    if [ -n "$cid" ] && docker cp "$cid:$so" "$cd_/native.so" >/dev/null 2>&1; then
-      scan "container $img: $(basename "$so")" "$cd_/native.so" own
-    else fail "container $img" "could not copy $so out"; fi
-  done
+  # worker): an Encompute binary like the others. The listing ends with a
+  # marker, so a docker run that failed is told apart from an image without
+  # the extension; an image that must carry it (by repository name: registry,
+  # tag and digest aside) fails without one.
+  name="${img%%@*}"; name="${name##*/}"; name="${name%%:*}"
+  need_native=0
+  for want in $NATIVE_IMAGES; do [ "$name" = "$want" ] && need_native=1; done
+  listing="$(docker run --rm --entrypoint sh "$img" -c \
+      "find / -xdev -path '*/encompute/_native*' \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null; echo END-OF-LISTING" 2>/dev/null)"
+  if [ "$(printf '%s\n' "$listing" | tail -n 1)" != "END-OF-LISTING" ]; then
+    fail "container $img" "could not list its files for the SDK's native extension (docker run)"
+  else
+    sos="$(printf '%s\n' "$listing" | sed '$d' | grep . || true)"
+    if [ -z "$sos" ] && [ $need_native = 1 ]; then
+      fail "container $img" "no encompute/_native extension, which this image must carry: cannot audit"
+    fi
+    while IFS= read -r so; do
+      [ -n "$so" ] || continue
+      if [ -n "$cid" ] && docker cp "$cid:$so" "$cd_/native.so" >/dev/null 2>&1; then
+        scan "container $img: $(basename "$so")" "$cd_/native.so" own
+      else fail "container $img" "could not copy $so out"; fi
+    done <<< "$sos"
+  fi
   [ -z "$cid" ] || docker rm "$cid" >/dev/null 2>&1
   rm -rf "$cd_"
   [ $status -eq 0 ] && row "container $img" "PASS (no TFHE-rs packages, files or symbols)"
   [ $before -eq 0 ] || status=$before
 done
 [ -n "${IMAGE:-}${IMAGES:-}" ] || row "container" "SKIPPED (set IMAGE=tag or IMAGES=\"a b\")"
+
+# Every binary skipped (a wrong directory, no extension, no wheel or image):
+# nothing was audited, which is not a pass.
+[ $audited -gt 0 ] || fail "binaries" "none found (not in $BIN, no extension, wheel or image): nothing audited"
 
 echo
 [ $status -eq 0 ] && echo "COMMERCIAL BUILD AUDIT PASSED: TFHE-rs contamination NONE" ||

@@ -1039,6 +1039,11 @@ fn package_configurations_hold_only_known_settings() {
         serde_json::json!({"auto_map": {"AutoTokenizer": ["x.T", null]}}),
         serde_json::json!({"tokenizer_class": "EvilTokenizer"}),
         serde_json::json!({"processor_class": "x.P"}),
+        // Keys naming a file: Transformers would open whatever path they name.
+        serde_json::json!({"tokenizer_file": "/etc/passwd"}),
+        serde_json::json!({"full_tokenizer_file": "../other/tokenizer.json"}),
+        serde_json::json!({"special_tokens_map_file": "/home/x/special_tokens_map.json"}),
+        serde_json::json!({"tokenizer_file": null}),
         serde_json::json!([]),
     ] {
         assert_eq!(

@@ -26,6 +26,13 @@ encompute keys serve  ◄── challenge ── Confidential Space VM (TDX)
   `BROKER_URL` is also the broker's ID and the audience the workload's token
   must name.
 
+The `encompute-confidential-space` image published with a release is a
+base reference, not a workload you can deploy: it is built without
+`broker-keys`, so it refuses to start ("the image names no broker keys").
+Build your own image with `deploy.sh` below, which writes your broker's
+grant-signing key into it. The image digest your key broker approves is
+your build's digest, not the released one.
+
 ## Run
 
 ```sh

@@ -931,9 +931,26 @@ fn print_state(b: &KeyBroker) {
                 DebugPolicy::Forbidden => "forbidden",
             }
         );
-        if p.allow_development {
-            println!("  {:<18}ACCEPTED (development only)", "Mock evidence");
-        }
+        println!(
+            "  {:<18}{}",
+            "GPU attestation",
+            if p.require_gpu_attestation {
+                "required"
+            } else {
+                "not required"
+            }
+        );
+        println!("  {:<18}{} s", "Max evidence age", p.max_evidence_age_secs);
+        println!(
+            "  {:<18}{}",
+            "Mock evidence",
+            if p.allow_development {
+                "ACCEPTED (development only)"
+            } else {
+                "refused"
+            }
+        );
+        println!("  {:<18}{}", "Policy format", p.version);
     }
 }
 
