@@ -34,6 +34,11 @@ pub fn requirement(r: &TrustRequirement) -> String {
         }
         TrustRequirement::ExecutionRegion { region } => format!("everything runs in {region}"),
         TrustRequirement::SignedEvidence => "every execution leaves signed evidence".into(),
+        TrustRequirement::KeyCustody {
+            organization,
+            broker,
+            ..
+        } => format!("key held by {broker}, the key broker of {organization}"),
     }
 }
 

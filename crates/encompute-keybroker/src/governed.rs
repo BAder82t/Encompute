@@ -540,6 +540,24 @@ impl KeyBroker {
             return Err(not_attested("policy"));
         }
         binding.check().map_err(|e| not_attested(&e.message))?;
+        // The binding's per-asset broker map, when it has one: this key is
+        // released here only if the map gives it to this broker.
+        if !binding.asset_brokers.is_empty() {
+            match binding.asset_brokers.get(asset_id) {
+                Some(b) if b == self.id() => {}
+                other => {
+                    return Err(err(
+                        Code::GovernanceCustody,
+                        format!(
+                            "the governance binding gives {asset_id}'s key to {}, not to this \
+                             broker ({}): nothing is released",
+                            other.map_or("no key broker", String::as_str),
+                            self.id()
+                        ),
+                    ))
+                }
+            }
+        }
         if binding.project != a.project || binding.purpose_id != a.purpose_id {
             return Err(err(
                 Code::GovernancePurposeMismatch,

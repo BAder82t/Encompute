@@ -227,3 +227,41 @@ def test_budget_exhaustion_stops_training(tmp_path):
         assert r.satisfied, r.report
     finally:
         r.close()
+
+
+def test_asset_brokers_bind_every_key_to_its_broker(tmp_path):
+    """``asset_brokers`` puts a per-asset broker binding in the training
+    spec: every key the run protects is bound to the broker that holds it,
+    workers accept each grant only from that broker, and the run is trusted
+    as without it. A binding to a broker the run does not have is refused
+    before any work."""
+    p, m, a, b = project()
+    with pytest.raises(encompute.EncomputeError) as e:
+        p.finetune(model=m, data=[a, b], allow_development=True, config=CFG, verbose=False,
+                   asset_brokers={"patients-a": "hospital-a-broker"},
+                   workdir=str(tmp_path / "refused"))
+    assert "hospital-a-broker" in str(e.value)
+    assert not (tmp_path / "refused").exists()
+    r = p.finetune(model=m, data=[a, b], privacy="standard", verification="required",
+                   allow_development=True, config=et.LoRAConfig(rounds=1, local_steps=2),
+                   asset_brokers={"contribution-hospital-a": "modelco"},
+                   workdir=str(tmp_path / "w"), verbose=False)
+    try:
+        spec_json = r._ctx["spec"]
+        spec = json.loads(spec_json)
+        # Exactly the keys the spec's workers acquire, as the spec defines
+        # them, the derived per-participant keys included.
+        keys = _native.training_key_ids(spec_json)
+        assert "contribution-hospital-b" in keys and "adapters.hospital-a" in keys
+        assert spec["asset_brokers"] == {k: "modelco" for k in keys}
+        assert spec["broker_organizations"] == {"modelco": "modelco"}
+        assert r.satisfied, r.report
+    finally:
+        r.close()
+    # The helper: unbound keys default to the run's broker; a mapping
+    # naming another broker, or not a mapping of strings, is refused.
+    assert ft._asset_brokers(None, "modelco", ["x"]) is None
+    assert ft._asset_brokers({}, "modelco", ["x"]) == {"x": "modelco"}
+    for bad in ({"x": "elsewhere"}, {"": "modelco"}, {"x": 1}, ["x"], {"y": "modelco"}):
+        with pytest.raises(encompute.EncomputeError):
+            ft._asset_brokers(bad, "modelco", ["x"])

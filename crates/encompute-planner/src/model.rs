@@ -54,6 +54,13 @@ pub enum TrustRequirement {
     ExecutionRegion { region: String },
     /// Every execution is recorded with signed evidence.
     SignedEvidence,
+    /// Sovereign custody: `asset`'s key is held by `broker`, a key broker
+    /// its owner `organization` registered, and released only there.
+    KeyCustody {
+        asset: String,
+        organization: String,
+        broker: String,
+    },
 }
 
 /// Encrypted computation scheme.
@@ -411,6 +418,21 @@ pub struct PlanningContext {
     pub facts: ProgramFacts,
     #[serde(default)]
     pub training: Option<TrainingDeclaration>,
+    /// Sovereign custody: who holds each source's key (one entry per
+    /// source asset). Absent, and not serialized, outside sovereign
+    /// custody, so those plans and their PlanIds are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custody: Vec<SourceCustody>,
+}
+
+/// A source asset in sovereign custody: its owner organization and the key
+/// broker that organization registered to hold its key.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCustody {
+    pub asset: String,
+    pub organization: String,
+    pub broker: String,
 }
 
 /// Where a step runs.

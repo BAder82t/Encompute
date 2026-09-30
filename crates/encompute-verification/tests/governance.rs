@@ -173,6 +173,7 @@ fn binding() -> GovernanceBinding {
         )]),
         placement_digest: Some(h('5')),
         project_policy_digest: Some(h('6')),
+        asset_brokers: BTreeMap::new(),
     }
 }
 
@@ -518,4 +519,30 @@ fn a_v4_receipt_binds_the_grant_and_v3_receipts_are_unchanged() {
     let mut forged = v4.clone();
     forged.receipt.grant_digest = Some(h('3'));
     assert!(forged.verify_signature(&signer.identity()).is_err());
+}
+
+/// A binding without a per-asset broker map keeps its bytes and its
+/// GovernanceId (the value before the field existed).
+#[test]
+fn governance_ids_unchanged_without_asset_brokers() {
+    let b = binding();
+    let text = String::from_utf8(canonical_json(&b).unwrap()).unwrap();
+    assert!(!text.contains("asset_brokers"), "{text}");
+    assert_eq!(
+        b.id().hex(),
+        "53ceeeb22c3702d5a095aa3644e59cc973f10bbb306aa735d735a975c41a11e7"
+    );
+    // The map, when present, changes the ID; a broker ID or key that is not
+    // a label is refused.
+    let mut x = binding();
+    x.asset_brokers.insert("income".into(), "tax-broker".into());
+    x.check().unwrap();
+    assert_ne!(x.id(), b.id());
+    let mut y = x.clone();
+    y.asset_brokers
+        .insert("income".into(), "other-broker".into());
+    assert_ne!(y.id(), x.id());
+    let mut z = x.clone();
+    z.asset_brokers.insert("income".into(), String::new());
+    assert!(z.check().is_err());
 }

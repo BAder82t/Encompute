@@ -428,3 +428,33 @@ def test_no_plaintext_leaves_the_workload(prep, local, approved, tmp_path):
         hits += [f"{rel}: {what}" for what, ns in needles.items() for n in ns if n in data]
     hits += [f"logs: {what}" for what, ns in needles.items() for n in ns if n in logs.encode()]
     assert hits == []
+
+
+def test_the_worker_asks_for_the_specs_keys_at_their_brokers(prep, monkeypatch):
+    """The worker requests exactly the key IDs the spec defines for its
+    participant, and passes the descriptor's broker addresses (broker ID
+    -> URL) through, so each key can go to its own broker; an address
+    carrying a key is refused."""
+    from encompute.torch import cs_worker
+    seen = {}
+
+    def fake(spec, broker, assets, *args, broker_urls=None):
+        seen.update(spec=spec, assets=assets, broker_urls=broker_urls)
+        raise encompute._native.NativeError("ENC2004", "stopped by the test")
+
+    monkeypatch.setattr(cs_worker._native, "acquire_session_keys", fake)
+    _, j = job_file(prep)
+    urls = {"http://127.0.0.1:1": j["broker"]}
+    j["broker_urls"] = urls
+    with pytest.raises(cs_worker.JobRefused, match="stopped by the test"):
+        cs_worker.run(j)
+    ids = encompute._native.training_participant_keys(seen["spec"], j["participant"])
+    assert seen["assets"] == [ids["model"], ids["dataset"], ids["adapters"], ids["contribution"]]
+    assert set(seen["assets"]) <= set(encompute._native.training_key_ids(seen["spec"]))
+    assert seen["broker_urls"] == urls
+    j["broker_urls"] = {"b": j["broker"] + "#" + "ab" * 32}
+    with pytest.raises(cs_worker.JobRefused, match="comes from the training spec"):
+        cs_worker.run(j)
+    j["broker_urls"] = ["not", "a", "map"]
+    with pytest.raises(cs_worker.JobRefused, match="broker_urls"):
+        cs_worker.run(j)

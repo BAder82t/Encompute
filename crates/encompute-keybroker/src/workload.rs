@@ -69,6 +69,12 @@ struct Opened {
 /// broker could otherwise seal a key of its choosing to the session
 /// (review finding KB-1). Every grant of one broker session must come from
 /// one signer.
+///
+/// With a per-asset broker binding ([`BrokerClient::trusting_per_asset`]),
+/// a key's grant must also name the broker the binding gives for that key,
+/// and be signed by that broker's pinned key: one owner's broker cannot
+/// grant a key for another owner's asset, and a key the binding leaves out
+/// is refused before it is asked for.
 pub fn acquire_keys(
     attester: &dyn Attester,
     session: &WorkloadSession,
@@ -147,6 +153,17 @@ fn acquire(
     let mut sessions: BTreeMap<String, Opened> = BTreeMap::new();
     for (broker, asset_id, governed) in requests {
         let trusted = broker.trusted_brokers();
+        // With a per-asset binding, the broker that must grant this key.
+        // A key the binding leaves out is not asked for at all.
+        let bound = match broker.asset_brokers() {
+            Some(m) => Some(m.get(*asset_id).ok_or_else(|| {
+                refuse(format!(
+                    "the workload's attested identity binds {asset_id} to no key broker: its key \
+                     is not accepted from any"
+                ))
+            })?),
+            None => None,
+        };
         if trusted.is_none() && broker.pinned_key().is_none() && !development {
             return Err(refuse(format!(
                 "broker {} is not pinned: with a hardware attester, a grant is accepted only \
@@ -195,6 +212,18 @@ fn acquire(
         // The grant is signed (checked when it is opened); only a pin says
         // the signer is the intended broker.
         let signer = &grant.header.broker_public_key;
+        // The binding is checked before the signer: a genuine grant from
+        // another owner's broker (for a key it should not hold) and a grant
+        // naming the bound broker but signed by another are both refused.
+        if let Some(b) = bound {
+            if grant.header.broker_id != *b {
+                return Err(refuse(format!(
+                    "the key grant for {asset_id} comes from key broker {}, but the workload's \
+                     attested identity binds {asset_id} to {b}",
+                    grant.header.broker_id
+                )));
+            }
+        }
         if let Some(t) = trusted {
             if t.get(&grant.header.broker_id) != Some(signer) {
                 return Err(refuse(format!(

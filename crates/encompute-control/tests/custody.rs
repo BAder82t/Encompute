@@ -421,6 +421,7 @@ impl C {
             )]),
             placement_digest: None,
             project_policy_digest: None,
+            asset_brokers: BTreeMap::new(),
         };
         let program = encompute_ir::parse(EXACT).unwrap();
         let compiled = encompute_evaluator::compile_program(&program).unwrap();
@@ -1405,4 +1406,163 @@ fn a_ticket_waits_for_a_concurrent_revocation() {
     );
     tx.commit().unwrap();
     refused(h.join().unwrap(), "ENC2706");
+}
+
+/// A program reading `assets` (registered IDs) of tax's, released to tax.
+fn reading(assets: &[&str]) -> String {
+    let mut p = String::from(
+        "encompute 0.1\nprogram adult precision 0.001 purpose \"benefits-eligibility\"\n\
+         party \"tax-agency\" \"Tax\"\n",
+    );
+    for a in assets {
+        p.push_str(&format!(
+            "asset \"{a}\" dataset owners [\"tax-agency\"] readers [\"tax-agency\"] purposes \
+             [\"benefits-eligibility\"] release allowed_parties\n"
+        ));
+    }
+    for (i, a) in assets.iter().enumerate() {
+        p.push_str(&format!(
+            "%{i} = input \"x{i}\" [0.0, 120.0] asset \"{a}\" : secret u8\n"
+        ));
+    }
+    let n = assets.len();
+    p.push_str(&format!(
+        "%{n} = const [18.0] : public u8\n%{} = ge %0, %{n} : secret bool\noutput \"out\" = %{} to \"tax-agency\"\n",
+        n + 1,
+        n + 1
+    ));
+    p
+}
+
+impl C {
+    fn plan(&self, project: &str, program: &str) -> (u16, Value) {
+        self.t.call(
+            &self.tax_dev,
+            "POST",
+            "/v1/plans",
+            Some(json!({"project": project, "program": program})),
+        )
+    }
+
+    /// The stored plan document's plan.
+    fn stored_plan(&self, id: &str) -> Value {
+        let doc: Value = self
+            .t
+            .control
+            .db
+            .conn()
+            .unwrap()
+            .query_one("SELECT document FROM plans WHERE id = $1", &[&id])
+            .unwrap()
+            .get(0);
+        doc["plan"].clone()
+    }
+
+    fn tax_asset(&self, name: &str, broker: Option<&str>, project: Option<&str>) -> String {
+        let mut b = json!({"organization": TAX, "kind": "dataset", "name": name,
+                           "digest": "e".repeat(64)});
+        if let Some(k) = broker {
+            b["key_ref"] = key_ref(k, name);
+        }
+        if let Some(p) = project {
+            b["project"] = json!(p);
+        }
+        let (s, v) = self.register_asset(b);
+        assert_eq!(s, 201, "{v}");
+        v["id"].as_str().unwrap().to_owned()
+    }
+}
+
+/// Sovereign planning checks each source's own broker (a broker the
+/// source's organization registered), not merely that some broker exists,
+/// and binds it into the plan as a key-custody requirement.
+#[test]
+fn sovereign_planning_requires_owner_broker() {
+    let Some(c) = world() else { return };
+    c.own_broker();
+    let held = c.tax_asset("income-own", Some("tax-broker"), Some(&c.project));
+    let v = c.t.ok(
+        &c.tax_dev,
+        "POST",
+        "/v1/plans",
+        Some(json!({"project": c.project, "program": reading(&[&held])})),
+    );
+    let plan = c.stored_plan(v["id"].as_str().unwrap());
+    let want = json!({"requirement": "key_custody", "asset": held, "organization": TAX,
+                      "broker": "tax-broker"});
+    assert!(
+        plan["requirements"].as_array().unwrap().contains(&want),
+        "{}",
+        plan["requirements"]
+    );
+    assert_eq!(
+        plan["context"]["custody"],
+        json!([{"asset": held, "organization": TAX, "broker": "tax-broker"}])
+    );
+    // A source of tax's whose key a platform broker holds, or no broker at
+    // all (registered outside the project, where that is allowed): no plan
+    // in sovereign custody, although a platform broker exists.
+    let platform_held = c.tax_asset("income-platform", Some("platform-broker"), None);
+    let unheld = c.tax_asset("income-unheld", None, None);
+    let unregistered = c.tax_asset("income-unreg", Some("tax-broker-unregistered"), None);
+    for a in [&platform_held, &unheld, &unregistered] {
+        let (s, v) = c.plan(&c.project, &reading(&[&held, a]));
+        refused((s, v.clone()), "ENC2715");
+        assert!(v["message"].as_str().unwrap().contains(a.as_str()), "{v}");
+    }
+    // Once tax's broker is disabled, its own sources have no broker either.
+    c.t.ok(
+        &c.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/service-accounts/tax-broker/disable"),
+        None,
+    );
+    refused(c.plan(&c.project, &reading(&[&held])), "ENC2715");
+    // Every refusal is audited.
+    let n: i64 =
+        c.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT count(*) FROM audit_events WHERE action = 'plan.failed'",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+    assert_eq!(n, 4);
+}
+
+/// Standard projects plan as before: any active broker will do, and the
+/// plan carries no custody, so its bytes and PlanId are unchanged.
+#[test]
+fn standard_planning_unchanged() {
+    let Some(c) = world() else { return };
+    let p = c.t.ok(
+        &c.tax_admin,
+        "POST",
+        "/v1/projects",
+        Some(json!({"organization": TAX, "name": "statistics"})),
+    );
+    let standard = p["id"].as_str().unwrap().to_owned();
+    let platform_held = c.tax_asset("s-platform", Some("platform-broker"), Some(&standard));
+    let unheld = c.tax_asset("s-unheld", None, Some(&standard));
+    let program = reading(&[&platform_held, &unheld]);
+    let (s, v) = c.plan(&standard, &program);
+    assert_eq!(s, 201, "{v}");
+    let plan = c.stored_plan(v["id"].as_str().unwrap());
+    let text = plan.to_string();
+    assert!(!text.contains("custody"), "{text}");
+    // The same plan as the planner makes without custody, byte for byte.
+    let parsed: encompute_planner::ConfidentialExecutionPlan =
+        serde_json::from_value(plan).unwrap();
+    assert!(parsed.context.custody.is_empty());
+    assert!(parsed.context.infrastructure.key_broker);
+    let again =
+        encompute_planner::plan_or_fail(&encompute_ir::parse(&program).unwrap(), &parsed.context)
+            .unwrap();
+    assert_eq!(
+        again.id().unwrap().to_string(),
+        v["plan_id"].as_str().unwrap()
+    );
 }

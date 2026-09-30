@@ -17,7 +17,7 @@ use encompute_evaluator::{compile_program, execution_spec, transcript_for, Compi
 use encompute_ir::{Code, Error, Program, Result};
 use encompute_planner::{
     plan_or_fail, verify_plan, verify_plan_with, BackendCatalog, ConfidentialExecutionPlan,
-    Infrastructure, PlanFloor, PlanningContext, Preferences, Profile, ProgramFacts,
+    Infrastructure, PlanFloor, PlanningContext, Preferences, Profile, ProgramFacts, SourceCustody,
 };
 use encompute_verification::service::{now, sha256_hex, verify_signed, JOB_GRANT};
 use encompute_verification::{
@@ -34,7 +34,7 @@ use crate::db::db_err;
 use crate::log::LogLine;
 use crate::model::{
     bad, check_name, new_id, CompleteJob, CreatePlan, EvaluatorStatus, JobGrant, JobState, JobView,
-    MessageEnvelope, RegisterEvaluator, Role, ServiceKind, SubmitJob, JOB_GRANT_TTL_SECS,
+    KeyRef, MessageEnvelope, RegisterEvaluator, Role, ServiceKind, SubmitJob, JOB_GRANT_TTL_SECS,
     JOB_GRANT_VERSION, PLATFORM_ORG,
 };
 
@@ -196,6 +196,35 @@ impl SourceBinding {
     /// The job's sources, as recorded: the program's bound assets, in order.
     fn sources(&self) -> Vec<String> {
         self.assets.iter().cloned().collect()
+    }
+
+    /// Sovereign custody of each source: its owner organization and the key
+    /// broker holding its key, which must be an active broker that
+    /// organization registered itself (never a platform broker, another
+    /// organization's, or none: ENC2715). One entry per source, in order.
+    fn custody(&self, c: &mut impl GenericClient) -> Result<Vec<SourceCustody>> {
+        let mut out = Vec::with_capacity(self.assets.len());
+        for a in &self.assets {
+            let r = c
+                .query_one(
+                    "SELECT organization_id, key_ref FROM assets WHERE id = $1",
+                    &[a],
+                )
+                .map_err(db_err)?;
+            let organization: String = r.get(0);
+            let broker = r
+                .get::<_, Option<Value>>(1)
+                .and_then(|k| serde_json::from_value::<KeyRef>(k).ok())
+                .map(|k| k.broker);
+            super::require_own_broker(c, &organization, broker.as_deref())
+                .map_err(|e| Error::new(e.code, format!("source {a}: {}", e.message)))?;
+            out.push(SourceCustody {
+                asset: a.clone(),
+                organization,
+                broker: broker.expect("checked above"),
+            });
+        }
+        Ok(out)
     }
 
     /// The request must state the program's purpose, and list exactly the
@@ -441,13 +470,35 @@ impl Control {
         let target = compiled.target_backend();
         let spec = execution_spec(&ids, &compiled, target);
         let mut c = self.db.conn()?;
-        let key_broker = c
-            .query_opt(
-                "SELECT 1 FROM service_accounts WHERE kind = 'keybroker' AND status = 'active' LIMIT 1",
-                &[],
-            )
-            .map_err(db_err)?
-            .is_some();
+        // Sovereign custody: each source's key at a broker its own
+        // organization registered, bound into the plan. Otherwise: some
+        // active key broker.
+        let (key_broker, custody) = if project.sovereign() {
+            let custody = match SourceBinding::of(&mut *c, &program)?.custody(&mut *c) {
+                Ok(k) => k,
+                Err(e) => {
+                    self.metrics.inc("encompute_plans_failed_total", "custody");
+                    self.audit_denied(
+                        ctx.draft("plan.failed", "project", &r.project, Outcome::Denied)
+                            .org(&org)
+                            .project(&r.project)
+                            .r#ref("program", ids.program_id.clone())
+                            .r#ref("reason", "source_custody"),
+                    );
+                    return Err(e);
+                }
+            };
+            (!custody.is_empty(), custody)
+        } else {
+            let any = c
+                .query_opt(
+                    "SELECT 1 FROM service_accounts WHERE kind = 'keybroker' AND status = 'active' LIMIT 1",
+                    &[],
+                )
+                .map_err(db_err)?
+                .is_some();
+            (any, Vec::new())
+        };
         let pctx = PlanningContext {
             profile: Profile::Standard,
             catalog: self.catalog(&mut *c)?,
@@ -460,6 +511,7 @@ impl Control {
             preferences: Preferences::default(),
             facts: facts(&program)?,
             training: None,
+            custody,
         };
         drop(c);
         let plan = match plan_or_fail(&program, &pctx) {

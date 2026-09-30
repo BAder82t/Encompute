@@ -245,13 +245,22 @@ Related: [support matrix](docs/support-matrix.md),
 - **Attestation trusts the TEE vendor** and its attestation service (for
   Confidential Space: Google's verifier and launcher), and the reviewed
   image: the image digest is the measurement.
-- **One key broker per confidential training job.** A training spec names
-  exactly one key broker. A workload trusts every broker its spec names for
-  every asset, so with several, one broker could grant a key of its own
-  choosing for an asset another owner's broker holds (a participant's
-  contribution key among them). Jobs whose owners each run their own broker
-  need a per-asset broker binding first; until then every asset of a job is
-  protected by the one broker the spec names.
+- **Several key brokers per training job need a per-asset binding.** A
+  training spec without `asset_brokers` still names exactly one key broker:
+  a workload would trust every broker the spec names for every asset, so
+  with several, one broker could grant a key of its own choosing for an
+  asset another owner's broker holds (a participant's contribution key
+  among them). With `asset_brokers`, a spec may name several brokers: each
+  key is bound to one broker, and a workload accepts that key's grant only
+  from that broker, under its pinned grant-signing key. The spec also says
+  whose each broker is (`broker_organizations`): a participant's dataset
+  and contribution keys go to its own broker, or, if it runs none, to the
+  model owner's; never to another participant's. Two limits remain. Who
+  runs a broker is the spec's word, which each participant checks before
+  approving the spec (in a sovereign project the control plane also checks
+  each source's owner broker when it plans). And the local `finetune` run
+  holds every key at the model owner's broker, so there its binding names
+  that one broker.
 
 ## Differential privacy
 

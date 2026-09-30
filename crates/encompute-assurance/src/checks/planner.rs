@@ -230,6 +230,7 @@ pub fn scenario(seed: u64) -> Option<Scenario> {
             bgv_ms: None,
         },
         training,
+        custody: Vec::new(),
     };
     if semantics == "exact" {
         // Calibrated exact-backend estimates, derived without further draws
@@ -432,6 +433,7 @@ fn ctx() -> PlanningContext {
             bgv_ms: None,
         },
         training: None,
+        custody: Vec::new(),
     }
 }
 

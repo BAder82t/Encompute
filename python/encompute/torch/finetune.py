@@ -654,8 +654,36 @@ def _dp_settings(pv, data, cfg: lora.LoRAConfig) -> dict:
     }
 
 
+def _asset_brokers(requested: Optional[Dict[str, str]], broker_id: str,
+                   keys: Sequence[str]) -> Optional[Dict[str, str]]:
+    """The training spec's per-asset broker binding (key ID -> broker ID),
+    or None for the default of one broker trusted for every key.
+
+    This run holds every key at one broker, ``broker_id``: each requested
+    binding must name it (a key bound to another broker would be refused
+    by every worker, since that broker holds nothing here), and every key
+    the run protects (``keys``) is bound to it besides. Workers then accept
+    each key's grant only from the broker it is bound to."""
+    if requested is None:
+        return None
+    if not isinstance(requested, dict) or not all(
+            isinstance(k, str) and k and isinstance(v, str) for k, v in requested.items()):
+        raise EncomputeError("ENC2501", "asset_brokers maps asset or key IDs to key broker IDs")
+    unknown = sorted(set(requested) - set(keys)) if keys else []
+    if unknown:
+        raise EncomputeError("ENC2501", f"asset_brokers names {', '.join(unknown)}, which no "
+                                        f"worker of this run acquires")
+    other = sorted({v for v in requested.values() if v != broker_id})
+    if other:
+        raise EncomputeError(
+            "ENC2501", f"asset_brokers names key broker(s) {', '.join(other)}; this run holds "
+                       f"every key at {broker_id}")
+    return {**{k: broker_id for k in keys}, **requested}
+
+
 def _setup(project, model, data, privacy, verification, cfg, infrastructure,
-           allow_development, W: Path, cli: str, say, target: Optional[dict] = None) -> dict:
+           allow_development, W: Path, cli: str, say, target: Optional[dict] = None,
+           asset_brokers: Optional[Dict[str, str]] = None) -> dict:
     """Plans the run and prepares every party; writes the (non-secret) run
     state to run.json.
 
@@ -855,6 +883,14 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
         "coordinator_key": coord,
         "initial_adapter_digest": _native.sha256_hex(a0),
     }
+    # The per-asset broker binding, over exactly the keys the spec's
+    # workers acquire (the spec defines them). This run's one broker is the
+    # model owner's.
+    binding = _asset_brokers(asset_brokers, broker_id,
+                             list(_native.training_key_ids(json.dumps(spec))))
+    if binding is not None:
+        spec["asset_brokers"] = binding
+        spec["broker_organizations"] = {broker_id: model.owner}
     spec_json = json.dumps(spec)
     spec_id = _native.training_spec_id(spec_json)
     run_id = _native.training_run_id(spec_json, secrets.token_hex(16))
@@ -887,10 +923,12 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
             blob = (W / party / "dataset.bin").read_bytes()
             staged[c["asset_id"]] = _native.seal_asset(k, "dataset", project.name, c["asset_id"],
                                                        blob)
-            scoped[f"dataset-{c['asset_id']}"] = (k, policy)
-            scoped[f"contribution-{party}"] = (secrets.token_bytes(32), policy)
-            scoped[f"{model.id}.{party}"] = (keys[model.id], policy)
-            scoped[f"adapters.{party}"] = (keys["adapters"], policy)
+            # The key IDs the spec defines for this participant's jobs.
+            ids = _native.training_participant_keys(spec_json, party)
+            scoped[ids["dataset"]] = (k, policy)
+            scoped[ids["contribution"]] = (secrets.token_bytes(32), policy)
+            scoped[ids["model"]] = (keys[model.id], policy)
+            scoped[ids["adapters"]] = (keys["adapters"], policy)
     broker_args = (["--broker-id", broker_id, "--development"] if dev else
                    ["--broker-id", broker_id, "--kek", str(target["kek"])])
     for asset, (key, policy) in scoped.items():
@@ -943,9 +981,22 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
              verification="required", config: Optional[lora.LoRAConfig] = None,
              infrastructure: Optional[dict] = None, allow_development: bool = False,
              workdir: Optional[str] = None, resume: Optional[str] = None,
-             revocations: Sequence[str] = (), verbose: bool = True) -> FineTuneResult:
+             revocations: Sequence[str] = (), verbose: bool = True,
+             asset_brokers: Optional[Dict[str, str]] = None) -> FineTuneResult:
+    """``asset_brokers`` (optional) binds asset or key IDs to the key broker
+    that holds each key, in the training spec: workers then accept a key's
+    grant only from its bound broker, under that broker's pinned key. This
+    run holds every key at the model owner's broker, so each binding names
+    it; keys left out are bound to it as well. Without it, the spec names
+    one broker, trusted for every key."""
     say = print if verbose else (lambda *a, **k: None)
     t0 = time.perf_counter()
+    if resume and asset_brokers is not None:
+        raise EncomputeError("ENC2501", "asset_brokers is fixed by the run's training spec; "
+                                        "a resumed run keeps it")
+    if not resume and asset_brokers is not None and model is not None:
+        # Before any work: this run's broker is the model owner's.
+        _asset_brokers(asset_brokers, model.owner, [])
     if not resume:
         from .._privacy import Privacy
         Privacy.of(privacy)  # refuse an unknown level before any work
@@ -984,7 +1035,7 @@ def finetune(project=None, *, model=None, data=None, method="lora", privacy="str
         W = Path(workdir or tempfile.mkdtemp(prefix="encompute-finetune-"))
         W.mkdir(parents=True, exist_ok=True)
         st = _setup(project, model, data, privacy, verification, config or lora.LoRAConfig(),
-                    infrastructure, allow_development, W, cli, say)
+                    infrastructure, allow_development, W, cli, say, asset_brokers=asset_brokers)
     dp = st.get("dp_sgd")
     c = st["lora"]
     cfg = lora.LoRAConfig(rank=c["rank"], alpha=c["alpha"],

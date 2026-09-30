@@ -96,6 +96,7 @@ pub fn binding() -> GovernanceBinding {
         )]),
         placement_digest: None,
         project_policy_digest: None,
+        asset_brokers: BTreeMap::new(),
     }
 }
 

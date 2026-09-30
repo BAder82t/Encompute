@@ -881,3 +881,35 @@ fn unsigned_ticket_refused_before_coverage_checks() {
     let req = w.request(&handle, Some(w.ticket()));
     assert_eq!(code(w.release(&req)), Code::GovernancePurposeMismatch);
 }
+
+/// The governance binding's per-asset broker map is checked by the broker
+/// itself: a release of a key the binding maps to another broker, or does
+/// not map at all, is refused, whatever the ticket says; a binding mapping
+/// it to this broker releases as before.
+#[test]
+fn governed_broker_refuses_asset_bound_to_another_broker() {
+    let with = |map: &[(&str, &str)]| {
+        let mut b = binding();
+        b.asset_brokers = map
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        world_with(b, authorization())
+    };
+    let e = with(&[(ASSET, "benefits-broker")])
+        .release_fresh()
+        .unwrap_err();
+    assert_eq!(e.code, Code::GovernanceCustody, "{e}");
+    assert!(e.message.contains("benefits-broker"), "{e}");
+    let e = with(&[("other-asset", BROKER)])
+        .release_fresh()
+        .unwrap_err();
+    assert_eq!(e.code, Code::GovernanceCustody, "{e}");
+    with(&[(ASSET, BROKER), ("claims", "benefits-broker")])
+        .release_fresh()
+        .unwrap();
+    // No map: unchanged.
+    world_with(binding(), authorization())
+        .release_fresh()
+        .unwrap();
+}

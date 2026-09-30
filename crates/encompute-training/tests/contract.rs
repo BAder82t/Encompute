@@ -109,6 +109,8 @@ fn fixture_spec() -> TrainingSpec {
             })
             .collect(),
         key_brokers: [("modelco".to_string(), h('5'))].into(),
+        asset_brokers: Default::default(),
+        broker_organizations: Default::default(),
         coordinator_key: h('6'),
         initial_adapter_digest: h('7'),
     }

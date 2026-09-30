@@ -205,6 +205,7 @@ fn encompute_analysis_check(program: &Program) -> Result<()> {
             preferences: Default::default(),
             facts: Default::default(),
             training: None,
+            custody: Vec::new(),
         },
     )
     .map(|_| ())

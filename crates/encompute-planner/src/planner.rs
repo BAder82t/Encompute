@@ -496,6 +496,17 @@ fn global_satisfaction(req: &TrustRequirement) -> Option<RequirementSatisfaction
             vec![Mechanism::SignedReceipts],
             "every execution, aggregation and release issues a signed receipt".into(),
         ),
+        TrustRequirement::KeyCustody {
+            asset,
+            organization,
+            broker,
+        } => (
+            vec![Mechanism::OwnerAuthorization],
+            format!(
+                "{asset}'s key is held by {broker}, the key broker {organization} registered; it \
+                 is released only there, under {organization}'s authorization"
+            ),
+        ),
         _ => return None,
     };
     let evidence = by.iter().flat_map(Mechanism::evidence).collect();
@@ -523,7 +534,9 @@ fn touches(req: &TrustRequirement, step: &StepShape) -> bool {
         TrustRequirement::RequireAttestation { step: s }
         | TrustRequirement::RequireCorrectness { step: s } => *s == step.id,
         TrustRequirement::ExecutionRegion { .. } => true,
-        TrustRequirement::Purpose { .. } | TrustRequirement::SignedEvidence => false,
+        TrustRequirement::Purpose { .. }
+        | TrustRequirement::SignedEvidence
+        | TrustRequirement::KeyCustody { .. } => false,
     }
 }
 
@@ -742,7 +755,8 @@ pub fn by_subject(reqs: &[TrustRequirement]) -> BTreeMap<String, Vec<&TrustRequi
             TrustRequirement::HideFrom { asset, .. }
             | TrustRequirement::AggregateOnly { asset, .. }
             | TrustRequirement::Purpose { asset, .. }
-            | TrustRequirement::PrivacyBudget { asset, .. } => asset.clone(),
+            | TrustRequirement::PrivacyBudget { asset, .. }
+            | TrustRequirement::KeyCustody { asset, .. } => asset.clone(),
             TrustRequirement::RequireAttestation { step }
             | TrustRequirement::RequireCorrectness { step } => step.clone(),
             TrustRequirement::MinimumParticipants { output, .. } => output.clone(),

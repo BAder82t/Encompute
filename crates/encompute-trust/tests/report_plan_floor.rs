@@ -50,6 +50,7 @@ fn context(profile: Profile) -> PlanningContext {
         preferences: Preferences::default(),
         facts: facts(true),
         training: None,
+        custody: Vec::new(),
     }
 }
 

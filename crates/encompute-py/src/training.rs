@@ -35,6 +35,8 @@ fn spec(json: &str) -> PyResult<TrainingSpec> {
 /// The broker at `url`, trusted only with the grant-signing keys the
 /// training spec names (review finding KB-1): whoever supplies the URL (a
 /// job descriptor) cannot pin, or leave unpinned, a broker of its own.
+/// With the spec's per-asset broker binding, each key's grant is accepted
+/// only from the broker the spec binds it to.
 fn spec_broker(s: &TrainingSpec, url: &str) -> PyResult<BrokerClient> {
     if url.contains('#') {
         return Err(err(Error::new(
@@ -42,7 +44,53 @@ fn spec_broker(s: &TrainingSpec, url: &str) -> PyResult<BrokerClient> {
             "the broker's grant-signing key comes from the training spec, not with its address",
         )));
     }
-    BrokerClient::new(url).trusting(&s.key_brokers).map_err(err)
+    let b = BrokerClient::new(url);
+    if s.asset_brokers.is_empty() {
+        b.trusting(&s.key_brokers)
+    } else {
+        b.trusting_per_asset(&s.key_brokers, &s.asset_brokers)
+    }
+    .map_err(err)
+}
+
+/// Where to ask for `asset`'s key: with a per-asset binding, the address
+/// `broker_urls` gives for the broker the spec binds it to, else `broker`
+/// (only when the binding names a single broker: with several, each needs
+/// its address, and a missing one fails closed). Only routing: which grants
+/// are accepted comes from the spec.
+fn broker_url_of<'a>(
+    s: &TrainingSpec,
+    asset: &str,
+    broker: &'a str,
+    broker_urls: Option<&'a std::collections::BTreeMap<String, String>>,
+) -> PyResult<&'a str> {
+    let Some(bound) = s.asset_brokers.get(asset) else {
+        return Ok(broker);
+    };
+    let several = s.asset_brokers.values().any(|b| b != bound);
+    let urls = match broker_urls {
+        Some(u) => u,
+        None if !several => return Ok(broker),
+        None => {
+            return Err(err(Error::new(
+                Code::KeyRelease,
+                "the training spec binds keys to several key brokers: give each broker's \
+                 address (broker_urls)",
+            )))
+        }
+    };
+    if urls.values().any(|u| u.contains('#')) {
+        return Err(err(Error::new(
+            Code::KeyRelease,
+            "the broker's grant-signing key comes from the training spec, not with its address",
+        )));
+    }
+    urls.get(bound).map(String::as_str).ok_or_else(|| {
+        err(Error::new(
+            Code::KeyRelease,
+            format!("no address for key broker {bound}, which holds {asset}'s key"),
+        ))
+    })
 }
 
 fn seed32(path: &str) -> PyResult<[u8; 32]> {
@@ -60,6 +108,33 @@ fn bytes(py: Python<'_>, b: &[u8]) -> Py<PyBytes> {
 #[pyfunction]
 pub fn training_spec_id(spec_json: &str) -> PyResult<String> {
     spec(spec_json)?.id().map_err(err)
+}
+
+/// Every key ID a validated spec's workers acquire -> the party whose key
+/// it is ([`TrainingSpec::key_ids`]).
+#[pyfunction]
+pub fn training_key_ids(spec_json: &str) -> PyResult<std::collections::BTreeMap<String, String>> {
+    spec(spec_json)?.key_ids().map_err(err)
+}
+
+/// The keys `party`'s confidential training job acquires, by role
+/// (`model`, `dataset`, `adapters`, `contribution`): the worker asks for
+/// exactly these, never names of its own making.
+#[pyfunction]
+pub fn training_participant_keys(
+    spec_json: &str,
+    party: &str,
+) -> PyResult<std::collections::BTreeMap<String, String>> {
+    let k = spec(spec_json)?.participant_keys(party).map_err(err)?;
+    Ok([
+        ("model", k.model),
+        ("dataset", k.dataset),
+        ("adapters", k.adapters),
+        ("contribution", k.contribution),
+    ]
+    .into_iter()
+    .map(|(r, k)| (r.to_owned(), k))
+    .collect())
 }
 
 /// The TrainingRunId (hex) of one execution of a spec.
@@ -157,7 +232,10 @@ pub fn participant_attestation_policy(
 /// session identity `identity_seed`, acting for `party` (the attestation
 /// binds the spec scoped to that participant), and receive `assets'` keys
 /// sealed to that session. Returns the keys and the attestation record.
+/// With the spec's `asset_brokers`, `broker_urls` (broker ID -> address)
+/// routes each key to its broker; `broker` serves any broker it omits.
 #[pyfunction]
+#[pyo3(signature = (spec_json, broker, assets, identity_seed, attester, attester_arg, image, party, broker_urls=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn acquire_session_keys(
     py: Python<'_>,
@@ -169,6 +247,7 @@ pub fn acquire_session_keys(
     attester_arg: &str,
     image: &str,
     party: &str,
+    broker_urls: Option<std::collections::BTreeMap<String, String>>,
 ) -> PyResult<Acquired> {
     use encompute_runtime::attestation::gcp::ConfidentialSpaceAttester;
     use encompute_runtime::attestation::Attester;
@@ -191,8 +270,13 @@ pub fn acquire_session_keys(
     let signer = EvaluatorSigner::from_seed(&seed);
     let session = WorkloadSession::new(&signer.identity())
         .with_privacy_policy(s.privacy_policy_id.as_deref());
-    let broker = spec_broker(&s, broker)?;
-    let requests: Vec<_> = assets.iter().map(|a| (broker.clone(), a.clone())).collect();
+    let requests = assets
+        .iter()
+        .map(|a| {
+            let url = broker_url_of(&s, a, broker, broker_urls.as_ref())?;
+            Ok((spec_broker(&s, url)?, a.clone()))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
     let got = acquire_keys(
         att.as_ref(),
         &session,
@@ -452,8 +536,12 @@ type Acquired = (Vec<(String, Py<PyBytes>)>, String);
 /// workload and receive `assets`' keys, sealed to this session. Returns
 /// `({asset: key}, attestation_record_json)`. `identity` is the party's
 /// key file (the attestation binds the participant); the mock attester
-/// (development only) signs with `mock_seed` claiming `image`.
+/// (development only) signs with `mock_seed` claiming `image`. With the
+/// spec's `asset_brokers`, `broker_urls` (broker ID -> address) routes each
+/// key to its broker; `broker` serves any broker it omits.
 #[pyfunction]
+#[pyo3(signature = (spec_json, broker, assets, identity, mock_seed, image, broker_urls=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn acquire_training_keys(
     py: Python<'_>,
     spec_json: &str,
@@ -462,14 +550,20 @@ pub fn acquire_training_keys(
     identity: &str,
     mock_seed: &str,
     image: &str,
+    broker_urls: Option<std::collections::BTreeMap<String, String>>,
 ) -> PyResult<Acquired> {
     let s = spec(spec_json)?;
     let attester = MockHardware::from_seed(&seed32(mock_seed)?).attester(image);
     let signer = EvaluatorSigner::from_seed(&seed32(identity)?);
     let session = WorkloadSession::new(&signer.identity())
         .with_privacy_policy(s.privacy_policy_id.as_deref());
-    let broker = spec_broker(&s, broker)?;
-    let requests: Vec<_> = assets.iter().map(|a| (broker.clone(), a.clone())).collect();
+    let requests = assets
+        .iter()
+        .map(|a| {
+            let url = broker_url_of(&s, a, broker, broker_urls.as_ref())?;
+            Ok((spec_broker(&s, url)?, a.clone()))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
     let got = acquire_keys(
         &attester,
         &session,
@@ -664,6 +758,8 @@ pub fn check_export(eir: &str, spec_json: &str, adapter_id: &str) -> PyResult<()
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(training_spec_id, m)?)?;
+    m.add_function(wrap_pyfunction!(training_key_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(training_participant_keys, m)?)?;
     m.add_function(wrap_pyfunction!(training_run_id, m)?)?;
     m.add_function(wrap_pyfunction!(training_attestation_policy, m)?)?;
     m.add_function(wrap_pyfunction!(contribution_attestation_policy, m)?)?;

@@ -260,6 +260,12 @@ pub struct GovernanceBinding {
     pub placement_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_policy_digest: Option<String>,
+    /// Per-asset broker binding: asset or key ID -> the key broker that
+    /// holds its key. A governed broker refuses to release a key this map
+    /// gives to another broker, or leaves out. Empty (and then not
+    /// serialized, so existing GovernanceIds are unchanged): no binding.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub asset_brokers: BTreeMap<String, String>,
 }
 
 impl GovernanceBinding {
@@ -291,6 +297,10 @@ impl GovernanceBinding {
             check_hex32("asset version ID", &i.asset_version_id)?;
             check_hex32("digest commitment", &i.digest_commitment)?;
             check_label("input organization", &i.organization)?;
+        }
+        for (key, broker) in &self.asset_brokers {
+            check_label("asset or key ID", key)?;
+            check_label("key broker", broker)?;
         }
         for (name, o) in &self.outputs {
             check_label("output", name)?;

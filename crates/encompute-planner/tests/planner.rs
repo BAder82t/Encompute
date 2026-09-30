@@ -103,6 +103,7 @@ fn ctx(semantics: &str, profile: Profile) -> PlanningContext {
             bgv_ms: None,
         },
         training: None,
+        custody: Vec::new(),
     }
 }
 

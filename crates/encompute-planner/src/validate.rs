@@ -335,6 +335,26 @@ fn check(program: &Program, plan: &ConfidentialExecutionPlan, p: &mut Vec<String
     {
         p.push("the plan is for another policy".into());
     }
+    // Sovereign custody: each entry names a source the program reads, once,
+    // with its owner and broker.
+    let mut custodied = BTreeSet::new();
+    for k in &ctx.custody {
+        if k.asset.is_empty() || k.organization.is_empty() || k.broker.is_empty() {
+            p.push("a source's key custody names no asset, organization or broker".into());
+        }
+        if !custodied.insert(&k.asset) {
+            p.push(format!(
+                "{}: its key custody is declared more than once",
+                k.asset
+            ));
+        }
+        if !c.is_some_and(|c| c.inputs.values().any(|a| a == &k.asset)) {
+            p.push(format!(
+                "{}: key custody for an asset the program does not read",
+                k.asset
+            ));
+        }
+    }
     // No weakening: never below the validator's own floor, and exactly
     // the requirements the program and context imply.
     for r in floor_requirements(program, ctx.profile)? {
@@ -613,6 +633,19 @@ fn check(program: &Program, plan: &ConfidentialExecutionPlan, p: &mut Vec<String
             }
             TrustRequirement::SignedEvidence => {
                 plan.selected_mechanisms.contains(&Mechanism::SignedReceipts)
+            }
+            TrustRequirement::KeyCustody {
+                asset,
+                organization,
+                broker,
+            } => {
+                plan.selected_mechanisms.contains(&Mechanism::OwnerAuthorization)
+                    && ctx.infrastructure.key_broker
+                    && ctx.custody.contains(&SourceCustody {
+                        asset: asset.clone(),
+                        organization: organization.clone(),
+                        broker: broker.clone(),
+                    })
             }
         };
         if !ok {

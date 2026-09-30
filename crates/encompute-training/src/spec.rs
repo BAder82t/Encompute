@@ -3,7 +3,8 @@
 //! workers attest to, key brokers release keys for, and checkpoints and
 //! adapters are bound to. Changing any of it (base model, code, LoRA
 //! configuration, optimizer, privacy, aggregation, participants, plan,
-//! key brokers, coordinator, initial adapter) changes the ID.
+//! key brokers and the per-asset broker binding, coordinator, initial
+//! adapter) changes the ID.
 
 use std::collections::BTreeMap;
 
@@ -362,13 +363,52 @@ pub struct TrainingSpec {
     /// The key brokers whose grants workers accept: broker ID -> its
     /// grant-signing key (hex Ed25519). Part of the attested identity, so
     /// the host cannot choose or omit a broker's key.
+    #[serde(deserialize_with = "distinct_keys")]
     pub key_brokers: BTreeMap<String, String>,
+    /// Per-asset broker binding: each key ID the spec's workers acquire
+    /// ([`Self::key_ids`], exactly) -> the broker (in `key_brokers`) that
+    /// holds it. A worker accepts a key's grant only from that broker, under
+    /// its pinned grant-signing key, so each owner's keys can stay at the
+    /// owner's broker without one broker being able to grant a key for
+    /// another's asset. Empty (and then not serialized, so older specs keep
+    /// their IDs): exactly one broker, trusted for every key.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "distinct_keys"
+    )]
+    pub asset_brokers: BTreeMap<String, String>,
+    /// With `asset_brokers`: each broker's owner (broker ID -> a participant
+    /// or the model owner). A participant's keys are bound to its own broker
+    /// when it runs one (else to the model owner's), never to another
+    /// participant's; the model owner's keys to the model owner's broker.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "distinct_keys"
+    )]
+    pub broker_organizations: BTreeMap<String, String>,
     /// The coordinator's adapter-record signing key (hex Ed25519): a
     /// worker trains only from an adapter it recorded.
     pub coordinator_key: String,
     /// SHA-256 of the initial adapter (`adapter-0`, hex): round 1 starts
     /// from it.
     pub initial_adapter_digest: String,
+}
+
+/// The keys one participant's confidential training job acquires, as its
+/// owners' brokers hold them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ParticipantKeys {
+    /// The model key, released under this participant's policy (the model
+    /// owner's).
+    pub model: String,
+    /// The participant's dataset key (its own).
+    pub dataset: String,
+    /// The adapter key, under this participant's policy (the model owner's).
+    pub adapters: String,
+    /// The key its sealed contribution is under (its own).
+    pub contribution: String,
 }
 
 /// A model factory the worker image ships, and its arguments: the only
@@ -515,6 +555,39 @@ impl Architecture {
     }
 }
 
+/// A JSON object read into a map, refusing a key named twice (a map would
+/// otherwise keep the last silently, so the bytes a party reviewed and the
+/// spec a worker binds could bind a key to different brokers).
+fn distinct_keys<'de, D>(d: D) -> std::result::Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Distinct;
+    impl<'de> serde::de::Visitor<'de> for Distinct {
+        type Value = BTreeMap<String, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an object of strings, each key once")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut m: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((k, v)) = m.next_entry::<String, String>()? {
+                if out.contains_key(&k) {
+                    return Err(serde::de::Error::custom(format!(
+                        "{k:?} is named more than once (a key is bound to one broker, a broker \
+                         has one grant-signing key)"
+                    )));
+                }
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(Distinct)
+}
+
 fn hex64(name: &str, s: &str) -> Result<()> {
     if s.len() == 64
         && s.bytes()
@@ -544,14 +617,20 @@ impl TrainingSpec {
                 "a training spec names its key brokers and their grant-signing keys",
             ));
         }
-        // One broker per spec: a workload trusts every broker named here for
-        // every asset, so with two, one broker could grant a key (such as a
-        // participant's contribution key) for an asset held by the other.
-        // Several owners' brokers need a per-asset binding first.
-        if self.key_brokers.len() != 1 {
+        // Without a per-asset binding, one broker per spec: a workload would
+        // trust every broker named here for every asset, so with two, one
+        // broker could grant a key (such as a participant's contribution
+        // key) for an asset held by the other.
+        if self.asset_brokers.is_empty() && !self.broker_organizations.is_empty() {
             return Err(bad(
-                "a training spec names exactly one key broker: several brokers would each be \
-                 trusted for every asset",
+                "broker_organizations goes with asset_brokers: without a per-asset binding, the \
+                 spec's one broker holds every key",
+            ));
+        }
+        if self.asset_brokers.is_empty() && self.key_brokers.len() != 1 {
+            return Err(bad(
+                "a training spec names exactly one key broker, unless asset_brokers binds each \
+                 key to its broker: several brokers would each be trusted for every asset",
             ));
         }
         for (id, key) in &self.key_brokers {
@@ -560,6 +639,7 @@ impl TrainingSpec {
             }
             hex64("a key broker's grant-signing key", key)?;
         }
+        self.check_asset_brokers()?;
         if self.datasets.len() < 2 {
             return Err(bad("training needs datasets from at least two parties"));
         }
@@ -645,6 +725,152 @@ impl TrainingSpec {
                 return Err(bad(format!(
                     "{}'s owner {} is not a participant",
                     d.asset_id, d.owner
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The keys `party`'s confidential training job acquires. `party`
+    /// must own one of the spec's datasets (its first, as datasets are
+    /// sorted).
+    pub fn participant_keys(&self, party: &str) -> Result<ParticipantKeys> {
+        let d = self.dataset_of(party).ok_or_else(|| {
+            bad(format!(
+                "{party} contributes no dataset to this training spec: it acquires no keys"
+            ))
+        })?;
+        let model = &self.base_model.asset_id;
+        Ok(ParticipantKeys {
+            model: format!("{model}.{party}"),
+            dataset: format!("dataset-{}", d.asset_id),
+            adapters: format!("adapters.{party}"),
+            contribution: format!("contribution-{party}"),
+        })
+    }
+
+    /// Every key ID this spec's workers acquire, with the party whose key
+    /// it is: the base model, checkpoint and adapter keys (the model
+    /// owner's), and each contributing participant's
+    /// [`Self::participant_keys`] (its dataset and contribution keys its
+    /// own, its model and adapter keys the model owner's).
+    pub fn key_ids(&self) -> Result<BTreeMap<String, String>> {
+        let owner = &self.base_model.owner;
+        let mut out: BTreeMap<String, String> =
+            [self.base_model.asset_id.as_str(), "checkpoints", "adapters"]
+                .iter()
+                .map(|k| (k.to_string(), owner.clone()))
+                .collect();
+        for d in &self.datasets {
+            let k = self.participant_keys(&d.owner)?;
+            for (key, whose) in [
+                (k.model, owner),
+                (k.adapters, owner),
+                (k.dataset, &d.owner),
+                (k.contribution, &d.owner),
+            ] {
+                if let Some(prev) = out.insert(key.clone(), whose.clone()) {
+                    if prev != *whose {
+                        return Err(bad(format!(
+                            "key {key} would be both {prev}'s and {whose}'s: rename an asset or \
+                             a party"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The per-asset broker binding, when there is one:
+    /// - it binds exactly [`Self::key_ids`], each to a broker whose
+    ///   grant-signing key the spec pins, and uses every broker it names;
+    /// - no two brokers share a grant-signing key (a grant's signer
+    ///   identifies one broker);
+    /// - every broker's owner is declared, and is a participant or the
+    ///   model owner;
+    /// - a participant's own keys are at its own broker when it runs one,
+    ///   else at the model owner's; never at another participant's; the
+    ///   model owner's keys are at the model owner's broker.
+    fn check_asset_brokers(&self) -> Result<()> {
+        if self.asset_brokers.is_empty() {
+            return Ok(());
+        }
+        for (key, broker) in &self.asset_brokers {
+            if !self.key_brokers.contains_key(broker) {
+                return Err(bad(format!(
+                    "asset_brokers binds {key} to {broker:?}, whose grant-signing key the spec \
+                     does not name in key_brokers: nothing would pin who signs its grants"
+                )));
+            }
+        }
+        let keys = self.key_ids()?;
+        if let Some(k) = keys.keys().find(|k| !self.asset_brokers.contains_key(*k)) {
+            return Err(bad(format!(
+                "asset_brokers does not bind {k} to a key broker: with a per-asset binding, \
+                 every key the spec's workers acquire names the broker that holds it"
+            )));
+        }
+        if let Some(k) = self.asset_brokers.keys().find(|k| !keys.contains_key(*k)) {
+            return Err(bad(format!(
+                "asset_brokers binds {k:?}, which no worker of this spec acquires"
+            )));
+        }
+        for broker in self.key_brokers.keys() {
+            if !self.asset_brokers.values().any(|b| b == broker) {
+                return Err(bad(format!(
+                    "key broker {broker} holds no key in asset_brokers: a spec names only the \
+                     brokers its keys are bound to"
+                )));
+            }
+        }
+        let mut signers = std::collections::BTreeSet::new();
+        if self.key_brokers.values().any(|k| !signers.insert(k)) {
+            return Err(bad(
+                "two key brokers share a grant-signing key: their grants could not be told apart",
+            ));
+        }
+        let model_owner = &self.base_model.owner;
+        let party =
+            |o: &str| o == model_owner || self.participants.iter().any(|p| p.party.as_str() == o);
+        for broker in self.key_brokers.keys() {
+            match self.broker_organizations.get(broker) {
+                None => {
+                    return Err(bad(format!(
+                        "broker_organizations does not say whose key broker {broker} is"
+                    )))
+                }
+                Some(o) if !party(o) => {
+                    return Err(bad(format!(
+                        "key broker {broker} belongs to {o}, which is neither a participant nor \
+                         the model owner"
+                    )))
+                }
+                Some(_) => {}
+            }
+        }
+        if let Some(b) = self
+            .broker_organizations
+            .keys()
+            .find(|b| !self.key_brokers.contains_key(*b))
+        {
+            return Err(bad(format!(
+                "broker_organizations names {b}, which is not in key_brokers"
+            )));
+        }
+        let runs_broker = |o: &str| self.broker_organizations.values().any(|x| x == o);
+        for (key, whose) in &keys {
+            let broker = &self.asset_brokers[key];
+            let holder = &self.broker_organizations[broker];
+            let expected = if whose == model_owner || !runs_broker(whose) {
+                model_owner
+            } else {
+                whose
+            };
+            if holder != expected {
+                return Err(bad(format!(
+                    "asset_brokers binds {key} ({whose}'s key) to {broker}, a broker of {holder}: \
+                     it belongs at a broker of {expected}"
                 )));
             }
         }

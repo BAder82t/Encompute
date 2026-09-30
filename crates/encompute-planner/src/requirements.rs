@@ -244,5 +244,12 @@ pub fn derive(program: &Program, ctx: &PlanningContext) -> Result<Vec<TrustRequi
             region: region.clone(),
         });
     }
+    for k in &ctx.custody {
+        r.insert(TrustRequirement::KeyCustody {
+            asset: k.asset.clone(),
+            organization: k.organization.clone(),
+            broker: k.broker.clone(),
+        });
+    }
     Ok(r.into_iter().collect())
 }
