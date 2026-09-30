@@ -59,6 +59,26 @@ pub fn require_human(p: &Principal, org: &str, roles: &[Role], action: &str) -> 
     require(p, org, roles, action)
 }
 
+/// [`require_human`], and not the job's `submitter`: whoever submitted a
+/// job never counts toward its own approval, whatever roles they hold
+/// (four eyes, ENC2707).
+pub fn require_human_not_submitter(
+    p: &Principal,
+    org: &str,
+    roles: &[Role],
+    action: &str,
+    submitter: &str,
+) -> Result<()> {
+    require_human(p, org, roles, action)?;
+    if p.id == submitter {
+        return Err(Error::new(
+            Code::GovernanceFourEyesIncomplete,
+            format!("{action} needs someone other than the job's submitter"),
+        ));
+    }
+    Ok(())
+}
+
 /// Four eyes: `actor` is none of the people who already acted (`earlier`).
 pub fn require_other_person(actor: &str, earlier: &[&str], action: &str) -> Result<()> {
     if earlier.contains(&actor) {

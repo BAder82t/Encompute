@@ -260,6 +260,10 @@ impl JobState {
             (Created, Planning) | (Planning, Planned) => true,
             (Planned, WaitingForApproval) | (Planned, Authorized) => true,
             (WaitingForApproval, Authorized) => true,
+            // A governed job whose per-job approvals stopped counting
+            // before it was scheduled (an approver disabled, or no longer
+            // holding the role) waits for approval again.
+            (Authorized, WaitingForApproval) => true,
             (Authorized, Queued) | (Queued, Running) | (Running, Verifying) => true,
             (Verifying, Succeeded) => true,
             // Any live job can fail or be cancelled; finished ones cannot.

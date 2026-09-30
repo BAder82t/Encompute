@@ -209,8 +209,12 @@ releases, and validity is checked again at scheduling and start, strictly,
 on the control plane's clock. A job that started inside its window may
 finish after it.
 
-Not yet built: per-job four-eyes approval (an authorization that asks for
-it refuses jobs for now), release classes, placement and operator rules (a broker
+An authorization may ask for per-job four eyes: a job under it waits
+until enough distinct people of the owner (its approval rule, at least
+two, never the job's submitter) approve that job, its spec and its
+authorization set.
+
+Not yet built: release classes, placement and operator rules (a broker
 refuses any execution that declares placement until placement can be
 attested), record linkage, the governance report and evidence bundle. The
 limits of what exists are in [known limitations](../KNOWN_LIMITATIONS.md).

@@ -70,6 +70,8 @@ fn state_machine_is_explicit() {
         (Planned, WaitingForApproval),
         (Planned, Authorized),
         (WaitingForApproval, Authorized),
+        // A governed job whose per-job approvals lapsed before scheduling.
+        (Authorized, WaitingForApproval),
         (Authorized, Queued),
         (Queued, Running),
         (Running, Verifying),

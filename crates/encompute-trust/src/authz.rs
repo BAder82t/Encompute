@@ -145,6 +145,65 @@ const APPROVAL: &str = "encompute.approval.v1";
 const AUTHORIZATION_SET: &str = "encompute.authorization-set.v1";
 const PURPOSE_ACCEPTANCE: &str = "encompute.purpose-acceptance.v1";
 const GOVERNANCE_KEY: &str = "encompute.governance-key.v1";
+const JOB_APPROVAL: &str = "encompute.job-approval.v1";
+
+/// An organization's four-eyes rule over `approvals` (person, role): at
+/// least `min_distinct` (never fewer than two) different people, and
+/// `required_roles` (role → how many distinct people) covered. A person
+/// counts once, whatever roles or keys they approved with. The one quorum
+/// check for standing authorizations and per-job approvals alike; who may
+/// count at all (a person of the organization, never a service account,
+/// an auditor or the job's submitter) is the caller's to decide.
+pub fn quorum_met<P: Ord, R: AsRef<str>>(
+    approvals: impl IntoIterator<Item = (P, R)>,
+    min_distinct: usize,
+    required_roles: &BTreeMap<String, u32>,
+) -> Result<()> {
+    let four_eyes = |m: String| Error::new(Code::GovernanceFourEyesIncomplete, m);
+    let approvals: Vec<(P, R)> = approvals.into_iter().collect();
+    let people: BTreeSet<&P> = approvals.iter().map(|(p, _)| p).collect();
+    let min = min_distinct.max(2);
+    if people.len() < min {
+        return Err(four_eyes(format!(
+            "{} distinct people approved; {min} are required",
+            people.len()
+        )));
+    }
+    for (role, n) in required_roles {
+        let with_role: BTreeSet<&P> = approvals
+            .iter()
+            .filter(|(_, r)| r.as_ref() == role)
+            .map(|(p, _)| p)
+            .collect();
+        if with_role.len() < *n as usize {
+            return Err(four_eyes(format!("needs {n} approval(s) as {role}")));
+        }
+    }
+    Ok(())
+}
+
+/// The statement a person approves for one governed job (per-job four
+/// eyes): `SHA256("encompute.job-approval.v1" || 0x00 || canonical {job,
+/// spec_id, authorization_set_id})`, hex. It binds the job, its governed
+/// execution spec and the set of authorizations it runs under, so an
+/// approval never carries over to another spec or authorization set.
+pub fn job_approval_statement(job: &str, spec_id: &str, authorization_set_id: &str) -> String {
+    #[derive(Serialize)]
+    struct Statement<'a> {
+        job: &'a str,
+        spec_id: &'a str,
+        authorization_set_id: &'a str,
+    }
+    crate::tagged_hex(
+        JOB_APPROVAL,
+        &canonical_json(&Statement {
+            job,
+            spec_id,
+            authorization_set_id,
+        })
+        .expect("strings only"),
+    )
+}
 
 fn check_hex32(what: &str, s: &str) -> Result<()> {
     if is_hex32(s) {
@@ -449,31 +508,16 @@ impl AuthorizationV2 {
         min_distinct: usize,
         required_roles: &BTreeMap<String, u32>,
     ) -> Result<()> {
-        let four_eyes = |m: String| Error::new(Code::GovernanceFourEyesIncomplete, m);
-        let people: BTreeSet<(&str, &str)> = self
-            .approvals
-            .iter()
-            .map(|a| (a.idp_issuer.as_str(), a.approver_subject.as_str()))
-            .collect();
-        if people.len() < min_distinct.max(2) {
-            return Err(four_eyes(format!(
-                "{} distinct people approved; {} are required",
-                people.len(),
-                min_distinct.max(2)
-            )));
-        }
-        for (role, n) in required_roles {
-            let with_role: BTreeSet<(&str, &str)> = self
-                .approvals
-                .iter()
-                .filter(|a| &a.role == role)
-                .map(|a| (a.idp_issuer.as_str(), a.approver_subject.as_str()))
-                .collect();
-            if with_role.len() < *n as usize {
-                return Err(four_eyes(format!("needs {n} approval(s) as {role}")));
-            }
-        }
-        Ok(())
+        quorum_met(
+            self.approvals.iter().map(|a| {
+                (
+                    (a.idp_issuer.as_str(), a.approver_subject.as_str()),
+                    a.role.as_str(),
+                )
+            }),
+            min_distinct,
+            required_roles,
+        )
     }
 
     pub fn sign(self, key: &SigningKey) -> Result<SignedAuthorizationV2> {

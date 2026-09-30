@@ -65,6 +65,25 @@ Work toward confidential cross-agency computation
   checked as at start; in a governed project a source is visible only to
   its owner, the recipients an active authorization names, and the
   submitters of jobs under one. Migration 0007.
+- **Per-job four eyes (phase 3).** A governed job under an authorization
+  that asks for per-job four-eyes approval is no longer refused (ENC2707):
+  it runs under that authorization, even when a broader one would also
+  cover the source, and waits for approval. Each such owner organization
+  approves through `POST /v1/jobs/{id}/approve` under its approval rule
+  for the project (at least two distinct people; by default a data owner
+  and a security admin), with people homed there; the job's submitter,
+  service accounts, auditors and people homed elsewhere never count. An
+  approval is a statement over the job, its governed spec and its
+  authorization set, stored append-only; approving revalidates the job (a
+  job past its window or under a revoked authorization fails), and
+  scheduling and start require every owner's quorum. Governed projects
+  ignore the free-form `require_job_approval` policy field; standard
+  projects are unchanged. One quorum check serves authorizations and jobs.
+  Approvals count at scheduling and start only while the approver is
+  still an active user of the organization with the recorded role: a job
+  not yet scheduled waits for approval again, a scheduled one fails at
+  start. Approval rules may not require `auditor` or unknown roles.
+  Migration 0008; INV-228 extended.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody)
   and INV-236 (the control plane can only deny; broker state cannot be
   rolled back); 159 invariants.

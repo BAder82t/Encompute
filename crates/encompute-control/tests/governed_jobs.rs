@@ -8,6 +8,9 @@
 //! clock), fails a job whose authorization is revoked before it starts, and
 //! accepts completion only with a version 4 receipt naming the job's own
 //! grant. A job that started inside its window may complete after it.
+//! A job under an authorization that asks for per-job four eyes waits
+//! until every such owner's quorum of its own people (never the job's
+//! submitter) approves the job, its spec and its authorization set.
 //! Standard projects behave as before.
 //!
 //! Needs PostgreSQL (`ENCOMPUTE_TEST_DATABASE_URL`); skipped without it
@@ -22,7 +25,9 @@ use serde_json::{json, Value};
 
 use common::*;
 use encompute_control::authn::DEV_ISSUER;
-use encompute_trust::authz::{AuthorizationSetId, AuthorizationV2, PurposeAcceptance};
+use encompute_trust::authz::{
+    job_approval_statement, AuthorizationSetId, AuthorizationV2, PurposeAcceptance,
+};
 use encompute_verification::governance::{ProgramRef, ReleaseClass};
 use encompute_verification::service::JobGrant;
 use encompute_verification::{
@@ -1805,10 +1810,786 @@ fn broader_authorization_does_not_shadow_four_eyes_one() {
     g.authorize(g.body(&v, &p));
     let mut four = g.body(&v, &p);
     four.per_job_four_eyes = true;
-    g.authorize(four);
+    let f = g.authorize(four);
     let plan = g.plan(&g.ben_dev, &p);
-    refused(
-        g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k1"),
-        "ENC2707",
+    // The job runs under the authorization that asks for four eyes, and
+    // waits for that approval.
+    let (s, j) = g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k1");
+    assert_eq!(s, 201, "{j}");
+    assert_eq!(j["state"], "waiting_for_approval", "{j}");
+    let bound: Vec<String> =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query(
+                "SELECT authorization_row FROM job_authorizations WHERE job_id = $1",
+                &[&id(&j)],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+    assert_eq!(bound, vec![f.row]);
+}
+
+// --- step 3: per-job four eyes -----------------------------------------------------
+
+/// A governed job whose authorization asks for per-job four eyes, submitted
+/// by benefits: it waits for tax's people.
+fn four_eyes_job(g: &G, label: &str) -> (Version, Auth, String) {
+    let (v, a, _, j) = g.job(label, |b| b.per_job_four_eyes = true);
+    assert_eq!(j["state"], "waiting_for_approval", "{j}");
+    (v, a, id(&j))
+}
+
+fn approve(g: &G, who: &As, job: &str) -> (u16, Value) {
+    g.t.call(who, "POST", &format!("/v1/jobs/{job}/approve"), None)
+}
+
+/// The job's per-job approvals: (approver, organization, role, statement).
+fn approvals(g: &G, job: &str) -> Vec<(String, String, String, String)> {
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .query(
+            "SELECT approver_id, organization_id, role, statement_digest FROM job_human_approvals
+              WHERE job_id = $1 ORDER BY at, approver_id",
+            &[&job],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+        .collect()
+}
+
+fn principal_id(g: &G, who: &As) -> String {
+    g.t.ok(who, "GET", "/v1/whoami", None)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn self_approval_by_submitter_refused_2707() {
+    let Some(g) = world() else { return };
+    // A tax developer who is also a data owner submits a job over tax's
+    // own version.
+    let both = user(
+        &g.t,
+        &g.tax_admin,
+        TAX,
+        "t-both",
+        &["ml_developer", "data_owner"],
     );
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    let mut body = g.body(&v, &p);
+    body.per_job_four_eyes = true;
+    g.authorize(body);
+    let plan = g.plan(&both, &p);
+    let (s, j) = g.submit(&both, g.request(&plan, &[&v.asset], &[BEN]), "self");
+    assert_eq!(s, 201, "{j}");
+    assert_eq!(j["state"], "waiting_for_approval", "{j}");
+    let job = id(&j);
+    refused(approve(&g, &both, &job), "ENC2707");
+    assert!(approvals(&g, &job).is_empty());
+    // Two other people of tax.
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    let v = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    assert_eq!(v["state"], "queued", "{v}");
+}
+
+#[test]
+fn same_person_twice_is_one_approver() {
+    let Some(g) = world() else { return };
+    let (_, _, job) = four_eyes_job(&g, "2026-q1");
+    let v = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    assert_eq!(v["state"], "waiting_for_approval", "{v}");
+    refused(approve(&g, &g.tax_owner, &job), "ENC2707");
+    assert_eq!(approvals(&g, &job).len(), 1);
+    assert_eq!(g.state(&job), "waiting_for_approval");
+    // One person holding both of the rule's roles is still one person.
+    let (_, _, job2) = four_eyes_job(&g, "2026-q2");
+    let dual = user(
+        &g.t,
+        &g.tax_admin,
+        TAX,
+        "t-dual",
+        &["data_owner", "security_admin"],
+    );
+    let v =
+        g.t.ok(&dual, "POST", &format!("/v1/jobs/{job2}/approve"), None);
+    assert_eq!(v["state"], "waiting_for_approval", "{v}");
+    refused(approve(&g, &dual, &job2), "ENC2707");
+    let v = g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/jobs/{job2}/approve"),
+        None,
+    );
+    assert_eq!(v["state"], "queued", "{v}");
+}
+
+#[test]
+fn quorum_not_met_stays_waiting() {
+    let Some(g) = world() else { return };
+    let (_, _, job) = four_eyes_job(&g, "2026-q1");
+    // Two people, but both security admins: the rule also needs a data
+    // owner.
+    for who in [&g.tax_sec1, &g.tax_sec2] {
+        let v =
+            g.t.ok(who, "POST", &format!("/v1/jobs/{job}/approve"), None);
+        assert_eq!(v["state"], "waiting_for_approval", "{v}");
+    }
+    g.t.control.schedule_pending().unwrap();
+    assert_eq!(g.state(&job), "waiting_for_approval");
+    let (s, v) = g.start(&job);
+    assert!(s >= 400, "{v}");
+    let v = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    assert_eq!(v["state"], "queued", "{v}");
+    let roles: BTreeSet<String> = approvals(&g, &job).into_iter().map(|a| a.2).collect();
+    assert_eq!(
+        roles,
+        BTreeSet::from(["data_owner".to_string(), "security_admin".to_string()])
+    );
+}
+
+#[test]
+fn approver_homed_in_other_org_does_not_count() {
+    let Some(g) = world() else { return };
+    let (_, _, job) = four_eyes_job(&g, "2026-q1");
+    // A benefits person granted data_owner in tax.
+    let ben_admin = As::User("b-admin".into());
+    let ben_sec = user(&g.t, &ben_admin, BEN, "b-sec", &["security_admin"]);
+    let who = principal_id(&g, &ben_sec);
+    let mut c = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    c.execute(
+        "INSERT INTO memberships (principal_id, organization_id, role) VALUES ($1, $2, 'data_owner')",
+        &[&who, &TAX],
+    )
+    .unwrap();
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    let (s, v) = approve(&g, &ben_sec, &job);
+    assert_eq!(s, 403, "{v}");
+    // Another organization's person with no role in tax: no approval to
+    // give.
+    let (s, v) = approve(&g, &g.other_dev, &job);
+    assert!(s == 403 || s == 404, "{s} {v}");
+    assert_eq!(approvals(&g, &job).len(), 1);
+    assert_eq!(g.state(&job), "waiting_for_approval");
+}
+
+#[test]
+fn service_account_cannot_approve_2707() {
+    let Some(g) = world() else { return };
+    let (_, _, job) = four_eyes_job(&g, "2026-q1");
+    let signer = std::sync::Arc::new(ServiceSigner::from_seed("tax-robot", &[9; 32]).unwrap());
+    g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/service-accounts"),
+        Some(
+            json!({"id": "tax-robot", "kind": "automation", "public_key": signer.public_key_hex(),
+                    "roles": ["organization_admin", "data_owner"]}),
+        ),
+    );
+    let robot = As::Service(signer);
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    refused(approve(&g, &robot, &job), "ENC2707");
+    assert_eq!(approvals(&g, &job).len(), 1);
+    assert_eq!(g.state(&job), "waiting_for_approval");
+}
+
+#[test]
+fn approval_after_window_2705() {
+    let Some(g) = world() else { return };
+    let until = now() + 6;
+    let (_, _, _, j) = g.job("2026-q1", |b| {
+        b.per_job_four_eyes = true;
+        b.valid_until = until;
+    });
+    let job = id(&j);
+    assert_eq!(j["state"], "waiting_for_approval", "{j}");
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    after(until);
+    refused(approve(&g, &g.tax_owner, &job), "ENC2705");
+    // The job can never run now: it failed, anchored as ended.
+    assert_eq!(g.state(&job), "failed");
+    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert_eq!(approvals(&g, &job).len(), 1);
+    let refs: Value =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT refs FROM audit_events WHERE action = 'job.failed' AND resource_id = $1",
+                &[&job],
+            )
+            .unwrap()
+            .get(0);
+    assert_eq!(refs["reason"], "ENC2705", "{refs}");
+    assert_eq!(refs["stage"], "approve", "{refs}");
+}
+
+#[test]
+fn approval_of_revoked_authorization_job_fails() {
+    let Some(g) = world() else { return };
+    // Revoked behind the job's back (a lost cascade): the approval
+    // revalidates, refuses, and fails the job.
+    let (_, a, job) = four_eyes_job(&g, "2026-q1");
+    attacker(
+        &g.t.env0.url,
+        &["authorizations"],
+        &format!(
+            "UPDATE authorizations SET status = 'revoked', revoked_at = now() WHERE id = '{}'",
+            a.row
+        ),
+    );
+    refused(approve(&g, &g.tax_owner, &job), "ENC2706");
+    assert_eq!(g.state(&job), "failed");
+    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert!(approvals(&g, &job).is_empty());
+    // Revoked properly: the waiting job fails with the revocation, and
+    // there is nothing left to approve.
+    let (_, a2, job2) = four_eyes_job(&g, "2026-q2");
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{}/revoke", a2.row),
+        Some(json!({"reason": "withdrawn"})),
+    );
+    assert_eq!(g.state(&job2), "failed");
+    let (s, _) = approve(&g, &g.tax_owner, &job2);
+    assert_eq!(s, 409);
+}
+
+/// A program over tax's version `a` and benefits' version `b`.
+fn two_owner_program(a: &str, b: &str) -> String {
+    format!(
+        "encompute 0.1\nprogram adult precision 0.001 purpose \"{PURPOSE}\"\n\
+         party \"{TAX}\" \"Tax\"\nparty \"{BEN}\" \"Benefits\"\n\
+         asset \"{a}\" dataset owners [\"{TAX}\"] readers [\"{BEN}\", \"{TAX}\"] purposes \
+         [\"{PURPOSE}\"] release allowed_parties\n\
+         asset \"{b}\" dataset owners [\"{BEN}\"] readers [\"{BEN}\", \"{TAX}\"] purposes \
+         [\"{PURPOSE}\"] release allowed_parties\n\
+         %0 = input \"x0\" [0.0, 120.0] asset \"{a}\" : secret u8\n\
+         %1 = input \"x1\" [0.0, 120.0] asset \"{b}\" : secret u8\n\
+         %2 = ge %0, %1 : secret bool\noutput \"out\" = %2 to \"{BEN}\"\n"
+    )
+}
+
+#[test]
+fn schedule_requires_every_owner_quorum() {
+    let Some(g) = world() else { return };
+    // Benefits owns a source too: its own governance key, broker, purpose
+    // acceptance and people.
+    let ben_admin = As::User("b-admin".into());
+    let ben_sec1 = user(&g.t, &ben_admin, BEN, "b-sec1", &["security_admin"]);
+    let ben_sec2 = user(&g.t, &ben_admin, BEN, "b-sec2", &["security_admin"]);
+    let ben_owner = user(&g.t, &ben_admin, BEN, "b-owner", &["data_owner"]);
+    let ben_key = key(8);
+    let k = g.t.ok(
+        &ben_admin,
+        "POST",
+        &format!("/v1/organizations/{BEN}/governance-keys"),
+        Some(json!({"public_key": pk(&ben_key), "kms_key_ref": "vault:transit/governance"})),
+    );
+    g.t.ok(
+        &ben_sec1,
+        "POST",
+        &format!(
+            "/v1/organizations/{BEN}/governance-keys/{}/approve",
+            k["id"].as_str().unwrap()
+        ),
+        None,
+    );
+    let acceptance = PurposeAcceptance {
+        version: 1,
+        organization: BEN.into(),
+        project: g.project.clone(),
+        purpose_id: g.purpose.clone(),
+        accepted_at: now(),
+    }
+    .sign(&ben_key)
+    .unwrap();
+    g.t.ok(
+        &ben_sec2,
+        "POST",
+        &format!("/v1/purposes/{}/accept", g.purpose),
+        Some(json!({"acceptance": acceptance})),
+    );
+    broker_account(&g.t, &ben_admin, BEN, "ben-broker", 32);
+    let (s, v) = g.t.call(
+        &ben_sec1,
+        "POST",
+        &format!("/v1/organizations/{BEN}/key-brokers"),
+        Some(json!({"id": "ben-broker", "grant_public_key": pk(&key(42)),
+                    "provider_kind": "openbao-transit", "key_ref_namespace": "transit/ben"})),
+    );
+    assert_eq!(s, 201, "{v}");
+    let tv = g.version("2026-q1", json!({}));
+    let bv = g.t.ok(
+        &ben_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": BEN, "kind": "dataset", "name": "claims@2026-q1",
+                    "series": "claims", "version": "2026-q1",
+                    "digest": "e".repeat(64), "project": g.project,
+                    "key_ref": {"broker": "ben-broker", "provider": "openbao-transit",
+                                "key_ref": "claims-2026-q1", "key_version": 1}}),
+        ),
+    );
+    let bv = Version {
+        asset: bv["id"].as_str().unwrap().to_owned(),
+        version: bv["version_id"].as_str().unwrap().to_owned(),
+    };
+    let p = two_owner_program(&tv.asset, &bv.asset);
+    // Both owners ask for per-job four eyes.
+    let mut tax_body = g.body(&tv, &p);
+    tax_body.per_job_four_eyes = true;
+    g.authorize(tax_body);
+    let mut ben_body = g.body(&bv, &p);
+    ben_body.party = BEN.into();
+    ben_body.per_job_four_eyes = true;
+    let row = g.t.ok(
+        &ben_owner,
+        "POST",
+        "/v1/authorizations",
+        Some(json!({"body": ben_body})),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (who, role) in [(&ben_owner, "data_owner"), (&ben_sec1, "security_admin")] {
+        g.t.ok(
+            who,
+            "POST",
+            &format!("/v1/authorizations/{row}/approve"),
+            Some(json!({"role": role})),
+        );
+    }
+    let doc: AuthorizationV2 = serde_json::from_value(
+        g.t.ok(&ben_sec1, "GET", &format!("/v1/authorizations/{row}"), None)["body"].clone(),
+    )
+    .unwrap();
+    let signed = doc.sign(&ben_key).unwrap();
+    g.t.ok(
+        &ben_sec1,
+        "POST",
+        &format!("/v1/authorizations/{row}/signature"),
+        Some(json!({"public_key": signed.public_key, "signature": signed.signature})),
+    );
+    let plan = g.plan(&g.other_dev, &p);
+    let (s, j) = g.submit(
+        &g.other_dev,
+        g.request(&plan, &[&tv.asset, &bv.asset], &[BEN]),
+        "two",
+    );
+    assert_eq!(s, 201, "{j}");
+    assert_eq!(j["state"], "waiting_for_approval", "{j}");
+    let job = id(&j);
+    // Tax's quorum alone is not enough.
+    for who in [&g.tax_owner, &g.tax_sec1] {
+        let v =
+            g.t.ok(who, "POST", &format!("/v1/jobs/{job}/approve"), None);
+        assert_eq!(v["state"], "waiting_for_approval", "{v}");
+    }
+    g.t.control.schedule_pending().unwrap();
+    assert_eq!(g.state(&job), "waiting_for_approval");
+    let e =
+        g.t.control
+            .revalidate_governed_job(&job, encompute_control::GovernedStage::Schedule)
+            .unwrap_err();
+    assert_eq!(e.code.as_str(), "ENC2707", "{}", e.message);
+    assert!(e.message.contains(BEN), "{}", e.message);
+    // Another tax person's approval counts for tax, never for benefits.
+    let v = g.t.ok(
+        &g.tax_sec2,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    assert_eq!(v["state"], "waiting_for_approval", "{v}");
+    g.t.ok(&ben_owner, "POST", &format!("/v1/jobs/{job}/approve"), None);
+    let v =
+        g.t.ok(&ben_sec2, "POST", &format!("/v1/jobs/{job}/approve"), None);
+    assert_eq!(v["state"], "queued", "{v}");
+    let orgs: BTreeSet<String> = approvals(&g, &job).into_iter().map(|a| a.1).collect();
+    assert_eq!(orgs, BTreeSet::from([TAX.to_string(), BEN.to_string()]));
+
+    // A job pushed to authorized without its quorum (a tampered state) is
+    // not scheduled: it waits for approval again.
+    let (_, _, job2) = four_eyes_job(&g, "2026-q2");
+    attacker(
+        &g.t.env0.url,
+        &["jobs"],
+        &format!("UPDATE jobs SET state = 'authorized' WHERE id = '{job2}'"),
+    );
+    assert!(!g.t.control.schedule_job(&job2).unwrap());
+    assert_eq!(g.state(&job2), "waiting_for_approval");
+    let refs: Value = g
+        .t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT refs FROM audit_events WHERE action = 'job.approval_lapsed' AND resource_id = $1",
+            &[&job2],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(refs["reason"], "ENC2707", "{refs}");
+    assert_eq!(refs["stage"], "schedule", "{refs}");
+}
+
+#[test]
+fn standard_job_approval_unchanged() {
+    let Some(w) = common::world() else { return };
+    let t = &w.t;
+    let d = t.ok(
+        &w.a_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": "hospital-a", "kind": "dataset", "name": "gated",
+                    "digest": "f".repeat(64), "policy": {"require_job_approval": true}}),
+        ),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    t.ok(
+        &w.a_owner,
+        "POST",
+        &format!("/v1/assets/{d}/approvals"),
+        Some(json!({"project": w.project, "purpose": "medical-training"})),
+    );
+    let plan = w.plan(&exact_over(&d, "hospital-a", "dataset", "medical-training"));
+    let (s, j) = w.job(&plan, &[&d], "std-1");
+    assert_eq!(s, 201, "{j}");
+    assert_eq!(j["state"], "waiting_for_approval", "{j}");
+    let job = id(&j);
+    // The submitter's organization does not approve its own job.
+    let (s, _) = t.call(&w.b_admin, "POST", &format!("/v1/jobs/{job}/approve"), None);
+    assert_eq!(s, 403);
+    // One person of the owner approves, as in rc.4: no quorum of two, and
+    // nothing recorded as a per-job four-eyes approval.
+    let v = t.ok(&w.a_owner, "POST", &format!("/v1/jobs/{job}/approve"), None);
+    assert_ne!(v["state"], "waiting_for_approval", "{v}");
+    let mut c = t.control.db.conn().unwrap();
+    let n: i64 = c
+        .query_one(
+            "SELECT count(*) FROM job_approvals WHERE job_id = $1",
+            &[&job],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
+    let n: i64 = c
+        .query_one(
+            "SELECT count(*) FROM job_human_approvals WHERE job_id = $1",
+            &[&job],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn governed_job_ignores_require_job_approval() {
+    let Some(g) = world() else { return };
+    // The free-form policy field asks for approval; a governed job waits
+    // only for an authorization's per-job four eyes.
+    let v = g.version("2026-q1", json!({"policy": {"require_job_approval": true}}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    let (s, j) = g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k1");
+    assert_eq!(s, 201, "{j}");
+    assert_eq!(j["state"], "queued", "{j}");
+    let (s, _) = approve(&g, &g.tax_owner, &id(&j));
+    assert_eq!(s, 409);
+}
+
+#[test]
+fn approval_statement_binds_spec_and_authorization_set() {
+    let Some(g) = world() else { return };
+    let (_, a, job) = four_eyes_job(&g, "2026-q1");
+    let spec_id = g.view(&job)["spec_id"].as_str().unwrap().to_owned();
+    let set = AuthorizationSetId::of([a.id.clone()]).unwrap();
+    let statement = job_approval_statement(&job, &spec_id, set.hex());
+    g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    let rows = approvals(&g, &job);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].3, statement);
+    assert_ne!(
+        rows[0].3,
+        job_approval_statement(&job, &"0".repeat(64), set.hex())
+    );
+    assert_ne!(
+        rows[0].3,
+        job_approval_statement(&job, &spec_id, &"0".repeat(64))
+    );
+    // An approval over another spec or authorization set (a row written
+    // behind the control plane's back) does not count.
+    let sec1 = principal_id(&g, &g.tax_sec1);
+    let stale = job_approval_statement(&job, &spec_id, &"0".repeat(64));
+    attacker(
+        &g.t.env0.url,
+        &["job_human_approvals"],
+        &format!(
+            "INSERT INTO job_human_approvals (job_id, organization_id, approver_id, role, statement_digest)
+             VALUES ('{job}', '{TAX}', '{sec1}', 'security_admin', '{stale}')"
+        ),
+    );
+    let e =
+        g.t.control
+            .revalidate_governed_job(&job, encompute_control::GovernedStage::Schedule)
+            .unwrap_err();
+    assert_eq!(e.code.as_str(), "ENC2707", "{}", e.message);
+    // Approvals are append-only.
+    let mut c = g.t.control.db.conn().unwrap();
+    assert!(c
+        .execute(
+            "UPDATE job_human_approvals SET statement_digest = $2 WHERE job_id = $1",
+            &[&job, &statement],
+        )
+        .is_err());
+    assert!(c
+        .execute("DELETE FROM job_human_approvals WHERE job_id = $1", &[&job])
+        .is_err());
+    // A person approving the job's own statement completes the quorum.
+    let v = g.t.ok(
+        &g.tax_sec2,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    assert_eq!(v["state"], "queued", "{v}");
+}
+
+// --- per-job four eyes at execution time ---------------------------------------------
+
+/// A four-eyes job approved by tax's data owner and first security admin.
+fn approved_job(g: &G, label: &str) -> String {
+    let (_, _, job) = four_eyes_job(g, label);
+    g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    job
+}
+
+fn evaluators(g: &G, status: &str) {
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute("UPDATE evaluators SET status = $1", &[&status])
+        .unwrap();
+}
+
+/// A scheduled job is started only while its approvers still count: once
+/// one no longer does, start refuses (ENC2707) and fails the job, anchored
+/// as ended. The approval stays on record.
+#[test]
+fn approver_disabled_after_approving_no_longer_counts() {
+    let Some(g) = world() else { return };
+    let job = approved_job(&g, "2026-q1");
+    assert_eq!(g.state(&job), "queued");
+    let sec1 = principal_id(&g, &g.tax_sec1);
+    g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/users/{sec1}/disable"),
+        None,
+    );
+    start_refused(&g, &job, "ENC2707");
+    assert_eq!(approvals(&g, &job).len(), 2, "evidence stays");
+}
+
+/// A job not yet scheduled goes back to waiting for approval (not failed)
+/// when an approver no longer holds the role their approval counted for;
+/// a new approval by someone who does lets it run.
+#[test]
+fn approver_role_removed_after_approving_no_longer_counts() {
+    let Some(g) = world() else { return };
+    evaluators(&g, "draining");
+    let job = approved_job(&g, "2026-q1");
+    assert_eq!(g.state(&job), "authorized");
+    let owner = principal_id(&g, &g.tax_owner);
+    g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/memberships/remove"),
+        Some(json!({"principal": owner, "role": "data_owner"})),
+    );
+    let e =
+        g.t.control
+            .revalidate_governed_job(&job, encompute_control::GovernedStage::Schedule)
+            .unwrap_err();
+    assert_eq!(e.code.as_str(), "ENC2707", "{}", e.message);
+    evaluators(&g, "ready");
+    g.t.control.schedule_pending().unwrap();
+    assert_eq!(g.state(&job), "waiting_for_approval");
+    let refs: Value = g
+        .t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT refs FROM audit_events WHERE action = 'job.approval_lapsed' AND resource_id = $1",
+            &[&job],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(refs["reason"], "ENC2707", "{refs}");
+    assert_eq!(approvals(&g, &job).len(), 2, "evidence stays");
+    // Another data owner of tax restores the quorum.
+    let owner2 = user(&g.t, &g.tax_admin, TAX, "t-owner2", &["data_owner"]);
+    let v =
+        g.t.ok(&owner2, "POST", &format!("/v1/jobs/{job}/approve"), None);
+    assert_eq!(v["state"], "queued", "{v}");
+}
+
+/// Removed from the organization (every role taken away): the approval
+/// no longer counts, and start refuses and fails the job.
+#[test]
+fn approver_removed_from_org_no_longer_counts() {
+    let Some(g) = world() else { return };
+    let job = approved_job(&g, "2026-q1");
+    assert_eq!(g.state(&job), "queued");
+    // A second job, approved by the data owner and the other security admin.
+    let (_, _, job2) = four_eyes_job(&g, "2026-q2");
+    g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/jobs/{job2}/approve"),
+        None,
+    );
+    let v = g.t.ok(
+        &g.tax_sec2,
+        "POST",
+        &format!("/v1/jobs/{job2}/approve"),
+        None,
+    );
+    assert_eq!(v["state"], "queued", "{v}");
+    let sec1 = principal_id(&g, &g.tax_sec1);
+    g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/memberships/remove"),
+        Some(json!({"principal": sec1})),
+    );
+    start_refused(&g, &job, "ENC2707");
+    // The second job does not depend on that person.
+    g.t.control
+        .revalidate_governed_job(&job2, encompute_control::GovernedStage::Start)
+        .unwrap();
+    // Its data owner homed in another organization now (behind the control
+    // plane's back): no longer counts either.
+    let owner = principal_id(&g, &g.tax_owner);
+    attacker(
+        &g.t.env0.url,
+        &["users"],
+        &format!("UPDATE users SET organization_id = '{BEN}' WHERE id = '{owner}'"),
+    );
+    let e =
+        g.t.control
+            .revalidate_governed_job(&job2, encompute_control::GovernedStage::Start)
+            .unwrap_err();
+    assert_eq!(e.code.as_str(), "ENC2707", "{}", e.message);
+}
+
+/// An approval rule naming `auditor` could never be met (auditors never
+/// approve): the database refuses it, on insert and on update.
+#[test]
+fn approval_rule_naming_auditor_refused() {
+    let Some(g) = world() else { return };
+    let mut c = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    let e = c
+        .execute(
+            "INSERT INTO approval_rules (project_id, organization_id, min_distinct_humans, required_roles, created_by)
+             VALUES ($1, $2, 2, '{\"auditor\": 1, \"data_owner\": 1}', 'test')",
+            &[&g.project, &TAX],
+        )
+        .unwrap_err();
+    assert!(format!("{e:?}").contains("auditor"), "{e:?}");
+    c.execute(
+        "INSERT INTO approval_rules (project_id, organization_id, min_distinct_humans, required_roles, created_by)
+         VALUES ($1, $2, 2, '{\"data_owner\": 1, \"security_admin\": 1}', 'test')",
+        &[&g.project, &TAX],
+    )
+    .unwrap();
+    let e = c
+        .execute(
+            "UPDATE approval_rules SET required_roles = '{\"auditor\": 1}'
+              WHERE project_id = $1 AND organization_id = $2",
+            &[&g.project, &TAX],
+        )
+        .unwrap_err();
+    assert!(format!("{e:?}").contains("auditor"), "{e:?}");
+    // Only roles a person may approve with are named.
+    let e = c
+        .execute(
+            "UPDATE approval_rules SET required_roles = '{\"no_such_role\": 1}'
+              WHERE project_id = $1 AND organization_id = $2",
+            &[&g.project, &TAX],
+        )
+        .unwrap_err();
+    assert!(format!("{e:?}").contains("unknown role"), "{e:?}");
 }

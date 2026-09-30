@@ -1174,7 +1174,7 @@ fn with_approvals(
 /// The organization's approval rule in the project: (minimum distinct
 /// people, role → count). Default: two people, a data owner and a security
 /// admin.
-fn approval_rule(
+pub(crate) fn approval_rule(
     t: &mut postgres::Transaction<'_>,
     project: &str,
     org: &str,
@@ -1187,11 +1187,18 @@ fn approval_rule(
         )
         .map_err(db_err)?;
     Ok(match r {
-        Some(r) => (
-            r.get::<_, i32>(0).max(2) as usize,
-            serde_json::from_value(r.get(1))
-                .map_err(|e| db_err(format!("stored approval rule: {e}")))?,
-        ),
+        Some(r) => {
+            let roles: BTreeMap<String, u32> = serde_json::from_value(r.get(1))
+                .map_err(|e| db_err(format!("stored approval rule: {e}")))?;
+            // Auditors never approve: such a rule could never be met (the
+            // database refuses it too).
+            if roles.contains_key(Role::Auditor.as_str()) {
+                return Err(conflict(format!(
+                    "{org}'s approval rule in project {project} requires auditor, which no approval can meet"
+                )));
+            }
+            (r.get::<_, i32>(0).max(2) as usize, roles)
+        }
         None => (
             2,
             BTreeMap::from([

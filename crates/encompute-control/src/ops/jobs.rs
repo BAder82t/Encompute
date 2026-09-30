@@ -21,7 +21,9 @@ use encompute_planner::{
     plan_or_fail, verify_plan, verify_plan_with, BackendCatalog, ConfidentialExecutionPlan,
     Infrastructure, PlanFloor, PlanningContext, Preferences, Profile, ProgramFacts, SourceCustody,
 };
-use encompute_trust::authz::{AuthorizationSetId, SignedAuthorizationV2};
+use encompute_trust::authz::{
+    job_approval_statement, quorum_met, AuthorizationSetId, SignedAuthorizationV2,
+};
 use encompute_verification::governance::{
     is_hex32, GovernanceBinding, GovernanceInput, GrantGovernance, ReleaseClass,
     GOVERNANCE_BINDING_VERSION,
@@ -35,7 +37,7 @@ use crate::audit::{self, Outcome};
 use crate::authn::PrincipalKind;
 use crate::authz::{
     asset_visible, conflict, forbidden, not_found, project_role_orgs, project_visible, require,
-    ProjectRow,
+    require_human_not_submitter, ProjectRow,
 };
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
@@ -304,12 +306,15 @@ struct JobGovernance {
 }
 
 /// The lifecycle transitions of a governed job that revalidate it:
-/// submission builds and checks its binding and authorizations, then
-/// scheduling and start each call `revalidate_governed` once. Completion
-/// does not (a job that started inside its window may complete after it);
-/// release tickets are checked again at the owner's broker.
+/// submission builds and checks its binding and authorizations, then each
+/// per-job approval, scheduling and start call `revalidate_governed` once.
+/// Completion does not (a job that started inside its window may complete
+/// after it); release tickets are checked again at the owner's broker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GovernedStage {
+    /// A person's per-job four-eyes approval (the quorum is what it
+    /// collects, so it is not required yet).
+    Approve,
     Schedule,
     Start,
 }
@@ -317,6 +322,7 @@ pub enum GovernedStage {
 impl GovernedStage {
     pub fn as_str(self) -> &'static str {
         match self {
+            GovernedStage::Approve => "approve",
             GovernedStage::Schedule => "schedule",
             GovernedStage::Start => "start",
         }
@@ -1205,7 +1211,6 @@ impl Control {
                 .map(|x| (x.get(0), x.get(1), x.get(2)))
                 .collect();
             let mut refusal: Option<(&'static str, Error)> = None;
-            let mut four_eyes: Option<(&'static str, Error)> = None;
             for (row, aid, signed) in candidates {
                 if anchored.contains(&row) || aid.as_ref().is_some_and(|x| anchored.contains(x)) {
                     refusal.get_or_insert((
@@ -1226,25 +1231,23 @@ impl Control {
                     .transpose()
                     .map_err(|e| db_err(format!("stored authorization: {e}")))?
                     .ok_or_else(|| db_err("a usable authorization is signed"))?;
-                // Every candidate is looked at: one that would cover the job
-                // but asks for per-job four-eyes approval is never shadowed
-                // by a broader one (a later phase makes it require the
-                // job's four-eyes approval instead).
+                // Every candidate is looked at: one that covers the job and
+                // asks for per-job four-eyes approval is never shadowed by a
+                // broader one; the job runs under it and waits for that
+                // approval.
                 match covers(&signed, &spec, &purpose.linkage_policy_id, outputs) {
                     Ok(()) => {
-                        chosen.entry(a.clone()).or_insert((row, signed));
-                    }
-                    Err(e) if e.1.code == Code::GovernanceFourEyesIncomplete => {
-                        four_eyes.get_or_insert(e);
+                        let take = chosen.get(a).is_none_or(|(_, c)| {
+                            signed.body.per_job_four_eyes && !c.body.per_job_four_eyes
+                        });
+                        if take {
+                            chosen.insert(a.clone(), (row, signed));
+                        }
                     }
                     Err(e) => {
                         refusal.get_or_insert(e);
                     }
                 }
-            }
-            if let Some((why, e)) = four_eyes {
-                chosen.remove(a);
-                return Err(deny("asset", a, why, e));
             }
             if !chosen.contains_key(a) {
                 let (why, e) = refusal.unwrap_or((
@@ -1382,8 +1385,15 @@ impl Control {
             )
             .map_err(db_err)?;
         }
+        // An owner that asks for per-job four eyes has its people approve
+        // this job first.
+        let next = if chosen.values().any(|(_, x)| x.body.per_job_four_eyes) {
+            JobState::WaitingForApproval
+        } else {
+            JobState::Authorized
+        };
         let actor = ctx.actor();
-        for to in [JobState::Planning, JobState::Planned, JobState::Authorized] {
+        for to in [JobState::Planning, JobState::Planned, next] {
             self.transition_in(t, actor, &ctx.request_id, &id, to, None)?;
         }
         audit::append(
@@ -1397,7 +1407,7 @@ impl Control {
                 .r#ref("purpose", purpose_id.clone())
                 .r#ref("governance", governance.governance_id.clone())
                 .r#ref("authorization_set", governance.authorization_set_id.clone())
-                .r#ref("state", JobState::Authorized.as_str()),
+                .r#ref("state", next.as_str()),
         )?;
         Ok((json!({"id": id}), true))
     }
@@ -1423,9 +1433,12 @@ impl Control {
     ///    `at` (its window, governance key, purpose or version: ENC2705,
     ///    ENC2706, ENC2708), or no longer covering the job (ENC2703,
     ///    ENC2709, ENC2711);
-    /// 5. the privacy budget ([`Control::governed_privacy_budget`], a hook
+    /// 5. per-job four eyes (except when approving): an owner whose
+    ///    authorization asks for it without its quorum of distinct people
+    ///    approving this job's spec and authorization set (ENC2707);
+    /// 6. the privacy budget ([`Control::governed_privacy_budget`], a hook
     ///    for now);
-    /// 6. `at` at or after `not_after`, the strict end of every
+    /// 7. `at` at or after `not_after`, the strict end of every
     ///    authorization, purpose and source window, deletion dates
     ///    included (ENC2705).
     ///
@@ -1593,9 +1606,15 @@ impl Control {
             )?;
             not_after = not_after.min(until);
         }
-        // 5. The privacy budget.
+        // 5. Per-job four eyes: every owner that asks for it has its quorum
+        //    (an approval is what collects it).
+        if stage != GovernedStage::Approve {
+            let owners = four_eyes_owners(t, g)?;
+            job_quorums(t, j, g, &owners)?;
+        }
+        // 6. The privacy budget.
         self.governed_privacy_budget(t, j, stage)?;
-        // 6. The window, strictly.
+        // 7. The window, strictly.
         if at >= not_after {
             return Err(expired(format!(
                 "the job's governed window ended at {not_after}"
@@ -1912,11 +1931,17 @@ impl Control {
     }
 
     /// An owner approves a job that uses its asset (assets whose policy
-    /// sets `require_job_approval`).
+    /// sets `require_job_approval`). In a governed project that policy
+    /// field is ignored: see [`Self::approve_governed`].
     pub fn approve_job(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        let ended = std::cell::Cell::new(false);
         let out = self.db.tx(|t| {
+            ended.set(false);
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             job_visible(t, ctx, &j)?;
+            if j.governance.is_some() {
+                return self.approve_governed(t, ctx, &j, &ended);
+            }
             if j.state != JobState::WaitingForApproval {
                 return Err(conflict(format!("job {id} is {}, not waiting for approval", j.state.as_str())));
             }
@@ -1963,11 +1988,157 @@ impl Control {
                 self.transition_in(t, ctx.actor(), &ctx.request_id, id, JobState::Authorized, None)?;
                 audit::append(t, ctx.draft("job.authorized", "job", id, Outcome::Succeeded).org(&j.organization).project(&j.project))?;
             }
-            Ok(())
-        });
+            Ok(Ok(()))
+        })?;
+        if ended.get() {
+            // Anchored as ended: a restored database cannot revive it.
+            self.sync_anchor()?;
+        }
         out?;
         let _ = self.schedule_job(id);
         self.job_view(ctx, id)
+    }
+
+    /// A person's per-job four-eyes approval of governed job `j` (locked;
+    /// in the caller's transaction). The job waits for it when an
+    /// authorization it runs under asks for per-job four eyes; each such
+    /// owner has a quorum of its own people approve, under its approval
+    /// rule for the project (at least two people; by default a data owner
+    /// and a security admin). The approver is a person homed in that
+    /// organization with a role the rule names, never a service account,
+    /// an auditor or the job's submitter, and approves once
+    /// ([`require_human_not_submitter`], ENC2707). The job is revalidated
+    /// first, as scheduling and start do: if it no longer may run (its
+    /// window over, ENC2705; an authorization revoked, ENC2706; ...) it
+    /// fails and is anchored as ended (`ended`), and the approval is
+    /// refused. The approval is a statement over the job, its governed spec
+    /// and its authorization set; once every owner's quorum is met the job
+    /// is authorized.
+    fn approve_governed(
+        &self,
+        t: &mut Transaction<'_>,
+        ctx: &Ctx,
+        j: &JobRow,
+        ended: &std::cell::Cell<bool>,
+    ) -> Result<Result<()>> {
+        let id = &j.id;
+        let g = j.governance.as_ref().expect("a governed job");
+        if j.state != JobState::WaitingForApproval {
+            return Err(conflict(format!(
+                "job {id} is {}, not waiting for approval",
+                j.state.as_str()
+            )));
+        }
+        let owners = four_eyes_owners(t, g)?;
+        // The organization the person approves for: their own, or else one
+        // they hold a role in (refused below: roles held from another
+        // organization never count).
+        let p = &ctx.principal;
+        let Some(org) = p
+            .organization
+            .clone()
+            .filter(|o| owners.contains(o))
+            .or_else(|| owners.iter().find(|o| p.member_of(o)).cloned())
+        else {
+            return Err(forbidden(
+                "only people of the organizations whose authorization asks for per-job approval approve this job",
+            ));
+        };
+        let (_, rule) = crate::ops::governance::approval_rule(t, &j.project, &org)?;
+        let mut roles: Vec<Role> = rule
+            .keys()
+            .filter_map(|r| Role::parse(r).ok())
+            .filter(|r| *r != Role::Auditor)
+            .collect();
+        if roles.is_empty() {
+            roles = vec![Role::DataOwner, Role::SecurityAdmin];
+        }
+        require_human_not_submitter(p, &org, &roles, "approving a governed job", &j.initiated_by)?;
+        let again = t
+            .query_opt(
+                "SELECT 1 FROM job_human_approvals WHERE job_id = $1 AND approver_id = $2",
+                &[id, &ctx.actor()],
+            )
+            .map_err(db_err)?;
+        if again.is_some() {
+            return Err(Error::new(
+                Code::GovernanceFourEyesIncomplete,
+                "this person has approved this job already: four eyes are different people",
+            ));
+        }
+        if let Err(e) = self.revalidate_governed(t, j, GovernedStage::Approve, now()) {
+            self.fail_governed(
+                t,
+                ctx.actor(),
+                &ctx.request_id,
+                j,
+                GovernedStage::Approve,
+                &e,
+            )?;
+            ended.set(true);
+            return Ok(Err(e));
+        }
+        // The rule's role this approval counts for: the first one the
+        // person holds that is still short, else the first one they hold.
+        let given: Vec<String> = t
+            .query(
+                "SELECT role FROM job_human_approvals WHERE job_id = $1 AND organization_id = $2",
+                &[id, &org],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let held: Vec<Role> = roles
+            .iter()
+            .copied()
+            .filter(|r| p.has_role(&org, *r))
+            .collect();
+        let role = held
+            .iter()
+            .find(|r| {
+                let need = rule.get(r.as_str()).copied().unwrap_or(0) as usize;
+                given.iter().filter(|x| x.as_str() == r.as_str()).count() < need
+            })
+            .or(held.first())
+            .copied()
+            .expect("require_human checked a role");
+        let statement = job_statement(j, g);
+        t.execute(
+            "INSERT INTO job_human_approvals (job_id, organization_id, approver_id, role, statement_digest)
+             VALUES ($1, $2, $3, $4, $5)",
+            &[id, &org, &ctx.actor(), &role.as_str(), &statement],
+        )
+        .map_err(db_err)?;
+        // Rows first, the audit chain last.
+        let authorized = job_quorums(t, j, g, &owners).is_ok();
+        if authorized {
+            self.transition_in(
+                t,
+                ctx.actor(),
+                &ctx.request_id,
+                id,
+                JobState::Authorized,
+                None,
+            )?;
+        }
+        audit::append(
+            t,
+            ctx.draft("job.approved", "job", id, Outcome::Succeeded)
+                .org(&org)
+                .project(&j.project)
+                .r#ref("role", role.as_str())
+                .r#ref("statement", statement.clone()),
+        )?;
+        if authorized {
+            audit::append(
+                t,
+                ctx.draft("job.authorized", "job", id, Outcome::Succeeded)
+                    .org(&j.organization)
+                    .project(&j.project),
+            )?;
+        }
+        Ok(Ok(()))
     }
 
     // --- scheduling ---------------------------------------------------------------
@@ -2003,7 +2174,10 @@ impl Control {
     /// fails (anchored as ended). Its version 2 grant carries the binding,
     /// the plan's PlanId and the authorization set, and never outlives
     /// `not_after`, the strict end of every authorization, purpose and
-    /// source window.
+    /// source window. One whose per-job four-eyes approvals no longer
+    /// count (ENC2707: an approver disabled, homed elsewhere or without the
+    /// role now) is not failed but waits for approval again; once
+    /// scheduled, start refuses and fails it instead.
     pub fn schedule_job(&self, id: &str) -> Result<bool> {
         let (placed, ended) = self.db.tx(|t| {
             let Some(j) = job_row(t, id, true)? else { return Ok((false, false)) };
@@ -2014,6 +2188,22 @@ impl Control {
                 None => None,
                 Some(g) => match self.revalidate_governed(t, &j, GovernedStage::Schedule, now()) {
                     Ok(not_after) => Some((g, not_after)),
+                    // Its per-job approvals no longer count (an approver
+                    // disabled or without the role now): not scheduled, it
+                    // waits for approval again rather than failing.
+                    Err(e) if e.code == Code::GovernanceFourEyesIncomplete => {
+                        self.transition_in(t, &self.service_id, "scheduler", id, JobState::WaitingForApproval, Some(&e.message))?;
+                        audit::append(
+                            t,
+                            audit::AuditDraft::new(&self.service_id, "scheduler", "job.approval_lapsed", "job", id, Outcome::Denied)
+                                .org(&j.organization)
+                                .project(&j.project)
+                                .r#ref("reason", e.code.as_str())
+                                .r#ref("check", "revalidate_governed")
+                                .r#ref("stage", GovernedStage::Schedule.as_str()),
+                        )?;
+                        return Ok((false, false));
+                    }
                     Err(e) => {
                         self.fail_governed(t, &self.service_id, "scheduler", &j, GovernedStage::Schedule, &e)?;
                         return Ok((false, true));
@@ -3179,14 +3369,82 @@ fn covers(
             ));
         }
     }
-    if b.per_job_four_eyes {
-        return Err((
-            "per_job_four_eyes",
-            gov(
-                Code::GovernanceFourEyesIncomplete,
-                "the owner requires a per-job approval by two people, which this release does not collect yet",
-            ),
-        ));
+    Ok(())
+}
+
+/// The organizations whose authorization, among those governed job `g`
+/// runs under, asks for per-job four-eyes approval: each has a quorum of
+/// its own people approve the job before it is scheduled.
+fn four_eyes_owners(t: &mut Transaction<'_>, g: &JobGovernance) -> Result<BTreeSet<String>> {
+    let rows: Vec<String> = g.authorizations.keys().cloned().collect();
+    let mut owners = BTreeSet::new();
+    for r in t
+        .query(
+            "SELECT organization_id, signed FROM authorizations WHERE id = ANY($1) ORDER BY id",
+            &[&rows],
+        )
+        .map_err(db_err)?
+    {
+        let signed: SignedAuthorizationV2 = r
+            .get::<_, Option<Value>>(1)
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| db_err(format!("stored authorization: {e}")))?
+            .ok_or_else(|| db_err("a job's authorization is signed"))?;
+        if signed.body.per_job_four_eyes {
+            owners.insert(r.get(0));
+        }
+    }
+    Ok(owners)
+}
+
+/// The statement each approver of governed job `j` approves: its job ID,
+/// governed spec ID and authorization set.
+fn job_statement(j: &JobRow, g: &JobGovernance) -> String {
+    job_approval_statement(&j.id, &j.spec_id, &g.authorization_set_id)
+}
+
+/// Whether every organization in `owners` has its quorum for governed job
+/// `j`: under its approval rule for the project, enough distinct people of
+/// it approved this job's statement (ENC2707). Only approvals over the
+/// job's current statement count, never its submitter's, and only while
+/// the approver still may approve (validity at execution time, as
+/// [`require_human`](crate::authz::require_human) checks when approving):
+/// an active user, homed in the organization, still holding the role the
+/// approval counted for and not an auditor there. An approval that stops
+/// counting stays on record as evidence.
+fn job_quorums(
+    t: &mut Transaction<'_>,
+    j: &JobRow,
+    g: &JobGovernance,
+    owners: &BTreeSet<String>,
+) -> Result<()> {
+    let statement = job_statement(j, g);
+    for org in owners {
+        let (min, roles) = crate::ops::governance::approval_rule(t, &j.project, org)?;
+        let approvals: Vec<(String, String)> = t
+            .query(
+                "SELECT a.approver_id, a.role FROM job_human_approvals a
+                   JOIN users u ON u.id = a.approver_id AND u.status = 'active'
+                    AND u.organization_id = a.organization_id
+                  WHERE a.job_id = $1 AND a.organization_id = $2 AND a.statement_digest = $3
+                    AND a.approver_id <> $4
+                    AND EXISTS (SELECT 1 FROM memberships m WHERE m.principal_id = a.approver_id
+                                   AND m.organization_id = a.organization_id AND m.role = a.role)
+                    AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.principal_id = a.approver_id
+                                       AND m.organization_id = a.organization_id AND m.role = 'auditor')",
+                &[&j.id, org, &statement, &j.initiated_by],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+        quorum_met(approvals, min, &roles).map_err(|e| {
+            Error::new(
+                e.code,
+                format!("{org}'s per-job approval of job {}: {}", j.id, e.message),
+            )
+        })?;
     }
     Ok(())
 }

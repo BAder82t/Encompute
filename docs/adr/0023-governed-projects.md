@@ -254,6 +254,30 @@ Approval statement = SHA256("encompute.approval.v1" ||
   approval evidence. Verifying the IdP token itself (OIDC with `nonce =
   statement_digest`) at the broker and in the report is a later phase.
 
+As built (per-job four eyes):
+
+- A job waits for approval when an authorization it runs under asks for
+  per-job four eyes; each such owner organization reaches its own approval
+  rule's quorum for the project. The approval rule is the same one standing
+  authorizations use, and one quorum check serves both.
+- An approval is a statement over the job, its governed spec and its
+  authorization set (`encompute.job-approval.v1`), stored append-only.
+- Approvals are checked again at execution time. At scheduling and start
+  an approval counts only while its approver is still an active user,
+  homed in the organization, holding the role the approval counted for and
+  not an auditor there. A job not yet scheduled whose approvals stop
+  counting waits for approval again (it is not failed); a job already
+  scheduled is refused at start and fails. The approval row stays as
+  evidence.
+- An approval rule never requires `auditor` (auditors never approve, so
+  the rule could never be met) and names only known roles; the database
+  refuses any other rule.
+- Four eyes assume one canonical identity per person. The control plane
+  counts distinct user identities (issuer and subject); two identity
+  provider accounts for the same human would count as two people. Keeping
+  one identity per person is an onboarding control of each organization's
+  identity provider, outside Encompute.
+
 ### 8. Expiry and execution-time validity (D7)
 
 - **Expiry is strict:** `valid_from ≤ t < valid_until`, with no margin.

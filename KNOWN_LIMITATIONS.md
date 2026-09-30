@@ -356,13 +356,17 @@ Governed projects are being built after 0.3 (see
 [docs/public-sector.md](docs/public-sector.md)). What exists so far has
 these limits:
 
-- **Governed jobs have no per-job four-eyes approval, release forms or
-  derived assets yet.** A job runs under its owners' authorizations, but an
-  authorization that asks for per-job approval refuses jobs until that
-  approval exists; a release class is compared by equality with the
-  authorization's (not yet by a partial order of classes, nor against the
-  program's output forms); and a released result cannot yet be registered
-  or exported as a derived asset.
+- **Governed jobs have no release forms or derived assets yet.** A job
+  runs under its owners' authorizations (with per-job four-eyes approval
+  where an authorization asks for it); a release class is compared by
+  equality with the authorization's (not yet by a partial order of
+  classes, nor against the program's output forms); and a released result
+  cannot yet be registered or exported as a derived asset.
+- **Four eyes assume one identity per person.** Quorums count distinct
+  user identities (identity provider issuer and subject). If one person
+  holds two identities, in one identity provider or two, the control plane
+  counts two people. Giving each person one identity is an onboarding
+  control of the organization's identity provider, outside Encompute.
 - **Declared placement is refused.** A governed broker releases no key
   for an execution that declares placement until attested placement can
   be checked.

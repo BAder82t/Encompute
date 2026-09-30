@@ -326,9 +326,9 @@ fn migration_2_applies_to_a_version_1_database() {
                   VALUES ('j', 'o', 'p', 'pl', 'y', 'x', 'p', '[]', 'out', 'exact', 'openfhe-exact', 'P', 'authorized', 'u', 'k', 'd');",
         )
         .unwrap();
-    assert_eq!(db.migrate().unwrap(), 7);
-    assert_eq!(db.schema_version().unwrap(), 7);
-    assert_eq!(db.migrate().unwrap(), 7, "idempotent");
+    assert_eq!(db.migrate().unwrap(), 8);
+    assert_eq!(db.schema_version().unwrap(), 8);
+    assert_eq!(db.migrate().unwrap(), 8, "idempotent");
     let mut c = db.conn().unwrap();
     let e = c
         .query_one(

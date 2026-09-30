@@ -10,8 +10,9 @@ use ed25519_dalek::SigningKey;
 
 use encompute_ir::Code;
 use encompute_trust::authz::{
-    governance_key_id, ApprovalEvidence, AuthorizationLimits, AuthorizationSetId, AuthorizationV2,
-    GovernanceKey, GovernanceKeyStatus, PurposeAcceptance, RevocationV2, SignedAuthorizationV2,
+    governance_key_id, job_approval_statement, quorum_met, ApprovalEvidence, AuthorizationLimits,
+    AuthorizationSetId, AuthorizationV2, GovernanceKey, GovernanceKeyStatus, PurposeAcceptance,
+    RevocationV2, SignedAuthorizationV2,
 };
 use encompute_trust::{Evidence, NodeKind, ReportOptions, Status, TrustGraph};
 use encompute_verification::governance::{ProgramRef, ProgramSetId, ReleaseClass};
@@ -768,3 +769,37 @@ asset \"income\" dataset owners [\"tax-agency\"] readers [\"tax-agency\"] purpos
 %2 = ge %0, %1 : secret bool
 output \"out\" = %2 to \"tax-agency\"
 ";
+
+/// Per-job four eyes: one quorum rule for jobs and authorizations (a
+/// person counts once), and a statement bound to the job, its governed
+/// spec and its authorization set.
+#[test]
+fn job_approval_quorum_and_statement() {
+    let rule = BTreeMap::from([("data_owner".to_string(), 1), ("security_admin".into(), 1)]);
+    quorum_met(
+        [("alice", "data_owner"), ("bob", "security_admin")],
+        2,
+        &rule,
+    )
+    .unwrap();
+    let twice = quorum_met(
+        [("alice", "data_owner"), ("alice", "security_admin")],
+        2,
+        &rule,
+    );
+    assert_eq!(twice.unwrap_err().code, Code::GovernanceFourEyesIncomplete);
+    let one_role = quorum_met([("alice", "data_owner"), ("carol", "data_owner")], 2, &rule);
+    assert_eq!(
+        one_role.unwrap_err().code,
+        Code::GovernanceFourEyesIncomplete
+    );
+    // Never fewer than two people, whatever the rule says.
+    let alone = quorum_met([("alice", "data_owner")], 1, &BTreeMap::new());
+    assert_eq!(alone.unwrap_err().code, Code::GovernanceFourEyesIncomplete);
+    let s = job_approval_statement("job_1", &h('a'), &h('b'));
+    assert_eq!(s.len(), 64);
+    assert_eq!(s, job_approval_statement("job_1", &h('a'), &h('b')));
+    assert_ne!(s, job_approval_statement("job_2", &h('a'), &h('b')));
+    assert_ne!(s, job_approval_statement("job_1", &h('c'), &h('b')));
+    assert_ne!(s, job_approval_statement("job_1", &h('a'), &h('c')));
+}
