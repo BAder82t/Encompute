@@ -535,14 +535,17 @@ fn governance_ids_unchanged_without_asset_brokers() {
     // The map, when present, changes the ID; a broker ID or key that is not
     // a label is refused.
     let mut x = binding();
-    x.asset_brokers.insert("income".into(), "tax-broker".into());
+    x.asset_brokers.insert(h('3'), "tax-broker".into());
     x.check().unwrap();
     assert_ne!(x.id(), b.id());
     let mut y = x.clone();
-    y.asset_brokers
-        .insert("income".into(), "other-broker".into());
+    y.asset_brokers.insert(h('3'), "other-broker".into());
     assert_ne!(y.id(), x.id());
     let mut z = x.clone();
-    z.asset_brokers.insert("income".into(), String::new());
+    z.asset_brokers.insert(h('3'), String::new());
     assert!(z.check().is_err());
+    // Keyed by asset version ID, never by a key reference or asset name.
+    let mut k = binding();
+    k.asset_brokers.insert("income".into(), "tax-broker".into());
+    assert!(k.check().is_err());
 }

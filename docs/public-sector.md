@@ -214,6 +214,15 @@ until enough distinct people of the owner (its approval rule, at least
 two, never the job's submitter) approve that job, its spec and its
 authorization set.
 
+An institution can be appointed the project's auditor: it reads the
+project, its purposes, the owners' signed authorizations, the jobs, their
+trust reports and the project's audit events, and changes nothing. No
+auditor, in any institution taking part, can act in the project, and an
+auditor holds no other role there. Every institution that does not own a
+record sees the same shared view of it: never where another institution's
+data is stored or which key protects it, and approvers only as
+pseudonyms.
+
 Not yet built: release classes, placement and operator rules (a broker
 refuses any execution that declares placement until placement can be
 attested), record linkage, the governance report and evidence bundle. The

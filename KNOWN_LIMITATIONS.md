@@ -367,6 +367,15 @@ these limits:
   holds two identities, in one identity provider or two, the control plane
   counts two people. Giving each person one identity is an onboarding
   control of the organization's identity provider, outside Encompute.
+- **Role combinations with auditor are not yet removed everywhere.**
+  Auditor separation is enforced in organizations taking part in governed
+  projects. Elsewhere, and for combinations made before (bootstrap admins
+  hold admin, operator and auditor in the platform organization), they
+  remain; `GET /v1/security/legacy-service-admins` lists them
+  (`auditor_combinations`) and a later migration removes them. Such an
+  auditor stays read-only in governed projects.
+- **Auditor organizations read no privacy ledgers yet.** A ledger is its
+  asset owner's until privacy scopes give a project its own ledger.
 - **Declared placement is refused.** A governed broker releases no key
   for an execution that declares placement until attested placement can
   be checked.

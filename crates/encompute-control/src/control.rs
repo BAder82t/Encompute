@@ -64,6 +64,9 @@ pub struct Control {
     /// Compiled execution specs of plans, by plan row (release tickets).
     pub plan_specs:
         std::sync::Mutex<std::collections::BTreeMap<String, encompute_verification::ExecutionSpec>>,
+    /// The key approver pseudonyms are computed under (derived from the
+    /// signing key; never leaves the process).
+    pub pseudonyms: crate::views::PseudonymKey,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -167,6 +170,7 @@ impl Control {
         audit_every: u64,
     ) -> Result<Self> {
         let (anchor, existed) = Anchor::open(store, &signer)?;
+        let pseudonyms = crate::views::PseudonymKey::derive(&signer.seed());
         let transport = transport.unwrap_or_else(|| {
             Box::new(HttpTransport::new(
                 ServiceSigner::from_seed(signer.id(), &signer.seed()).expect("valid ID"),
@@ -184,6 +188,7 @@ impl Control {
             audit_every: audit_every.max(1),
             metrics_access: MetricsAccess::default_for(env),
             plan_specs: Default::default(),
+            pseudonyms,
         };
         c.ensure_self_registered()?;
         c.verify_state(existed)?;
@@ -313,6 +318,7 @@ impl Control {
         store: Box<dyn AnchorStore>,
     ) -> Result<Self> {
         let (anchor, _) = Anchor::open(store, &signer)?;
+        let pseudonyms = crate::views::PseudonymKey::derive(&signer.seed());
         Ok(Self {
             env: cfg.env,
             service_id: cfg.service_id.clone(),
@@ -327,6 +333,7 @@ impl Control {
             audit_every: cfg.audit_checkpoint_every.max(1),
             metrics_access: MetricsAccess::Closed,
             plan_specs: Default::default(),
+            pseudonyms,
         })
     }
 

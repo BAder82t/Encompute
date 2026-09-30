@@ -121,13 +121,7 @@ fn world() -> Option<C> {
     let tax_sec1 = user(&t, &tax_admin, TAX, "t-sec1", &["security_admin"]);
     let tax_sec2 = user(&t, &tax_admin, TAX, "t-sec2", &["security_admin"]);
     let tax_owner = user(&t, &tax_admin, TAX, "t-owner", &["data_owner"]);
-    let tax_auditor = user(
-        &t,
-        &tax_admin,
-        TAX,
-        "t-auditor",
-        &["auditor", "security_admin"],
-    );
+    let tax_auditor = user(&t, &tax_admin, TAX, "t-auditor", &["auditor"]);
     let tax_dev = user(&t, &tax_admin, TAX, "t-dev", &["ml_developer"]);
     let ben_sec1 = user(&t, &ben_admin, BEN, "b-sec1", &["security_admin"]);
     let evaluator = common::evaluator(
@@ -782,7 +776,9 @@ fn only_org_security_admin_registers_brokers() {
     // A security admin of another organization.
     let (s, _) = register_broker(&c.t, &c.ben_sec1, TAX, "tax-broker", 41);
     assert_eq!(s, 404);
-    // An auditor, whatever else it holds.
+    // An auditor, whatever else it holds (a combination from before
+    // auditor separation: granting it now is refused, ENC2716).
+    legacy_role(&c.t, "t-auditor", TAX, "security_admin");
     refused(
         register_broker(&c.t, &c.tax_auditor, TAX, "tax-broker", 41),
         "ENC2602",

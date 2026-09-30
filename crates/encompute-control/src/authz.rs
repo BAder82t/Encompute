@@ -9,6 +9,12 @@
 //!
 //! Platform admins (organization `platform`) create organizations and
 //! register platform services; they get no access to tenant data.
+//!
+//! Auditors are read-only (D9). In a governed project every mutating call
+//! refuses them ([`deny_auditor`]), and in an organization taking part in
+//! one an auditor holds no other role ([`require_auditor_separation`],
+//! ENC2716). An auditor organization takes part in a governed project only
+//! to read its shared records (`crate::views`).
 
 use postgres::GenericClient;
 
@@ -124,6 +130,12 @@ pub struct ProjectRow {
     pub governance: String,
     /// `standard` or `sovereign` (governed projects only; immutable).
     pub custody: String,
+    /// Auditor organizations that accepted (governed projects only): they
+    /// see the project's shared records and change nothing. Never in
+    /// `members`.
+    pub auditors: Vec<String>,
+    /// Auditor organizations invited that have not accepted yet.
+    pub invited_auditors: Vec<String>,
 }
 
 impl ProjectRow {
@@ -135,6 +147,15 @@ impl ProjectRow {
     /// registered.
     pub fn sovereign(&self) -> bool {
         self.custody == "sovereign"
+    }
+
+    /// Every organization taking part, invited or not, member or auditor.
+    pub fn participants(&self) -> impl Iterator<Item = &String> {
+        std::iter::once(&self.organization)
+            .chain(&self.members)
+            .chain(&self.invited)
+            .chain(&self.auditors)
+            .chain(&self.invited_auditors)
     }
 }
 
@@ -149,17 +170,21 @@ pub fn project_row(c: &mut impl GenericClient, id: &str) -> Result<Option<Projec
         return Ok(None);
     };
     let (mut members, mut invited) = (vec![], vec![]);
+    let (mut auditors, mut invited_auditors) = (vec![], vec![]);
     for m in c
         .query(
-            "SELECT organization_id, status FROM project_members WHERE project_id = $1 ORDER BY 1",
+            "SELECT organization_id, status, participation FROM project_members
+              WHERE project_id = $1 ORDER BY 1",
             &[&id],
         )
         .map_err(db_err)?
     {
-        if m.get::<_, String>(1) == "active" {
-            members.push(m.get(0));
-        } else {
-            invited.push(m.get(0));
+        let active = m.get::<_, String>(1) == "active";
+        match (m.get::<_, String>(2) == "auditor", active) {
+            (false, true) => members.push(m.get(0)),
+            (false, false) => invited.push(m.get(0)),
+            (true, true) => auditors.push(m.get(0)),
+            (true, false) => invited_auditors.push(m.get(0)),
         }
     }
     Ok(Some(ProjectRow {
@@ -171,16 +196,174 @@ pub fn project_row(c: &mut impl GenericClient, id: &str) -> Result<Option<Projec
         invited,
         governance: r.get(4),
         custody: r.get(5),
+        auditors,
+        invited_auditors,
     }))
 }
 
-/// A project the principal's organization collaborates in.
+/// A project the principal's organization collaborates in, as a member or
+/// (governed projects) as an auditor organization that accepted.
 pub fn project_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Result<ProjectRow> {
     let row = project_row(c, id)?.ok_or_else(|| not_found("project", id))?;
-    if !row.members.iter().any(|o| p.member_of(o)) {
+    if !row
+        .members
+        .iter()
+        .chain(&row.auditors)
+        .any(|o| p.member_of(o))
+    {
         return Err(not_found("project", id));
     }
     Ok(row)
+}
+
+fn read_only(msg: String) -> Error {
+    forbidden(format!("auditors are read-only: {msg}"))
+}
+
+/// Auditors change nothing in a governed project (D9): refused when the
+/// principal holds `auditor` in any organization taking part in it (the
+/// owner, a member, an auditor organization, invited or not), whatever
+/// else it holds. Standard projects are unchanged. The membership calls
+/// use only this part: an auditor organization's admin accepts and leaves
+/// its own participation.
+pub fn deny_auditor_role(p: &Principal, project: &ProjectRow) -> Result<()> {
+    if !project.governed() {
+        return Ok(());
+    }
+    if let Some(o) = project
+        .participants()
+        .find(|o| p.has_role(o, Role::Auditor))
+    {
+        return Err(read_only(format!(
+            "auditor in {o}, which takes part in governed project {}",
+            project.id
+        )));
+    }
+    Ok(())
+}
+
+/// Every mutating call that touches governed project `project` (its
+/// members, policies, purposes, authorizations, plans, jobs, approvals,
+/// tickets, sources) refuses an auditor (D9, ENC2602): someone holding
+/// `auditor` in an organization taking part in it ([`deny_auditor_role`]),
+/// and anyone acting for one of its auditor organizations, which never
+/// own, submit, receive, approve or hold keys there.
+pub fn deny_auditor(p: &Principal, project: &ProjectRow) -> Result<()> {
+    deny_auditor_role(p, project)?;
+    if !project.governed() {
+        return Ok(());
+    }
+    if let Some(o) = project
+        .auditors
+        .iter()
+        .chain(&project.invited_auditors)
+        .find(|o| p.member_of(o))
+    {
+        return Err(read_only(format!(
+            "{o} audits governed project {} and changes nothing there",
+            project.id
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `org` takes part in a governed project (as owner, member or
+/// auditor organization, invited or not).
+pub fn in_governed_project(c: &mut impl GenericClient, org: &str) -> Result<bool> {
+    Ok(c.query_opt(
+        "SELECT 1 FROM project_members m JOIN projects p ON p.id = m.project_id
+              WHERE m.organization_id = $1 AND p.governance = 'governed' LIMIT 1",
+        &[&org],
+    )
+    .map_err(db_err)?
+    .is_some())
+}
+
+/// Whether `org` is an auditor organization: it takes part in a governed
+/// project as an auditor (invited or not). Such an organization takes part
+/// in no governed project as a member, and holds no keys for one.
+pub fn auditor_organization(c: &mut impl GenericClient, org: &str) -> Result<bool> {
+    Ok(c
+        .query_opt(
+            "SELECT 1 FROM project_members WHERE organization_id = $1 AND participation = 'auditor' LIMIT 1",
+            &[&org],
+        )
+        .map_err(db_err)?
+        .is_some())
+}
+
+/// Mutations of `org`'s own governance state (its assets, governance
+/// keys, key brokers, privacy ledgers) refuse someone holding `auditor`
+/// there once `org` takes part in a governed project (D9, ENC2602). In
+/// organizations outside governed projects roles combine as before.
+pub fn deny_auditor_in(c: &mut impl GenericClient, p: &Principal, org: &str) -> Result<()> {
+    if p.has_role(org, Role::Auditor) && in_governed_project(c, org)? {
+        return Err(read_only(format!(
+            "auditor in {org}, which takes part in a governed project"
+        )));
+    }
+    Ok(())
+}
+
+/// Serializes changes of `org`'s roles with its joining governed projects:
+/// both take this transaction-scoped lock before reading what the other
+/// writes, so a role combination and a governed participation are never
+/// both accepted.
+pub fn org_roles_lock(c: &mut impl GenericClient, org: &str) -> Result<()> {
+    c.execute(
+        "SELECT pg_advisory_xact_lock(hashtext('org-roles'), hashtext($1))",
+        &[&org],
+    )
+    .map(|_| ())
+    .map_err(db_err)
+}
+
+/// A principal holding `auditor` with another role: (organization,
+/// principal, kind `user` or `service`, every role it holds there).
+pub type AuditorCombination = (String, String, String, Vec<String>);
+
+/// Principals of `org` (or of every organization) holding `auditor`
+/// together with another role there, by organization then principal.
+pub fn auditor_combinations(
+    c: &mut impl GenericClient,
+    orgs: Option<&[String]>,
+) -> Result<Vec<AuditorCombination>> {
+    let orgs: Option<Vec<String>> = orgs.map(<[String]>::to_vec);
+    Ok(c.query(
+        "SELECT m.organization_id, m.principal_id,
+                    CASE WHEN EXISTS (SELECT 1 FROM users u WHERE u.id = m.principal_id)
+                         THEN 'user' ELSE 'service' END,
+                    array_agg(m.role ORDER BY m.role)
+               FROM memberships m
+              WHERE ($1::text[] IS NULL OR m.organization_id = ANY($1))
+              GROUP BY m.organization_id, m.principal_id
+             HAVING bool_or(m.role = 'auditor') AND bool_or(m.role <> 'auditor')
+              ORDER BY 1, 2",
+        &[&orgs],
+    )
+    .map_err(db_err)?
+    .iter()
+    .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+    .collect())
+}
+
+/// Auditor separation (D9, ENC2716): `org` may take part in a governed
+/// project only while none of its principals holds `auditor` together
+/// with another role there.
+pub fn require_auditor_separation(c: &mut impl GenericClient, org: &str) -> Result<()> {
+    let combined = auditor_combinations(c, Some(&[org.to_owned()]))?;
+    if let Some((_, principal, _, roles)) = combined.first() {
+        return Err(Error::new(
+            Code::GovernanceAuditorSeparation,
+            format!(
+                "{org} cannot take part in a governed project while {principal} holds auditor with {} \
+                 ({} principal(s) in all; see GET /v1/security/legacy-service-admins): an auditor holds no other role",
+                roles.iter().filter(|r| *r != "auditor").cloned().collect::<Vec<_>>().join(", "),
+                combined.len()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The organizations through which `p` takes part in `project` with one of
@@ -242,8 +425,10 @@ pub fn asset_row(c: &mut impl GenericClient, id: &str) -> Result<Option<AssetRow
 /// governed project, where consent is an owner-signed authorization and
 /// not an approval, a source is visible beyond its owner only to an
 /// organization an active authorization of it names as a recipient (while
-/// a member of that project), and to the submitting organization of a job
-/// that runs under an authorization of it. Anyone else gets "not found".
+/// a member of that project), to the submitting organization of a job
+/// that runs under an authorization of it, and to the project's auditor
+/// organizations (the version an authorization names). Anyone else gets
+/// "not found".
 /// Other organizations get the row without where it is stored, which key
 /// protects it or its size.
 pub fn asset_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Result<AssetRow> {
@@ -267,6 +452,11 @@ pub fn asset_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Res
              UNION ALL
              SELECT 1 FROM job_authorizations ja JOIN jobs j ON j.id = ja.job_id
               WHERE ja.asset_id = $1 AND j.organization_id = ANY($2)
+             UNION ALL
+             SELECT 1 FROM authorizations z
+               JOIN project_members pm ON pm.project_id = z.project_id AND pm.participation = 'auditor'
+                AND pm.status = 'active'
+              WHERE z.asset_id = $1 AND pm.organization_id = ANY($2)
              LIMIT 1",
             &[&id, &orgs],
         )

@@ -839,6 +839,8 @@ dependencies = [
  "encompute-trust",
  "encompute-verification",
  "getrandom 0.2.17",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
  "jsonwebtoken",
  "p256",
  "postgres",

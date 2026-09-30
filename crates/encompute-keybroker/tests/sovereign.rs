@@ -888,7 +888,7 @@ fn unsigned_ticket_refused_before_coverage_checks() {
 /// it to this broker releases as before.
 #[test]
 fn governed_broker_refuses_asset_bound_to_another_broker() {
-    let with = |map: &[(&str, &str)]| {
+    let with = |map: &[(&String, &str)]| {
         let mut b = binding();
         b.asset_brokers = map
             .iter()
@@ -896,16 +896,16 @@ fn governed_broker_refuses_asset_bound_to_another_broker() {
             .collect();
         world_with(b, authorization())
     };
-    let e = with(&[(ASSET, "benefits-broker")])
+    let v = asset_version();
+    let e = with(&[(&v, "benefits-broker")])
         .release_fresh()
         .unwrap_err();
     assert_eq!(e.code, Code::GovernanceCustody, "{e}");
     assert!(e.message.contains("benefits-broker"), "{e}");
-    let e = with(&[("other-asset", BROKER)])
-        .release_fresh()
-        .unwrap_err();
+    // Mapped under another version: this key's version is left out.
+    let e = with(&[(&h('9'), BROKER)]).release_fresh().unwrap_err();
     assert_eq!(e.code, Code::GovernanceCustody, "{e}");
-    with(&[(ASSET, BROKER), ("claims", "benefits-broker")])
+    with(&[(&v, BROKER), (&h('9'), "benefits-broker")])
         .release_fresh()
         .unwrap();
     // No map: unchanged.

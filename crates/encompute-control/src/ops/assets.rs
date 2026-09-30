@@ -12,7 +12,8 @@ use encompute_verification::service::sha256_hex;
 
 use crate::audit::{self, Outcome};
 use crate::authz::{
-    asset_row, asset_visible, conflict, forbidden, not_found, project_visible, require, AssetRow,
+    asset_row, asset_visible, conflict, deny_auditor, deny_auditor_in, forbidden, not_found,
+    project_visible, require, AssetRow,
 };
 use crate::control::{load_ledger, runtime_rollback, Control, Ctx};
 use crate::db::db_err;
@@ -142,6 +143,7 @@ pub fn asset_view(p: &crate::authn::Principal, a: &AssetRow) -> Value {
 
 impl Control {
     pub fn register_asset(&self, ctx: &Ctx, r: RegisterAsset) -> Result<Value> {
+        deny_auditor_in(&mut *self.db.conn()?, &ctx.principal, &r.organization)?;
         require(
             &ctx.principal,
             &r.organization,
@@ -264,6 +266,7 @@ impl Control {
             // owner itself registered (never a platform broker).
             if let Some(project) = &r.project {
                 let p = project_visible(t, &ctx.principal, project)?;
+                deny_auditor(&ctx.principal, &p)?;
                 if !p.members.contains(&r.organization) {
                     return Err(forbidden("the asset's owner must be a member of the project"));
                 }
@@ -431,11 +434,13 @@ impl Control {
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
             }
+            deny_auditor_in(t, &ctx.principal, &a.organization)?;
             require(&ctx.principal, &a.organization, owner_roles(&a.kind), "approving an asset")?;
             if a.status == "revoked" {
                 return Err(conflict(format!("asset {id} is revoked")));
             }
             let p = project_visible(t, &ctx.principal, &r.project)?;
+            deny_auditor(&ctx.principal, &p)?;
             if !p.members.contains(&a.organization) {
                 return Err(forbidden("the asset's owner must be a member of the project"));
             }
@@ -498,6 +503,7 @@ impl Control {
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
             }
+            deny_auditor_in(t, &ctx.principal, &a.organization)?;
             require(&ctx.principal, &a.organization, owner_roles(&a.kind), "withdrawing an asset approval")?;
             // Serializes with submissions (they hold the asset row shared).
             t.execute("SELECT 1 FROM assets WHERE id = $1 FOR UPDATE", &[&id])
@@ -583,6 +589,7 @@ impl Control {
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
             }
+            deny_auditor_in(t, &ctx.principal, &a.organization)?;
             let mut roles = owner_roles(&a.kind).to_vec();
             roles.push(Role::SecurityAdmin);
             require(&ctx.principal, &a.organization, &roles, "revoking an asset")?;
@@ -833,6 +840,7 @@ impl Control {
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", asset));
             }
+            deny_auditor_in(t, &ctx.principal, &a.organization)?;
             require(
                 &ctx.principal,
                 &a.organization,
@@ -903,6 +911,7 @@ impl Control {
                 if !ctx.principal.member_of(&org) {
                     return Err(not_found("privacy ledger for asset", asset));
                 }
+                deny_auditor_in(t, &ctx.principal, &org)?;
                 if !ctx.principal.any_role(&org, &[Role::DataOwner, Role::Operator]) {
                     return Err(forbidden(
                         "privacy spending is done by the owner's data owners, or SecAgg services the owner authorized",

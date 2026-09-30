@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod model;
 mod ops;
 pub mod transport;
+pub mod views;
 
 pub use control::{Control, Ctx};
 pub use ops::{

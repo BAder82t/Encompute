@@ -36,7 +36,8 @@
 //! | POST | `/v1/privacy/{asset}/events` | |
 //! | POST | `/v1/privacy/{asset}/spenders` | owners authorize a SecAgg service |
 //! | GET | `/v1/trust/{job}` | |
-//! | GET | `/v1/audit?organization=&after=&limit=` | |
+//! | GET | `/v1/audit?organization=&after=&limit=` | an organization's trail |
+//! | GET | `/v1/audit?project=&after=&limit=` | a governed project's events, as every participant sees them |
 //! | POST | `/v1/audit/checkpoints` | |
 //! | POST | `/v1/messages` | services only |
 //! | POST, GET | `/v1/organizations/{id}/governance-keys` | governed projects: an organization's governance public keys |
@@ -120,7 +121,8 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceResidency
         | Code::GovernanceLinkageMismatch
         | Code::GovernanceReleaseTicket
-        | Code::GovernanceCustody => 403,
+        | Code::GovernanceCustody
+        | Code::GovernanceAuditorSeparation => 403,
         Code::NotFound => 404,
         Code::Conflict | Code::PrivacyBudgetExceeded => 409,
         Code::PlanningFailed | Code::PlanInvalid => 422,
@@ -478,6 +480,19 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
 
         ("GET", ["v1", "audit"]) => {
             let q = query(&r.url);
+            let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit = q
+                .get("limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200)
+                .clamp(1, 1000);
+            // A governed project's events, shared by everyone taking part.
+            if let Some(project) = q.get("project") {
+                if q.contains_key("organization") {
+                    return Err(bad("name an organization or a project, not both"));
+                }
+                return ok(control.project_audit(ctx, project, after, limit)?);
+            }
             let org = q
                 .get("organization")
                 .cloned()
@@ -489,17 +504,17 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
                 &[Role::Auditor, Role::OrganizationAdmin, Role::SecurityAdmin],
                 "reading the audit trail",
             )?;
-            let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
-            let limit = q
-                .get("limit")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(200)
-                .clamp(1, 1000);
             let mut c = control.db.conn()?;
-            ok(
-                serde_json::to_value(audit::list(&mut *c, Some(&org), after, limit)?)
-                    .expect("serializable"),
-            )
+            // Another organization's people who acted on this one (an
+            // invitation, a removal, a revocation that failed its job)
+            // appear as `organization/kind`; each event's hash covers the
+            // actor as recorded.
+            let mut labels = crate::views::Labels::default();
+            let mut events = audit::list(&mut *c, Some(&org), after, limit)?;
+            for e in &mut events {
+                e.actor = labels.label_outside(&mut *c, &e.actor, Some(&org))?;
+            }
+            ok(serde_json::to_value(events).expect("serializable"))
         }
         ("POST", ["v1", "audit", "checkpoints"]) => {
             require(
@@ -521,6 +536,77 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         _ => Err(not_found("route", &format!("{m} {path}"))),
     }
 }
+
+/// Every authenticated route of [`route`], as (method, path with `{}` for
+/// each ID). Tests enumerate it: every `POST` is a mutation an auditor is
+/// refused (`every_mutating_route_refuses_an_auditor`), every `GET` is
+/// scanned for other organizations' private metadata
+/// (`governance_views_canary_scan`); a unit test keeps it equal to the
+/// router, so a new route is covered by both from the start.
+pub const ROUTES: &[(&str, &str)] = &[
+    ("GET", "/v1/whoami"),
+    ("POST", "/v1/organizations"),
+    ("GET", "/v1/organizations/{}"),
+    ("POST", "/v1/organizations/{}/users"),
+    ("POST", "/v1/organizations/{}/service-accounts"),
+    ("POST", "/v1/organizations/{}/service-accounts/{}/disable"),
+    ("POST", "/v1/organizations/{}/users/{}/disable"),
+    ("POST", "/v1/organizations/{}/memberships/remove"),
+    ("GET", "/v1/security/legacy-service-admins"),
+    ("POST", "/v1/organizations/{}/key-rotations"),
+    ("POST", "/v1/projects"),
+    ("GET", "/v1/projects"),
+    ("GET", "/v1/projects/{}"),
+    ("POST", "/v1/projects/{}/members"),
+    ("POST", "/v1/projects/{}/members/remove"),
+    ("POST", "/v1/organizations/{}/governance-keys"),
+    ("GET", "/v1/organizations/{}/governance-keys"),
+    ("POST", "/v1/organizations/{}/governance-keys/{}/approve"),
+    ("POST", "/v1/organizations/{}/governance-keys/{}/revoke"),
+    ("POST", "/v1/projects/{}/purposes"),
+    ("GET", "/v1/projects/{}/purposes"),
+    ("GET", "/v1/purposes/{}"),
+    ("POST", "/v1/purposes/{}/approve"),
+    ("POST", "/v1/purposes/{}/accept"),
+    ("POST", "/v1/purposes/{}/retire"),
+    ("POST", "/v1/authorizations"),
+    ("GET", "/v1/authorizations/{}"),
+    ("POST", "/v1/authorizations/{}/approve"),
+    ("POST", "/v1/authorizations/{}/signature"),
+    ("POST", "/v1/authorizations/{}/revoke"),
+    ("POST", "/v1/organizations/{}/key-brokers"),
+    ("GET", "/v1/organizations/{}/key-brokers"),
+    ("POST", "/v1/projects/{}/policies"),
+    ("POST", "/v1/policies/{}/approve"),
+    ("POST", "/v1/assets"),
+    ("GET", "/v1/assets"),
+    ("GET", "/v1/assets/{}"),
+    ("GET", "/v1/assets/{}/lineage"),
+    ("POST", "/v1/assets/{}/approvals"),
+    ("POST", "/v1/assets/{}/approvals/withdraw"),
+    ("POST", "/v1/assets/{}/revoke"),
+    ("POST", "/v1/plans"),
+    ("POST", "/v1/jobs"),
+    ("GET", "/v1/jobs"),
+    ("GET", "/v1/jobs/{}"),
+    ("POST", "/v1/jobs/{}/cancel"),
+    ("POST", "/v1/jobs/{}/approve"),
+    ("POST", "/v1/jobs/{}/start"),
+    ("POST", "/v1/jobs/{}/release-ticket"),
+    ("POST", "/v1/jobs/{}/complete"),
+    ("POST", "/v1/jobs/{}/receipt"),
+    ("POST", "/v1/evaluators"),
+    ("GET", "/v1/evaluators"),
+    ("POST", "/v1/evaluators/{}/status"),
+    ("GET", "/v1/privacy/{}"),
+    ("GET", "/v1/privacy/{}/ledger"),
+    ("POST", "/v1/privacy/{}/events"),
+    ("POST", "/v1/privacy/{}/spenders"),
+    ("GET", "/v1/trust/{}"),
+    ("GET", "/v1/audit"),
+    ("POST", "/v1/audit/checkpoints"),
+    ("POST", "/v1/messages"),
+];
 
 /// Serves the API on `listen` with `workers` × 4 connection threads until
 /// the process exits (see [`encompute_verification::http`] for the limits:
@@ -562,5 +648,46 @@ impl http::Handler for Api {
             },
         );
         http::Response::new(resp.status, resp.content_type, resp.body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ROUTES;
+
+    /// [`ROUTES`] is exactly the router's table, in order.
+    #[test]
+    fn routes_list_every_route_of_the_router() {
+        let src = include_str!("api.rs");
+        let start = src.find("fn route(").expect("the router");
+        let end = src[start..].find("pub const ROUTES").expect("the list") + start;
+        let mut found = vec![];
+        for line in src[start..end].lines().map(str::trim) {
+            let Some(method) = ["GET", "POST"]
+                .into_iter()
+                .find(|m| line.starts_with(&format!("(\"{m}\", [")))
+            else {
+                continue;
+            };
+            let segs = &line[line.find('[').unwrap() + 1..line.find(']').unwrap()];
+            let path: String = segs
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(|x| {
+                    if x.starts_with('"') {
+                        format!("/{}", x.trim_matches('"'))
+                    } else {
+                        "/{}".to_owned()
+                    }
+                })
+                .collect();
+            found.push((method.to_owned(), path));
+        }
+        let listed: Vec<(String, String)> = ROUTES
+            .iter()
+            .map(|(m, p)| ((*m).to_owned(), (*p).to_owned()))
+            .collect();
+        assert_eq!(found, listed, "ROUTES must list every route of the router");
     }
 }

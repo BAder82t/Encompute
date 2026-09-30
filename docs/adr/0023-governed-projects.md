@@ -368,6 +368,27 @@ As built (per-job four eyes):
   receive or approve. It reads authorizations, policies, privacy spending,
   evidence, lineage, revocations and exports.
 
+As built (auditors and views):
+
+- Governed mode enforces exclusivity: in an organization taking part in a
+  governed project, granting auditor with another role is refused, and
+  an organization with such a combination neither creates nor joins a
+  governed project (ENC2716). Bootstrap admins keep admin, operator and
+  auditor, since the platform organization never takes part in a
+  project; the legacy-admin report lists every combination.
+- An auditor organization joins with `participation = 'auditor'` (fixed
+  by its invitation) and takes part in governed projects only as an
+  auditor. It registers no key broker, is named as no recipient, and is
+  issued no ticket.
+- One static table (`views.rs`) gives every organization that does not
+  own a record the same bytes: approvers as a keyed pseudonym (HMAC over
+  the project and the principal, under a key derived from the control
+  plane's signing key, so a known principal ID cannot be confirmed),
+  actors as organization and kind, no storage or key references. The
+  governance binding's broker map is keyed by asset version, never by key
+  reference; the broker looks up the version its key is bound to. Privacy
+  ledgers stay the owner's until privacy scopes exist.
+
 ### 12. Governance event log (D10)
 
 - **Interim** (early phases): the signed state anchor gains sets of revoked

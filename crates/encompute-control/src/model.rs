@@ -479,10 +479,41 @@ pub struct RevokeAuthorization {
     pub revocation: Option<encompute_trust::authz::SignedRevocationV2>,
 }
 
+/// How an organization takes part in a project: as a member, or (governed
+/// projects only) as an auditor organization, which reads the project's
+/// shared records and changes nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Participation {
+    #[default]
+    Member,
+    Auditor,
+}
+
+impl Participation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Participation::Member => "member",
+            Participation::Auditor => "auditor",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "member" => Ok(Participation::Member),
+            "auditor" => Ok(Participation::Auditor),
+            _ => Err(bad(format!("unknown participation {s:?}"))),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddProjectMember {
     pub organization: String,
+    /// Invitations only: `member` (the default) or `auditor`.
+    #[serde(default)]
+    pub participation: Option<Participation>,
 }
 
 /// Removes a principal's role in an organization (all its roles there when

@@ -519,7 +519,9 @@ fn submit_under_active_authorizations_binds_governance_id() {
         gov.binding.outputs["out"].recipients,
         BTreeSet::from([BEN.to_string()])
     );
-    assert_eq!(gov.binding.asset_brokers["income-2026-q1"], "tax-broker");
+    // Keyed by the source version, never by the owner's key reference.
+    assert_eq!(gov.binding.asset_brokers[&v.version], "tax-broker");
+    assert_eq!(gov.binding.asset_brokers.len(), 1);
     assert_eq!(gov.governance_id, gov.binding.id().hex());
     assert_eq!(
         gov.authorization_set_id,

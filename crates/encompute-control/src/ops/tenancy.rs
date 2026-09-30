@@ -7,18 +7,114 @@ use encompute_verification::service::check_service_id;
 
 use crate::audit::{self, Outcome};
 use crate::authz::{
-    conflict, forbidden, not_found, project_row, project_visible, require, require_human,
+    auditor_combinations, auditor_organization, conflict, deny_auditor_role, forbidden,
+    in_governed_project, not_found, org_roles_lock, project_row, project_visible, require,
+    require_auditor_separation, require_human,
 };
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
 use crate::model::{
     bad, check_name, check_slug, new_id, AddProjectMember, CreateOrganization, CreateProject,
-    CreateServiceAccount, CreateUser, Custody, GovernanceMode, RemoveMembership, Role, ServiceKind,
-    PLATFORM_ORG,
+    CreateServiceAccount, CreateUser, Custody, GovernanceMode, Participation, RemoveMembership,
+    Role, ServiceKind, PLATFORM_ORG,
 };
 
 fn unique_violation(e: &postgres::Error) -> bool {
     e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION)
+}
+
+/// An auditor organization takes part in no governed project as a member
+/// (D9, ENC2716).
+fn separation(org: &str) -> encompute_ir::Error {
+    encompute_ir::Error::new(
+        encompute_ir::Code::GovernanceAuditorSeparation,
+        format!("{org} is an auditor organization: it takes part in governed projects only as an auditor"),
+    )
+}
+
+/// Joining governed project `p` as `participation` (D9): `org` has no
+/// principal holding auditor with another role, and takes part in every
+/// governed project the same way (an auditor organization is never a
+/// member of one, and a member never an auditor organization).
+fn check_governed_join(
+    t: &mut postgres::Transaction<'_>,
+    org: &str,
+    participation: Participation,
+) -> Result<()> {
+    org_roles_lock(t, org)?;
+    require_auditor_separation(t, org)?;
+    let other = match participation {
+        Participation::Member => "auditor",
+        Participation::Auditor => "member",
+    };
+    let clash = t
+        .query_opt(
+            "SELECT 1 FROM project_members m JOIN projects p ON p.id = m.project_id
+              WHERE m.organization_id = $1 AND p.governance = 'governed' AND m.participation = $2
+             LIMIT 1",
+            &[&org, &other],
+        )
+        .map_err(db_err)?;
+    if clash.is_some() {
+        return Err(match participation {
+            Participation::Member => separation(org),
+            Participation::Auditor => encompute_ir::Error::new(
+                encompute_ir::Code::GovernanceAuditorSeparation,
+                format!("{org} is a member of a governed project: an auditor organization is independent of the projects it audits"),
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Auditor separation (D9, ENC2716) when granting `roles` in `org`: an
+/// auditor holds no other role in an organization taking part in a
+/// governed project. Takes the organization's roles lock
+/// ([`org_roles_lock`]) first, as joining a governed project does.
+fn check_auditor_grant(t: &mut postgres::Transaction<'_>, org: &str, roles: &[Role]) -> Result<()> {
+    if !roles.contains(&Role::Auditor) || roles.iter().all(|r| *r == Role::Auditor) {
+        return Ok(());
+    }
+    org_roles_lock(t, org)?;
+    if in_governed_project(t, org)? {
+        return Err(encompute_ir::Error::new(
+            encompute_ir::Code::GovernanceAuditorSeparation,
+            format!(
+                "{org} takes part in a governed project: an auditor there holds no other role (grant auditor alone)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Principals holding `auditor` with another role, in `orgs` or
+/// everywhere: each with its organization, kind, roles, whether the
+/// organization takes part in a governed project (where joining is refused
+/// while it lasts, ENC2716) and the call that removes the other roles.
+/// Organizations outside governed projects keep such combinations for now
+/// (bootstrap admins hold admin, operator and auditor); a later migration
+/// removes them.
+pub fn auditor_role_combinations(
+    c: &mut impl postgres::GenericClient,
+    orgs: Option<&[String]>,
+) -> Result<Vec<Value>> {
+    let mut out = vec![];
+    for (org, id, kind, roles) in auditor_combinations(c, orgs)? {
+        let governed = in_governed_project(c, &org)?;
+        out.push(json!({
+            "organization": org,
+            "id": id,
+            "kind": kind,
+            "roles": roles,
+            "governed": governed,
+            "remove": {
+                "method": "POST",
+                "path": format!("/v1/organizations/{org}/memberships/remove"),
+                "body": {"principal": id, "role": "auditor"},
+            },
+        }));
+    }
+    Ok(out)
 }
 
 /// The release that refuses legacy security_admin service accounts.
@@ -206,6 +302,7 @@ impl Control {
         }
         let id = new_id("usr");
         self.db.tx(|t| {
+            check_auditor_grant(t, org, &r.roles)?;
             t.execute(
                 "INSERT INTO users (id, organization_id, issuer, subject, email, status)
                  VALUES ($1, $2, $3, $4, $5, 'active')",
@@ -290,6 +387,7 @@ impl Control {
             return Err(conflict("this service ID or key is already registered"));
         }
         self.db.tx(|t| {
+            check_auditor_grant(t, org, &r.roles)?;
             // An organization's key broker cannot take the name another
             // organization's assets give their broker (it would receive
             // their revocations). The platform's brokers serve every
@@ -504,10 +602,12 @@ impl Control {
         };
         let mut c = self.db.conn()?;
         let accounts = legacy_service_admins(&mut *c, scope.as_deref())?;
+        let combined = auditor_role_combinations(&mut *c, scope.as_deref())?;
         Ok(json!({
             "count": accounts.len(),
             "service_accounts": accounts,
             "refused_from": LEGACY_SERVICE_ADMINS_REFUSED_FROM,
+            "auditor_combinations": combined,
         }))
     }
 
@@ -595,6 +695,14 @@ impl Control {
         }
         let id = new_id("prj");
         self.db.tx(|t| {
+            // Auditor separation: the owner takes part from now on.
+            if mode == GovernanceMode::Governed {
+                org_roles_lock(t, &r.organization)?;
+                require_auditor_separation(t, &r.organization)?;
+                if auditor_organization(t, &r.organization)? {
+                    return Err(separation(&r.organization));
+                }
+            }
             t.execute(
                 "INSERT INTO projects (id, organization_id, name, status, governance, custody)
                  VALUES ($1, $2, $3, 'active', $4, $5)",
@@ -710,15 +818,54 @@ impl Control {
             .iter()
             .map(|r| json!({"asset": r.get::<_, String>(0), "purpose": r.get::<_, String>(1)}))
             .collect::<Vec<_>>();
-        let mut out = json!({
+        if p.governed() {
+            // The shared view: the same bytes for everyone taking part
+            // (consent there is by owner authorizations, never approvals).
+            return Ok(json!({
+                "id": p.id, "organization": p.organization, "name": p.name, "status": p.status,
+                "members": p.members, "invited": p.invited, "approved_assets": [],
+                "governance": p.governance, "custody": p.custody,
+                "auditors": p.auditors, "invited_auditors": p.invited_auditors,
+            }));
+        }
+        Ok(json!({
             "id": p.id, "organization": p.organization, "name": p.name, "status": p.status,
             "members": p.members, "invited": p.invited, "approved_assets": assets,
             "governance": p.governance,
-        });
-        if p.governed() {
-            out["custody"] = json!(p.custody);
+        }))
+    }
+
+    /// A governed project's audit events (those recorded for the project),
+    /// as everyone taking part sees them: to readers of the trail
+    /// (auditors, admins, security admins) of a member or auditor
+    /// organization, the same bytes for each, actors labelled and only the
+    /// project's shared references ([`crate::views`]). An organization's
+    /// own trail stays `GET /v1/audit?organization=`.
+    pub fn project_audit(&self, ctx: &Ctx, id: &str, after: i64, limit: i64) -> Result<Value> {
+        let mut c = self.db.conn()?;
+        let p = project_visible(&mut *c, &ctx.principal, id)?;
+        if !p.governed() {
+            return Err(bad(
+                "a project's shared audit view belongs to governed projects: read your organization's trail",
+            ));
         }
-        Ok(out)
+        let readers = [Role::Auditor, Role::OrganizationAdmin, Role::SecurityAdmin];
+        if !p
+            .members
+            .iter()
+            .chain(&p.auditors)
+            .any(|o| ctx.principal.any_role(o, &readers))
+        {
+            return Err(forbidden(
+                "reading a project's audit events needs auditor, organization_admin or security_admin in an organization taking part",
+            ));
+        }
+        let mut labels = crate::views::Labels::default();
+        let mut out = vec![];
+        for e in audit::list_project(&mut *c, id, after, limit)? {
+            out.push(crate::views::shared_audit_event(&mut *c, &mut labels, &e)?);
+        }
+        Ok(Value::Array(out))
     }
 
     /// Invites a collaborating organization, or accepts an invitation.
@@ -739,33 +886,70 @@ impl Control {
             .principal
             .has_role(&r.organization, Role::OrganizationAdmin)
             && r.organization != PLATFORM_ORG;
-        let answer =
-            |status: &str| json!({"project": project, "member": r.organization, "status": status});
+        let answer = |status: &str, participation: Participation| {
+            let mut v = json!({"project": project, "member": r.organization, "status": status});
+            if participation == Participation::Auditor {
+                v["participation"] = json!(participation.as_str());
+            }
+            v
+        };
         self.db.tx(|t| {
             let p = project_row(t, project)?.ok_or_else(|| not_found("project", project))?;
-            let current: Option<String> = t
+            let current: Option<(String, Participation)> = t
                 .query_opt(
-                    "SELECT status FROM project_members WHERE project_id = $1 AND organization_id = $2 FOR UPDATE",
+                    "SELECT status, participation FROM project_members
+                      WHERE project_id = $1 AND organization_id = $2 FOR UPDATE",
                     &[&project, &r.organization],
                 )
                 .map_err(db_err)?
-                .map(|x| x.get(0));
-            // The invited organization's admin accepts.
-            if consents && current.as_deref() == Some("invited") {
+                .map(|x| Ok::<_, encompute_ir::Error>((x.get(0), Participation::parse(x.get(1))?)))
+                .transpose()?;
+            // The invited organization's admin accepts, as invited.
+            if let (true, Some(("invited", invited_as))) =
+                (consents, current.as_ref().map(|(s, a)| (s.as_str(), *a)))
+            {
+                deny_auditor_role(&ctx.principal, &p)?;
+                if r.participation.is_some_and(|x| x != invited_as) {
+                    return Err(conflict(format!(
+                        "{} is invited as {}",
+                        r.organization,
+                        invited_as.as_str()
+                    )));
+                }
+                if p.governed() {
+                    check_governed_join(t, &r.organization, invited_as)?;
+                }
                 t.execute(
                     "UPDATE project_members SET status = 'active' WHERE project_id = $1 AND organization_id = $2",
                     &[&project, &r.organization],
                 )
                 .map_err(db_err)?;
-                self.audit_joined(t, ctx, &p.organization, project, &r.organization)?;
-                return Ok(answer("active"));
+                self.audit_joined(t, ctx, &p.organization, project, &r.organization, invited_as)?;
+                return Ok(answer("active", invited_as));
             }
             if !p.members.iter().any(|o| ctx.principal.member_of(o)) {
                 return Err(not_found("project", project));
             }
+            deny_auditor_role(&ctx.principal, &p)?;
             require(&ctx.principal, &p.organization, &[Role::OrganizationAdmin], "adding a project member")?;
-            if let Some(s) = current {
-                return Ok(answer(&s));
+            let participation = r.participation.unwrap_or_default();
+            if participation == Participation::Auditor {
+                if !p.governed() {
+                    return Err(bad("auditor organizations take part in governed projects only"));
+                }
+                if r.organization == p.organization {
+                    return Err(bad("the project's owner cannot audit it"));
+                }
+            }
+            if let Some((s, was)) = current {
+                if was != participation {
+                    return Err(conflict(format!(
+                        "{} takes part as {}: a different participation is a new membership",
+                        r.organization,
+                        was.as_str()
+                    )));
+                }
+                return Ok(answer(&s, was));
             }
             let exists = r.organization != PLATFORM_ORG
                 && t
@@ -773,38 +957,45 @@ impl Control {
                     .map_err(db_err)?
                     .is_some();
             if !exists {
-                return Ok(answer("invited"));
+                return Ok(answer("invited", participation));
             }
             // An admin of both organizations consents for the invited one.
             // (A membership's ID is never reused: an organization that left
             // and is invited again is a new member.)
             let status = if consents { "active" } else { "invited" };
+            if consents && p.governed() {
+                check_governed_join(t, &r.organization, participation)?;
+            }
             t.execute(
-                "INSERT INTO project_members (project_id, organization_id, added_by, status, membership_id)
-                 VALUES ($1, $2, $3, $4, $5)",
-                &[&project, &r.organization, &ctx.actor(), &status, &new_id("pmb")],
+                "INSERT INTO project_members (project_id, organization_id, added_by, status, membership_id, participation)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[&project, &r.organization, &ctx.actor(), &status, &new_id("pmb"), &participation.as_str()],
             )
             .map_err(db_err)?;
             if consents {
-                self.audit_joined(t, ctx, &p.organization, project, &r.organization)?;
+                self.audit_joined(t, ctx, &p.organization, project, &r.organization, participation)?;
             } else {
-                audit::append(
-                    t,
-                    ctx.draft("project.member_invited", "project", project, Outcome::Succeeded)
-                        .org(&p.organization)
-                        .project(project)
-                        .r#ref("member", r.organization.clone()),
-                )?;
+                let mut invited = ctx
+                    .draft("project.member_invited", "project", project, Outcome::Succeeded)
+                    .org(&p.organization)
+                    .project(project)
+                    .r#ref("member", r.organization.clone());
+                if participation == Participation::Auditor {
+                    invited = invited.r#ref("participation", participation.as_str());
+                }
+                audit::append(t, invited)?;
                 // The invited organization learns of it from its own trail.
-                audit::append(
-                    t,
-                    ctx.draft("project.invited", "project", project, Outcome::Succeeded)
-                        .org(&r.organization)
-                        .project(project)
-                        .r#ref("owner", p.organization.clone()),
-                )?;
+                let mut told = ctx
+                    .draft("project.invited", "project", project, Outcome::Succeeded)
+                    .org(&r.organization)
+                    .project(project)
+                    .r#ref("owner", p.organization.clone());
+                if participation == Participation::Auditor {
+                    told = told.r#ref("participation", participation.as_str());
+                }
+                audit::append(t, told)?;
             }
-            Ok(answer(status))
+            Ok(answer(status, participation))
         })
     }
 
@@ -815,10 +1006,10 @@ impl Control {
         owner: &str,
         project: &str,
         member: &str,
+        participation: Participation,
     ) -> Result<()> {
-        audit::append(
-            t,
-            ctx.draft(
+        let mut added = ctx
+            .draft(
                 "project.member_added",
                 "project",
                 project,
@@ -826,15 +1017,18 @@ impl Control {
             )
             .org(owner)
             .project(project)
-            .r#ref("member", member.to_owned()),
-        )?;
+            .r#ref("member", member.to_owned());
+        let mut joined = ctx
+            .draft("project.joined", "project", project, Outcome::Succeeded)
+            .org(member)
+            .project(project);
+        if participation == Participation::Auditor {
+            added = added.r#ref("participation", participation.as_str());
+            joined = joined.r#ref("participation", participation.as_str());
+        }
+        audit::append(t, added)?;
         // The added organization's own trail records it too.
-        audit::append(
-            t,
-            ctx.draft("project.joined", "project", project, Outcome::Succeeded)
-                .org(member)
-                .project(project),
-        )?;
+        audit::append(t, joined)?;
         Ok(())
     }
 
@@ -856,10 +1050,13 @@ impl Control {
         check_name("organization", &r.organization)?;
         let out = self.db.tx(|t| {
             let p = project_row(t, project)?.ok_or_else(|| not_found("project", project))?;
+            deny_auditor_role(&ctx.principal, &p)?;
             let own = ctx.principal.has_role(&r.organization, Role::OrganizationAdmin);
-            let invited_here = p.invited.contains(&r.organization);
-            if !own || !(p.members.contains(&r.organization) || invited_here) {
-                if !p.members.iter().any(|o| ctx.principal.member_of(o)) {
+            let invited_here =
+                p.invited.contains(&r.organization) || p.invited_auditors.contains(&r.organization);
+            let taking_part = p.members.contains(&r.organization) || p.auditors.contains(&r.organization);
+            if !own || !(taking_part || invited_here) {
+                if !p.members.iter().chain(&p.auditors).any(|o| ctx.principal.member_of(o)) {
                     return Err(not_found("project", project));
                 }
                 if !ctx.principal.has_role(&p.organization, Role::OrganizationAdmin) {

@@ -895,7 +895,7 @@ fn approvals_from_before_version_4_get_stable_ids() {
                       VALUES ('a', 'p', 'x', 'o', '2026-09-01T00:00:00Z');"
             ))
             .unwrap();
-        assert_eq!(db.migrate().unwrap(), 8);
+        assert_eq!(db.migrate().unwrap(), 9);
         let r = db
             .conn()
             .unwrap()
@@ -950,7 +950,7 @@ fn a_schema_2_backup_migrated_twice_gets_the_same_ids() {
                              ('b', 'p', 'y', 'usr_2', '2026-09-02T00:00:00Z');",
             )
             .unwrap();
-        assert_eq!(db.migrate().unwrap(), 8);
+        assert_eq!(db.migrate().unwrap(), 9);
         let mut out = Vec::new();
         for q in [
             "SELECT approval_id FROM asset_approvals ORDER BY asset_id",

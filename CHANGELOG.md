@@ -84,9 +84,42 @@ Work toward confidential cross-agency computation
   not yet scheduled waits for approval again, a scheduled one fails at
   start. Approval rules may not require `auditor` or unknown roles.
   Migration 0008; INV-228 extended.
-- **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody)
-  and INV-236 (the control plane can only deny; broker state cannot be
-  rolled back); 159 invariants.
+- **Auditors and views (phase 3).** Auditors are read-only: every
+  mutating route that touches a governed project refuses anyone holding
+  `auditor` in an organization taking part in it, whatever else they
+  hold, and anyone acting for one of its auditor organizations (a test
+  enumerates the router's routes). An organization joins a governed
+  project as a member or, invited with `participation: auditor`, as an
+  auditor organization: it reads the project's shared records and never
+  owns a source, submits, receives a release, approves or registers a key
+  broker there, and takes part in no governed project as a member. In an
+  organization taking part in a governed project an auditor holds no
+  other role: granting one is refused, and an organization with such a
+  combination neither creates nor joins a governed project until it is
+  removed (new ENC2716 "auditor separation"). Bootstrap admins keep
+  admin, operator and auditor: the platform organization never takes part
+  in a project. `GET /v1/security/legacy-service-admins` now lists
+  `auditor_combinations` for later removal. Standard organizations keep
+  their role combinations. Migration 0009.
+- **Cross-organization views of governed projects.** One static table
+  (`views.rs`) decides what each organization sees; everyone who does not
+  own a record gets the same bytes. Authorizations are readable by every
+  organization taking part, with approvers as per-project pseudonyms
+  (HMAC under a key derived from the control plane's signing key, so a
+  known principal ID cannot be confirmed) and without the signed copy; jobs are visible to every organization taking
+  part, with actors as `organization/kind` and without the grant, the
+  evaluator URL or its receipt key; the scheduled evaluator sees a
+  governed job's grant only. New `GET /v1/audit?project=`: the project's
+  events as everyone taking part sees them. An organization's own trail
+  now labels another organization's people who acted on it. The
+  governance binding's broker map (`asset_brokers`) is keyed by asset
+  version ID instead of the owner's key reference, so grants and tickets
+  name no KMS key; a governed broker checks the version its key is bound
+  to. Bindings without the map keep their GovernanceIds.
+- **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
+  INV-236 (the control plane can only deny; broker state cannot be
+  rolled back), INV-223 (auditors) and INV-229 (cross-organization
+  views); 161 invariants.
 
 ## 0.3.0-rc.4 — 2026-09-29
 

@@ -409,6 +409,24 @@ pub fn user(t: &T, admin: &As, org: &str, subject: &str, roles: &[&str]) -> As {
     As::User(subject.into())
 }
 
+/// Gives `subject`'s user `role` in `org` directly in the database: a role
+/// combination from before auditor separation (D9), which the API now
+/// refuses to grant in organizations taking part in governed projects.
+pub fn legacy_role(t: &T, subject: &str, org: &str, role: &str) {
+    let n = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "INSERT INTO memberships (principal_id, organization_id, role)
+             SELECT id, $2, $3 FROM users WHERE subject = $1",
+            &[&subject, &org, &role],
+        )
+        .unwrap();
+    assert_eq!(n, 1, "no user {subject}");
+}
+
 pub fn world() -> Option<World> {
     let t = setup()?;
     t.control

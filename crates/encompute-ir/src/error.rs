@@ -185,6 +185,8 @@ pub enum Code {
     GovernanceAuthorizationLimit,
     /// Key custody refused: in a sovereign project an asset's key must be held by a key broker its own organization registered, never a platform broker or another organization's (ENC2715).
     GovernanceCustody,
+    /// Auditor separation: an auditor is read-only and exclusive of every other role in an organization taking part in a governed project, and an auditor organization never owns, submits, receives, approves or holds keys there (ENC2716).
+    GovernanceAuditorSeparation,
 }
 
 impl Code {
@@ -265,13 +267,14 @@ impl Code {
             Code::GovernanceBrokerStateRollback => "ENC2713",
             Code::GovernanceAuthorizationLimit => "ENC2714",
             Code::GovernanceCustody => "ENC2715",
+            Code::GovernanceAuditorSeparation => "ENC2716",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 75] = [
+    pub const ALL: [Code; 76] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -347,6 +350,7 @@ impl Code {
         Code::GovernanceBrokerStateRollback,
         Code::GovernanceAuthorizationLimit,
         Code::GovernanceCustody,
+        Code::GovernanceAuditorSeparation,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

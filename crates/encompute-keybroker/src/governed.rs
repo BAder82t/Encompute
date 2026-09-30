@@ -540,10 +540,11 @@ impl KeyBroker {
             return Err(not_attested("policy"));
         }
         binding.check().map_err(|e| not_attested(&e.message))?;
-        // The binding's per-asset broker map, when it has one: this key is
-        // released here only if the map gives it to this broker.
+        // The binding's per-source broker map, when it has one: this key is
+        // released here only if the map gives the source version it is
+        // bound to (`bind_version`) to this broker.
         if !binding.asset_brokers.is_empty() {
-            match binding.asset_brokers.get(asset_id) {
+            match binding.asset_brokers.get(&version_id) {
                 Some(b) if b == self.id() => {}
                 other => {
                     return Err(err(

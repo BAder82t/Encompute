@@ -67,13 +67,7 @@ fn gov_world() -> Option<G> {
     let tax_sec2 = user(&t, &tax_admin, TAX, "t-sec2", &["security_admin"]);
     let tax_owner = user(&t, &tax_admin, TAX, "t-owner", &["data_owner"]);
     let tax_owner2 = user(&t, &tax_admin, TAX, "t-owner2", &["data_owner"]);
-    let tax_auditor = user(
-        &t,
-        &tax_admin,
-        TAX,
-        "t-auditor",
-        &["auditor", "security_admin"],
-    );
+    let tax_auditor = user(&t, &tax_admin, TAX, "t-auditor", &["auditor"]);
     let tax_dev = user(&t, &tax_admin, TAX, "t-dev", &["ml_developer"]);
     let ben_sec1 = user(&t, &ben_admin, BEN, "b-sec1", &["security_admin"]);
     let ben_sec2 = user(&t, &ben_admin, BEN, "b-sec2", &["security_admin"]);
@@ -491,6 +485,10 @@ fn a_governance_key_needs_a_second_person_who_is_a_security_admin() {
     // Not by the proposer, not by an auditor, not by another
     // organization's security admin, not by a service account.
     refused(g.t.call(&g.tax_sec1, "POST", &approve, None), "ENC2707");
+    // An auditor that also holds security_admin: a combination from before
+    // auditor separation (granting it now is refused, ENC2716), kept and
+    // still read-only.
+    legacy_role(&g.t, "t-auditor", TAX, "security_admin");
     let (s, _) = g.t.call(&g.tax_auditor, "POST", &approve, None);
     assert_eq!(s, 403, "an auditor is read-only, whatever else it holds");
     let (s, _) = g.t.call(&g.ben_sec1, "POST", &approve, None);
@@ -1296,7 +1294,7 @@ fn version_4_databases_migrate_to_standard_projects() {
                   VALUES ('a', 'o', 'dataset', 'a', 'd', '{}', 'a', '[]', 'active', 'u');",
         )
         .unwrap();
-    assert_eq!(db.migrate().unwrap(), 8);
+    assert_eq!(db.migrate().unwrap(), 9);
     let mut c = db.conn().unwrap();
     let r = c
         .query_one(

@@ -47,8 +47,8 @@ use encompute_verification::service::now;
 use crate::audit::{self, Outcome};
 use crate::authn::PrincipalKind;
 use crate::authz::{
-    conflict, forbidden, not_found, project_visible, require_human, require_other_person,
-    ProjectRow,
+    conflict, deny_auditor, forbidden, not_found, project_row, project_visible, require_human,
+    require_other_person, ProjectRow,
 };
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
@@ -334,12 +334,6 @@ impl Control {
     /// A security admin of a member organization proposes a purpose; its ID
     /// is the PurposeId of the document (project included).
     pub fn propose_purpose(&self, ctx: &Ctx, project: &str, r: ProposePurpose) -> Result<Value> {
-        require_human(
-            &ctx.principal,
-            &r.organization,
-            &[Role::SecurityAdmin],
-            "proposing a purpose",
-        )?;
         let purpose = Purpose {
             version: PURPOSE_VERSION,
             project_id: project.to_owned(),
@@ -361,6 +355,13 @@ impl Control {
         let document = serde_json::to_value(&purpose).expect("serializable");
         self.db.tx(|t| {
             let p = governed_project(t, ctx, project)?;
+            deny_auditor(&ctx.principal, &p)?;
+            require_human(
+                &ctx.principal,
+                &r.organization,
+                &[Role::SecurityAdmin],
+                "proposing a purpose",
+            )?;
             if !p.members.contains(&r.organization) {
                 return Err(forbidden(format!(
                     "{} is not a member of the project",
@@ -421,7 +422,8 @@ impl Control {
     pub fn approve_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         self.db.tx(|t| {
             let (project, org, status, proposer, valid_until) = purpose_row(t, id, true)?;
-            project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
+            let p = project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
+            deny_auditor(&ctx.principal, &p)?;
             if !ctx.principal.member_of(&org) {
                 return Err(forbidden(format!(
                     "a purpose is approved by a security admin of its proposer, {org}"
@@ -457,6 +459,7 @@ impl Control {
         self.db.tx(|t| {
             let (project, _, status, _, _) = purpose_row(t, id, true)?;
             let p = project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
+            deny_auditor(&ctx.principal, &p)?;
             require_human(
                 &ctx.principal,
                 &a.organization,
@@ -515,7 +518,9 @@ impl Control {
     pub fn retire_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         self.db.tx(|t| {
             let (project, org, status, _, _) = purpose_row(t, id, true)?;
-            project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
+            let p = project_visible(t, &ctx.principal, &project)
+                .map_err(|_| not_found("purpose", id))?;
+            deny_auditor(&ctx.principal, &p)?;
             if !ctx.principal.member_of(&org) {
                 return Err(forbidden(format!(
                     "a purpose is retired by a security admin of its proposer, {org}"
@@ -608,15 +613,16 @@ impl Control {
         }
         b.check()?;
         check_window(b.valid_from, b.valid_until)?;
-        require_human(
-            &ctx.principal,
-            &b.party,
-            &[Role::DataOwner, Role::SecurityAdmin],
-            "proposing an authorization",
-        )?;
         let id = new_id("atz");
         self.db.tx(|t| {
             let p = governed_project(t, ctx, &b.project)?;
+            deny_auditor(&ctx.principal, &p)?;
+            require_human(
+                &ctx.principal,
+                &b.party,
+                &[Role::DataOwner, Role::SecurityAdmin],
+                "proposing an authorization",
+            )?;
             if !p.members.contains(&b.party) {
                 return Err(forbidden(format!("{} is not a member of the project", b.party)));
             }
@@ -729,7 +735,7 @@ impl Control {
         r: ApproveAuthorization,
     ) -> Result<Value> {
         self.db.tx(|t| {
-            let row = authorization_row(t, ctx, id)?;
+            let row = owned_authorization(t, ctx, id)?;
             require_human(
                 &ctx.principal,
                 &row.org,
@@ -807,11 +813,43 @@ impl Control {
     }
 
     /// The authorization as its owner's members see it: `body` is the
-    /// document to sign (approvals included).
+    /// document to sign (approvals included). Everyone else taking part in
+    /// the project (members, auditor organizations) gets the shared view:
+    /// the same document with each approval as (organization, role, time)
+    /// and a pseudonym of the approver, and without the signed copy (whose
+    /// approvals name the approvers); the same bytes for each of them.
     pub fn get_authorization(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         self.db.tx(|t| {
-            let row = authorization_row(t, ctx, id)?;
-            let doc = with_approvals(t, id, &row.body)?;
+            let (row, _) = authorization_row(t, ctx, id)?;
+            let owner = ctx.principal.member_of(&row.org);
+            let body = if owner {
+                serde_json::to_value(with_approvals(t, id, &row.body)?).expect("serializable")
+            } else {
+                let approvals = t
+                    .query(
+                        "SELECT approver_id, evidence FROM authorization_approvals WHERE authorization_row = $1
+                          ORDER BY approved_at, approver_id",
+                        &[&id],
+                    )
+                    .map_err(db_err)?
+                    .iter()
+                    .map(|r| {
+                        let e: ApprovalEvidence = serde_json::from_value(r.get(1))
+                            .map_err(|e| db_err(format!("stored approval: {e}")))?;
+                        Ok(crate::views::shared_approval(
+                            &self.pseudonyms,
+                            &row.project,
+                            r.get(0),
+                            &e.organization,
+                            &e.role,
+                            e.at,
+                        ))
+                    })
+                    .collect::<Result<Vec<Value>>>()?;
+                let mut b = serde_json::to_value(&row.body).expect("serializable");
+                b["approvals"] = json!(approvals);
+                b
+            };
             let r = t
                 .query_one(
                     &format!(
@@ -828,12 +866,14 @@ impl Control {
                 )
                 .map_err(db_err)?;
             let mut v = json!({"id": id, "organization": row.org, "project": row.project,
-                               "purpose_id": doc.purpose_id, "asset_version_id": doc.asset_version_id,
-                               "status": row.status, "body": doc,
+                               "purpose_id": row.body.purpose_id, "asset_version_id": row.body.asset_version_id,
+                               "status": row.status, "body": body,
                                "revoked_at": r.get::<_, Option<i64>>(4)});
             if let Some(a) = r.get::<_, Option<String>>(0) {
                 v["authorization_id"] = json!(a);
-                v["signed"] = r.get::<_, Option<Value>>(1).unwrap_or(Value::Null);
+                if owner {
+                    v["signed"] = r.get::<_, Option<Value>>(1).unwrap_or(Value::Null);
+                }
                 v["governance_key_id"] = json!(r.get::<_, Option<String>>(2));
                 v["activated_at"] = json!(r.get::<_, Option<i64>>(3));
                 v["governance_key_revoked_at"] = json!(r.get::<_, Option<i64>>(5));
@@ -860,7 +900,7 @@ impl Control {
         r: AuthorizationSignature,
     ) -> Result<Value> {
         self.db.tx(|t| {
-            let row = authorization_row(t, ctx, id)?;
+            let row = owned_authorization(t, ctx, id)?;
             require_human(
                 &ctx.principal,
                 &row.org,
@@ -969,7 +1009,7 @@ impl Control {
                 &[&id],
             )
             .map_err(db_err)?;
-            let row = authorization_row(t, ctx, id)?;
+            let row = owned_authorization(t, ctx, id)?;
             require_human(
                 &ctx.principal,
                 &row.org,
@@ -1119,13 +1159,14 @@ struct AuthorizationRow {
     body: AuthorizationV2,
 }
 
-/// An authorization, locked, visible only to its owner's members (others
-/// get "not found").
+/// An authorization, locked, with its project: visible to its owner's
+/// members and to everyone taking part in the project (members and auditor
+/// organizations, who get the shared view); anyone else gets "not found".
 fn authorization_row(
     t: &mut postgres::Transaction<'_>,
     ctx: &Ctx,
     id: &str,
-) -> Result<AuthorizationRow> {
+) -> Result<(AuthorizationRow, ProjectRow)> {
     let r = t
         .query_opt(
             "SELECT organization_id, project_id, status, body FROM authorizations WHERE id = $1 FOR UPDATE",
@@ -1133,17 +1174,38 @@ fn authorization_row(
         )
         .map_err(db_err)?
         .ok_or_else(|| not_found("authorization", id))?;
-    let org: String = r.get(0);
-    if !ctx.principal.member_of(&org) {
-        return Err(not_found("authorization", id));
-    }
-    Ok(AuthorizationRow {
-        org,
+    let row = AuthorizationRow {
+        org: r.get(0),
         project: r.get(1),
         status: r.get(2),
         body: serde_json::from_value(r.get(3))
             .map_err(|e| db_err(format!("stored authorization: {e}")))?,
-    })
+    };
+    let p = project_row(t, &row.project)?.ok_or_else(|| not_found("authorization", id))?;
+    let participant = p
+        .members
+        .iter()
+        .chain(&p.auditors)
+        .any(|o| ctx.principal.member_of(o));
+    if !ctx.principal.member_of(&row.org) && !participant {
+        return Err(not_found("authorization", id));
+    }
+    Ok((row, p))
+}
+
+/// An authorization its owner's people act on (approve, sign, revoke):
+/// never an auditor ([`deny_auditor`]); others get "not found".
+fn owned_authorization(
+    t: &mut postgres::Transaction<'_>,
+    ctx: &Ctx,
+    id: &str,
+) -> Result<AuthorizationRow> {
+    let (row, p) = authorization_row(t, ctx, id)?;
+    deny_auditor(&ctx.principal, &p)?;
+    if !ctx.principal.member_of(&row.org) {
+        return Err(not_found("authorization", id));
+    }
+    Ok(row)
 }
 
 /// The proposed body with its approvals, in a fixed order: the document

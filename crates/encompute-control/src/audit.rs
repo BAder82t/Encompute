@@ -264,6 +264,23 @@ pub fn list(
     rows.iter().map(row_to_event).collect()
 }
 
+/// Events recorded for `project`, in order.
+pub fn list_project(
+    c: &mut impl GenericClient,
+    project: &str,
+    after: i64,
+    limit: i64,
+) -> Result<Vec<AuditEvent>> {
+    c.query(
+        "SELECT * FROM audit_events WHERE project_id = $1 AND seq > $2 ORDER BY seq LIMIT $3",
+        &[&project, &after, &limit],
+    )
+    .map_err(db_err)?
+    .iter()
+    .map(row_to_event)
+    .collect()
+}
+
 fn chain_err(m: impl Into<String>) -> Error {
     Error::new(Code::TrustEvidence, m)
 }

@@ -36,8 +36,8 @@ use encompute_verification::{
 use crate::audit::{self, Outcome};
 use crate::authn::PrincipalKind;
 use crate::authz::{
-    asset_visible, conflict, forbidden, not_found, project_role_orgs, project_visible, require,
-    require_human_not_submitter, ProjectRow,
+    asset_visible, conflict, deny_auditor, forbidden, not_found, project_role_orgs, project_row,
+    project_visible, require, require_human_not_submitter, ProjectRow,
 };
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
@@ -303,6 +303,12 @@ struct JobGovernance {
     authorization_set_id: String,
     /// Authorization row → its AuthorizationId.
     authorizations: BTreeMap<String, String>,
+    /// Source version → the owner's key reference at submission. Kept on
+    /// the job only (the binding's broker map is keyed by version and
+    /// names no key), so a key re-bound under another name is refused at
+    /// start as before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    source_keys: BTreeMap<String, String>,
 }
 
 /// The lifecycle transitions of a governed job that revalidate it:
@@ -416,7 +422,8 @@ fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<Jo
 }
 
 /// Whether `p` may see the job: its organization's members, and the
-/// owners of its source assets.
+/// owners of its source assets; in a governed project everyone taking part
+/// (members and auditor organizations, who get the shared view).
 fn job_visible(c: &mut impl GenericClient, ctx: &Ctx, j: &JobRow) -> Result<()> {
     if ctx.principal.member_of(&j.organization) {
         return Ok(());
@@ -425,6 +432,19 @@ fn job_visible(c: &mut impl GenericClient, ctx: &Ctx, j: &JobRow) -> Result<()> 
         && j.evaluator.as_deref() == Some(ctx.actor())
     {
         return Ok(());
+    }
+    if j.governance.is_some() {
+        let p = project_row(c, &j.project)?.ok_or_else(|| not_found("job", &j.id))?;
+        return if p
+            .members
+            .iter()
+            .chain(&p.auditors)
+            .any(|o| ctx.principal.member_of(o))
+        {
+            Ok(())
+        } else {
+            Err(not_found("job", &j.id))
+        };
     }
     let orgs: Vec<String> = ctx.principal.organizations().into_iter().collect();
     let owns = c
@@ -438,6 +458,14 @@ fn job_visible(c: &mut impl GenericClient, ctx: &Ctx, j: &JobRow) -> Result<()> 
     } else {
         Err(not_found("job", &j.id))
     }
+}
+
+/// The job's project; a governed one refuses an auditor (D9,
+/// [`deny_auditor`]). Every call that changes a job takes it first.
+fn job_project(c: &mut impl GenericClient, ctx: &Ctx, j: &JobRow) -> Result<ProjectRow> {
+    let p = project_row(c, &j.project)?.ok_or_else(|| not_found("job", &j.id))?;
+    deny_auditor(&ctx.principal, &p)?;
+    Ok(p)
 }
 
 /// How `actor` appears to a viewer outside the submitting organization:
@@ -525,6 +553,7 @@ impl Control {
         // project costs no compilation.
         let mut c = self.db.conn()?;
         let project = project_visible(&mut *c, &ctx.principal, &r.project)?;
+        deny_auditor(&ctx.principal, &project)?;
         let orgs = project_role_orgs(
             &ctx.principal,
             &project,
@@ -770,6 +799,7 @@ impl Control {
         let denied: Denied = RefCell::new(None);
         let out = self.db.tx(|t| {
             let project = project_visible(t, &ctx.principal, &r.project)?;
+            deny_auditor(&ctx.principal, &project)?;
             let orgs = project_role_orgs(&ctx.principal, &project, &[Role::MlDeveloper]);
             let Some(org) = orgs.first().cloned() else {
                 return Err(forbidden("submitting a job needs ml_developer in a project member organization"));
@@ -1164,6 +1194,20 @@ impl Control {
         }
         for (n, o) in outputs {
             check_name("output", n)?;
+            // An auditor organization never receives a release (D9).
+            if let Some(x) = o.recipients.iter().find(|x| {
+                s.project.auditors.contains(*x) || s.project.invited_auditors.contains(*x)
+            }) {
+                return Err(deny(
+                    "plan",
+                    &r.plan,
+                    "auditor_recipient",
+                    gov(
+                        Code::GovernanceAuditorSeparation,
+                        format!("{x} audits this project and receives no release (output {n:?})"),
+                    ),
+                ));
+            }
             if o.release_class != ReleaseClass::Never
                 && !purpose.allowed_release_classes.contains(&o.release_class)
             {
@@ -1283,14 +1327,12 @@ impl Control {
                 )
             })
             .collect();
+        // Keyed by source version: the map travels in grants and tickets
+        // other organizations see, and names no key reference.
         let asset_brokers = custody
             .iter()
-            .filter_map(|c| {
-                versions[&c.asset]
-                    .2
-                    .clone()
-                    .map(|key| (key, c.broker.clone()))
-            })
+            .filter(|c| versions[&c.asset].2.is_some())
+            .map(|c| (versions[&c.asset].1.clone(), c.broker.clone()))
             .collect();
         let binding = GovernanceBinding {
             version: GOVERNANCE_BINDING_VERSION,
@@ -1335,12 +1377,17 @@ impl Control {
             .strip_prefix("encplan1:")
             .unwrap_or(&s.doc.plan_id)
             .to_owned();
+        let source_keys = versions
+            .values()
+            .filter_map(|(_, v, k)| k.clone().map(|k| (v.clone(), k)))
+            .collect();
         let governance = JobGovernance {
             governance_id: binding.id().hex(),
             binding,
             plan_hash,
             authorization_set_id: set.hex().to_owned(),
             authorizations,
+            source_keys,
         };
         let id = new_id("job");
         t.execute(
@@ -1574,14 +1621,20 @@ impl Control {
                     "source {a} is no longer the dataset version the job is bound to"
                 )));
             };
-            versions.insert(a.clone(), v);
+            versions.insert(a.clone(), v.clone());
             let key = r
                 .get::<_, Option<Value>>(6)
                 .and_then(|k| serde_json::from_value::<KeyRef>(k).ok());
             super::require_own_broker(t, &owner, key.as_ref().map(|k| k.broker.as_str()))
                 .map_err(|e| Error::new(e.code, format!("source {a}: {}", e.message)))?;
             let key = key.expect("checked above");
-            keys.insert(key.key_ref, key.broker);
+            if g.source_keys.get(&v).is_some_and(|k| *k != key.key_ref) {
+                return Err(gov(
+                    Code::GovernanceCustody,
+                    format!("source {a}'s key is no longer the one the job was bound to"),
+                ));
+            }
+            keys.insert(v.clone(), key.broker);
         }
         if !g.binding.asset_brokers.is_empty() && keys != g.binding.asset_brokers {
             return Err(gov(
@@ -1790,6 +1843,20 @@ impl Control {
         // The evaluator's URL and receipt key, like the grant, go only to
         // the submitting organization (the one that runs the job).
         let submitter = ctx.principal.member_of(&j.organization);
+        // In a governed project the scheduled evaluator sees the grant and
+        // nothing else ([`crate::views`]).
+        if j.governance.is_some()
+            && !submitter
+            && ctx.principal.service_kind() == Some(ServiceKind::Evaluator)
+            && j.evaluator.as_deref() == Some(ctx.actor())
+        {
+            return Ok(json!({"id": j.id, "grant": j.grant}));
+        }
+        // Everyone else taking part in a governed project gets the shared
+        // view: the same bytes for each (actors as `organization/kind`
+        // whoever asks).
+        let shared = j.governance.is_some() && !submitter;
+        let mut shared_labels = crate::views::Labels::default();
         let (url, receipt_key, parallel): (Option<String>, Option<String>, Option<i32>) =
             match &j.evaluator {
                 Some(e) if submitter => c
@@ -1810,6 +1877,9 @@ impl Control {
         let mut label = |c: &mut postgres::Client, actor: String| -> Result<String> {
             if submitter {
                 return Ok(actor);
+            }
+            if shared {
+                return shared_labels.label(c, &actor);
             }
             if let Some(l) = labels.get(&actor) {
                 return Ok(String::clone(l));
@@ -1873,9 +1943,14 @@ impl Control {
         let mut c = self.db.conn()?;
         let rows = c
             .query(
-                "SELECT id, project_id, state, backend, created_at FROM jobs
-                  WHERE organization_id = ANY($1) AND ($2::text IS NULL OR project_id = $2)
-                  ORDER BY created_at DESC LIMIT 200",
+                "SELECT j.id, j.project_id, j.state, j.backend, j.created_at FROM jobs j
+                  WHERE (j.organization_id = ANY($1)
+                         OR (j.governance IS NOT NULL AND EXISTS (
+                               SELECT 1 FROM project_members m
+                                WHERE m.project_id = j.project_id AND m.status = 'active'
+                                  AND m.organization_id = ANY($1))))
+                    AND ($2::text IS NULL OR j.project_id = $2)
+                  ORDER BY j.created_at DESC, j.id LIMIT 200",
                 &[&orgs, &project],
             )
             .map_err(db_err)?;
@@ -1893,6 +1968,8 @@ impl Control {
         self.db
             .tx(|t| {
                 let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
+                job_visible(t, ctx, &j)?;
+                job_project(t, ctx, &j)?;
                 if !ctx.principal.member_of(&j.organization) {
                     return Err(not_found("job", id));
                 }
@@ -1939,6 +2016,7 @@ impl Control {
             ended.set(false);
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             job_visible(t, ctx, &j)?;
+            job_project(t, ctx, &j)?;
             if j.governance.is_some() {
                 return self.approve_governed(t, ctx, &j, &ended);
             }
@@ -2322,6 +2400,7 @@ impl Control {
             if j.evaluator.as_deref() != Some(ctx.actor()) {
                 return Err(not_found("job", id));
             }
+            job_project(t, ctx, &j)?;
             if j.state != JobState::Queued {
                 return Err(conflict(format!(
                     "job {id} is {}: it does not start (again)",
@@ -2484,6 +2563,8 @@ impl Control {
     pub fn complete_job(&self, ctx: &Ctx, id: &str, r: CompleteJob) -> Result<Value> {
         let res = self.db.tx(|t| {
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
+            job_visible(t, ctx, &j)?;
+            job_project(t, ctx, &j)?;
             if !ctx.principal.member_of(&j.organization) {
                 return Err(not_found("job", id));
             }
@@ -2630,6 +2711,13 @@ impl Control {
         let mut c = self.db.conn()?;
         let j = job_row(&mut *c, id, false)?.ok_or_else(|| not_found("job", id))?;
         job_visible(&mut *c, ctx, &j)?;
+        // A governed job's evaluator sees its grant and nothing else.
+        if j.governance.is_some()
+            && ctx.principal.service_kind() == Some(ServiceKind::Evaluator)
+            && !ctx.principal.member_of(&j.organization)
+        {
+            return Err(not_found("job", id));
+        }
         let mut checks = vec![];
         let mut ok = true;
         let mut check = |name: &str, r: Result<String>| match r {

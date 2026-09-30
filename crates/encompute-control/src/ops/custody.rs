@@ -30,7 +30,10 @@ use encompute_verification::ticket::{
 };
 
 use crate::audit::{self, AuditDraft, Outcome};
-use crate::authz::{conflict, forbidden, not_found, project_row, require, require_human, AssetRow};
+use crate::authz::{
+    auditor_organization, conflict, deny_auditor, deny_auditor_in, forbidden, not_found,
+    org_roles_lock, project_row, require, require_human, AssetRow,
+};
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
 use crate::model::{
@@ -168,6 +171,16 @@ impl Control {
         encompute_verification::EvaluatorIdentity::from_public_key_hex(&r.grant_public_key)
             .map_err(|_| bad("grant_public_key must be a 32-byte Ed25519 key in hex"))?;
         self.db.tx(|t| {
+            deny_auditor_in(t, &ctx.principal, org)?;
+            // An auditor organization holds no keys for a governed project
+            // (D9, ENC2716): serialized with its joining one.
+            org_roles_lock(t, org)?;
+            if auditor_organization(t, org)? {
+                return Err(Error::new(
+                    Code::GovernanceAuditorSeparation,
+                    format!("{org} is an auditor organization: it holds no keys, so it registers no key broker"),
+                ));
+            }
             // The broker ID's lock, as service-account and asset
             // registrations naming it take it.
             crate::ops::keybroker_lock(t, &r.id)?;
@@ -375,6 +388,14 @@ impl Control {
                 )));
             }
             let p = project_row(t, &project)?.ok_or_else(|| not_found("project", &project))?;
+            deny_auditor(&ctx.principal, &p)?;
+            // An auditor organization never holds a source's key.
+            if p.auditors.contains(&owner) || p.invited_auditors.contains(&owner) {
+                return Err(Error::new(
+                    Code::GovernanceAuditorSeparation,
+                    format!("{owner} audits this project: no release ticket is issued for its keys"),
+                ));
+            }
             if !p.governed() {
                 return Err(conflict(
                     "release tickets belong to governed projects",
