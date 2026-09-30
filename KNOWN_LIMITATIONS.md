@@ -191,12 +191,19 @@ Related: [support matrix](docs/support-matrix.md),
   them.** A reservation whose declared sensitivity is below what its own
   noise implies is refused, but its noise multiplier and sampling rate are
   the coordinator's declaration.
-- **Key broker state can be rolled back to an older authenticated copy.**
-  The state file is authenticated under a key derived from the KEK, so an
-  edited file does not open. An older copy that was genuinely
-  authenticated still opens, and restoring it brings revoked keys back.
-  Revocation does not crypto-shred: an old state file plus the unchanged
-  KEK still yields the revoked keys. Keep broker backups access-controlled.
+- **A key broker without a generation mark can be rolled back to an older
+  authenticated copy.** The state file is authenticated under a key derived
+  from the KEK, so an edited file does not open. A governed production
+  broker must also keep a generation mark in the organization's KMS
+  (`--generation-mark openbao`); it then refuses an older copy, or a forked
+  one, and grants nothing while the mark is unreachable. A standard broker
+  may run without a mark: there an older copy that was genuinely
+  authenticated still opens, and restoring it brings revoked keys back, so
+  rollback is guarded by procedure only. The first start under a mark
+  trusts the state file it finds, unless the operator passes the expected
+  generation and MAC (`--expect-generation`, `--expect-state-mac`). Revocation does not crypto-shred: an old
+  state file plus the unchanged KEK still yields the revoked keys. Keep
+  broker backups access-controlled.
 - **Evaluator upload grants are reusable** until they expire, and are not
   bound to a client.
 - **A co-tenant can block a victim's evaluation-key upload.** A client that

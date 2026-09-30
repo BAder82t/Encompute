@@ -92,6 +92,13 @@ fn error_reply(e: &Error) -> http::Response {
         Code::Remote => 400,
         Code::Freshness if e.message.starts_with("too many requests") => 429,
         Code::KeyRelease if e.message.starts_with("no key for") => 404,
+        // The generation mark cannot be reached: nothing was granted, and
+        // the request may succeed once it can.
+        Code::GovernanceBrokerStateRollback
+            if e.message.starts_with(crate::generation::MARK_UNAVAILABLE) =>
+        {
+            503
+        }
         _ => 403,
     };
     // A refusal tells the (unauthenticated) caller what its own evidence
@@ -413,6 +420,16 @@ struct Broker<'a> {
 /// Saves the broker's state.
 type Persist<'a> = dyn Fn(&KeyBroker) -> Result<(), Error> + Sync + 'a;
 
+/// A governed production broker without a generation mark persists
+/// nothing (its changes could be undone by restoring an older state file):
+/// every persisting route refuses, saying what was not recorded, so a
+/// revocation is never dropped silently. (Governed releases are refused in
+/// `prepare_governed_release`.)
+fn not_recorded(b: &KeyBroker, what: &str) -> Result<(), Error> {
+    b.check_generation_mark()
+        .map_err(|e| Error::new(e.code, format!("{what}: {}", e.message)))
+}
+
 /// What a governed release report names.
 struct Governed<'a> {
     authorization_id: &'a str,
@@ -432,8 +449,10 @@ impl<'a> Broker<'a> {
     }
 
     /// Prepare, persist, then seal: a release that was not persisted grants
-    /// nothing. (A generation mark in the organization's KMS, advanced
-    /// after the write and before sealing, fits between the two.)
+    /// nothing. Persisting writes the state file and then advances the
+    /// generation mark in the organization's KMS, when configured, all
+    /// under the broker's lock, so saves are serialized; a mark that
+    /// cannot be advanced grants nothing (ENC2713).
     fn release_governed(&self, body: &[u8]) -> Result<String, Error> {
         let req: GovernedReleaseRequest = serde_json::from_slice(body)
             .map_err(|e| Error::new(Code::Remote, format!("malformed release request: {e}")))?;
@@ -465,12 +484,18 @@ impl<'a> Broker<'a> {
         let persist = self.persist()?;
         let mut b = self.broker.lock().unwrap_or_else(|p| p.into_inner());
         if path == "/v1/authorizations" {
+            not_recorded(&b, "the authorization was not installed")?;
             let a: SignedAuthorizationV2 = serde_json::from_slice(body).map_err(bad)?;
             let id = b.install_authorization(&a)?;
             persist(&b)?;
             json(&serde_json::json!({ "authorization_id": id }))
         } else {
             let r: SignedRevocationV2 = serde_json::from_slice(body).map_err(bad)?;
+            not_recorded(
+                &b,
+                "the revocation was not recorded; revoke it offline in the state file \
+                 (encompute keys authorization revoke ID)",
+            )?;
             b.revoke_authorization_signed(&r)?;
             persist(&b)?;
             json(&serde_json::json!({ "authorization_id": r.body.authorization }))
@@ -509,6 +534,10 @@ impl http::Handler for Broker<'_> {
             match self.control {
                 Some(c) => self.persist().and_then(|persist| {
                     let mut b = self.broker.lock().unwrap_or_else(|p| p.into_inner());
+                    not_recorded(
+                        &b,
+                        "the message was not recorded; the control plane retries it",
+                    )?;
                     c.receive(&mut b, &req.headers, body)
                         .and_then(|r| persist(&b).map(|_| r))
                 }),

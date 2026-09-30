@@ -391,7 +391,7 @@ enum KeysCmd {
         mode: String,
     },
     #[command(flatten)]
-    Broker(attest::BrokerCmd),
+    Broker(Box<attest::BrokerCmd>),
 }
 
 fn main() -> ExitCode {
@@ -651,7 +651,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Workload { cmd } => attest::workload(cmd),
         Cmd::Keys {
             cmd: KeysCmd::Broker(cmd),
-        } => attest::broker(cmd),
+        } => attest::broker(*cmd),
         Cmd::Keys {
             cmd:
                 KeysCmd::Generate {

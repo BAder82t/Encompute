@@ -258,21 +258,24 @@ impl SecretStore for RootWrappedKekStore {
 
 // --- OpenBao / HashiCorp Vault Transit ----------------------------------------
 
-/// A root key in OpenBao or HashiCorp Vault's Transit engine (same API).
-/// The token comes from the environment or a mounted file, never from a
-/// command line or config file.
-pub struct OpenBaoTransit {
-    addr: String,
-    mount: String,
-    key: String,
+/// The HTTP rules every call to OpenBao or HashiCorp Vault follows (Transit
+/// root keys and the KV-v2 generation mark alike): https, or plain http on
+/// loopback only; the token from the environment or a mounted file, never a
+/// command line or config file; redirects never followed; every call bounded
+/// by a timeout.
+pub(crate) struct BaoHttp {
+    pub(crate) addr: String,
     token: Zeroizing<String>,
     agent: ureq::Agent,
 }
 
-impl OpenBaoTransit {
+/// How long one OpenBao/Vault call may take.
+pub(crate) const BAO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl BaoHttp {
     /// `addr`: e.g. `https://bao.internal:8200`. Plain HTTP is accepted only
     /// for loopback addresses (local development containers).
-    pub fn new(addr: &str, mount: &str, key: &str, token: Zeroizing<String>) -> Result<Self> {
+    pub(crate) fn new(addr: &str, token: Zeroizing<String>) -> Result<Self> {
         let addr = addr.trim_end_matches('/').to_owned();
         // The loopback host must end the authority: `http://127.0.0.1.evil`,
         // `http://localhost.evil` and `http://127.0.0.1:1@evil` are not
@@ -289,30 +292,20 @@ impl OpenBaoTransit {
             .any(|p| addr.strip_prefix(p).is_some_and(authority_ends));
         if !addr.starts_with("https://") && !loopback {
             return Err(err(format!(
-                "root key provider address {addr} must use https (plain http only on loopback)"
+                "OpenBao/Vault address {addr} must use https (plain http only on loopback)"
             )));
-        }
-        let ok = |s: &str| {
-            !s.is_empty()
-                && s.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        };
-        if !ok(mount) || !ok(key) {
-            return Err(err("malformed transit mount or key name"));
         }
         if token.is_empty() {
             return Err(err("no OpenBao/Vault token"));
         }
         Ok(Self {
             addr,
-            mount: mount.into(),
-            key: key.into(),
             token,
             // Redirects are never followed: ureq would carry X-Vault-Token
             // to whatever origin a redirect names (it strips only
-            // Authorization and Cookie). A 3xx is an error (see `answer`).
+            // Authorization and Cookie). A 3xx is an error.
             agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(BAO_TIMEOUT)
                 .redirects(0)
                 .build(),
         })
@@ -320,10 +313,10 @@ impl OpenBaoTransit {
 
     /// From `BAO_ADDR`/`VAULT_ADDR`, and the token from `BAO_TOKEN_FILE`
     /// (a mounted secret) or `BAO_TOKEN`/`VAULT_TOKEN`.
-    pub fn from_env(mount: &str, key: &str) -> Result<Self> {
+    pub(crate) fn from_env() -> Result<Self> {
         let var = |names: &[&str]| names.iter().find_map(|n| std::env::var(n).ok());
         let addr = var(&["BAO_ADDR", "VAULT_ADDR"])
-            .ok_or_else(|| err("set BAO_ADDR (or VAULT_ADDR) to the root key provider"))?;
+            .ok_or_else(|| err("set BAO_ADDR (or VAULT_ADDR) to the OpenBao/Vault server"))?;
         let token = match var(&["BAO_TOKEN_FILE", "VAULT_TOKEN_FILE"]) {
             Some(f) => {
                 check_token_file(Path::new(&f))?;
@@ -334,11 +327,91 @@ impl OpenBaoTransit {
                         .to_owned(),
                 )
             }
-            None => Zeroizing::new(var(&["BAO_TOKEN", "VAULT_TOKEN"]).ok_or_else(|| {
-                err("set BAO_TOKEN_FILE (or BAO_TOKEN) for the root key provider")
-            })?),
+            None => Zeroizing::new(
+                var(&["BAO_TOKEN", "VAULT_TOKEN"])
+                    .ok_or_else(|| err("set BAO_TOKEN_FILE (or BAO_TOKEN) for OpenBao/Vault"))?,
+            ),
         };
-        Self::new(&addr, mount, key, token)
+        Self::new(&addr, token)
+    }
+
+    /// `GET {addr}/v1/{path}`.
+    pub(crate) fn get(&self, path: &str) -> std::result::Result<ureq::Response, Box<ureq::Error>> {
+        self.agent
+            .get(&format!("{}/v1/{path}", self.addr))
+            .set("X-Vault-Token", &self.token)
+            .call()
+            .map_err(Box::new)
+    }
+
+    /// `POST {addr}/v1/{path}` with a JSON body.
+    pub(crate) fn post(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> std::result::Result<ureq::Response, Box<ureq::Error>> {
+        self.agent
+            .post(&format!("{}/v1/{path}", self.addr))
+            .set("X-Vault-Token", &self.token)
+            .send_json(body)
+            .map_err(Box::new)
+    }
+}
+
+/// The `errors` an OpenBao/Vault refusal names.
+pub(crate) fn bao_errors(resp: ureq::Response) -> String {
+    resp.into_json::<serde_json::Value>()
+        .ok()
+        .and_then(|v| {
+            v["errors"].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// A root key in OpenBao or HashiCorp Vault's Transit engine (same API).
+/// The token comes from the environment or a mounted file, never from a
+/// command line or config file.
+pub struct OpenBaoTransit {
+    http: BaoHttp,
+    mount: String,
+    key: String,
+}
+
+/// A mount or key name: letters, digits, `-`, `_`, `.`.
+pub(crate) fn bao_name_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+impl OpenBaoTransit {
+    /// `addr`: e.g. `https://bao.internal:8200`. Plain HTTP is accepted only
+    /// for loopback addresses (local development containers).
+    pub fn new(addr: &str, mount: &str, key: &str, token: Zeroizing<String>) -> Result<Self> {
+        let http = BaoHttp::new(addr, token)?;
+        Self::with_http(http, mount, key)
+    }
+
+    fn with_http(http: BaoHttp, mount: &str, key: &str) -> Result<Self> {
+        if !bao_name_ok(mount) || !bao_name_ok(key) {
+            return Err(err("malformed transit mount or key name"));
+        }
+        Ok(Self {
+            http,
+            mount: mount.into(),
+            key: key.into(),
+        })
+    }
+
+    /// From `BAO_ADDR`/`VAULT_ADDR`, and the token from `BAO_TOKEN_FILE`
+    /// (a mounted secret) or `BAO_TOKEN`/`VAULT_TOKEN`.
+    pub fn from_env(mount: &str, key: &str) -> Result<Self> {
+        Self::with_http(BaoHttp::from_env()?, mount, key)
     }
 
     /// A reply's JSON body: only a 2xx answer counts. With redirects off,
@@ -356,31 +429,16 @@ impl OpenBaoTransit {
     }
 
     fn call(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
-        let url = format!("{}/v1/{}/{}", self.addr, self.mount, path);
-        let r = self
-            .agent
-            .post(&url)
-            .set("X-Vault-Token", &self.token)
-            .send_json(body);
-        match r {
+        match self
+            .http
+            .post(&format!("{}/{path}", self.mount), body)
+            .map_err(|e| *e)
+        {
             Ok(resp) => self.answer(resp),
-            Err(ureq::Error::Status(code, resp)) => {
-                let detail = resp
-                    .into_json::<serde_json::Value>()
-                    .ok()
-                    .and_then(|v| {
-                        v["errors"].as_array().map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_str())
-                                .collect::<Vec<_>>()
-                                .join("; ")
-                        })
-                    })
-                    .unwrap_or_default();
-                Err(err(format!(
-                    "root key provider refused ({code}): {detail}; no key is released without it"
-                )))
-            }
+            Err(ureq::Error::Status(code, resp)) => Err(err(format!(
+                "root key provider refused ({code}): {}; no key is released without it",
+                bao_errors(resp)
+            ))),
             Err(e) => Err(unavailable(self.provider(), e)),
         }
     }
@@ -433,7 +491,7 @@ impl RootKeyProvider for OpenBaoTransit {
     }
 
     fn key_ref(&self) -> String {
-        format!("{}/{}/keys/{}", self.addr, self.mount, self.key)
+        format!("{}/{}/keys/{}", self.http.addr, self.mount, self.key)
     }
 
     fn security(&self) -> StoreSecurity {
@@ -478,12 +536,9 @@ impl RootKeyProvider for OpenBaoTransit {
 
     fn rotate(&self) -> Result<u64> {
         self.call(&format!("keys/{}/rotate", self.key), serde_json::json!({}))?;
-        let url = format!("{}/v1/{}/keys/{}", self.addr, self.mount, self.key);
         let v = self.answer(
-            self.agent
-                .get(&url)
-                .set("X-Vault-Token", &self.token)
-                .call()
+            self.http
+                .get(&format!("{}/keys/{}", self.mount, self.key))
                 .map_err(|e| unavailable(self.provider(), e))?,
         )?;
         v["data"]["latest_version"]

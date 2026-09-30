@@ -721,3 +721,269 @@ fn governed_broker_commands() {
         "ENC2605",
     );
 }
+
+/// The state's generation mark through the CLI: a governed production
+/// broker does not serve without one, a production broker refuses a file
+/// mark, a state saved under a mark needs it for every command, and an
+/// older copy of the state is refused. With OpenBao, the mark lives in a
+/// KV-v2 engine.
+#[test]
+fn generation_mark_through_the_cli() {
+    let d = Dir::new("mark");
+    let root = setup(&d);
+    let b = d.p("b.json");
+    let kek = d.p("kek");
+    let org = ["--organization", "tax-agency"];
+    // A governed production broker without a mark does not start.
+    ok(
+        &strs(&protect(
+            &d,
+            "prod-policy.json",
+            &["--kek", &kek, org[0], org[1]],
+        )),
+        &[],
+    );
+    let pk: serde_json::Value = serde_json::from_str(&ok(
+        &["governance", "keygen", "--out", &d.p("gov.key")],
+        &[],
+    ))
+    .unwrap();
+    let pk = pk["public_key"].as_str().unwrap().to_owned();
+    ok(
+        &[
+            "keys",
+            "governance-key",
+            "pin",
+            "--key",
+            &pk,
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+        ],
+        &[],
+    );
+    let err = refused(
+        &[
+            "keys",
+            "serve",
+            "--control-key",
+            &"a".repeat(64),
+            "--mock-root",
+            &root,
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+        ],
+        &[("ENCOMPUTE_ENV", "production")],
+        "ENC2605",
+    );
+    assert!(err.contains("generation mark"), "{err}");
+    // A production broker refuses a development (file) mark.
+    let file_mark = format!("file:{}", d.p("mark.json"));
+    refused(
+        &[
+            "keys",
+            "rotate",
+            "--asset",
+            "weights",
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+            "--generation-mark",
+            &file_mark,
+        ],
+        &[],
+        "ENC2605",
+    );
+    // Malformed mark settings.
+    for bad in [
+        vec!["--generation-mark", "openbao"],
+        vec!["--generation-mark", "kms"],
+        vec!["--kv-mount", "secret"],
+    ] {
+        let mut a = vec![
+            "keys", "rotate", "--asset", "weights", "--broker", &b, "--kek", &kek,
+        ];
+        a.extend(bad);
+        refused(&a, &[], "ENC2004");
+    }
+
+    // A development broker under a file mark.
+    let db = d.p("dev.json");
+    let mut a = protect(&d, "dev-policy.json", &["--development"]);
+    let i = a.iter().position(|s| s == &b).unwrap();
+    a[i] = db.clone();
+    a.extend(["--generation-mark".into(), file_mark.clone()]);
+    ok(&strs(&a), &[]);
+    std::fs::copy(&db, d.p("older.json")).unwrap();
+    let rotate = |mark: bool| {
+        let mut a = vec!["keys", "rotate", "--asset", "weights", "--broker", &db];
+        if mark {
+            a.extend(["--generation-mark", file_mark.as_str()]);
+        }
+        encompute(&a, &[])
+    };
+    assert_eq!(rotate(true).0, 0);
+    // Saved under a mark: refused without it.
+    let (c, _, err) = rotate(false);
+    assert_ne!(c, 0);
+    assert!(err.contains("error[ENC2713]"), "{err}");
+    // The older copy is refused.
+    std::fs::copy(d.p("older.json"), &db).unwrap();
+    let (c, _, err) = rotate(true);
+    assert_ne!(c, 0);
+    assert!(
+        err.contains("error[ENC2713]") && err.contains("older"),
+        "{err}"
+    );
+
+    // In OpenBao KV-v2, with the Transit root key's settings.
+    let Some((addr, token)) = bao() else { return };
+    bao_admin(
+        &addr,
+        &token,
+        "sys/mounts/encompute-kv",
+        serde_json::json!({"type": "kv", "options": {"version": "2"}}),
+    );
+    let id = format!(
+        "cli-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let pb = d.p("prod-mark.json");
+    let env = [("BAO_ADDR", addr.as_str()), ("BAO_TOKEN", token.as_str())];
+    let mark = ["--generation-mark", "openbao", "--kv-mount", "encompute-kv"];
+    let mut a = protect(&d, "prod-policy.json", &["--kek", &kek]);
+    let i = a.iter().position(|s| s == &b).unwrap();
+    a[i] = pb.clone();
+    let j = a.iter().position(|s| s == "modelco").unwrap();
+    a[j] = id.clone();
+    a.extend(mark.iter().map(|s| s.to_string()));
+    ok(&strs(&a), &env);
+    std::fs::copy(&pb, d.p("prod-older.json")).unwrap();
+    let mut rotate = vec![
+        "keys", "rotate", "--asset", "weights", "--broker", &pb, "--kek", &kek,
+    ];
+    rotate.extend(mark);
+    ok(&rotate, &env);
+    std::fs::copy(d.p("prod-older.json"), &pb).unwrap();
+    let err = refused(&rotate, &env, "ENC2713");
+    assert!(err.contains("older"), "{err}");
+}
+
+/// The first start under a generation mark trusts the state file; the
+/// operator can pin what it expects (`--expect-generation`,
+/// `--expect-state-mac`), and a state that does not match is refused
+/// before any mark is written.
+#[test]
+fn first_generation_mark_checks_the_expected_state() {
+    let d = Dir::new("expect");
+    setup(&d);
+    let b = d.p("b.json");
+    let kek = d.p("kek");
+    let mark_file = d.p("mark.json");
+    let file_mark = format!("file:{mark_file}");
+    ok(
+        &strs(&protect(
+            &d,
+            "dev-policy.json",
+            &["--development", "--kek", &kek],
+        )),
+        &[],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&b).unwrap()).unwrap();
+    let generation = v["generation"].as_u64().unwrap().to_string();
+    let mac = v["mac"].as_str().unwrap().to_owned();
+    let rotate = |extra: &[&str]| {
+        let mut a = vec![
+            "keys",
+            "rotate",
+            "--asset",
+            "weights",
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+            "--generation-mark",
+            &file_mark,
+        ];
+        a.extend(extra);
+        a.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    };
+    // The expectation needs a mark.
+    refused(
+        &[
+            "keys",
+            "rotate",
+            "--asset",
+            "weights",
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+            "--expect-generation",
+            "1",
+        ],
+        &[],
+        "ENC2004",
+    );
+    // Another generation, or another MAC: refused, and no mark written.
+    let err = refused(
+        &strs(&rotate(&["--expect-generation", "7"])),
+        &[],
+        "ENC2713",
+    );
+    assert!(err.contains("expected"), "{err}");
+    let err = refused(
+        &strs(&rotate(&[
+            "--expect-generation",
+            &generation,
+            "--expect-state-mac",
+            &"0".repeat(64),
+        ])),
+        &[],
+        "ENC2713",
+    );
+    assert!(err.contains("expected"), "{err}");
+    assert!(!Path::new(&mark_file).exists());
+    // The state the operator expects: the mark is created from it.
+    ok(
+        &strs(&rotate(&[
+            "--expect-generation",
+            &generation,
+            "--expect-state-mac",
+            &mac,
+        ])),
+        &[],
+    );
+    assert!(Path::new(&mark_file).exists());
+    // Without an expectation the first marking says what it trusted.
+    let d2 = d.p("b2.json");
+    let mut a = protect(&d, "dev-policy.json", &["--development", "--kek", &kek]);
+    let i = a.iter().position(|s| s == &b).unwrap();
+    a[i] = d2.clone();
+    ok(&strs(&a), &[]);
+    let (c, _, err) = encompute(
+        &[
+            "keys",
+            "rotate",
+            "--asset",
+            "weights",
+            "--broker",
+            &d2,
+            "--kek",
+            &kek,
+            "--generation-mark",
+            &format!("file:{}", d.p("mark2.json")),
+        ],
+        &[],
+    );
+    assert_eq!(c, 0, "{err}");
+    assert!(err.contains("--expect-generation"), "{err}");
+}

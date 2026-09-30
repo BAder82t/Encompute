@@ -203,9 +203,56 @@ encrypted assets
   release policies. It is authenticated: a generation number and an HMAC
   under a key derived from the KEK. A state file edited outside Encompute (a
   release policy, the mode, the organization or a key version) does not
-  open; restore it from a backup instead. A backup does restore keys revoked
-  since it was taken (a rollback this check does not detect), so keep
-  backups access-controlled.
+  open; restore it from a backup instead. Without a generation mark, a
+  backup does restore keys revoked since it was taken (a rollback this
+  check does not detect), so keep backups access-controlled.
+- **Generation mark.** A governed broker (a governance key pinned) in
+  production refuses to start without a generation mark in the
+  organization's KMS; any other broker may use one. Every save writes the
+  state file, then advances the mark with compare-and-set, and only then
+  grants a key or acknowledges a change. A state older than the mark, or
+  at the same generation with another MAC, does not open (ENC2713). A state
+  one save ahead (the broker stopped between the write and the mark) opens
+  only if it names the mark's MAC as its previous one, so a file from
+  another history with the same number is refused. If the mark cannot be
+  reached, nothing is granted (ENC2713, HTTP 503). The first start under a
+  mark trusts the state file it finds, so start from a state you trust:
+  pass `--expect-generation N` (and `--expect-state-mac HEX`, the `mac` in
+  `broker.json`) to the command that first attaches the mark, and a state
+  that does not match is refused before any mark is written. Without them,
+  the broker prints the generation and MAC it trusted; check them against
+  your records. A governed production broker without a mark records no
+  change at all: authorization installs and revocations, and control-plane
+  messages, are refused with an error saying so (revoke offline with
+  `encompute keys authorization revoke`; the control plane retries its
+  messages). Once a state is saved under a mark, every `encompute keys`
+  command on it needs `--generation-mark`.
+
+  ```sh
+  bao secrets enable -path=encompute-kv -version=2 kv
+  encompute keys serve --root-key openbao:transit/modelco --organization modelco \
+    --generation-mark openbao --kv-mount encompute-kv ...
+  ```
+
+  The mark uses the same `BAO_ADDR` and token as the Transit root key, and
+  the same rules (https, no redirects, a 10-second timeout). Grant the
+  broker's token only the Transit key and its own mark path:
+
+  ```hcl
+  path "transit/encrypt/modelco" { capabilities = ["update"] }
+  path "transit/decrypt/modelco" { capabilities = ["update"] }
+  path "encompute-kv/data/encompute/brokers/BROKER_ID/generation" {
+    capabilities = ["create", "read", "update"]
+  }
+  ```
+
+  Writes always carry `options.cas`, so a second broker running a copy of
+  the state loses and grants nothing. A broker ID that is not a plain name
+  (letters, digits, `-`, `_`, `.`) is stored under `sha256-` and the
+  SHA-256 of the ID. Do not delete the mark: a state saved under it then
+  does not open (KV-v2 keeps versions; undelete the latest one).
+  `--generation-mark file:PATH` keeps the mark in a local file, for
+  development only; production brokers refuse it.
 - **Upgrading a broker from 0.3.0-rc.3.** Its state is not authenticated
   yet and does not open. Run `encompute keys upgrade-state` with the same
   `--kek`, or `--root-key` and `--organization`, flags the broker runs

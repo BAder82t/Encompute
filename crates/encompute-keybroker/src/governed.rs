@@ -14,9 +14,11 @@
 //!
 //! [`KeyBroker::prepare_governed_release`] runs the checks in a fixed
 //! order and refuses at the first failure; it records the ticket as used
-//! and counts the release. The caller then persists the state and only
-//! then calls [`KeyBroker::finish_release`], which seals the key: a
-//! release that was not persisted grants nothing.
+//! and counts the release. The caller then persists the state (the file,
+//! then the generation mark in the organization's KMS, when configured) and
+//! only then calls [`KeyBroker::finish_release`], which seals the key: a
+//! release that was not persisted grants nothing. A governed production
+//! broker needs a generation mark.
 
 use std::fmt;
 
@@ -401,6 +403,9 @@ impl KeyBroker {
         &mut self,
         req: &GovernedReleaseRequest,
     ) -> Result<PendingRelease> {
+        // A governed production broker without a generation mark could
+        // have its counters and used tickets undone by a restored file.
+        self.check_generation_mark()?;
         let now = self.now();
         self.prune(now);
         // 1. The session.

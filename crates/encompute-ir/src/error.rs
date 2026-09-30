@@ -179,6 +179,8 @@ pub enum Code {
     GovernanceLinkageMismatch,
     /// A key-release ticket is invalid, expired or replayed (ENC2712).
     GovernanceReleaseTicket,
+    /// A key broker's state is older than, or forked from, the generation mark kept in the organization's KMS, or the mark cannot be read or advanced (ENC2713).
+    GovernanceBrokerStateRollback,
     /// An owner authorization's usage limit (releases or executions) is exhausted at the key broker (ENC2714).
     GovernanceAuthorizationLimit,
 }
@@ -258,6 +260,7 @@ impl Code {
             Code::GovernanceResidency => "ENC2710",
             Code::GovernanceLinkageMismatch => "ENC2711",
             Code::GovernanceReleaseTicket => "ENC2712",
+            Code::GovernanceBrokerStateRollback => "ENC2713",
             Code::GovernanceAuthorizationLimit => "ENC2714",
         }
     }
@@ -265,7 +268,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 73] = [
+    pub const ALL: [Code; 74] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -338,6 +341,7 @@ impl Code {
         Code::GovernanceResidency,
         Code::GovernanceLinkageMismatch,
         Code::GovernanceReleaseTicket,
+        Code::GovernanceBrokerStateRollback,
         Code::GovernanceAuthorizationLimit,
     ];
 

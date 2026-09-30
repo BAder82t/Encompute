@@ -16,8 +16,14 @@
 //! [`KeyBroker::prepare_governed_release`] and
 //! [`KeyBroker::finish_release`], with the owner's signed authorization and
 //! a control-plane release ticket (see the `governed` module).
+//!
+//! A broker may keep its state's generation high-water mark in the
+//! organization's KMS ([`GenerationMark`], see the `generation` module), so
+//! that restoring an older authentic state file is refused. A governed
+//! production broker needs one.
 
 mod client;
+pub mod generation;
 mod governed;
 pub mod root;
 mod server;
@@ -42,6 +48,9 @@ use encompute_trust::authz::{GovernanceKey, SignedAuthorizationV2};
 use encompute_verification::{hex, unhex};
 
 pub use client::BrokerClient;
+pub use generation::{
+    DevelopmentFileMark, GenerationMark, Mark, MarkRead, OpenBaoKvMark, MARK_UNAVAILABLE,
+};
 pub use governed::{
     GovernanceConfig, GovernedGrant, GovernedReleaseRequest, PendingRelease,
     MAX_REVOKED_AUTHORIZATIONS,
@@ -215,11 +224,24 @@ pub struct BrokerState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub seen_tickets: BTreeMap<String, u64>,
     /// Incremented by every save: of two copies of a broker's state, the
-    /// one with the lower generation is older. Informational only: it is
-    /// not compared against anything persistent, so restoring an older
-    /// authentic copy is not detected (a known limitation).
+    /// one with the lower generation is older. With a [`GenerationMark`]
+    /// (the organization's KMS), every save also advances the mark, and a
+    /// state older than the mark, or at its generation with another MAC,
+    /// is refused: restoring an older authentic copy is detected. Without
+    /// one it is informational only, and such a restore is not detected (a
+    /// known limitation).
     #[serde(default)]
     pub generation: u64,
+    /// Set by every save under a generation mark: the state is then opened
+    /// only with its mark, so a mark cannot be dropped to hide a rollback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub generation_marked: bool,
+    /// Under a generation mark: the state MAC the mark recorded when this
+    /// state was saved, so a state one save ahead of the mark is accepted
+    /// only if it continues the state the mark holds (a hash chain), never
+    /// a file from another history that happens to have the next number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_state_mac: Option<String>,
     /// Hex HMAC-SHA256 over every other field, under a key derived from
     /// the store's KEK ([`SecretStore::state_mac`]): an edited state file
     /// does not open, but an older authentic copy (one saved before a
@@ -340,6 +362,60 @@ pub struct KeyBroker {
     /// The control plane whose release tickets are accepted (governed
     /// release); not part of the state.
     governance: Option<GovernanceConfig>,
+    /// The state's generation high-water mark, if configured.
+    mark: Option<AttachedMark>,
+}
+
+struct AttachedMark {
+    mark: Box<dyn GenerationMark>,
+    /// The mark's compare-and-set version as this broker last wrote or
+    /// read it.
+    cas: AtomicU64,
+    /// The state MAC the mark holds (the head of the chain): the next save
+    /// records it as its `previous_state_mac`.
+    head: std::sync::Mutex<String>,
+}
+
+/// What the operator expects of the state file when a mark is first
+/// created from it (the first start under a mark otherwise trusts the
+/// file as found).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedState {
+    pub generation: u64,
+    /// The state's MAC in hex (for development plaintext storage,
+    /// `sha256:` and the SHA-256 of the state), if checked.
+    pub state_mac: Option<String>,
+}
+
+/// What a generation mark records of a state: its MAC, or (development
+/// plaintext storage, which has none) the SHA-256 of what the MAC would
+/// cover.
+fn state_fingerprint(state: &BrokerState) -> Result<String> {
+    match &state.mac {
+        Some(m) => Ok(m.clone()),
+        None => {
+            use sha2::Digest;
+            Ok(format!(
+                "sha256:{}",
+                hex(&sha2::Sha256::digest(state_bytes(state)?.as_slice()))
+            ))
+        }
+    }
+}
+
+fn rollback(msg: impl Into<String>) -> Error {
+    err(Code::GovernanceBrokerStateRollback, msg)
+}
+
+/// A state saved under a generation mark opens only with that mark.
+fn refuse_marked(state: &BrokerState) -> Result<()> {
+    if state.generation_marked {
+        return Err(rollback(
+            "this broker's state is guarded by a generation mark in the organization's KMS: \
+             open it with its mark (--generation-mark)",
+        ));
+    }
+    Ok(())
 }
 
 fn check_broker_id(id: &str) -> Result<()> {
@@ -394,6 +470,8 @@ impl KeyBroker {
                 counters: BTreeMap::new(),
                 seen_tickets: BTreeMap::new(),
                 generation: 0,
+                generation_marked: false,
+                previous_state_mac: None,
                 mac: None,
             },
             verifier,
@@ -411,6 +489,7 @@ impl KeyBroker {
         verifier: Verifier,
         store: Box<dyn SecretStore>,
     ) -> Result<Self> {
+        refuse_marked(&state)?;
         Self::open(state, verifier, store, StateAuth::Required)
     }
 
@@ -475,7 +554,161 @@ impl KeyBroker {
             clock: Box::new(unix_now),
             grant_signer,
             governance: None,
+            mark: None,
         })
+    }
+
+    /// Guards this broker's state with `mark` (see the `generation`
+    /// module): the state must not be older than the mark, nor at its
+    /// generation with another MAC (ENC2713); one save ahead (the broker
+    /// stopped between writing the file and advancing the mark) is
+    /// accepted and the mark advanced, but only if that state continues
+    /// the one the mark records (its `previous_state_mac` is the mark's
+    /// MAC). With no mark yet, the mark is
+    /// created from this state: the first start under a mark trusts the
+    /// state file. A production broker refuses a development mark, and an
+    /// unreachable mark refuses to open (fails closed).
+    pub fn with_generation_mark(self, mark: Box<dyn GenerationMark>) -> Result<Self> {
+        self.with_generation_mark_expecting(mark, None)
+    }
+
+    /// [`with_generation_mark`](KeyBroker::with_generation_mark), and when
+    /// no mark exists yet, the state must be what the operator `expected`
+    /// (its generation, and its MAC if given), or nothing is written and
+    /// the broker does not open (ENC2713). Without an expectation, the
+    /// first marking prints the generation and MAC it trusted. Once a mark
+    /// exists, the expectation is not used.
+    pub fn with_generation_mark_expecting(
+        mut self,
+        mark: Box<dyn GenerationMark>,
+        expected: Option<&ExpectedState>,
+    ) -> Result<Self> {
+        if self.state.mode == BrokerMode::Production && mark.security() != StoreSecurity::Production
+        {
+            return Err(err(
+                Code::InsecureConfiguration,
+                format!(
+                    "a production broker cannot keep its generation mark in {} (development only)",
+                    mark.describe()
+                ),
+            ));
+        }
+        let what = mark.describe();
+        let generation = self.state.generation;
+        let fingerprint = state_fingerprint(&self.state)?;
+        let here = Mark {
+            broker_id: self.state.broker_id.clone(),
+            generation,
+            state_mac: fingerprint.clone(),
+        };
+        let read = mark.read()?;
+        let cas = match read.mark {
+            None if self.state.generation_marked => {
+                return Err(rollback(format!(
+                    "this broker's state was saved under a generation mark, and there is none \
+                     at {what}: the mark was deleted or another mark is configured; restore the \
+                     mark (KV-v2 keeps its versions) or configure the broker's own"
+                )))
+            }
+            None => {
+                match expected {
+                    Some(x)
+                        if x.generation != generation
+                            || x.state_mac.as_ref().is_some_and(|m| *m != fingerprint) =>
+                    {
+                        return Err(rollback(format!(
+                            "the broker state is generation {generation} with MAC {fingerprint}, \
+                             not the state expected (generation {}{}): no generation mark was \
+                             created; restore the state file you expect",
+                            x.generation,
+                            x.state_mac
+                                .as_deref()
+                                .map(|m| format!(", MAC {m}"))
+                                .unwrap_or_default()
+                        )))
+                    }
+                    Some(_) => {}
+                    None => eprintln!(
+                        "generation mark created at {what} from the state file as found \
+                         (generation {generation}, MAC {fingerprint}); check it against your \
+                         records, and pass --expect-generation (and --expect-state-mac) to \
+                         have the first marking check it"
+                    ),
+                }
+                mark.advance(&here, read.cas)?
+            }
+            Some(m) if generation < m.generation => {
+                return Err(rollback(format!(
+                    "the broker state is generation {generation}, older than generation {} \
+                     recorded at {what}: an older copy of the state file was restored \
+                     (revocations, used tickets or counters since then would be lost); restore \
+                     the latest state file",
+                    m.generation
+                )))
+            }
+            Some(m) if generation == m.generation => {
+                if m.state_mac != fingerprint {
+                    return Err(rollback(format!(
+                        "the broker state is generation {generation}, as recorded at {what}, but \
+                         another state was saved under that generation: the state forked; \
+                         restore the state file that was saved last"
+                    )));
+                }
+                read.cas
+            }
+            Some(m) if generation == m.generation + 1 => {
+                // One save ahead: the broker stopped between writing the
+                // file and advancing the mark. Only the state that
+                // continues the mark's is that write.
+                if self.state.previous_state_mac.as_deref() != Some(m.state_mac.as_str()) {
+                    return Err(rollback(format!(
+                        "the broker state is generation {generation}, one save ahead of {what}, \
+                         but it is not chained to the state the mark records: it comes from \
+                         another history; restore the state file that was saved last"
+                    )));
+                }
+                mark.advance(&here, read.cas)?
+            }
+            Some(m) => {
+                return Err(rollback(format!(
+                    "the broker state is generation {generation}, more than one save ahead of \
+                     generation {} recorded at {what}: it was saved without its mark",
+                    m.generation
+                )))
+            }
+        };
+        self.mark = Some(AttachedMark {
+            mark,
+            cas: AtomicU64::new(cas),
+            head: std::sync::Mutex::new(fingerprint),
+        });
+        Ok(self)
+    }
+
+    /// Whether a generation mark guards this broker's state.
+    pub fn has_generation_mark(&self) -> bool {
+        self.mark.is_some()
+    }
+
+    /// Whether this broker must have a generation mark: a governed broker
+    /// (governance key pinned) in production mode.
+    pub fn requires_generation_mark(&self) -> bool {
+        self.state.governance_key.is_some() && self.state.mode == BrokerMode::Production
+    }
+
+    /// Refuses (ENC2605) a governed production broker without a generation
+    /// mark: its counters, used tickets and revocations could otherwise be
+    /// undone by restoring an older state file.
+    pub fn check_generation_mark(&self) -> Result<()> {
+        if self.requires_generation_mark() && self.mark.is_none() {
+            return Err(err(
+                Code::InsecureConfiguration,
+                "a governed production broker needs a generation mark in the organization's KMS \
+                 (--generation-mark openbao --kv-mount MOUNT), so that an older copy of its \
+                 state is refused",
+            ));
+        }
+        Ok(())
     }
 
     /// The hex Ed25519 key this broker signs grants with: workloads pin it.
@@ -685,8 +918,9 @@ impl KeyBroker {
 
     /// Revokes a version (default: the current one). A revoked current key
     /// is never released; rotate to release again. Restoring a state file
-    /// saved before the revocation undoes it, undetected (see
-    /// [`load`](KeyBroker::load)).
+    /// saved before the revocation undoes it, undetected unless a
+    /// generation mark guards the state (see
+    /// [`load_with_mark`](KeyBroker::load_with_mark)).
     pub fn revoke(&mut self, asset_id: &str, version: Option<u64>) -> Result<u64> {
         let broker_id = self.state.broker_id.clone();
         let s = self
@@ -942,11 +1176,30 @@ impl KeyBroker {
     /// Writes the state (secrets included) to `path`, readable by the owner
     /// only, under the next generation and authenticated under the store's
     /// KEK. The MAC stops edits, not a later restore of this file over a
-    /// newer one (see [`load`](KeyBroker::load)).
+    /// newer one; a generation mark stops that (see
+    /// [`with_generation_mark`](KeyBroker::with_generation_mark)).
+    ///
+    /// With a mark, the file is written first, then the mark advanced with
+    /// compare-and-set, and only then does `save` succeed: a caller grants
+    /// or acknowledges nothing before. If the mark cannot be advanced
+    /// (unreachable, or advanced by someone else), `save` fails with
+    /// ENC2713 and the broker's generation stays, so the next save rewrites
+    /// the same generation; what was recorded in memory (a spent ticket, a
+    /// counted release) stays recorded.
     pub fn save(&self, path: &Path) -> Result<()> {
         let io = |e: std::io::Error| err(Code::KeyRelease, format!("{}: {e}", path.display()));
         let mut state = self.state.clone();
-        state.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        state.generation = match &self.mark {
+            Some(_) => {
+                state.generation_marked = true;
+                state.previous_state_mac = self
+                    .mark
+                    .as_ref()
+                    .map(|m| m.head.lock().unwrap_or_else(|p| p.into_inner()).clone());
+                self.generation.load(Ordering::SeqCst) + 1
+            }
+            None => self.generation.fetch_add(1, Ordering::SeqCst) + 1,
+        };
         state.mac = self
             .store
             .state_mac(&state_bytes(&state)?)?
@@ -976,18 +1229,59 @@ impl KeyBroker {
             f.write_all(&json).map_err(io)?;
             f.sync_all().map_err(io)?;
         }
-        std::fs::rename(&tmp, path).map_err(io)
+        std::fs::rename(&tmp, path).map_err(io)?;
+        if let Some(m) = &self.mark {
+            let next = Mark {
+                broker_id: state.broker_id.clone(),
+                generation: state.generation,
+                state_mac: state_fingerprint(&state)?,
+            };
+            let cas = m.mark.advance(&next, m.cas.load(Ordering::SeqCst))?;
+            m.cas.store(cas, Ordering::SeqCst);
+            *m.head.lock().unwrap_or_else(|p| p.into_inner()) = next.state_mac;
+            self.generation.store(state.generation, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     /// Opens the state at `path`: it must be authenticated under `store`'s
     /// KEK, so an edited file (a widened release policy, a flipped mode, a
     /// cleared revocation) is refused. A rollback is not: restoring an
     /// older authentic copy of the file (one saved before a revocation)
-    /// is not detected, and its revoked versions are released again (a
-    /// known limitation; the generation is not checked against anything
-    /// persistent).
+    /// is not detected here, and its revoked versions are released again.
+    /// Open with [`load_with_mark`](KeyBroker::load_with_mark) to detect
+    /// it; a state saved under a mark is refused here (ENC2713).
     pub fn load(path: &Path, verifier: Verifier, store: Box<dyn SecretStore>) -> Result<Self> {
-        Self::open(Self::read(path)?, verifier, store, StateAuth::Required)
+        let state = Self::read(path)?;
+        refuse_marked(&state)?;
+        Self::open(state, verifier, store, StateAuth::Required)
+    }
+
+    /// Opens the state at `path` as [`load`](KeyBroker::load) does, then
+    /// checks it against its generation mark: an older authentic copy, or a
+    /// fork, is refused (ENC2713), and an unreachable mark refuses to open
+    /// (see [`with_generation_mark`](KeyBroker::with_generation_mark)).
+    pub fn load_with_mark(
+        path: &Path,
+        verifier: Verifier,
+        store: Box<dyn SecretStore>,
+        mark: Box<dyn GenerationMark>,
+    ) -> Result<Self> {
+        Self::load_with_mark_expecting(path, verifier, store, mark, None)
+    }
+
+    /// [`load_with_mark`](KeyBroker::load_with_mark), checking the state
+    /// against what the operator `expected` when no mark exists yet (see
+    /// [`with_generation_mark_expecting`](KeyBroker::with_generation_mark_expecting)).
+    pub fn load_with_mark_expecting(
+        path: &Path,
+        verifier: Verifier,
+        store: Box<dyn SecretStore>,
+        mark: Box<dyn GenerationMark>,
+        expected: Option<&ExpectedState>,
+    ) -> Result<Self> {
+        Self::open(Self::read(path)?, verifier, store, StateAuth::Required)?
+            .with_generation_mark_expecting(mark, expected)
     }
 
     /// Opens a state file written before broker states were authenticated,
@@ -1001,7 +1295,9 @@ impl KeyBroker {
         verifier: Verifier,
         store: Box<dyn SecretStore>,
     ) -> Result<Self> {
-        Self::open(Self::read(path)?, verifier, store, StateAuth::Legacy)
+        let state = Self::read(path)?;
+        refuse_marked(&state)?;
+        Self::open(state, verifier, store, StateAuth::Legacy)
     }
 
     fn read(path: &Path) -> Result<BrokerState> {

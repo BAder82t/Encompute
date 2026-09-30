@@ -14,8 +14,9 @@ use encompute_runtime::attestation::{
     TcbStatus, TeeKind, VerifiedWorkload, Verifier, WorkloadSession,
 };
 use encompute_runtime::keybroker::{
-    acquire_keys, BrokerClient, BrokerMode, DevelopmentFileStore, GovernanceConfig, KeyBroker,
-    KeyMaterial, LocalKekStore, SecretStore,
+    acquire_keys, BrokerClient, BrokerMode, DevelopmentFileMark, DevelopmentFileStore,
+    ExpectedState, GenerationMark, GovernanceConfig, KeyBroker, KeyMaterial, LocalKekStore,
+    OpenBaoKvMark, SecretStore,
 };
 use encompute_runtime::trust::authz::{SignedAuthorizationV2, SignedRevocationV2};
 use encompute_runtime::verification::{hex, EvaluatorSigner};
@@ -414,6 +415,26 @@ pub struct BrokerFile {
     /// Where the root-wrapped KEK is kept (not secret).
     #[arg(long, default_value = "kek.wrapped.json")]
     pub wrapped_kek: PathBuf,
+    /// Where the state's generation mark is kept, so that an older copy of
+    /// the state file is refused: `openbao` (a KV-v2 engine, --kv-mount;
+    /// BAO_ADDR and the token as for the root key) or `file:PATH`
+    /// (development only). A governed production broker needs one; once a
+    /// state is saved under a mark, every command on it needs the mark.
+    #[arg(long)]
+    pub generation_mark: Option<String>,
+    /// The KV-v2 mount holding the generation mark (with
+    /// `--generation-mark openbao`).
+    #[arg(long)]
+    pub kv_mount: Option<String>,
+    /// When the generation mark is first created from the state file: the
+    /// generation the file must have (otherwise the first start trusts the
+    /// file as found). Not used once the mark exists.
+    #[arg(long)]
+    pub expect_generation: Option<u64>,
+    /// With --expect-generation: the state MAC (hex, as in the state file)
+    /// the file must have.
+    #[arg(long, requires = "expect_generation")]
+    pub expect_state_mac: Option<String>,
 }
 
 impl BrokerFile {
@@ -451,6 +472,42 @@ impl BrokerFile {
             provider,
             org,
         )?))
+    }
+
+    /// The generation mark of broker `broker_id`, if configured.
+    fn mark(&self, broker_id: &str) -> Result<Option<Box<dyn GenerationMark>>> {
+        let usage = || {
+            Error::new(
+                Code::KeyRelease,
+                "--generation-mark openbao (with --kv-mount MOUNT) or file:PATH",
+            )
+        };
+        let Some(spec) = &self.generation_mark else {
+            if self.kv_mount.is_some() || self.expect_generation.is_some() {
+                return Err(usage());
+            }
+            return Ok(None);
+        };
+        Ok(Some(match (spec.as_str(), spec.split_once(':')) {
+            ("openbao", _) => {
+                let mount = self.kv_mount.as_deref().ok_or_else(usage)?;
+                Box::new(OpenBaoKvMark::from_env(mount, broker_id)?)
+            }
+            (_, Some(("file", path))) if !path.is_empty() && self.kv_mount.is_none() => {
+                eprintln!("DEVELOPMENT ONLY: a generation mark in a local file protects little");
+                Box::new(DevelopmentFileMark::new(Path::new(path), broker_id))
+            }
+            _ => return Err(usage()),
+        }))
+    }
+
+    /// What the operator expects of the state when its mark is first
+    /// created.
+    fn expected(&self) -> Option<ExpectedState> {
+        self.expect_generation.map(|generation| ExpectedState {
+            generation,
+            state_mac: self.expect_state_mac.clone(),
+        })
     }
 
     fn store(&self) -> Result<Box<dyn SecretStore>> {
@@ -581,6 +638,9 @@ pub enum BrokerCmd {
     /// ENCOMPUTE_CONTROL_PUBLIC_KEY and ENCOMPUTE_SERVICE_ID set, also accept
     /// revocations from that control plane, for the one organization this
     /// broker serves (--organization).
+    /// A governed production broker (governance key pinned) needs a
+    /// generation mark (--generation-mark openbao --kv-mount MOUNT): it
+    /// refuses to start without one.
     Serve {
         #[arg(long, default_value = "127.0.0.1:8760")]
         listen: String,
@@ -678,7 +738,16 @@ fn open_broker(file: &BrokerFile, trust: Option<&TrustArgs>) -> Result<KeyBroker
         }
         None => Verifier::new(),
     };
-    KeyBroker::load(&file.broker, verifier, file.store()?)
+    match file.mark(&state.broker_id)? {
+        Some(m) => KeyBroker::load_with_mark_expecting(
+            &file.broker,
+            verifier,
+            file.store()?,
+            m,
+            file.expected().as_ref(),
+        ),
+        None => KeyBroker::load(&file.broker, verifier, file.store()?),
+    }
 }
 
 pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
@@ -702,7 +771,11 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 } else {
                     BrokerMode::Production
                 };
-                KeyBroker::new(&id, mode, Verifier::new(), file.store()?)?
+                let b = KeyBroker::new(&id, mode, Verifier::new(), file.store()?)?;
+                match file.mark(&id)? {
+                    Some(m) => b.with_generation_mark_expecting(m, file.expected().as_ref())?,
+                    None => b,
+                }
             };
             if let Some(org) = &file.organization {
                 b.set_organization(org)?;
@@ -987,6 +1060,8 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 }
                 None => b,
             };
+            // A governed production broker needs a generation mark.
+            b.check_generation_mark()?;
             // Keeps a grant-signing key created for an older state file.
             b.save(&file.broker)?;
             let control = match std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY") {

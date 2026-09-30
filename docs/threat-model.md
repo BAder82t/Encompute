@@ -494,18 +494,22 @@ attestation policies name artifact or code digests.
 | Edit a trust bundle | The report rebuilds the graph from the signed evidence (`crates/encompute-trust/src/report.rs`) | INV-101 |
 | Swap files in a model package, or smuggle pickled or remote code | Content-addressed packages; only safetensors, configuration and tokenizer files (`python/encompute/torch/hf.py`, `crates/encompute-training/src/hf.rs`) | INV-136, INV-137, INV-138 |
 | Edit a key broker's state file (`broker.json`): release policies, mode, organization, key versions, revocations | Every field is covered by an HMAC-SHA256 under a key derived from the KEK by HKDF-SHA256 (domain `encompute.broker-state.v1`; formula in [protocols.md](../security-review/protocols.md), section 6); each save raises `generation`. An edited file does not open. A state without a MAC (written by 0.3.0-rc.3 or earlier) opens only through the owner's explicit `encompute keys upgrade-state --confirm`; a production broker refuses a store that cannot authenticate state (`crates/encompute-keybroker/src/lib.rs`, `store.rs`, `root.rs`) | `an_edited_state_file_does_not_open`, `an_unauthenticated_state_needs_its_owner_to_upgrade_it`, `a_production_store_must_authenticate_state`, `owner_changes_are_reauthenticated_and_generations_advance` |
+| Restore an older authentic copy of a key broker's state file, to bring back an unrevoked authorization, a counter below its limit or an unused ticket; or run two copies of it | With a generation mark (required for a governed production broker): every save writes the file, then advances a mark in the organization's KMS (OpenBao or Vault KV-v2, compare-and-set) holding the generation and the state MAC, and only then grants or acknowledges. Opening refuses a state older than the mark, at its generation with another MAC, or one save ahead without naming the mark's MAC as its previous state (a hash chain) (ENC2713); a second writer loses the compare-and-set and grants nothing; an unreachable mark grants nothing (503). A state saved under a mark opens only with it. The first start under a mark trusts the state file, unless the operator pins the expected generation and MAC (`crates/encompute-keybroker/src/generation.rs`, `lib.rs`, `server.rs`) | `broker_state_rollback_refused_by_kms_generation`, `forked_state_same_generation_refused`, `crash_between_save_and_mark_recovers`, `divergent_file_at_mark_plus_one_refused`, `first_generation_mark_checks_the_expected_state`, `cas_conflict_denies_release`, `mark_unreachable_fails_closed`, `governed_production_broker_requires_a_mark`, `openbao_kv_generation_mark_refuses_rollback` |
 
 **Out of scope:**
 
 - Deletion and availability.
-- **Rolling a key broker's state back to an older authenticated copy.** A
-  writer without the KEK can only stop the broker, or replace its state
-  with an older copy the broker itself wrote. That copy still holds keys
-  revoked since, so it undoes those revocations. Detecting it needs the
-  generation anchored outside the file (in the KMS or the control plane),
-  which is not built. Revocation does not rotate the KEK, so old state
-  files and the unchanged KEK still yield revoked keys (no
-  crypto-shredding). Keep broker backups access-controlled.
+- **Rolling back the state of a key broker without a generation mark.**
+  A writer without the KEK can only stop the broker, or replace its state
+  with an older copy the broker itself wrote. Without a mark, that copy
+  still holds keys revoked since, so it undoes those revocations. A
+  governed production broker needs a mark in the organization's KMS, which
+  refuses such a copy; a standard broker may run without one, and then
+  rollback is handled by procedure. Whoever can rewrite both the state file
+  and the KMS mark (or holds the KEK) is out of scope. Revocation does not
+  rotate the KEK, so old state files and the unchanged KEK still yield
+  revoked keys (no crypto-shredding). Keep broker backups
+  access-controlled.
 - Confidentiality of artifacts: program structure, public weights, shapes
   and declared ranges are not encrypted.
 - The artifact manifest is an unkeyed SHA-256 list, not a signature. Its
