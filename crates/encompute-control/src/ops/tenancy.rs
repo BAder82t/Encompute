@@ -13,7 +13,7 @@ use crate::control::{Control, Ctx};
 use crate::db::db_err;
 use crate::model::{
     bad, check_name, check_slug, new_id, AddProjectMember, CreateOrganization, CreateProject,
-    CreateServiceAccount, CreateUser, GovernanceMode, RemoveMembership, Role, ServiceKind,
+    CreateServiceAccount, CreateUser, Custody, GovernanceMode, RemoveMembership, Role, ServiceKind,
     PLATFORM_ORG,
 };
 
@@ -283,6 +283,12 @@ impl Control {
         } else {
             Some(org)
         };
+        // A disabled service's ID is never registered again, even when its
+        // row is gone: whatever trusts it by ID (an asset's broker, an
+        // evaluator) would trust the new key.
+        if self.anchor.snapshot().disabled_services.contains(&r.id) {
+            return Err(conflict("this service ID or key is already registered"));
+        }
         self.db.tx(|t| {
             // An organization's key broker cannot take the name another
             // organization's assets give their broker (it would receive
@@ -549,6 +555,21 @@ impl Control {
     /// by a person who administers the owning organization.
     pub fn create_project(&self, ctx: &Ctx, r: CreateProject) -> Result<Value> {
         let mode = r.governance.unwrap_or_default();
+        // A governed project is always in sovereign custody; a standard
+        // project keeps the platform's custody, as before.
+        let custody = match (mode, r.custody) {
+            (GovernanceMode::Governed, None | Some(Custody::Sovereign)) => Custody::Sovereign,
+            (GovernanceMode::Governed, Some(Custody::Standard)) => {
+                return Err(encompute_ir::Error::new(
+                    encompute_ir::Code::GovernanceCustody,
+                    "a governed project is always in sovereign custody: each source's key is held by a key broker its own organization registered",
+                ))
+            }
+            (GovernanceMode::Standard, None | Some(Custody::Standard)) => Custody::Standard,
+            (GovernanceMode::Standard, Some(Custody::Sovereign)) => {
+                return Err(bad("sovereign key custody belongs to governed projects"))
+            }
+        };
         if mode == GovernanceMode::Governed || !r.organizations.is_empty() {
             require_human(
                 &ctx.principal,
@@ -575,8 +596,9 @@ impl Control {
         let id = new_id("prj");
         self.db.tx(|t| {
             t.execute(
-                "INSERT INTO projects (id, organization_id, name, status, governance) VALUES ($1, $2, $3, 'active', $4)",
-                &[&id, &r.organization, &r.name, &mode.as_str()],
+                "INSERT INTO projects (id, organization_id, name, status, governance, custody)
+                 VALUES ($1, $2, $3, 'active', $4, $5)",
+                &[&id, &r.organization, &r.name, &mode.as_str(), &custody.as_str()],
             )
             .map_err(|e| {
                 if unique_violation(&e) {
@@ -596,7 +618,9 @@ impl Control {
                 .org(&r.organization)
                 .project(&id);
             if mode == GovernanceMode::Governed {
-                created = created.r#ref("governance", mode.as_str());
+                created = created
+                    .r#ref("governance", mode.as_str())
+                    .r#ref("custody", custody.as_str());
             }
             audit::append(t, created)?;
             // Invitations, as `add_project_member` makes them: an unknown
@@ -634,6 +658,9 @@ impl Control {
                                  "members": [r.organization], "governance": mode.as_str()});
             if !invited.is_empty() {
                 out["invited"] = json!(invited);
+            }
+            if mode == GovernanceMode::Governed {
+                out["custody"] = json!(custody.as_str());
             }
             Ok(out)
         })
@@ -683,11 +710,15 @@ impl Control {
             .iter()
             .map(|r| json!({"asset": r.get::<_, String>(0), "purpose": r.get::<_, String>(1)}))
             .collect::<Vec<_>>();
-        Ok(json!({
+        let mut out = json!({
             "id": p.id, "organization": p.organization, "name": p.name, "status": p.status,
             "members": p.members, "invited": p.invited, "approved_assets": assets,
             "governance": p.governance,
-        }))
+        });
+        if p.governed() {
+            out["custody"] = json!(p.custody);
+        }
+        Ok(out)
     }
 
     /// Invites a collaborating organization, or accepts an invitation.

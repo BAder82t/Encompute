@@ -292,7 +292,7 @@ fn the_governance_codes_are_the_2701_block() {
         .map(|c| c.as_str())
         .filter(|s| s.starts_with("ENC27"))
         .collect();
-    let expected: Vec<String> = (2701..=2714).map(|n| format!("ENC{n}")).collect();
+    let expected: Vec<String> = (2701..=2715).map(|n| format!("ENC{n}")).collect();
     assert_eq!(block, expected);
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/errors.md"),
@@ -308,4 +308,5 @@ fn the_governance_codes_are_the_2701_block() {
     assert_eq!(Code::GovernanceReleaseTicket.as_str(), "ENC2712");
     assert_eq!(Code::GovernanceBrokerStateRollback.as_str(), "ENC2713");
     assert_eq!(Code::GovernanceAuthorizationLimit.as_str(), "ENC2714");
+    assert_eq!(Code::GovernanceCustody.as_str(), "ENC2715");
 }

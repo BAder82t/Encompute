@@ -61,6 +61,9 @@ pub struct Control {
     pub audit_every: u64,
     /// Who may read `/metrics`.
     pub metrics_access: MetricsAccess,
+    /// Compiled execution specs of plans, by plan row (release tickets).
+    pub plan_specs:
+        std::sync::Mutex<std::collections::BTreeMap<String, encompute_verification::ExecutionSpec>>,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -180,6 +183,7 @@ impl Control {
             transport,
             audit_every: audit_every.max(1),
             metrics_access: MetricsAccess::default_for(env),
+            plan_specs: Default::default(),
         };
         c.ensure_self_registered()?;
         c.verify_state(existed)?;
@@ -322,6 +326,7 @@ impl Control {
             metrics: Metrics::default(),
             audit_every: cfg.audit_checkpoint_every.max(1),
             metrics_access: MetricsAccess::Closed,
+            plan_specs: Default::default(),
         })
     }
 
@@ -361,7 +366,7 @@ impl Control {
     /// The database must extend the anchor: nothing anchored may be missing,
     /// and no anchored security-negative transition (freeze, revocation,
     /// disable, cancellation, approval withdrawal, membership or role
-    /// removal) may be undone.
+    /// removal, authorization revocation, asset expiry) may be undone.
     pub fn verify_state(&self, anchor_existed: bool) -> Result<()> {
         let a = self.anchor.snapshot();
         let mut c = self.db.conn()?;
@@ -430,8 +435,18 @@ impl Control {
                 }
             }
         }
-        // A revoked asset must still be revoked (an absent one cannot be
-        // used either: asset IDs are never reissued).
+        // A row an anchored set names must still be there: deleting it
+        // undoes the transition as surely as changing it back (a deleted
+        // revoked authorization frees its signed document to come back
+        // under another row; a deleted disabled service frees its ID).
+        // Only recovery's acknowledgement in the anchor excuses a loss.
+        if let Some((what, id)) = missing_rows(&mut *c, &a)?.into_iter().next() {
+            return Err(rollback(
+                what,
+                format!("{id} is anchored, but the database no longer holds it"),
+            ));
+        }
+        // A revoked asset must still be revoked.
         for asset in &a.revoked {
             if let Some(status) = revoked_status(&mut *c, asset)? {
                 if status != "revoked" {
@@ -443,7 +458,7 @@ impl Control {
             }
         }
         // Disabled principals stay disabled; cancelled and failed jobs stay
-        // ended (absent ones cannot act or run: IDs are never reissued).
+        // ended.
         let undone = |c: &mut crate::db::Conn,
                       sql: &str,
                       ids: &std::collections::BTreeSet<String>|
@@ -534,6 +549,35 @@ impl Control {
                 format!("role {id} ({who}) was removed, but the database holds it"),
             ));
         }
+        // A revoked owner authorization stays revoked (its key brokers were
+        // told already), and an expired asset stays expired.
+        if let Some((id, status)) = undone(
+            &mut c,
+            "SELECT id, status FROM authorizations
+              WHERE (id = ANY($1) OR authorization_id = ANY($1)) AND status <> 'revoked' ORDER BY id",
+            &a.revoked_authorizations,
+        )?
+        .into_iter()
+        .next()
+        {
+            return Err(rollback(
+                "AUTHORIZATION",
+                format!("authorization {id} was revoked, but the database shows it {status}"),
+            ));
+        }
+        if let Some((id, status)) = undone(
+            &mut c,
+            "SELECT id, status FROM assets WHERE id = ANY($1) AND expired_at IS NULL ORDER BY id",
+            &a.expired_assets,
+        )?
+        .into_iter()
+        .next()
+        {
+            return Err(rollback(
+                "EXPIRY",
+                format!("asset {id} expired, but the database shows it {status} and not expired"),
+            ));
+        }
         Ok(())
     }
 
@@ -543,9 +587,11 @@ impl Control {
     /// before are frozen again; a ledger whose row the database lost (its
     /// asset still held) is re-created frozen. A rewound audit chain is recorded as a
     /// gap. Anchored revocations, disables, job cancellations, approval
-    /// withdrawals, membership removals and role removals the database
-    /// forgot are applied again. All of it is audited, then the
-    /// anchor is re-signed.
+    /// withdrawals, membership removals, role removals, authorization
+    /// revocations and asset expiries the database forgot are applied
+    /// again (a revocation or expiry re-applied is recorded at the time of
+    /// recovery, and its key brokers are told again). All of it is
+    /// audited, then the anchor is re-signed.
     pub fn recover(&self, operator: &str) -> Result<Vec<String>> {
         let a = self.anchor.snapshot();
         let mut notes = vec![];
@@ -861,6 +907,98 @@ impl Control {
                 Ok(())
             })?;
         }
+        // Revoked owner authorizations are revoked again, and their
+        // brokers told again (idempotent there).
+        if !a.revoked_authorizations.is_empty() {
+            let ids: Vec<&String> = a.revoked_authorizations.iter().collect();
+            self.db.tx(|t| {
+                let held: Vec<(String, String, String)> = t
+                    .query(
+                        "SELECT id, organization_id, project_id FROM authorizations
+                          WHERE id = ANY($1) AND status <> 'revoked' ORDER BY id FOR UPDATE",
+                        &[&ids],
+                    )
+                    .map_err(db_err)?
+                    .iter()
+                    .map(|r| (r.get(0), r.get(1), r.get(2)))
+                    .collect();
+                let at = i64::try_from(encompute_verification::service::now()).unwrap_or(i64::MAX);
+                for (id, org, project) in held {
+                    t.execute(
+                        "UPDATE authorizations SET status = 'revoked', revoked_by = $2,
+                                revoked_at = to_timestamp($3::bigint) WHERE id = $1",
+                        &[&id, &operator, &at],
+                    )
+                    .map_err(db_err)?;
+                    audit::append(
+                        t,
+                        AuditDraft::new(
+                            operator,
+                            "recovery",
+                            "authorization.revoked",
+                            "authorization",
+                            &id,
+                            Outcome::Succeeded,
+                        )
+                        .org(&org)
+                        .project(&project)
+                        .r#ref("reason", "anchored_revocation_reapplied"),
+                    )?;
+                    self.queue_authorization_revoked(t, operator, "recovery", &id)?;
+                    notes.push(format!("authorization {id}: revocation re-applied"));
+                }
+                Ok(())
+            })?;
+        }
+        // Expired assets expire again.
+        for asset in &a.expired_assets {
+            self.db.tx(|t| {
+                let Some(row) = crate::authz::asset_row(t, asset)? else {
+                    return Ok(());
+                };
+                if self.expire_in(
+                    t,
+                    operator,
+                    "recovery",
+                    &row,
+                    Some("anchored_expiry_reapplied"),
+                )? {
+                    notes.push(format!("asset {asset}: expiry re-applied"));
+                }
+                Ok(())
+            })?;
+        }
+        // Rows the database lost are acknowledged in the anchor (their IDs
+        // stay blocked), and audited.
+        let lost = {
+            let mut c = self.db.conn()?;
+            missing_rows(&mut *c, &a)?
+        };
+        if !lost.is_empty() {
+            self.db.tx(|t| {
+                for (what, id) in &lost {
+                    audit::append(
+                        t,
+                        AuditDraft::new(
+                            operator,
+                            "recovery",
+                            "anchor.row_lost",
+                            "anchor",
+                            id,
+                            Outcome::Succeeded,
+                        )
+                        .r#ref("state", what.to_lowercase().replace(' ', "_")),
+                    )?;
+                }
+                Ok(())
+            })?;
+            for (what, id) in &lost {
+                notes.push(format!(
+                    "{} {id}: the database lost its row; recorded as lost in the state anchor (the ID stays blocked)",
+                    what.to_lowercase()
+                ));
+            }
+        }
         let (seq, root, ledgers) = {
             let mut c = self.db.conn()?;
             let (seq, root) = audit::verify_chain(&mut *c)?;
@@ -873,6 +1011,9 @@ impl Control {
             (seq, root, ledgers)
         };
         self.anchor.update(&self.signer, |x| {
+            for (what, id) in &lost {
+                x.lost.insert(lost_key(what, id));
+            }
             x.audit_seq = seq;
             x.audit_root = root.clone();
             x.ledgers = ledgers.clone();
@@ -925,11 +1066,12 @@ impl Control {
     /// Anchors the security-negative state the database holds and the
     /// anchor does not yet: revoked assets, disabled service accounts and
     /// users, cancelled and failed jobs, withdrawn asset approvals, removed
-    /// project memberships and organization roles. Only ever adds. Runs after the
+    /// project memberships and organization roles, revoked owner
+    /// authorizations and expired assets. Only ever adds. Runs after the
     /// operations that make such transitions and in the background (a
     /// crash between a commit and its anchoring is caught up here).
     pub fn sync_anchor(&self) -> Result<()> {
-        let (revoked, services, users, jobs, withdrawn, removed, roles) = {
+        let (revoked, services, users, jobs, withdrawn, removed, roles, authorizations, expired) = {
             let mut c = self.db.conn()?;
             let ids = |c: &mut crate::db::Conn, sql: &str| -> Result<Vec<String>> {
                 Ok(c.query(sql, &[])
@@ -952,17 +1094,31 @@ impl Control {
                 ids(&mut c, "SELECT id FROM withdrawn_grants")?,
                 ids(&mut c, "SELECT id FROM removed_memberships")?,
                 ids(&mut c, "SELECT id FROM removed_roles")?,
+                // Row IDs and the signed documents' IDs: a document stays
+                // revoked whatever row carries it.
+                ids(
+                    &mut c,
+                    "SELECT id FROM authorizations WHERE status = 'revoked'
+                     UNION SELECT authorization_id FROM authorizations
+                      WHERE status = 'revoked' AND authorization_id IS NOT NULL",
+                )?,
+                ids(&mut c, "SELECT id FROM assets WHERE expired_at IS NOT NULL")?,
             )
+        };
+        let size = |a: &crate::anchor::StateAnchor| {
+            a.revoked.len()
+                + a.disabled_services.len()
+                + a.disabled_users.len()
+                + a.ended_jobs.len()
+                + a.withdrawn_grants.len()
+                + a.removed_memberships.len()
+                + a.removed_roles.len()
+                + a.revoked_authorizations.len()
+                + a.expired_assets.len()
         };
         self.anchor
             .try_update(&self.signer, |a| {
-                let before = a.revoked.len()
-                    + a.disabled_services.len()
-                    + a.disabled_users.len()
-                    + a.ended_jobs.len()
-                    + a.withdrawn_grants.len()
-                    + a.removed_memberships.len()
-                    + a.removed_roles.len();
+                let before = size(a);
                 a.revoked.extend(revoked.iter().cloned());
                 a.disabled_services.extend(services.iter().cloned());
                 a.disabled_users.extend(users.iter().cloned());
@@ -970,14 +1126,10 @@ impl Control {
                 a.withdrawn_grants.extend(withdrawn.iter().cloned());
                 a.removed_memberships.extend(removed.iter().cloned());
                 a.removed_roles.extend(roles.iter().cloned());
-                Ok(before
-                    != a.revoked.len()
-                        + a.disabled_services.len()
-                        + a.disabled_users.len()
-                        + a.ended_jobs.len()
-                        + a.withdrawn_grants.len()
-                        + a.removed_memberships.len()
-                        + a.removed_roles.len())
+                a.revoked_authorizations
+                    .extend(authorizations.iter().cloned());
+                a.expired_assets.extend(expired.iter().cloned());
+                Ok(before != size(a))
             })
             .map(|_| ())
     }
@@ -1160,6 +1312,59 @@ fn recreate_frozen_ledger(
     )
     .map_err(db_err)?;
     Ok(Some(genesis))
+}
+
+/// The anchor's key of a lost row: `set:id`.
+fn lost_key(what: &str, id: &str) -> String {
+    format!("{}:{id}", what.to_lowercase().replace(' ', "_"))
+}
+
+/// The IDs anchored sets name that the database does not hold, and that
+/// recovery has not acknowledged as lost: (state, ID). Withdrawn approvals
+/// and removed memberships and roles are anchored as absent rows, so they
+/// are not here.
+fn missing_rows(
+    c: &mut impl GenericClient,
+    a: &crate::anchor::StateAnchor,
+) -> Result<Vec<(&'static str, String)>> {
+    let mut out = vec![];
+    for (what, ids, table, matches) in [
+        ("REVOCATION", &a.revoked, "assets", "t.id = x"),
+        (
+            "SERVICE ACCOUNT",
+            &a.disabled_services,
+            "service_accounts",
+            "t.id = x",
+        ),
+        ("USER", &a.disabled_users, "users", "t.id = x"),
+        ("JOB", &a.ended_jobs, "jobs", "t.id = x"),
+        (
+            "AUTHORIZATION",
+            &a.revoked_authorizations,
+            "authorizations",
+            "t.id = x OR t.authorization_id = x",
+        ),
+        ("EXPIRY", &a.expired_assets, "assets", "t.id = x"),
+    ] {
+        let ids: Vec<&String> = ids
+            .iter()
+            .filter(|id| !a.lost.contains(&lost_key(what, id)))
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let rows = c
+            .query(
+                &format!(
+                    "SELECT x FROM unnest($1::text[]) AS x
+                      WHERE NOT EXISTS (SELECT 1 FROM {table} t WHERE {matches}) ORDER BY x"
+                ),
+                &[&ids],
+            )
+            .map_err(db_err)?;
+        out.extend(rows.iter().map(|r| (what, r.get::<_, String>(0))));
+    }
+    Ok(out)
 }
 
 /// An asset's status, or `None` if the database does not hold it.

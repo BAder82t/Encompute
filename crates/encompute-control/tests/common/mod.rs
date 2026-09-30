@@ -173,6 +173,21 @@ pub fn restore_database(backup: &str, url: &str) {
     panic!("the backup database stayed in use");
 }
 
+/// Runs `sql` on `url` with the user triggers of `tables` disabled: what an
+/// attacker with the database's credentials can do.
+pub fn attacker(url: &str, tables: &[&str], sql: &str) {
+    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    for t in tables {
+        c.batch_execute(&format!("ALTER TABLE {t} DISABLE TRIGGER USER"))
+            .unwrap();
+    }
+    c.batch_execute(sql).unwrap();
+    for t in tables {
+        c.batch_execute(&format!("ALTER TABLE {t} ENABLE TRIGGER USER"))
+            .unwrap();
+    }
+}
+
 /// The configuration `encompute-control recover` would run with on
 /// `env0`'s database and anchor.
 pub fn recovery_config(env0: &Env0) -> encompute_control::config::Config {

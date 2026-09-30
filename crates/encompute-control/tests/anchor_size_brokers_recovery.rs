@@ -40,8 +40,11 @@ fn the_anchor_size_is_measured_on_every_write_and_exported() {
     t.control
         .anchor
         .update(&t.control.signer, |a| {
+            // (Removed roles: their anchored state is the absence of their
+            // rows, so IDs the database never held pass the start check;
+            // an ended job the database does not hold is a rollback.)
             for i in 0..100 {
-                a.ended_jobs.insert(format!("job_{i:032}"));
+                a.removed_roles.insert(format!("rol_{i:032}"));
             }
         })
         .unwrap();

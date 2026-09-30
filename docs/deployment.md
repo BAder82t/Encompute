@@ -277,6 +277,57 @@ encrypted assets
   nothing. There is no fallback to local or plaintext keys. Production
   brokers refuse development stores.
 
+### Registering an organization's own key broker
+
+A governed project is always in sovereign key custody: every source's key
+must be held by a key broker the source's own organization registered,
+never a platform broker (ENC2715). Asking for standard custody in a
+governed project is refused (ENC2715); standard projects keep standard
+custody. Custody never changes. To register a
+broker for your organization:
+
+1. An organization admin creates the broker's service account, owned by the
+   organization, with the URL the control plane sends its messages to:
+
+   ```sh
+   curl -X POST $CONTROL/v1/organizations/tax-agency/service-accounts \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -d '{"id": "tax-broker", "kind": "keybroker",
+          "public_key": "<broker service key, hex>",
+          "url": "https://keys.tax-agency.example:8760"}'
+   ```
+
+2. A person who is a security admin of the organization (not a service
+   account, not an auditor) registers it as the organization's broker, with
+   the public key it signs key grants with, the kind of KMS behind it, the
+   key namespace it serves, and where it runs (self-declared):
+
+   ```sh
+   curl -X POST $CONTROL/v1/organizations/tax-agency/key-brokers \
+     -H "Authorization: Bearer $SECURITY_ADMIN_TOKEN" \
+     -d '{"id": "tax-broker", "grant_public_key": "<grant key, hex>",
+          "provider_kind": "openbao-transit", "key_ref_namespace": "transit/tax",
+          "location": {"country": "NL"}}'
+   ```
+
+   The registration is audited (`key_broker.registered`). A broker's
+   identity, organization and grant key never change; disable its service
+   account to retire it.
+
+3. Data owners register each dataset version for the project with the
+   broker in its `key_ref` (`"project": "<project ID>"` and `"key_ref":
+   {"broker": "tax-broker", ...}` on `POST /v1/assets`).
+
+Start the broker pinned to the control plane's public key (`GET /v1/info`
+`public_key`): it accepts only release tickets and messages signed with it.
+The scheduled evaluator of a governed job asks the control plane for a
+ticket per source (`POST /v1/jobs/{id}/release-ticket`); a ticket lives at
+most five minutes and never beyond the job's governed window or grant.
+When an owner revokes an authorization, the control plane anchors the
+revocation first, then tells the organization's registered brokers
+(`authorization.revoked`); the owner can always revoke at its own broker
+directly, without the control plane.
+
 ## Upgrading from 0.3.0-rc.3 or earlier
 
 - **Service accounts with `security_admin`.** Earlier releases let an
@@ -320,8 +371,9 @@ The control plane signs into the **state anchor**:
 - every security-negative transition: revoked assets, frozen ledgers,
   disabled service accounts and users, cancelled and failed jobs,
   withdrawn asset approvals (including the grants an organization lost by
-  leaving a project), removed project memberships, and organization roles
-  removed from a user or service account.
+  leaving a project), removed project memberships, organization roles
+  removed from a user or service account, revoked owner authorizations of
+  governed projects, and expired assets.
 
 The anchor is kept outside the database: on its own volume, or in the
 customer's vault (OpenBao or Vault KV). It only moves forward along the
@@ -345,8 +397,10 @@ error[ENC2202]: PRIVACY STATE ROLLBACK: ... STARTUP REFUSED
 The same refusal names AUDIT, FREEZE (a frozen ledger shown spendable),
 REVOCATION, SERVICE ACCOUNT, USER, JOB (a cancelled or failed job shown
 live), APPROVAL (a withdrawn asset approval held again), MEMBERSHIP (an
-organization listed again in a project it left) or ROLE (a removed role
-held again) when that is what the database undid. That happens when an older
+organization listed again in a project it left), ROLE (a removed role
+held again), AUTHORIZATION (a revoked owner authorization shown unrevoked)
+or EXPIRY (an expired asset shown unexpired) when that is what the
+database undid. That happens when an older
 database backup was restored, or the database was edited. Recovery is
 explicit:
 
@@ -362,7 +416,9 @@ fail, and its key broker is told again. Disabled service accounts and users
 are disabled again, and cancelled or failed jobs end again (never run
 twice). Withdrawn asset approvals are withdrawn again, organizations
 that left a project are removed from it again, and removed roles are
-removed again. It records all of this,
+removed again. Revoked owner authorizations are revoked again and expired
+assets expire again, each at the time of recovery, and their key brokers
+are told again. It records all of this,
 and any audit gap, in the audit trail. If the database lost a frozen
 ledger's row but still holds its asset, recovery re-creates the row,
 frozen, with no entries and a placeholder budget that pays for nothing

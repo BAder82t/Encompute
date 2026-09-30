@@ -183,6 +183,8 @@ pub enum Code {
     GovernanceBrokerStateRollback,
     /// An owner authorization's usage limit (releases or executions) is exhausted at the key broker (ENC2714).
     GovernanceAuthorizationLimit,
+    /// Key custody refused: in a sovereign project an asset's key must be held by a key broker its own organization registered, never a platform broker or another organization's (ENC2715).
+    GovernanceCustody,
 }
 
 impl Code {
@@ -262,13 +264,14 @@ impl Code {
             Code::GovernanceReleaseTicket => "ENC2712",
             Code::GovernanceBrokerStateRollback => "ENC2713",
             Code::GovernanceAuthorizationLimit => "ENC2714",
+            Code::GovernanceCustody => "ENC2715",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 74] = [
+    pub const ALL: [Code; 75] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -343,6 +346,7 @@ impl Code {
         Code::GovernanceReleaseTicket,
         Code::GovernanceBrokerStateRollback,
         Code::GovernanceAuthorizationLimit,
+        Code::GovernanceCustody,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

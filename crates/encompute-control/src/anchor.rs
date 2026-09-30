@@ -19,7 +19,8 @@
 //! Security-negative transitions are anchored too (revoked assets, frozen
 //! ledgers, disabled service accounts and users, cancelled and failed
 //! jobs, withdrawn asset approvals, removed project memberships, removed
-//! organization roles), so a restored database cannot silently undo them.
+//! organization roles, revoked owner authorizations, expired assets), so a
+//! restored database cannot silently undo them.
 //!
 //! One control plane process per anchor: updates are compare-and-set on the
 //! counter, and a process whose update lost the race reloads the stored
@@ -116,6 +117,23 @@ pub struct StateAnchor {
     /// never reused): a restored database must not hold them again.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub removed_roles: BTreeSet<String>,
+    /// Revoked owner authorizations of governed projects (row IDs, never
+    /// reused): a restored database must still show them revoked. A key
+    /// broker is told of a revocation only once it is here.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub revoked_authorizations: BTreeSet<String>,
+    /// Expired assets (their owner's retention ended): a restored database
+    /// must still show them expired, and a key broker is told only once
+    /// they are here.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub expired_assets: BTreeSet<String>,
+    /// Rows of the sets above that the database lost (deleted, or never
+    /// restored), acknowledged by an operator's recovery, as `set:id`. A
+    /// row missing without this is a rollback like one shown undone; with
+    /// it, the ID stays blocked (IDs are never reused), and a row that
+    /// comes back must still show the anchored state.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub lost: BTreeSet<String>,
     pub signer: String,
     pub signer_public_key: String,
     #[serde(default)]
@@ -138,6 +156,9 @@ impl StateAnchor {
             withdrawn_grants: Default::default(),
             removed_memberships: Default::default(),
             removed_roles: Default::default(),
+            revoked_authorizations: Default::default(),
+            expired_assets: Default::default(),
+            lost: Default::default(),
             signer: signer.id().into(),
             signer_public_key: signer.public_key_hex(),
             signature: String::new(),
@@ -486,6 +507,9 @@ mod tests {
             "withdrawn_grants",
             "removed_memberships",
             "removed_roles",
+            "revoked_authorizations",
+            "expired_assets",
+            "lost",
         ] {
             assert!(v.get(k).is_none(), "{k} serialized while empty");
         }

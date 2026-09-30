@@ -245,6 +245,18 @@ impl Control {
                     )));
                 }
             }
+            // Registered for a project: the owner must be a member, and in
+            // sovereign custody the key must be held by a broker the
+            // owner itself registered (never a platform broker).
+            if let Some(project) = &r.project {
+                let p = project_visible(t, &ctx.principal, project)?;
+                if !p.members.contains(&r.organization) {
+                    return Err(forbidden("the asset's owner must be a member of the project"));
+                }
+                if p.sovereign() {
+                    crate::ops::require_own_broker(t, &r.organization, r.key_ref.as_ref().map(|k| k.broker.as_str()))?;
+                }
+            }
             if let Some(v) = &version {
                 // One label is one digest, forever: the same series and
                 // version with another digest is refused (and not only by
@@ -305,6 +317,9 @@ impl Control {
                 .r#ref("digest", r.digest.clone());
             if let Some(k) = &r.key_ref {
                 d = d.r#ref("key_provider", k.provider.clone()).r#ref("key_version", k.key_version.to_string());
+            }
+            if let Some(p) = &r.project {
+                d = d.project(p);
             }
             audit::append(t, d)?;
             let mut ledger = None;

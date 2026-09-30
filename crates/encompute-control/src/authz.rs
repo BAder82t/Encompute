@@ -102,18 +102,26 @@ pub struct ProjectRow {
     pub invited: Vec<String>,
     /// `standard` or `governed` (immutable).
     pub governance: String,
+    /// `standard` or `sovereign` (governed projects only; immutable).
+    pub custody: String,
 }
 
 impl ProjectRow {
     pub fn governed(&self) -> bool {
         self.governance == "governed"
     }
+
+    /// Every source's key is held by a broker its own organization
+    /// registered.
+    pub fn sovereign(&self) -> bool {
+        self.custody == "sovereign"
+    }
 }
 
 pub fn project_row(c: &mut impl GenericClient, id: &str) -> Result<Option<ProjectRow>> {
     let Some(r) = c
         .query_opt(
-            "SELECT id, organization_id, name, status, governance FROM projects WHERE id = $1",
+            "SELECT id, organization_id, name, status, governance, custody FROM projects WHERE id = $1",
             &[&id],
         )
         .map_err(db_err)?
@@ -142,6 +150,7 @@ pub fn project_row(c: &mut impl GenericClient, id: &str) -> Result<Option<Projec
         members,
         invited,
         governance: r.get(4),
+        custody: r.get(5),
     }))
 }
 

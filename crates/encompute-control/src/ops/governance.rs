@@ -20,11 +20,16 @@
 //! then on nothing new uses the authorization, while uses before it stay
 //! valid history ([`Control::authorization_usable_at`]).
 //!
+//! A revoked authorization is anchored before the revocation is
+//! acknowledged, and only then are the owner's key brokers told
+//! (`authorization.revoked`, see `ops/custody.rs`); release tickets are
+//! issued there too.
+//!
 //! Not yet (later phases): enforcement of authorizations at job
-//! submission, scheduling, start and key release (jobs in governed
-//! projects are refused meanwhile; those phases call
-//! [`Control::authorization_usable_at`]), release tickets, and anchoring of
-//! revocations and retirements against database rollback.
+//! submission, scheduling and start (jobs in governed projects are refused
+//! meanwhile; those phases call [`Control::authorization_usable_at`]), and
+//! anchoring of purpose retirements and governance-key revocations against
+//! database rollback.
 
 use std::collections::BTreeMap;
 
@@ -950,7 +955,7 @@ impl Control {
         r: RevokeAuthorization,
     ) -> Result<Value> {
         check_name("reason", &r.reason)?;
-        self.db.tx(|t| {
+        let out = self.db.tx(|t| {
             let row = authorization_row(t, ctx, id)?;
             require_human(
                 &ctx.principal,
@@ -1003,8 +1008,16 @@ impl Control {
                 d = d.r#ref("authorization_id", a.clone());
             }
             audit::append(t, d)?;
+            // The owner's brokers stop using it too: queued now, sent once
+            // the revocation is anchored.
+            self.queue_authorization_revoked(t, ctx.actor(), &ctx.request_id, id)?;
             Ok(json!({"id": id, "status": "revoked"}))
-        })
+        })?;
+        // Anchored before acknowledging (a retry of a revoked one
+        // re-anchors); the brokers' messages go out only after that.
+        self.sync_anchor()?;
+        let _ = self.deliver_outbox();
+        Ok(out)
     }
 }
 

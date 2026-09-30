@@ -323,6 +323,59 @@ pub struct CreateProject {
     /// (`POST /v1/projects/{id}/members`).
     #[serde(default)]
     pub organizations: Vec<String>,
+    /// Key custody, fixed by the mode: `sovereign` for a governed project
+    /// (`standard` is refused), `standard` for a standard one.
+    #[serde(default)]
+    pub custody: Option<Custody>,
+}
+
+/// Who holds the keys of a project's sources. In sovereign custody every
+/// source's key is held by a key broker its own organization registered
+/// (`POST /v1/organizations/{org}/key-brokers`), never a platform broker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Custody {
+    Standard,
+    Sovereign,
+}
+
+impl Custody {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Custody::Standard => "standard",
+            Custody::Sovereign => "sovereign",
+        }
+    }
+}
+
+/// An organization registers one of its own key-broker service accounts
+/// as its key broker. Only public information: the key it signs grants
+/// with, the kind of KMS behind it, the key namespace it serves, and where
+/// it says it runs.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterKeyBroker {
+    /// The broker's service-account ID (kind `keybroker`, of this
+    /// organization).
+    pub id: String,
+    /// Hex Ed25519 key the broker signs key grants with.
+    pub grant_public_key: String,
+    /// The KMS behind the broker (`openbao-transit`, `aws-kms`, ...).
+    pub provider_kind: String,
+    /// The key namespace it serves in that KMS.
+    pub key_ref_namespace: String,
+    /// Where it says it runs (self-declared, never evidence): string
+    /// fields such as `country` or `region`.
+    #[serde(default)]
+    pub location: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The scheduled evaluator asks for a release ticket for one source.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestReleaseTicket {
+    /// Hex `AssetVersionId` of the source whose key the workload needs.
+    pub asset_version_id: String,
 }
 
 /// A project's mode. A governed project computes across organizations for
@@ -470,6 +523,11 @@ pub struct RegisterAsset {
     pub series: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
+    /// The project the asset is registered for. In a project with
+    /// sovereign custody the asset's key must be held by a key broker the
+    /// asset's own organization registered.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Where an asset's key lives. Only references: the key broker holds the

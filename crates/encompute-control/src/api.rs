@@ -47,6 +47,8 @@
 //! | POST | `/v1/authorizations` | owner authorizations (v2), proposed without approvals |
 //! | GET | `/v1/authorizations/{id}` | to the owner's members: the document to sign |
 //! | POST | `/v1/authorizations/{id}/approve`, `/signature`, `/revoke` | four eyes, then the owner's governance-key signature |
+//! | POST, GET | `/v1/organizations/{id}/key-brokers` | an organization's own key brokers (sovereign custody); a security admin registers |
+//! | POST | `/v1/jobs/{id}/release-ticket` | governed projects: the scheduled evaluator asks for a key-release ticket |
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -117,7 +119,8 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceReleaseClass
         | Code::GovernanceResidency
         | Code::GovernanceLinkageMismatch
-        | Code::GovernanceReleaseTicket => 403,
+        | Code::GovernanceReleaseTicket
+        | Code::GovernanceCustody => 403,
         Code::NotFound => 404,
         Code::Conflict | Code::PrivacyBudgetExceeded => 409,
         Code::PlanningFailed | Code::PlanInvalid => 422,
@@ -388,6 +391,12 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "authorizations", id, "revoke"]) => {
             ok(control.revoke_authorization(ctx, id, parse(&r.body)?)?)
         }
+        ("POST", ["v1", "organizations", id, "key-brokers"]) => {
+            created(control.register_key_broker(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "organizations", id, "key-brokers"]) => {
+            ok(control.list_key_brokers(ctx, id)?)
+        }
         ("POST", ["v1", "projects", id, "policies"]) => {
             created(control.propose_policy(ctx, id, parse(&r.body)?)?)
         }
@@ -422,6 +431,9 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "jobs", id, "cancel"]) => ok(control.cancel_job(ctx, id)?),
         ("POST", ["v1", "jobs", id, "approve"]) => ok(control.approve_job(ctx, id)?),
         ("POST", ["v1", "jobs", id, "start"]) => ok(control.start_job(ctx, id)?),
+        ("POST", ["v1", "jobs", id, "release-ticket"]) => {
+            created(control.issue_release_ticket(ctx, id, parse(&r.body)?)?)
+        }
         ("POST", ["v1", "jobs", id, "complete"]) => {
             ok(control.complete_job(ctx, id, parse(&r.body)?)?)
         }

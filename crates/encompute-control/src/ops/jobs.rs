@@ -526,6 +526,16 @@ impl Control {
         }))
     }
 
+    /// The execution spec of a stored plan (its program compiled again),
+    /// before any governance binding.
+    pub(crate) fn plan_spec(
+        &self,
+        c: &mut impl GenericClient,
+        plan: &str,
+    ) -> Result<ExecutionSpec> {
+        self.load_plan(c, plan).map(|(_, _, spec, _)| spec)
+    }
+
     /// The program, compiled spec and plan document of a stored plan.
     fn load_plan(
         &self,
@@ -2002,12 +2012,20 @@ impl Control {
             // A key broker learns of a revocation only once the anchor holds
             // it: a restored database cannot then un-revoke an asset whose
             // key the broker already destroyed without it being noticed.
-            if m.kind == "asset.revoked"
-                && !m.payload["asset"]
-                    .as_str()
-                    .is_some_and(|a| anchored.revoked.contains(a))
-            {
-                continue;
+            // Likewise an owner authorization's revocation and an asset's
+            // expiry.
+            let (field, set) = match m.kind.as_str() {
+                "asset.revoked" => ("asset", Some(&anchored.revoked)),
+                "authorization.revoked" => {
+                    ("authorization", Some(&anchored.revoked_authorizations))
+                }
+                "asset.expired" => ("asset", Some(&anchored.expired_assets)),
+                _ => ("", None),
+            };
+            if let Some(set) = set {
+                if !m.payload[field].as_str().is_some_and(|x| set.contains(x)) {
+                    continue;
+                }
             }
             let r = self.transport.send(&url, &m);
             let mut c = self.db.conn()?;
