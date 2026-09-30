@@ -302,6 +302,18 @@ pub struct AuthorizationLimits {
     pub max_subjects_per_job: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_evaluations_per_subject: Option<u64>,
+    /// How many outputs of one job may be released as boolean-only (a
+    /// boolean or a bounded category) from this source; absent: one.
+    /// Several such outputs of one job could jointly encode a value.
+    /// Skipped when absent, so existing AuthorizationIds are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_outputs_per_job: Option<u64>,
+}
+
+/// Classes whose ceiling admits boolean-only releases (a boolean or a
+/// bounded category): the ones repeated queries can probe.
+pub fn admits_probing(class: ReleaseClass) -> bool {
+    ReleaseClass::BooleanOnly.within(class)
 }
 
 impl AuthorizationLimits {
@@ -376,6 +388,45 @@ pub struct AuthorizationV2 {
 pub type SignedAuthorizationV2 = Signed<AuthorizationV2>;
 
 impl AuthorizationV2 {
+    /// Probing controls (fail closed): an authorization whose ceiling
+    /// admits boolean-only releases bounds how many jobs it runs and how
+    /// many key releases it makes (`max_executions`, `max_releases`), so
+    /// repeated yes/no questions about the same records are bounded. They
+    /// bound that channel; they do not close it (ENC2709).
+    pub fn check_probing_limits(&self) -> Result<()> {
+        if admits_probing(self.release_class)
+            && (self.limits.max_executions.is_none() || self.limits.max_releases.is_none())
+        {
+            return Err(Error::new(
+                Code::GovernanceReleaseClass,
+                format!(
+                    "an authorization with release class {} bounds repeated queries: it sets \
+                     limits.max_executions and limits.max_releases",
+                    self.release_class.as_str()
+                ),
+            ));
+        }
+        if self.limits.max_outputs_per_job == Some(0) {
+            return Err(err("max_outputs_per_job is at least 1"));
+        }
+        Ok(())
+    }
+
+    /// Whether the job's `outputs` stay within this authorization's
+    /// per-job cap on boolean-only outputs (`max_outputs_per_job`, one when
+    /// absent). The control plane at submission and the key broker at key
+    /// release both decide with this function.
+    pub fn probing_outputs_within(
+        &self,
+        outputs: &BTreeMap<String, encompute_verification::governance::GovernanceOutput>,
+    ) -> bool {
+        let n = outputs
+            .values()
+            .filter(|o| o.release_class == ReleaseClass::BooleanOnly)
+            .count() as u64;
+        n <= self.limits.max_outputs_per_job.unwrap_or(1)
+    }
+
     /// The authorization ID (hex): the tagged hash of the whole body,
     /// approvals included (the signature is over the same digest).
     pub fn id(&self) -> String {

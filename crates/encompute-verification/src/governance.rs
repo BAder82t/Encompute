@@ -26,6 +26,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use encompute_ir::confidentiality::ReleaseForm;
 use encompute_ir::{Code, Error, Result};
 
 use crate::canonical::canonical_json;
@@ -134,6 +135,77 @@ impl ReleaseClass {
             ReleaseClass::DerivedArtifactOnly => "derived-artifact-only",
         }
     }
+
+    pub const ALL: [ReleaseClass; 6] = [
+        ReleaseClass::Never,
+        ReleaseClass::BooleanOnly,
+        ReleaseClass::AggregateOnly,
+        ReleaseClass::DpAggregateOnly,
+        ReleaseClass::AuthorizedAgencyOnly,
+        ReleaseClass::DerivedArtifactOnly,
+    ];
+
+    /// Whether a release of class `self` stays within `ceiling`, the class
+    /// an owner (or a purpose) allows. The owners' order, a partial order:
+    /// every class is within itself; boolean-only, aggregate-only and
+    /// dp-aggregate-only are within authorized-agency-only;
+    /// dp-aggregate-only is within aggregate-only; derived-artifact-only
+    /// and never are within only themselves. The control plane (at
+    /// submission) and the key broker (at key release) both decide with
+    /// this one function.
+    pub fn within(self, ceiling: ReleaseClass) -> bool {
+        use ReleaseClass::*;
+        self == ceiling
+            || matches!(
+                (self, ceiling),
+                (
+                    BooleanOnly | AggregateOnly | DpAggregateOnly,
+                    AuthorizedAgencyOnly
+                ) | (DpAggregateOnly, AggregateOnly)
+            )
+    }
+
+    /// Whether this class allows a release in form `f`: boolean-only a
+    /// boolean or a bounded category; aggregate-only an aggregate, with or
+    /// without differential privacy; dp-aggregate-only a DP aggregate;
+    /// derived-artifact-only a derived artifact; authorized-agency-only
+    /// any form; never none (it releases nothing).
+    pub fn allows_form(self, f: ReleaseForm) -> bool {
+        match self {
+            ReleaseClass::Never => false,
+            ReleaseClass::BooleanOnly => {
+                matches!(
+                    f,
+                    ReleaseForm::Boolean | ReleaseForm::BoundedCategory { .. }
+                )
+            }
+            ReleaseClass::AggregateOnly => {
+                matches!(f, ReleaseForm::Aggregate | ReleaseForm::DpAggregate)
+            }
+            ReleaseClass::DpAggregateOnly => f == ReleaseForm::DpAggregate,
+            ReleaseClass::AuthorizedAgencyOnly => true,
+            ReleaseClass::DerivedArtifactOnly => f == ReleaseForm::DerivedArtifact,
+        }
+    }
+
+    /// Whether an output that provably takes forms `provable` may be
+    /// released under this class: authorized-agency-only releases any
+    /// value to its recipients, never releases nothing (the output stays
+    /// sealed); every other class needs a provable form it allows.
+    pub fn admits(self, provable: &BTreeSet<ReleaseForm>) -> bool {
+        match self {
+            ReleaseClass::Never | ReleaseClass::AuthorizedAgencyOnly => true,
+            c => provable.iter().any(|&f| c.allows_form(f)),
+        }
+    }
+}
+
+/// Whether an output requested at class `requested` is allowed under
+/// `ceiling`, an owner authorization's release class: within it, or never
+/// released at all (sealed). The one check the control plane and the key
+/// broker share.
+pub fn release_within(requested: ReleaseClass, ceiling: ReleaseClass) -> bool {
+    requested == ReleaseClass::Never || requested.within(ceiling)
 }
 
 /// A declared purpose of a governed project. `name` is what programs
@@ -309,6 +381,13 @@ impl GovernanceBinding {
             check_label("output", name)?;
             if o.recipients.is_empty() && o.release_class != ReleaseClass::Never {
                 return Err(bad(format!("output {name} has no recipient")));
+            }
+            // Released to nobody means nobody: no recipient could be named
+            // in a ticket or an export for it.
+            if o.release_class == ReleaseClass::Never && !o.recipients.is_empty() {
+                return Err(bad(format!(
+                    "output {name} is never released: it names no recipient"
+                )));
             }
             for r in &o.recipients {
                 check_label("recipient", r)?;

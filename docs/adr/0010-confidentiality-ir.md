@@ -83,6 +83,23 @@ MPC, secure aggregation or a TEE, and nothing changes how a program runs.
   program itself; binding that approval to the program ID is part of
   policy-gated key release.
 
+## Addendum: release forms
+
+An asset's policy may also limit the forms a release takes, beside who may
+learn it: `release R forms [boolean, bounded_category 3, aggregate,
+dp_aggregate, derived_artifact]` (any subset; at most one bounded
+category). Absent, any form is allowed and the policy's bytes, and so its
+PolicyId, are unchanged. Forms join by intersection (a bounded category at
+the lower bound). A released output (to a party, public, or through an
+aggregation boundary) whose sources declare forms must provably take one:
+a scalar `bool` is a boolean; a scalar integer proven by range analysis to
+lie in `[0, max]` is a bounded category; an aggregation boundary's output
+is an aggregate, and a differentially private aggregate with `dp`; a
+value labelled a model, model update, checkpoint or adapter is a derived
+artifact. Otherwise the program does not compile (ENC1907). Governed
+projects map forms onto release classes; see the governed-projects
+decision record.
+
 ## Evidence
 
 `crates/encompute-analysis/tests/confidentiality.rs` (the training

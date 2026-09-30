@@ -848,3 +848,26 @@ pub fn body_of(reply: &str) -> Value {
         .and_then(|(_, b)| serde_json::from_str(b).ok())
         .unwrap_or(Value::Null)
 }
+
+/// The registered policy (and release class) a governed dataset version of
+/// `org` carries: readers benefits and tax, for benefits eligibility,
+/// boolean-only. Governed sources need one.
+#[allow(dead_code)]
+pub fn registered(org: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ir_policy": {"owners": [org], "readers": ["benefits-agency", "tax-agency"],
+                      "purposes": ["benefits-eligibility"], "release": "allowed_parties",
+                      "derive": {}},
+        "release_class": "boolean-only"
+    })
+}
+
+/// Probing limits a boolean-only authorization carries.
+#[allow(dead_code)]
+pub fn probing_limits() -> encompute_trust::authz::AuthorizationLimits {
+    encompute_trust::authz::AuthorizationLimits {
+        max_executions: Some(1000),
+        max_releases: Some(1000),
+        ..Default::default()
+    }
+}

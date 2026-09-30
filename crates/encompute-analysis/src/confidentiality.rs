@@ -8,10 +8,13 @@
 //! - purposes: intersection;
 //! - release: the most restrictive;
 //! - derivation permissions: kinds allowed by every source, each at the
-//!   most restrictive release, to the parties every source allows.
+//!   most restrictive release, to the parties every source allows;
+//! - release forms: the forms every source allows.
 //!
 //! Policies weaken only through an explicit derivation that every source
-//! asset permits. Violations are compile errors ENC1901–ENC1906.
+//! asset permits. Violations are compile errors ENC1901–ENC1907: a value
+//! released from sources that declare release forms must provably take
+//! one of them (ENC1907).
 //!
 //! An `aggregate` declaration (ADR-012) lowers an output to an
 //! [`AggregationBoundary`]: the output must be the sum of one input per
@@ -22,10 +25,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use encompute_ir::confidentiality::{
-    AggregationFunction, AggregationRule, AssetDecl, AssetKind, Confidentiality, DerivePermission,
-    DpMechanism, FixedPointCodec, OutputRelease, PartyId, PrivacyBudget, Release,
+    forms_within, meet_forms, AggregationFunction, AggregationRule, AssetDecl, AssetKind,
+    AssetPolicy, Confidentiality, DerivePermission, DpMechanism, FixedPointCodec, OutputRelease,
+    PartyId, PrivacyBudget, Release, ReleaseForm,
 };
-use encompute_ir::{Code, Error, Op, Program, Result, Shape, ValueId};
+use encompute_ir::{Code, Elem, Error, Op, Program, Result, Shape, ValueId};
 use serde::Serialize;
 
 /// The effective policy of a value.
@@ -42,6 +46,9 @@ pub struct Policy {
     pub kind: AssetKind,
     /// Declared assets it is derived from.
     pub sources: BTreeSet<String>,
+    /// The forms it may be released in; `None`: any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forms: Option<BTreeSet<ReleaseForm>>,
 }
 
 impl Policy {
@@ -55,6 +62,7 @@ impl Policy {
             derive: None,
             kind: AssetKind::Generic,
             sources: BTreeSet::new(),
+            forms: None,
         }
     }
 
@@ -72,6 +80,7 @@ impl Policy {
                     kind: a.kind,
                     purposes: Some(p.purposes.clone()),
                     derive: Some(p.derive.clone()),
+                    forms: p.forms.clone(),
                     ..Self::public()
                 }
             }
@@ -84,6 +93,7 @@ impl Policy {
             derive: Some(p.derive.clone()),
             kind: a.kind,
             sources: [a.id.clone()].into(),
+            forms: p.forms.clone(),
         }
     }
 
@@ -124,6 +134,7 @@ impl Policy {
             derive,
             kind: AssetKind::Generic,
             sources: self.sources.union(&other.sources).cloned().collect(),
+            forms: meet_forms(&self.forms, &other.forms),
         }
     }
 
@@ -236,10 +247,111 @@ fn set<T: std::fmt::Display>(s: &BTreeSet<T>) -> String {
 
 /// Analyze `program`'s confidentiality declarations; `None` if it has none.
 pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
+    Ok(run(program, false)?.map(|(r, _)| r))
+}
+
+/// The release forms each output of `program` is released in: those it
+/// provably takes (see [`provable_forms`]) that its sources allow. A
+/// bounded category counts only under a bound its sources declared: an
+/// integer is otherwise a value, however small its range. Runs the same
+/// analysis as [`analyze`] (a program that does not compile is refused the
+/// same way); `None` without confidentiality declarations.
+pub fn output_forms(program: &Program) -> Result<Option<BTreeMap<String, BTreeSet<ReleaseForm>>>> {
+    Ok(run(program, true)?.map(|(_, f)| f))
+}
+
+/// Asset kinds that are derived artifacts (`DerivedArtifact`).
+const ARTIFACTS: [AssetKind; 4] = [
+    AssetKind::Model,
+    AssetKind::ModelUpdate,
+    AssetKind::Checkpoint,
+    AssetKind::Adapter,
+];
+
+/// Every release form an output provably takes, from what the analysis
+/// knows about it: a scalar `bool` is `Boolean` and a category bounded by
+/// 1; a scalar integer proven to lie in `[0, hi]` is a category bounded by
+/// `hi`; an aggregation boundary's output is `Aggregate` (and
+/// `DpAggregate` with differential privacy); a value labelled a model,
+/// model update, checkpoint or adapter is a `DerivedArtifact`. Anything
+/// else takes no form the compiler can prove.
+pub fn provable_forms(
+    elem: Elem,
+    shape: Shape,
+    range: Option<(i128, i128)>,
+    aggregated: bool,
+    dp: bool,
+    kind: AssetKind,
+) -> BTreeSet<ReleaseForm> {
+    let mut out = BTreeSet::new();
+    if shape == Shape::Scalar {
+        if elem == Elem::Bool {
+            out.insert(ReleaseForm::Boolean);
+            out.insert(ReleaseForm::BoundedCategory { max: 1 });
+        } else if let Some((lo, hi)) = range.filter(|_| elem.is_exact()) {
+            if lo >= 0 && hi >= 0 && hi <= u64::MAX as i128 {
+                out.insert(ReleaseForm::BoundedCategory { max: hi as u64 });
+            }
+        }
+    }
+    if aggregated {
+        out.insert(ReleaseForm::Aggregate);
+        if dp {
+            out.insert(ReleaseForm::DpAggregate);
+        }
+    }
+    if ARTIFACTS.contains(&kind) {
+        out.insert(ReleaseForm::DerivedArtifact);
+    }
+    out
+}
+
+/// Whether an output that provably takes forms `provable` may be released
+/// under `allowed` (`None`: any form).
+pub fn admissible(
+    provable: &BTreeSet<ReleaseForm>,
+    allowed: &Option<BTreeSet<ReleaseForm>>,
+) -> bool {
+    match allowed {
+        None => true,
+        Some(a) => provable.iter().any(|&p| a.iter().any(|&f| p.within(f))),
+    }
+}
+
+type Forms = BTreeMap<String, BTreeSet<ReleaseForm>>;
+
+/// The provable forms an output is released in under `allowed`: those
+/// within an allowed form (any, without forms), bounded categories only
+/// under a declared bound.
+fn released_forms(
+    provable: BTreeSet<ReleaseForm>,
+    allowed: &Option<BTreeSet<ReleaseForm>>,
+) -> BTreeSet<ReleaseForm> {
+    provable
+        .into_iter()
+        .filter(|&f| match allowed {
+            None => !matches!(f, ReleaseForm::BoundedCategory { .. }),
+            Some(a) => a.iter().any(|&g| f.within(g)),
+        })
+        .collect()
+}
+
+fn run(program: &Program, all_forms: bool) -> Result<Option<(ConfidentialityReport, Forms)>> {
     let Some(c) = program.confidentiality() else {
         return Ok(None);
     };
     c.validate()?;
+    // Integer ranges prove bounded categories; only exact programs have
+    // them, and only programs with forms (or asking for them) need them.
+    let ranges = if all_forms || c.assets.iter().any(|a| a.policy.forms.is_some()) {
+        match crate::exact::semantics(program) {
+            Ok(crate::exact::Semantics::Exact) => crate::exact::int_ranges(program).ok(),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let mut forms: Forms = BTreeMap::new();
     let derivations: BTreeMap<ValueId, _> = c.derivations.iter().map(|d| (d.value, d)).collect();
     let mut policies: Vec<Policy> = Vec::with_capacity(program.nodes().len());
     // Nearest asset labels above each value, and the operations since them.
@@ -321,6 +433,17 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
         let sources = &policies[o.value.index()].sources;
         let aggregated = c.aggregation(&o.name).is_some();
         let dp = c.aggregation(&o.name).and_then(|a| a.dp.clone());
+        let ty = program.node(o.value).ty;
+        let provable = |kind| {
+            provable_forms(
+                ty.elem,
+                ty.shape,
+                ranges.as_ref().and_then(|r| r[o.value.index()]),
+                aggregated,
+                dp.is_some(),
+                kind,
+            )
+        };
         if let Some(r) = privacy_release(
             c,
             &o.name,
@@ -335,6 +458,9 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
         if let Some(rule) = c.aggregation(&o.name) {
             let b = boundary(program, c, rule, o.value, &policies[o.value.index()], &dest)?;
             check_output(&o.name, &b.aggregate_policy, &dest)?;
+            let p = provable(b.aggregate_policy.kind);
+            check_form(&o.name, &b.aggregate_policy, true, &p)?;
+            forms.insert(o.name.clone(), released_forms(p, &b.aggregate_policy.forms));
             for (id, name, _, r) in program.inputs() {
                 if b.contributions.iter().any(|k| k.input == name)
                     && (r.lo < b.codec.clip_min || r.hi > b.codec.clip_max)
@@ -365,6 +491,9 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
         }
         let p = &policies[o.value.index()];
         check_output(&o.name, p, &dest)?;
+        let provable = provable(p.kind);
+        check_form(&o.name, p, dest != OutputRelease::Sealed, &provable)?;
+        forms.insert(o.name.clone(), released_forms(provable, &p.forms));
         if dest == OutputRelease::Sealed && p.release == Release::AggregateOnly {
             warnings.push(format!(
                 "output {:?} ({}) may only be released as part of an aggregate: it needs an \
@@ -395,14 +524,17 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
                 .into(),
         );
     }
-    Ok(Some(ConfidentialityReport {
-        purpose: c.purpose.clone(),
-        nodes,
-        flows,
-        aggregations,
-        privacy_releases,
-        warnings,
-    }))
+    Ok(Some((
+        ConfidentialityReport {
+            purpose: c.purpose.clone(),
+            nodes,
+            flows,
+            aggregations,
+            privacy_releases,
+            warnings,
+        },
+        forms,
+    )))
 }
 
 /// Release-boundary detection: an output that leaves confidential
@@ -798,4 +930,128 @@ fn check_output(name: &str, p: &Policy, dest: &OutputRelease) -> Result<()> {
             ),
         )),
     }
+}
+
+/// A released output (to a party, public, or through an aggregation
+/// boundary) whose sources declare release forms must provably take one
+/// of them (ENC1907). A sealed output releases nothing.
+fn check_form(
+    name: &str,
+    p: &Policy,
+    releases: bool,
+    provable: &BTreeSet<ReleaseForm>,
+) -> Result<()> {
+    if !releases || admissible(provable, &p.forms) {
+        return Ok(());
+    }
+    let list = |s: &BTreeSet<ReleaseForm>| {
+        if s.is_empty() {
+            "none".to_owned()
+        } else {
+            s.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    Err(err(
+        Code::ReleaseForm,
+        format!(
+            "output {name:?} (derived from {}) may be released only as {}, but the compiler \
+             proves it is only {}: release a value of an allowed form (a boolean, an integer \
+             proven within the category bound, an aggregate), or keep it sealed",
+            set(&p.sources),
+            list(p.forms.as_ref().expect("admissible without forms")),
+            list(provable)
+        ),
+    ))
+}
+
+/// Whether `declared`, an asset's policy as a program declares it, is at
+/// least as strict as `registered`, the policy its owner registered, for a
+/// program run for `purpose`: the same owners, a release no weaker,
+/// readers and purposes within the registered ones (and the purpose among
+/// them), forms and derivations within the registered ones, the same
+/// privacy budget. A program therefore never declares a weaker policy than
+/// its owner registered. Purposes are ENC1903, forms ENC1907, anything
+/// else ENC1904.
+pub fn refines(declared: &AssetPolicy, registered: &AssetPolicy, purpose: &str) -> Result<()> {
+    let weaker = |what: String| {
+        err(
+            Code::Declassification,
+            format!("the program declares a weaker policy than its owner registered: {what}"),
+        )
+    };
+    if declared.owners != registered.owners {
+        return Err(weaker(format!(
+            "owners {} instead of {}",
+            set(&declared.owners),
+            set(&registered.owners)
+        )));
+    }
+    if declared.release > registered.release {
+        return Err(weaker(format!(
+            "release {} is weaker than {}",
+            declared.release, registered.release
+        )));
+    }
+    if !declared.readers.is_subset(&registered.readers) {
+        return Err(weaker(format!(
+            "readers {} are not among {}",
+            set(&declared.readers),
+            set(&registered.readers)
+        )));
+    }
+    if !registered.purposes.contains(purpose)
+        || declared
+            .purposes
+            .iter()
+            .any(|p| p != purpose || !registered.purposes.contains(p))
+    {
+        return Err(err(
+            Code::PurposeViolation,
+            format!(
+                "the program declares purposes {} for an asset its owner registered for {}; \
+                 it may declare only {purpose:?}, and only if the owner registered it",
+                set(&declared.purposes),
+                set(&registered.purposes)
+            ),
+        ));
+    }
+    if !forms_within(&declared.forms, &registered.forms) {
+        let list = |f: &Option<BTreeSet<ReleaseForm>>| match f {
+            None => "any form".to_owned(),
+            Some(s) => format!(
+                "[{}]",
+                s.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        return Err(err(
+            Code::ReleaseForm,
+            format!(
+                "the program declares release forms {} for an asset its owner registered with {}",
+                list(&declared.forms),
+                list(&registered.forms)
+            ),
+        ));
+    }
+    for (k, d) in &declared.derive {
+        match registered.derive.get(k) {
+            Some(r) if d.release <= r.release && d.to.is_subset(&r.to) => {}
+            _ => {
+                return Err(weaker(format!(
+                    "{k} derivations {} to {} are not permitted by the owner",
+                    d.release,
+                    set(&d.to)
+                )))
+            }
+        }
+    }
+    if declared.privacy != registered.privacy {
+        return Err(weaker("another privacy budget".into()));
+    }
+    Ok(())
 }

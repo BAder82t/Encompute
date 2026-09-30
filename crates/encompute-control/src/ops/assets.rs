@@ -141,6 +141,45 @@ pub fn asset_view(p: &crate::authn::Principal, a: &AssetRow) -> Value {
     }
 }
 
+/// A registered policy as its owner sends it: the IR asset policy in its
+/// canonical JSON form (no unknown or redundant field), well formed, and
+/// owned by `organization` alone. Returns the value to store.
+fn registered_policy(v: &Value, organization: &str) -> Result<Value> {
+    use encompute_ir::confidentiality::{check_text, AssetPolicy, PartyId};
+    let p: AssetPolicy = serde_json::from_value(v.clone())
+        .map_err(|e| bad(format!("ir_policy is not an asset policy: {e}")))?;
+    let canonical = serde_json::to_value(&p).expect("serializable");
+    if &canonical != v {
+        return Err(bad(
+            "ir_policy has unknown, missing or non-canonical fields (absent optional fields are left out)",
+        ));
+    }
+    let party = |x: &PartyId| PartyId::new(x.as_str()).map(|_| ());
+    for x in p
+        .owners
+        .iter()
+        .chain(&p.readers)
+        .chain(p.derive.values().flat_map(|d| &d.to))
+    {
+        party(x)?;
+    }
+    let owner = PartyId::new(organization)
+        .map_err(|_| bad("the organization's ID is not a party ID: it cannot register a policy"))?;
+    if p.owners != [owner].into() {
+        return Err(bad(format!(
+            "a registered policy's owners are exactly its organization, {organization}"
+        )));
+    }
+    for x in &p.purposes {
+        check_text("purpose", x)?;
+    }
+    if let Some(b) = &p.privacy {
+        b.validate()?;
+    }
+    p.check_forms()?;
+    Ok(canonical)
+}
+
 impl Control {
     pub fn register_asset(&self, ctx: &Ctx, r: RegisterAsset) -> Result<Value> {
         deny_auditor_in(&mut *self.db.conn()?, &ctx.principal, &r.organization)?;
@@ -199,6 +238,19 @@ impl Control {
             }
             Some(d) => Some(d as i64),
         };
+        // A version's registered policy: typed, canonical, owned by the
+        // version's organization alone, fixed for good.
+        if (r.ir_policy.is_some() || r.release_class.is_some()) && version.is_none() {
+            return Err(bad(
+                "only a dataset version has a registered policy and release class",
+            ));
+        }
+        let ir_policy = r
+            .ir_policy
+            .as_ref()
+            .map(|v| registered_policy(v, &r.organization))
+            .transpose()?;
+        let release_class = r.release_class.map(|c| c.as_str());
         let id = new_id("ast");
         let policy = if r.policy.is_null() {
             json!({})
@@ -294,8 +346,9 @@ impl Control {
             t.execute(
                 "INSERT INTO assets (id, organization_id, kind, name, digest, size_bytes, media_type,
                      storage_uri, policy, lineage_root, parents, key_ref, status, created_by,
-                     series, version, version_id, delete_after)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', $13, $14, $15, $16, $17)",
+                     series, version, version_id, delete_after, ir_policy, release_class)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', $13, $14, $15, $16, $17,
+                         $18, $19)",
                 &[
                     &id,
                     &r.organization,
@@ -314,6 +367,8 @@ impl Control {
                     &version.as_ref().map(|v| v.label.clone()),
                     &version.as_ref().map(|v| v.id().hex()),
                     &delete_after,
+                    &ir_policy,
+                    &release_class,
                 ],
             )
             .map_err(|e| {

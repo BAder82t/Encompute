@@ -137,7 +137,11 @@ pub fn authorization() -> AuthorizationV2 {
         recipients: BTreeSet::from(["benefits-agency".into()]),
         privacy_scope_id: None,
         execution_spec_ids: None,
-        limits: Default::default(),
+        limits: encompute_trust::authz::AuthorizationLimits {
+            max_executions: Some(1000),
+            max_releases: Some(1000),
+            ..Default::default()
+        },
         per_job_four_eyes: false,
         valid_from: T0 - 100,
         valid_until: T0 + 3600,

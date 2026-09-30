@@ -41,7 +41,7 @@ use encompute_trust::authz::{
     governance_key_id, ApprovalEvidence, AuthorizationV2, GovernanceKey, GovernanceKeyStatus,
     Signed, SignedAuthorizationV2,
 };
-use encompute_verification::governance::{Purpose, PURPOSE_VERSION};
+use encompute_verification::governance::{Purpose, ReleaseClass, PURPOSE_VERSION};
 use encompute_verification::service::now;
 
 use crate::audit::{self, Outcome};
@@ -612,6 +612,7 @@ impl Control {
             ));
         }
         b.check()?;
+        b.check_probing_limits()?;
         check_window(b.valid_from, b.valid_until)?;
         let id = new_id("atz");
         self.db.tx(|t| {
@@ -645,7 +646,13 @@ impl Control {
                     "the authorization's linkage policy is not the purpose's",
                 ));
             }
-            if !purpose.allowed_release_classes.contains(&b.release_class) {
+            // The ceiling is within a class the purpose allows (the owners'
+            // release-class order).
+            if !purpose
+                .allowed_release_classes
+                .iter()
+                .any(|c| b.release_class.within(*c))
+            {
                 return Err(gov(
                     Code::GovernanceReleaseClass,
                     format!("the purpose does not allow release class {}", b.release_class.as_str()),
@@ -659,7 +666,8 @@ impl Control {
             }
             let asset = t
                 .query_opt(
-                    "SELECT id, status FROM assets WHERE version_id = $1 AND organization_id = $2",
+                    "SELECT id, status, release_class, ir_policy IS NOT NULL
+                       FROM assets WHERE version_id = $1 AND organization_id = $2",
                     &[&b.asset_version_id, &b.party],
                 )
                 .map_err(db_err)?
@@ -670,6 +678,33 @@ impl Control {
                     )
                 })?;
             let (asset_id, asset_status): (String, String) = (asset.get(0), asset.get(1));
+            // A governed source version carries its owner's registered
+            // policy and release class: without them nothing bounds what a
+            // program may declare for it.
+            let class = asset.get::<_, Option<String>>(2);
+            if class.is_none() || !asset.get::<_, bool>(3) {
+                return Err(gov(
+                    Code::GovernanceReleaseClass,
+                    format!(
+                        "dataset version {asset_id} has no registered policy and release class: register the version with ir_policy and release_class"
+                    ),
+                ));
+            }
+            // Never beyond the release class the version was registered with.
+            if let Some(class) = class {
+                if !ReleaseClass::ALL
+                    .into_iter()
+                    .any(|c| c.as_str() == class && b.release_class.within(c))
+                {
+                    return Err(gov(
+                        Code::GovernanceReleaseClass,
+                        format!(
+                            "release class {} is beyond {class}, the class dataset version {asset_id} was registered with",
+                            b.release_class.as_str()
+                        ),
+                    ));
+                }
+            }
             if asset_status != "active" {
                 return Err(gov(
                     Code::GovernanceAuthorizationRevoked,
@@ -742,6 +777,7 @@ impl Control {
                 &[r.role],
                 &format!("approving an authorization as {}", r.role.as_str()),
             )?;
+            row.body.check_probing_limits()?;
             if row.status != "proposed" {
                 return Err(conflict(format!(
                     "authorization {id} is {}: its approvals are closed (an approved authorization is \
@@ -918,6 +954,7 @@ impl Control {
                 _ => {}
             }
             let doc = with_approvals(t, id, &row.body)?;
+            doc.check_probing_limits()?;
             let (min, roles) = approval_rule(t, &row.project, &row.org)?;
             doc.check_quorum(min, &roles)?;
             usable_purpose(t, &row.project, &doc.purpose_id)?;

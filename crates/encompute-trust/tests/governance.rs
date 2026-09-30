@@ -55,6 +55,7 @@ fn body() -> AuthorizationV2 {
             max_releases: Some(10),
             max_subjects_per_job: Some(1000),
             max_evaluations_per_subject: Some(1),
+            max_outputs_per_job: None,
         },
         per_job_four_eyes: false,
         valid_from: 1_000,
@@ -803,3 +804,77 @@ fn job_approval_quorum_and_statement() {
     assert_ne!(s, job_approval_statement("job_1", &h('c'), &h('b')));
     assert_ne!(s, job_approval_statement("job_1", &h('a'), &h('c')));
 }
+
+/// Probing controls: an authorization whose ceiling admits boolean-only
+/// releases carries max_executions and max_releases (ENC2709); the per-job
+/// cap on boolean-only outputs is one when absent, is skipped when absent
+/// (existing AuthorizationIds are unchanged) and changes the ID when set.
+#[test]
+fn probing_limits_are_required_and_ids_unchanged_without_output_cap() {
+    use encompute_trust::authz::admits_probing;
+    use encompute_verification::governance::GovernanceOutput;
+    let b = body();
+    let text =
+        String::from_utf8(encompute_verification::canonical::canonical_json(&b).unwrap()).unwrap();
+    assert!(!text.contains("max_outputs_per_job"), "{text}");
+    assert_eq!(b.id(), GOLDEN_AUTHORIZATION_ID);
+    let mut capped = body();
+    capped.limits.max_outputs_per_job = Some(2);
+    assert_ne!(capped.id(), b.id());
+    b.check_probing_limits().unwrap();
+    for class in ReleaseClass::ALL {
+        for (e, r) in [(None, Some(1)), (Some(1), None), (None, None)] {
+            let mut x = body();
+            x.release_class = class;
+            x.limits.max_executions = e;
+            x.limits.max_releases = r;
+            let got = x.check_probing_limits();
+            if admits_probing(class) {
+                assert_eq!(
+                    got.unwrap_err().code,
+                    Code::GovernanceReleaseClass,
+                    "{class:?}"
+                );
+            } else {
+                got.unwrap();
+            }
+        }
+    }
+    assert_eq!(
+        ReleaseClass::ALL
+            .into_iter()
+            .filter(|c| admits_probing(*c))
+            .collect::<Vec<_>>(),
+        vec![
+            ReleaseClass::BooleanOnly,
+            ReleaseClass::AuthorizedAgencyOnly
+        ]
+    );
+    let mut zero = body();
+    zero.limits.max_outputs_per_job = Some(0);
+    assert!(zero.check_probing_limits().is_err());
+    // One boolean-only output per job by default; never-released outputs
+    // and other classes do not count.
+    let out = |c: ReleaseClass| GovernanceOutput {
+        release_class: c,
+        recipients: if c == ReleaseClass::Never {
+            BTreeSet::new()
+        } else {
+            BTreeSet::from(["benefits-agency".to_string()])
+        },
+    };
+    let one: BTreeMap<String, GovernanceOutput> = [
+        ("a".to_string(), out(ReleaseClass::BooleanOnly)),
+        ("b".to_string(), out(ReleaseClass::Never)),
+        ("c".to_string(), out(ReleaseClass::AggregateOnly)),
+    ]
+    .into();
+    assert!(b.probing_outputs_within(&one));
+    let mut two = one.clone();
+    two.insert("d".into(), out(ReleaseClass::BooleanOnly));
+    assert!(!b.probing_outputs_within(&two));
+    assert!(capped.probing_outputs_within(&two));
+}
+
+const GOLDEN_AUTHORIZATION_ID: &str =
+    "1a4935897fbce4c6ec4ee0a550521cf2a2a956d6374ecd362a4315fb1678a28c";

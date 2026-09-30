@@ -356,12 +356,20 @@ Governed projects are being built after 0.3 (see
 [docs/public-sector.md](docs/public-sector.md)). What exists so far has
 these limits:
 
-- **Governed jobs have no release forms or derived assets yet.** A job
-  runs under its owners' authorizations (with per-job four-eyes approval
-  where an authorization asks for it); a release class is compared by
-  equality with the authorization's (not yet by a partial order of
-  classes, nor against the program's output forms); and a released result
-  cannot yet be registered or exported as a derived asset.
+- **Governed jobs have no derived assets or exports yet.** A released
+  result cannot yet be registered or exported as a derived asset.
+- **Boolean releases still leak through repeated questions.** A
+  boolean-only output reveals one bit per job; a bounded category a few.
+  Probing limits bound this channel, they do not eliminate it: an
+  authorization whose ceiling admits boolean-only releases must set
+  `max_executions` and `max_releases`, and one job releases at most
+  `max_outputs_per_job` boolean-only outputs per source (one by default).
+  Within those limits, well-chosen questions about the same records still
+  add up. Statistics over records belong in the differential-privacy
+  classes, which account for what repeated releases reveal.
+- **Output forms are what the compiler can show.** A bounded category
+  rests on the integer range analysis; a boolean on the output's type.
+  Neither says what the bit means: owners approve the program itself.
 - **Four eyes assume one identity per person.** Quorums count distinct
   user identities (identity provider issuer and subject). If one person
   holds two identities, in one identity provider or two, the control plane

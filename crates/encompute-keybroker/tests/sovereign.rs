@@ -486,6 +486,7 @@ fn max_releases_exhausted_refused() {
     let mut a = authorization();
     a.limits = AuthorizationLimits {
         max_releases: Some(2),
+        max_executions: Some(1000),
         ..Default::default()
     };
     let mut w = world_with(binding(), a);
@@ -514,6 +515,7 @@ fn max_executions_counts_jobs() {
     let mut a = authorization();
     a.limits = AuthorizationLimits {
         max_executions: Some(1),
+        max_releases: Some(1000),
         ..Default::default()
     };
     let mut w = world_with(binding(), a);
@@ -912,4 +914,83 @@ fn governed_broker_refuses_asset_bound_to_another_broker() {
     world_with(binding(), authorization())
         .release_fresh()
         .unwrap();
+}
+
+/// The key broker decides an output's release class against the owner's
+/// ceiling with the owners' release-class order, exhaustively, and with
+/// the very function the control plane uses at submission
+/// (`governance::release_within`): the two never disagree, and neither
+/// keeps an exact-match copy of its own.
+#[test]
+fn broker_and_control_plane_use_the_same_class_order() {
+    use encompute_verification::governance::release_within;
+    for requested in ReleaseClass::ALL {
+        for ceiling in ReleaseClass::ALL {
+            let mut b = binding();
+            for o in b.outputs.values_mut() {
+                o.release_class = requested;
+                // Never released means released to nobody.
+                if requested == ReleaseClass::Never {
+                    o.recipients.clear();
+                }
+            }
+            let mut a = authorization();
+            a.release_class = ceiling;
+            let mut w = world_with(b, a);
+            let released = w.release_fresh();
+            let expected = release_within(requested, ceiling);
+            assert_eq!(
+                released.is_ok(),
+                expected,
+                "{} under {}: {:?}",
+                requested.as_str(),
+                ceiling.as_str(),
+                released.err()
+            );
+            if !expected {
+                assert_eq!(code(released), Code::GovernanceReleaseClass);
+            }
+        }
+    }
+    // One shared function: both call it, and neither compares classes
+    // itself.
+    let broker = include_str!("../src/governed.rs");
+    let control = include_str!("../../encompute-control/src/ops/jobs.rs");
+    for (who, src) in [("broker", broker), ("control plane", control)] {
+        assert!(src.contains("release_within(o.release_class,"), "{who}");
+        assert!(
+            !src.contains("o.release_class == "),
+            "{who} compares classes itself"
+        );
+    }
+}
+
+/// Probing controls at the broker (fail closed, the control plane's own
+/// check): a boolean-only authorization without max_executions and
+/// max_releases is never installed, and one job releases at most
+/// max_outputs_per_job boolean-only outputs (one when absent).
+#[test]
+fn broker_enforces_probing_limits() {
+    let mut w = world();
+    for (e, r) in [(None, Some(5)), (Some(5), None), (None, None)] {
+        let mut a = authorization();
+        a.nonce = "cd".repeat(16);
+        a.limits.max_executions = e;
+        a.limits.max_releases = r;
+        assert_eq!(
+            code(w.broker.install_authorization(&signed(a))),
+            Code::GovernanceReleaseClass
+        );
+    }
+    w.release_fresh().unwrap();
+    // Two boolean-only outputs in one execution.
+    let mut two = binding();
+    let o = two.outputs["eligible"].clone();
+    two.outputs.insert("eligible-too".into(), o);
+    let mut w = world_with(two.clone(), authorization());
+    assert_eq!(code(w.release_fresh()), Code::GovernanceReleaseClass);
+    let mut a = authorization();
+    a.limits.max_outputs_per_job = Some(2);
+    let mut w = world_with(two, a);
+    w.release_fresh().unwrap();
 }

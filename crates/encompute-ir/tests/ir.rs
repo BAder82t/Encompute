@@ -311,3 +311,104 @@ fn the_governance_codes_are_the_2701_block() {
     assert_eq!(Code::GovernanceCustody.as_str(), "ENC2715");
     assert_eq!(Code::GovernanceAuditorSeparation.as_str(), "ENC2716");
 }
+
+fn with_forms(forms: &str) -> String {
+    format!(
+        "encompute 0.1\nprogram eligible precision 0.001 purpose \"eligibility\"\n\
+         party \"tax\" \"Tax\"\nparty \"ben\" \"Benefits\"\n\
+         asset \"income\" dataset owners [\"tax\"] readers [\"ben\"] purposes [\"eligibility\"] release allowed_parties{forms}\n\
+         %0 = input \"x\" [0.0, 120.0] asset \"income\" : secret u8\n\
+         %1 = const [18.0] : public u8\n\
+         %2 = ge %0, %1 : secret bool\n\
+         output \"out\" = %2 to \"ben\"\n"
+    )
+}
+
+/// `release R forms [..]` parses into the asset's forms, prints back
+/// canonically and round-trips; without it there are no forms.
+#[test]
+fn release_forms_round_trip() {
+    use encompute_ir::confidentiality::ReleaseForm;
+    let none = encompute_ir::parse(&with_forms("")).unwrap();
+    assert_eq!(none.confidentiality().unwrap().assets[0].policy.forms, None);
+    assert!(!none.to_string().contains("forms"));
+    for (text, forms) in [
+        (" forms [boolean]", vec![ReleaseForm::Boolean]),
+        (
+            " forms [bounded_category 4, boolean]",
+            vec![ReleaseForm::Boolean, ReleaseForm::BoundedCategory { max: 4 }],
+        ),
+        (
+            " forms [aggregate, dp_aggregate, derived_artifact]",
+            vec![
+                ReleaseForm::Aggregate,
+                ReleaseForm::DpAggregate,
+                ReleaseForm::DerivedArtifact,
+            ],
+        ),
+        (" forms []", vec![]),
+        (
+            " forms [dp_aggregate] derive [model aggregate_only to [\"ben\"]] privacy unit \"person\" epsilon 1.0 delta 1e-6",
+            vec![ReleaseForm::DpAggregate],
+        ),
+    ] {
+        let p = encompute_ir::parse(&with_forms(text)).unwrap();
+        let got = &p.confidentiality().unwrap().assets[0].policy.forms;
+        assert_eq!(got, &Some(forms.into_iter().collect()), "{text}");
+        let printed = p.to_string();
+        let q = encompute_ir::parse(&printed).unwrap();
+        assert_eq!(p, q, "{printed}");
+        assert_eq!(printed, q.to_string());
+    }
+}
+
+#[test]
+fn malformed_release_forms_are_refused() {
+    for bad in [
+        " forms [bool]",
+        " forms [boolean, boolean]",
+        " forms [bounded_category]",
+        " forms [bounded_category -1]",
+        " forms [boolean",
+    ] {
+        let e = encompute_ir::parse(&with_forms(bad)).unwrap_err();
+        assert_eq!(e.code, Code::Parse, "{bad}: {e:?}");
+    }
+    let e = encompute_ir::parse(&with_forms(
+        " forms [bounded_category 2, bounded_category 5]",
+    ))
+    .unwrap_err();
+    assert_eq!(e.code, Code::PolicyDeclaration, "{e:?}");
+}
+
+/// Forms join by intersection (a bounded category at the lower maximum),
+/// and `forms_within` is "at least as strict".
+#[test]
+fn release_forms_meet_and_within() {
+    use encompute_ir::confidentiality::{forms_within, meet_forms, ReleaseForm as F};
+    use std::collections::BTreeSet;
+    let s = |x: &[F]| Some(x.iter().copied().collect::<BTreeSet<F>>());
+    assert_eq!(meet_forms(&None, &None), None);
+    assert_eq!(meet_forms(&s(&[F::Boolean]), &None), s(&[F::Boolean]));
+    assert_eq!(
+        meet_forms(
+            &s(&[F::Boolean, F::BoundedCategory { max: 9 }, F::Aggregate]),
+            &s(&[F::BoundedCategory { max: 3 }, F::Aggregate, F::DpAggregate])
+        ),
+        s(&[F::BoundedCategory { max: 3 }, F::Aggregate])
+    );
+    assert_eq!(meet_forms(&s(&[F::Boolean]), &s(&[F::Aggregate])), s(&[]));
+    assert!(forms_within(&None, &None));
+    assert!(forms_within(&s(&[F::Boolean]), &None));
+    assert!(!forms_within(&None, &s(&[F::Boolean])));
+    assert!(forms_within(
+        &s(&[F::BoundedCategory { max: 2 }]),
+        &s(&[F::BoundedCategory { max: 3 }])
+    ));
+    assert!(!forms_within(
+        &s(&[F::BoundedCategory { max: 4 }]),
+        &s(&[F::BoundedCategory { max: 3 }])
+    ));
+    assert!(!forms_within(&s(&[F::Aggregate]), &s(&[F::DpAggregate])));
+    assert!(forms_within(&s(&[]), &s(&[F::Boolean])));
+}

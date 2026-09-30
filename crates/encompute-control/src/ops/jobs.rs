@@ -25,7 +25,7 @@ use encompute_trust::authz::{
     job_approval_statement, quorum_met, AuthorizationSetId, SignedAuthorizationV2,
 };
 use encompute_verification::governance::{
-    is_hex32, GovernanceBinding, GovernanceInput, GrantGovernance, ReleaseClass,
+    is_hex32, release_within, GovernanceBinding, GovernanceInput, GrantGovernance, ReleaseClass,
     GOVERNANCE_BINDING_VERSION,
 };
 use encompute_verification::service::{now, sha256_hex, verify_signed, JOB_GRANT, JOB_GRANT_V2};
@@ -1109,10 +1109,13 @@ impl Control {
         .map_err(db_err)?;
         // Source → (owner, version, the broker's key ID).
         let mut versions: BTreeMap<String, (String, String, Option<String>)> = BTreeMap::new();
+        // Source → its owner's registered policy and release class.
+        let mut registered: BTreeMap<String, (Option<Value>, Option<String>)> = BTreeMap::new();
         for a in &sources {
             let row = t
                 .query_one(
-                    "SELECT organization_id, status, version_id, expired_at IS NOT NULL, delete_after, key_ref
+                    "SELECT organization_id, status, version_id, expired_at IS NOT NULL, delete_after, key_ref,
+                            ir_policy, release_class
                        FROM assets WHERE id = $1",
                     &[a],
                 )
@@ -1165,6 +1168,7 @@ impl Control {
                 .and_then(|k| serde_json::from_value::<KeyRef>(k).ok())
                 .map(|k| k.key_ref);
             versions.insert(a.clone(), (owner, version, key));
+            registered.insert(a.clone(), (row.get(6), row.get(7)));
         }
         // Governed projects are always in sovereign custody: each source's
         // key at a broker its own organization registered (ENC2715).
@@ -1208,8 +1212,10 @@ impl Control {
                     ),
                 ));
             }
-            if o.release_class != ReleaseClass::Never
-                && !purpose.allowed_release_classes.contains(&o.release_class)
+            if !purpose
+                .allowed_release_classes
+                .iter()
+                .any(|c| release_within(o.release_class, *c))
             {
                 return Err(deny(
                     "plan",
@@ -1236,6 +1242,8 @@ impl Control {
                 ));
             }
         }
+        release_forms(s.program, outputs, &purpose.name, &registered)
+            .map_err(|(why, e)| deny("plan", &r.plan, why, e))?;
         // One owner authorization per source. What the anchor holds revoked
         // stays revoked, whatever the database says now.
         let anchored = self.anchor.snapshot().revoked_authorizations;
@@ -3407,6 +3415,106 @@ struct Submission<'a> {
     program_id: String,
 }
 
+/// The release checks of a governed submission that need the program: each
+/// output's requested class admits a form the compiler proves the output
+/// takes (a program that releases in a form its sources do not allow,
+/// ENC1907 at compilation, is ENC2709 here); every source with a
+/// registered policy is declared by the program at least as strictly for
+/// `purpose` (ENC2709, or ENC2702 for its purposes); and every output's
+/// class is within each source's registered release class (ENC2709).
+fn release_forms(
+    program: &Program,
+    outputs: &BTreeMap<String, encompute_verification::governance::GovernanceOutput>,
+    purpose: &str,
+    registered: &BTreeMap<String, (Option<Value>, Option<String>)>,
+) -> std::result::Result<(), (&'static str, Error)> {
+    let release = |why, m: String| (why, gov(Code::GovernanceReleaseClass, m));
+    let forms = encompute_analysis::confidentiality::output_forms(program)
+        .map_err(|e| {
+            if e.code == Code::ReleaseForm {
+                release("release_form", e.message)
+            } else {
+                ("program", e)
+            }
+        })?
+        .unwrap_or_default();
+    for (n, o) in outputs {
+        let provable = forms.get(n).cloned().unwrap_or_default();
+        if !o.release_class.admits(&provable) {
+            return Err(release(
+                "release_form",
+                format!(
+                    "output {n:?} is released as {}, but the compiler does not prove it takes a form that class allows",
+                    o.release_class.as_str()
+                ),
+            ));
+        }
+    }
+    let conf = program.confidentiality();
+    for (a, (policy, class)) in registered {
+        // Every governed source carries its owner's registered policy and
+        // release class; without them the checks below could not bound it.
+        if policy.is_none() || class.is_none() {
+            return Err(release(
+                "registered_policy",
+                format!(
+                    "asset {a} has no registered policy and release class: a governed job reads only versions registered with ir_policy and release_class"
+                ),
+            ));
+        }
+        if let Some(policy) = policy {
+            let registered: encompute_ir::confidentiality::AssetPolicy =
+                serde_json::from_value(policy.clone()).map_err(|e| {
+                    (
+                        "registered_policy",
+                        db_err(format!("registered policy: {e}")),
+                    )
+                })?;
+            let Some(declared) = conf.and_then(|c| c.asset(a)) else {
+                return Err(release(
+                    "registered_policy",
+                    format!(
+                        "the program does not declare asset {a}, whose owner registered its policy"
+                    ),
+                ));
+            };
+            encompute_analysis::confidentiality::refines(&declared.policy, &registered, purpose)
+                .map_err(|e| {
+                    let m = format!("asset {a}: {}", e.message);
+                    if e.code == Code::PurposeViolation {
+                        ("registered_policy", gov(Code::GovernancePurposeMismatch, m))
+                    } else {
+                        release("registered_policy", m)
+                    }
+                })?;
+        }
+        if let Some(class) = class {
+            let ceiling = ReleaseClass::ALL
+                .into_iter()
+                .find(|c| c.as_str() == class)
+                .ok_or_else(|| {
+                    (
+                        "registered_policy",
+                        db_err(format!("release class {class}")),
+                    )
+                })?;
+            if let Some((n, o)) = outputs
+                .iter()
+                .find(|(_, o)| !release_within(o.release_class, ceiling))
+            {
+                return Err(release(
+                    "release_class",
+                    format!(
+                        "output {n:?} is released as {}, beyond {class}, the release class asset {a} was registered with",
+                        o.release_class.as_str()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether owner authorization `a` covers an execution of `spec` (before
 /// its binding) with the purpose's `linkage` and `outputs`: the same checks
 /// the owner's key broker makes. Refusals carry their audit reason.
@@ -3445,8 +3553,23 @@ fn covers(
             ),
         ));
     }
+    // Probing controls: limits on repeated queries, and at most the
+    // authorized number of boolean-only outputs per job.
+    if let Err(e) = a.body.check_probing_limits() {
+        return Err(("release", e));
+    }
+    if !a.body.probing_outputs_within(outputs) {
+        return Err((
+            "release",
+            gov(
+                Code::GovernanceReleaseClass,
+                "the job releases more boolean-only outputs than the owner authorized per job (max_outputs_per_job, one when absent)",
+            ),
+        ));
+    }
     for (name, o) in outputs {
-        let class_ok = o.release_class == b.release_class || o.release_class == ReleaseClass::Never;
+        // The owners' release-class order, the key broker's own check.
+        let class_ok = release_within(o.release_class, b.release_class);
         if !class_ok || !o.recipients.is_subset(&b.recipients) {
             return Err((
                 "release",

@@ -233,7 +233,8 @@ impl C {
     ) -> Value {
         let mut b = json!({"organization": TAX, "kind": "dataset", "name": format!("income@{label}"),
                            "series": "income", "version": label,
-                           "digest": digest.to_string().repeat(64)});
+                           "digest": digest.to_string().repeat(64),
+                           "ir_policy": registered(TAX)["ir_policy"], "release_class": "boolean-only"});
         if let Some(k) = broker {
             b["key_ref"] = key_ref(k, &format!("income-{label}"));
         }
@@ -276,7 +277,7 @@ impl C {
             recipients: [BEN.to_string()].into(),
             privacy_scope_id: None,
             execution_spec_ids: None,
-            limits: Default::default(),
+            limits: probing_limits(),
             per_job_four_eyes: false,
             valid_from: now() - 30,
             valid_until: now() + 1800,

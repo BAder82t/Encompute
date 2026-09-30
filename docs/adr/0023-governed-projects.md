@@ -233,6 +233,67 @@ Approval statement = SHA256("encompute.approval.v1" ||
     and local revocations, in its MAC-protected state;
   - trust graph: `Evidence::Authorization` body v2.
 
+As built (release classes and forms):
+
+- Release classes form a partial order, decided by the owners: every
+  class is within itself; `boolean-only`, `aggregate-only` and
+  `dp-aggregate-only` are within `authorized-agency-only`;
+  `dp-aggregate-only` is within `aggregate-only`; `derived-artifact-only`
+  and `never` are within only themselves. `ReleaseClass::within` is the
+  order; the control plane (at submission and when an authorization is
+  proposed) and the key broker (at key release) decide with one shared
+  function, so they cannot disagree. An output released as `never`
+  releases nothing and stays within any ceiling, as before.
+- Each class allows forms: `boolean-only` a boolean or bounded category,
+  `aggregate-only` an aggregate with or without differential privacy,
+  `dp-aggregate-only` a DP aggregate, `derived-artifact-only` a derived
+  artifact, `authorized-agency-only` any form. At submission a class other
+  than `authorized-agency-only` or `never` must admit a form the compiler
+  proves the output takes; an integer counts as a bounded category only
+  under a bound its sources declared (otherwise it is a value). Refusals
+  are ENC2709.
+- The IR asset policy has optional release forms (`release R forms
+  [boolean, bounded_category 3, aggregate, dp_aggregate,
+  derived_artifact]`), joined by intersection and skipped when absent, so
+  existing PolicyIds are unchanged. A released output that cannot be
+  proven to take an allowed form does not compile (ENC1907). Because a
+  plan is compiled before submission, that error appears at planning; the
+  submission check that recomputes the forms reports it as ENC2709.
+- A dataset version may carry its owner's registered policy: `ir_policy`
+  (the typed IR asset policy) and `release_class`, columns frozen with the
+  rest of the version (schema version 10). A governed job's program must
+  declare a policy at least as strict for that source
+  (`analysis::confidentiality::refines`: same owners, release no weaker,
+  readers, purposes, forms and derivations within the registered ones, the
+  job's purpose among them, the same privacy budget), and every output's
+  class and every authorization of the version stay within its registered
+  class.
+- Every source version of a governed project carries its owner's
+  registered policy and release class: a job reading a version without
+  them, or an authorization of one, is refused (ENC2709). Standard
+  projects need neither.
+- Probing controls, fail closed. A boolean-only release reveals little per
+  job, but repeated questions (twenty questions) add up, and several
+  boolean outputs of one job could jointly encode a value. An
+  authorization whose ceiling admits boolean-only releases
+  (`boolean-only`, `authorized-agency-only`) must carry
+  `limits.max_executions` and `limits.max_releases`; the control plane
+  refuses to propose, approve or activate one without them and the key
+  broker refuses to install or release under one (ENC2709). One job
+  releases at most `limits.max_outputs_per_job` boolean-only outputs per
+  source, one when absent (skipped when absent, so existing
+  AuthorizationIds are unchanged); the control plane at submission and the
+  broker at key release decide with one shared function. These limits
+  bound the channel; they do not remove it. Statistics over records belong
+  in the differential-privacy classes.
+- An output released as `never` names no recipient (the governance
+  binding refuses one), so no ticket or later export can name one for it.
+- Bounded categories rest on the integer range analysis, which is tested
+  on every input of adversarial and random programs to never
+  under-approximate.
+- Not yet: classes crossing derived assets and exports (the next step),
+  and the purpose's `min_aggregate_parties` against aggregation minimums.
+
 ### 7. Four-eyes (D5)
 
 - **Standing authorizations** need an approval rule per (project,
@@ -428,7 +489,8 @@ The block ENC2701 to ENC2712 is reserved for governed projects:
 
 A compile-time output-form violation uses a new compiler code, ENC1907,
 which maps to ENC2709 at runtime. The codes enter `docs/errors.md` when
-their checks are implemented.
+their checks are implemented (ENC1907 and the release-class checks of
+ENC2709 are in).
 
 ### 14. Invariants (D11)
 

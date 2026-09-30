@@ -66,6 +66,9 @@ pub enum Code {
     AggregationRequired,
     /// Confidentiality declarations are malformed (ENC1906).
     PolicyDeclaration,
+    /// A released value's form is not one its sources allow, or the
+    /// compiler cannot prove it is (ENC1907).
+    ReleaseForm,
     /// Attestation evidence is malformed, forged, tampered with, from an
     /// unknown provider, or does not bind the claimed workload (ENC2001).
     Attestation,
@@ -221,6 +224,7 @@ impl Code {
             Code::Declassification => "ENC1904",
             Code::AggregationRequired => "ENC1905",
             Code::PolicyDeclaration => "ENC1906",
+            Code::ReleaseForm => "ENC1907",
             Code::Attestation => "ENC2001",
             Code::WorkloadPolicy => "ENC2002",
             Code::Freshness => "ENC2003",
@@ -274,7 +278,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 76] = [
+    pub const ALL: [Code; 77] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -304,6 +308,7 @@ impl Code {
         Code::Declassification,
         Code::AggregationRequired,
         Code::PolicyDeclaration,
+        Code::ReleaseForm,
         Code::Attestation,
         Code::WorkloadPolicy,
         Code::Freshness,

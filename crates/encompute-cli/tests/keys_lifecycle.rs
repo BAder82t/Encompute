@@ -622,6 +622,7 @@ fn governed_broker_commands() {
         "program": {"kind": "program", "program_id": h('a')},
         "policy_id": h('d'), "release_class": "boolean-only",
         "recipients": ["benefits-agency"], "per_job_four_eyes": false,
+        "limits": {"max_executions": 100, "max_releases": 100},
         "valid_from": 1, "valid_until": 4_000_000_000u64, "issued_at": 1,
         "nonce": "ab".repeat(16), "approvals": []
     });

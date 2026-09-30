@@ -237,18 +237,26 @@ fn every_governance_binding_field_changes_the_governance_id() {
 
 #[test]
 fn a_governance_binding_is_checked() {
-    let bad: [&dyn Fn(&mut GovernanceBinding); 5] = [
+    let bad: [&dyn Fn(&mut GovernanceBinding); 6] = [
         &|b| b.purpose_id = "x".into(),
         &|b| b.project.clear(),
         &|b| b.inputs.clear(),
         &|b| b.inputs.get_mut("income").unwrap().asset_version_id = "short".into(),
         &|b| b.outputs.get_mut("eligible").unwrap().recipients.clear(),
+        // Never released, yet naming a recipient.
+        &|b| b.outputs.get_mut("eligible").unwrap().release_class = ReleaseClass::Never,
     ];
     for (i, f) in bad.iter().enumerate() {
         let mut b = binding();
         f(&mut b);
         assert!(b.check().is_err(), "change {i} was accepted");
     }
+    // Never released and naming nobody is well formed.
+    let mut b = binding();
+    let o = b.outputs.get_mut("eligible").unwrap();
+    o.release_class = ReleaseClass::Never;
+    o.recipients.clear();
+    b.check().unwrap();
 }
 
 #[test]
@@ -548,4 +556,180 @@ fn governance_ids_unchanged_without_asset_brokers() {
     let mut k = binding();
     k.asset_brokers.insert("income".into(), "tax-broker".into());
     assert!(k.check().is_err());
+}
+
+/// Confidentiality declarations using every asset-policy field that
+/// existed before release forms (owners, readers, purposes, release,
+/// derive, privacy), with an aggregation.
+const DECLARED: &str = "encompute 0.1\nprogram mean precision 0.001 purpose \"eligibility\"\n\
+party \"tax\" \"Tax\"\nparty \"ben\" \"Benefits\"\n\
+asset \"income\" dataset owners [\"tax\"] readers [\"ben\"] purposes [\"eligibility\"] release allowed_parties derive [model aggregate_only to [\"ben\"]] privacy unit \"person\" epsilon 1.0 delta 1e-6\n\
+asset \"ages\" dataset owners [\"ben\"] readers [\"ben\", \"tax\"] purposes [\"eligibility\", \"statistics\"] release owner_only\n\
+%0 = input \"x\" [0.0, 120.0] asset \"income\" : secret scalar\n\
+%1 = input \"y\" [0.0, 120.0] asset \"ages\" : secret scalar\n\
+%2 = add %0, %1 : secret scalar\n\
+output \"out\" = %2\n";
+
+/// Release forms are skipped when absent: every existing PolicyId keeps
+/// its value (the golden value was taken before the field existed), and
+/// every asset-policy field, forms included, changes the PolicyId.
+#[test]
+fn policy_ids_unchanged_without_forms() {
+    use encompute_ir::confidentiality::{AssetPolicy, ReleaseForm};
+    use encompute_verification::PolicyId;
+    let p = encompute_ir::parse(DECLARED).unwrap();
+    let c = p.confidentiality().unwrap().clone();
+    let text = String::from_utf8(canonical_json(&c).unwrap()).unwrap();
+    assert!(!text.contains("forms"), "{text}");
+    assert_eq!(PolicyId::of(&c).hex(), GOLDEN_POLICY_ID);
+    // The field sweep, over the first asset's policy.
+    let base = c.assets[0].policy.clone();
+    let id = |x: &AssetPolicy| {
+        let mut d = c.clone();
+        d.assets[0].policy = x.clone();
+        PolicyId::of(&d).hex()
+    };
+    let mut policy = base.clone();
+    policy.forms = Some([ReleaseForm::Boolean].into());
+    let changes: &[Change<AssetPolicy>] = &[
+        ("owners", &|x| {
+            x.owners
+                .insert(encompute_ir::confidentiality::PartyId::new("ben").unwrap());
+        }),
+        ("readers", &|x| x.readers.clear()),
+        ("purposes", &|x| {
+            x.purposes.insert("statistics".into());
+        }),
+        ("release", &|x| {
+            x.release = encompute_ir::confidentiality::Release::Never
+        }),
+        ("derive", &|x| x.derive.clear()),
+        ("privacy", &|x| x.privacy = None),
+        ("forms", &|x| {
+            x.forms = Some([ReleaseForm::BoundedCategory { max: 3 }].into())
+        }),
+    ];
+    sweep(&policy, id, changes);
+    let text = String::from_utf8(canonical_json(&policy).unwrap()).unwrap();
+    assert!(text.contains(r#""forms":["boolean"]"#), "{text}");
+    let mut b = base.clone();
+    b.forms = Some([ReleaseForm::BoundedCategory { max: 3 }].into());
+    let text = String::from_utf8(canonical_json(&b).unwrap()).unwrap();
+    assert!(
+        text.contains(r#""forms":[{"bounded_category":{"max":3}}]"#),
+        "{text}"
+    );
+    // Each form is a different policy, and so is the empty set.
+    let ids: BTreeSet<String> = [
+        None,
+        Some(BTreeSet::new()),
+        Some([ReleaseForm::Boolean].into()),
+        Some([ReleaseForm::BoundedCategory { max: 3 }].into()),
+        Some([ReleaseForm::BoundedCategory { max: 4 }].into()),
+        Some([ReleaseForm::Aggregate].into()),
+        Some([ReleaseForm::DpAggregate].into()),
+        Some([ReleaseForm::DerivedArtifact].into()),
+    ]
+    .into_iter()
+    .map(|f| {
+        let mut x = base.clone();
+        x.forms = f;
+        id(&x)
+    })
+    .collect();
+    assert_eq!(ids.len(), 8);
+}
+
+const GOLDEN_POLICY_ID: &str = "8da1eb29b218fada8b7c97652481b8dcf7884ca413c8026e0188495d11c8e88b";
+
+/// The owners' release-class order, exhaustively: every class is within
+/// itself; boolean-only and the aggregate classes are within
+/// authorized-agency-only; dp-aggregate-only is within aggregate-only;
+/// derived-artifact-only and never are within only themselves. A class
+/// within another allows no form the other does not.
+#[test]
+fn class_within_order_matches_owner_decision() {
+    use encompute_ir::confidentiality::ReleaseForm as F;
+    use ReleaseClass::*;
+    let within: &[(ReleaseClass, &[ReleaseClass])] = &[
+        (Never, &[Never]),
+        (BooleanOnly, &[BooleanOnly, AuthorizedAgencyOnly]),
+        (AggregateOnly, &[AggregateOnly, AuthorizedAgencyOnly]),
+        (
+            DpAggregateOnly,
+            &[DpAggregateOnly, AggregateOnly, AuthorizedAgencyOnly],
+        ),
+        (AuthorizedAgencyOnly, &[AuthorizedAgencyOnly]),
+        (DerivedArtifactOnly, &[DerivedArtifactOnly]),
+    ];
+    assert_eq!(within.len(), ReleaseClass::ALL.len());
+    for (a, ceilings) in within {
+        for b in ReleaseClass::ALL {
+            assert_eq!(
+                a.within(b),
+                ceilings.contains(&b),
+                "{} within {}",
+                a.as_str(),
+                b.as_str()
+            );
+        }
+    }
+    // A partial order: reflexive, antisymmetric, transitive.
+    for a in ReleaseClass::ALL {
+        for b in ReleaseClass::ALL {
+            if a.within(b) && b.within(a) {
+                assert_eq!(a, b);
+            }
+            for c in ReleaseClass::ALL {
+                if a.within(b) && b.within(c) {
+                    assert!(a.within(c));
+                }
+            }
+        }
+    }
+    // Monotone in forms.
+    let forms = [
+        F::Boolean,
+        F::BoundedCategory { max: 3 },
+        F::Aggregate,
+        F::DpAggregate,
+        F::DerivedArtifact,
+    ];
+    for a in ReleaseClass::ALL {
+        for b in ReleaseClass::ALL.into_iter().filter(|b| a.within(*b)) {
+            for f in forms {
+                assert!(!a.allows_form(f) || b.allows_form(f), "{a:?} {b:?} {f:?}");
+            }
+        }
+    }
+    // The class → forms mapping.
+    let allowed =
+        |c: ReleaseClass| -> Vec<F> { forms.into_iter().filter(|f| c.allows_form(*f)).collect() };
+    assert_eq!(allowed(Never), vec![]);
+    assert_eq!(
+        allowed(BooleanOnly),
+        vec![F::Boolean, F::BoundedCategory { max: 3 }]
+    );
+    assert_eq!(allowed(AggregateOnly), vec![F::Aggregate, F::DpAggregate]);
+    assert_eq!(allowed(DpAggregateOnly), vec![F::DpAggregate]);
+    assert_eq!(allowed(AuthorizedAgencyOnly), forms.to_vec());
+    assert_eq!(allowed(DerivedArtifactOnly), vec![F::DerivedArtifact]);
+    // An output proven to be a plain value only fits the classes that
+    // release values (or none).
+    let value = BTreeSet::new();
+    let admitting: Vec<ReleaseClass> = ReleaseClass::ALL
+        .into_iter()
+        .filter(|c| c.admits(&value))
+        .collect();
+    assert_eq!(admitting, vec![Never, AuthorizedAgencyOnly]);
+    // Nothing released is within any ceiling; otherwise the order decides.
+    for b in ReleaseClass::ALL {
+        assert!(encompute_verification::governance::release_within(Never, b));
+        for a in ReleaseClass::ALL.into_iter().filter(|a| *a != Never) {
+            assert_eq!(
+                encompute_verification::governance::release_within(a, b),
+                a.within(b)
+            );
+        }
+    }
 }

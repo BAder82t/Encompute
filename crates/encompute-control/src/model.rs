@@ -568,6 +568,15 @@ pub struct RegisterAsset {
     /// outlives it.
     #[serde(default)]
     pub delete_after: Option<u64>,
+    /// A dataset version's registered confidentiality policy (the IR
+    /// asset policy, in its JSON form; versions only, never changed): a
+    /// governed job's program declares a policy at least as strict for it.
+    #[serde(default)]
+    pub ir_policy: Option<serde_json::Value>,
+    /// A dataset version's release-class ceiling (versions only, never
+    /// changed): every output of a governed job reading it is within it.
+    #[serde(default)]
+    pub release_class: Option<encompute_verification::governance::ReleaseClass>,
 }
 
 /// Where an asset's key lives. Only references: the key broker holds the

@@ -215,7 +215,8 @@ impl G {
             "POST",
             "/v1/assets",
             Some(json!({"organization": TAX, "kind": "dataset", "name": format!("income@{label}"),
-                        "series": "income", "version": label, "digest": digest.to_string().repeat(64)})),
+                        "series": "income", "version": label, "digest": digest.to_string().repeat(64),
+                        "ir_policy": registered(TAX)["ir_policy"], "release_class": "boolean-only"})),
         );
         v["version_id"].as_str().unwrap().to_owned()
     }
@@ -240,7 +241,7 @@ impl G {
             recipients: [BEN.to_string()].into(),
             privacy_scope_id: None,
             execution_spec_ids: None,
-            limits: Default::default(),
+            limits: probing_limits(),
             per_job_four_eyes: false,
             valid_from: now() - 30,
             valid_until: now() + 1800,
@@ -1294,7 +1295,7 @@ fn version_4_databases_migrate_to_standard_projects() {
                   VALUES ('a', 'o', 'dataset', 'a', 'd', '{}', 'a', '[]', 'active', 'u');",
         )
         .unwrap();
-    assert_eq!(db.migrate().unwrap(), 9);
+    assert_eq!(db.migrate().unwrap(), 10);
     let mut c = db.conn().unwrap();
     let r = c
         .query_one(

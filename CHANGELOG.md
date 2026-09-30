@@ -116,10 +116,33 @@ Work toward confidential cross-agency computation
   version ID instead of the owner's key reference, so grants and tickets
   name no KMS key; a governed broker checks the version its key is bound
   to. Bindings without the map keep their GovernanceIds.
+- **Release classes and forms (phase 3).** Release classes are ordered
+  as the owners decided: boolean-only, aggregate-only and
+  dp-aggregate-only are within authorized-agency-only, dp-aggregate-only
+  within aggregate-only, and never and derived-artifact-only only within
+  themselves. A governed job's output class must be within a class the
+  purpose allows and within every source authorization's ceiling (no
+  longer an exact match), and must admit a form the compiler proves the
+  output takes (a boolean, a bounded category its sources declared, an
+  aggregate, a DP aggregate, a derived artifact); otherwise ENC2709. The
+  key broker uses the same function. Asset policies gain optional release
+  forms (`release R forms [boolean]`), joined by intersection; a released
+  output that cannot be proven to take an allowed form does not compile
+  (new ENC1907). Policies without forms keep their PolicyIds. A dataset
+  version may carry its owner's registered policy (`ir_policy`) and
+  `release_class`, frozen with the version (migration 0010): a governed
+  job's program must declare a policy at least as strict for it, and
+  nothing is released or authorized beyond its class. Every governed
+  source version must carry both. Probing controls: an authorization
+  whose ceiling admits boolean-only releases needs `max_executions` and
+  `max_releases`, and a job releases at most `max_outputs_per_job`
+  boolean-only outputs per source (one when absent; control plane and
+  broker share the check). An output released as `never` names no
+  recipient.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
   INV-236 (the control plane can only deny; broker state cannot be
-  rolled back), INV-223 (auditors) and INV-229 (cross-organization
-  views); 161 invariants.
+  rolled back), INV-223 (auditors), INV-229 (cross-organization
+  views) and INV-221 (over-release); 162 invariants.
 
 ## 0.3.0-rc.4 — 2026-09-29
 

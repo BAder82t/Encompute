@@ -33,7 +33,7 @@ use encompute_trust::authz::{
     GovernanceKey, GovernanceKeyStatus, RevocationV2, SignedAuthorizationV2, SignedRevocationV2,
     AUTHORIZATION_V2_VERSION,
 };
-use encompute_verification::governance::{is_hex32, GovernanceBinding, ReleaseClass};
+use encompute_verification::governance::{is_hex32, release_within, GovernanceBinding};
 use encompute_verification::ticket::{ReleaseTicket, TicketKind, TICKET_SKEW_SECS};
 use encompute_verification::ExecutionSpec;
 
@@ -259,6 +259,7 @@ impl KeyBroker {
         let organization = self.serving()?;
         let key = self.pinned_key()?.public_key.clone();
         a.body.check()?;
+        a.body.check_probing_limits()?;
         if a.body.party != organization {
             return Err(err(
                 Code::GovernanceAuthorizationMissing,
@@ -609,9 +610,18 @@ impl KeyBroker {
                 "the execution uses another linkage policy than the owner authorized",
             ));
         }
+        // Probing controls, the control plane's own check.
+        a.check_probing_limits()?;
+        if !a.probing_outputs_within(&binding.outputs) {
+            return Err(err(
+                Code::GovernanceReleaseClass,
+                "the execution releases more boolean-only outputs than the owner authorized per job",
+            ));
+        }
         for (name, o) in &binding.outputs {
-            let class_ok =
-                o.release_class == a.release_class || o.release_class == ReleaseClass::Never;
+            // The owners' release-class order, shared with the control
+            // plane: within the authorization's ceiling, or sealed.
+            let class_ok = release_within(o.release_class, a.release_class);
             if !class_ok || !o.recipients.is_subset(&a.recipients) {
                 return Err(err(
                     Code::GovernanceReleaseClass,

@@ -184,6 +184,110 @@ impl fmt::Display for Release {
     }
 }
 
+/// The form in which a value may be released: the owners' limit on what a
+/// release looks like, beside who may learn it ([`Release`]). A value
+/// whose sources declare forms is released only in one of them, which the
+/// compiler must prove from the program (ENC1907):
+/// - `Boolean`: a scalar `bool`;
+/// - `BoundedCategory { max }`: a scalar `bool` or integer proven to lie in
+///   `[0, max]`;
+/// - `Aggregate`: the result of an aggregation boundary;
+/// - `DpAggregate`: an aggregate with differential privacy;
+/// - `DerivedArtifact`: a model, adapter, checkpoint or model update
+///   derived under the owners' permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseForm {
+    Boolean,
+    BoundedCategory { max: u64 },
+    Aggregate,
+    DpAggregate,
+    DerivedArtifact,
+}
+
+impl ReleaseForm {
+    pub fn name(self) -> &'static str {
+        match self {
+            ReleaseForm::Boolean => "boolean",
+            ReleaseForm::BoundedCategory { .. } => "bounded_category",
+            ReleaseForm::Aggregate => "aggregate",
+            ReleaseForm::DpAggregate => "dp_aggregate",
+            ReleaseForm::DerivedArtifact => "derived_artifact",
+        }
+    }
+
+    /// A form without a parameter, by name (`bounded_category` takes its
+    /// maximum separately).
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            ReleaseForm::Boolean,
+            ReleaseForm::Aggregate,
+            ReleaseForm::DpAggregate,
+            ReleaseForm::DerivedArtifact,
+        ]
+        .into_iter()
+        .find(|f| f.name() == s)
+    }
+
+    /// Whether a release in form `self` is also one in form `other`: the
+    /// same form, or a category bounded no higher.
+    pub fn within(self, other: ReleaseForm) -> bool {
+        match (self, other) {
+            (ReleaseForm::BoundedCategory { max: a }, ReleaseForm::BoundedCategory { max: b }) => {
+                a <= b
+            }
+            (a, b) => a == b,
+        }
+    }
+}
+
+impl fmt::Display for ReleaseForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReleaseForm::BoundedCategory { max } => write!(f, "bounded_category {max}"),
+            x => f.write_str(x.name()),
+        }
+    }
+}
+
+/// Release forms joined: `None` allows any form; otherwise the forms both
+/// allow (a bounded category at the lower maximum). Never wider than either.
+pub fn meet_forms(
+    a: &Option<BTreeSet<ReleaseForm>>,
+    b: &Option<BTreeSet<ReleaseForm>>,
+) -> Option<BTreeSet<ReleaseForm>> {
+    match (a, b) {
+        (None, x) | (x, None) => x.clone(),
+        (Some(a), Some(b)) => Some(
+            a.iter()
+                .filter_map(|&x| {
+                    b.iter().find_map(|&y| match (x, y) {
+                        (
+                            ReleaseForm::BoundedCategory { max: m },
+                            ReleaseForm::BoundedCategory { max: n },
+                        ) => Some(ReleaseForm::BoundedCategory { max: m.min(n) }),
+                        _ if x == y => Some(x),
+                        _ => None,
+                    })
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Whether forms `declared` are at least as strict as `registered`: every
+/// declared form is within one registered form (`None` allows any form).
+pub fn forms_within(
+    declared: &Option<BTreeSet<ReleaseForm>>,
+    registered: &Option<BTreeSet<ReleaseForm>>,
+) -> bool {
+    match (declared, registered) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        (Some(d), Some(r)) => d.iter().all(|&f| r.iter().any(|&g| f.within(g))),
+    }
+}
+
 /// Whose privacy a budget protects: the unit two neighbouring datasets
 /// differ by. Explicit, because one training example is not always one
 /// person.
@@ -566,6 +670,25 @@ pub struct AssetPolicy {
     /// Differential-privacy budget for everything released from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy: Option<PrivacyBudget>,
+    /// The forms anything released from it may take; absent: any form.
+    /// Skipped when absent, so policies without forms keep their PolicyId.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forms: Option<BTreeSet<ReleaseForm>>,
+}
+
+impl AssetPolicy {
+    /// At most one bounded category (a set of them is its largest).
+    pub fn check_forms(&self) -> Result<()> {
+        let bounded = self
+            .forms
+            .iter()
+            .flatten()
+            .filter(|f| matches!(f, ReleaseForm::BoundedCategory { .. }));
+        if bounded.count() > 1 {
+            return Err(bad("an asset names at most one bounded_category form"));
+        }
+        Ok(())
+    }
 }
 
 /// Owners' consent for derived values of one kind.
@@ -879,6 +1002,9 @@ impl Confidentiality {
             if let Some(b) = &a.policy.privacy {
                 b.validate()?;
             }
+            a.policy
+                .check_forms()
+                .map_err(|e| bad(format!("asset {}: {}", a.id, e.message)))?;
             for (k, d) in &a.policy.derive {
                 if d.release == Release::Public && !d.to.is_empty() {
                     return Err(bad(format!(

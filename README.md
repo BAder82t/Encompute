@@ -72,7 +72,7 @@ Planned for after 0.3.0, at the design stage:
 | Docker Compose deployment | **Supported**; its bundled OpenBao runs in development mode |
 | Python SDK | **Supported** |
 | Platforms | Linux x86_64 and macOS arm64 **supported**; Linux arm64 **experimental** |
-| Assurance | 161 invariants (150 in 0.3) with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Assurance | 162 invariants (150 in 0.3) with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 | Commercial dependency boundary | Audited: no TFHE-rs in the dependency graph, SBOM, binaries, wheel or container of a production build (`scripts/audit-commercial-build.sh`) |
 
 ## Start here

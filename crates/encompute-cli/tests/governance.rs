@@ -53,7 +53,11 @@ fn body() -> AuthorizationV2 {
         recipients: ["benefits-agency".to_string()].into(),
         privacy_scope_id: None,
         execution_spec_ids: None,
-        limits: Default::default(),
+        limits: encompute_runtime::trust::authz::AuthorizationLimits {
+            max_executions: Some(1000),
+            max_releases: Some(1000),
+            ..Default::default()
+        },
         per_job_four_eyes: false,
         valid_from: 1_000,
         valid_until: 2_000,

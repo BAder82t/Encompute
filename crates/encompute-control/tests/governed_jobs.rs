@@ -305,8 +305,12 @@ impl G {
                            "digest": "c".repeat(64), "project": self.project,
                            "key_ref": {"broker": "tax-broker", "provider": "openbao-transit",
                                        "key_ref": format!("income-{label}"), "key_version": 1}});
+        if let (Value::Object(b), Value::Object(r)) = (&mut b, registered(TAX)) {
+            b.extend(r);
+        }
         if let (Value::Object(b), Value::Object(e)) = (&mut b, extra) {
             b.extend(e);
+            b.retain(|_, v| !v.is_null());
         }
         let v = self.t.ok(&self.tax_owner, "POST", "/v1/assets", Some(b));
         Version {
@@ -337,7 +341,7 @@ impl G {
             recipients: [BEN.to_string()].into(),
             privacy_scope_id: None,
             execution_spec_ids: None,
-            limits: Default::default(),
+            limits: probing_limits(),
             per_job_four_eyes: false,
             valid_from: now() - 30,
             valid_until: now() + 1800,
@@ -1395,7 +1399,9 @@ fn start_refuses_a_retired_or_expired_purpose() {
     let until = now() + 8;
     let short = "benefits-short";
     g.purpose = g.purpose_for(short, until, &[BEN]);
-    let v = g.version("2026-q2", json!({}));
+    let mut policy = registered(TAX)["ir_policy"].clone();
+    policy["purposes"] = json!([short]);
+    let v = g.version("2026-q2", json!({"ir_policy": policy}));
     let p = program(&[&v.asset], short, BEN);
     let mut body = g.body(&v, &p);
     body.valid_until = until;
@@ -2176,6 +2182,7 @@ fn schedule_requires_every_owner_quorum() {
             json!({"organization": BEN, "kind": "dataset", "name": "claims@2026-q1",
                     "series": "claims", "version": "2026-q1",
                     "digest": "e".repeat(64), "project": g.project,
+                    "ir_policy": registered(BEN)["ir_policy"], "release_class": "boolean-only",
                     "key_ref": {"broker": "ben-broker", "provider": "openbao-transit",
                                 "key_ref": "claims-2026-q1", "key_version": 1}}),
         ),
@@ -2594,4 +2601,406 @@ fn approval_rule_naming_auditor_refused() {
         )
         .unwrap_err();
     assert!(format!("{e:?}").contains("unknown role"), "{e:?}");
+}
+
+// --- step 5: release classes -------------------------------------------------------
+
+/// [`program`] releasing a value (the age plus 18), not a boolean.
+fn value_program(assets: &[&str]) -> String {
+    program(assets, PURPOSE, BEN).replace("ge %0, %1 : secret bool", "add %0, %1 : secret u8")
+}
+
+/// Tax's registered policy for its income versions: readers benefits and
+/// tax, for the purpose, released only as a boolean.
+fn registered_policy() -> Value {
+    json!({"owners": [TAX], "readers": [BEN, TAX], "purposes": [PURPOSE],
+           "release": "allowed_parties", "derive": {}, "forms": ["boolean"]})
+}
+
+#[test]
+fn release_form_stronger_than_class_refused_2709() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    // Owner-authorized, but boolean-only for a value the compiler cannot
+    // prove is a boolean or a small category.
+    let p = value_program(&[&v.asset]);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    let r = g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k1");
+    assert!(
+        r.1["message"].as_str().unwrap_or("").contains("form"),
+        "{}",
+        r.1
+    );
+    refused(r, "ENC2709");
+    // Released to nobody, it may run.
+    let mut sealed = g.request(&plan, &[&v.asset], &[]);
+    sealed["outputs"]["out"]["release_class"] = json!("never");
+    let (s, j) = g.submit(&g.ben_dev, sealed, "k2");
+    assert_eq!(s, 201, "{j}");
+    // A program whose sources allow only booleans and that releases a
+    // value does not compile (ENC1907), so it is never planned.
+    let forms = value_program(&[&v.asset]).replace(
+        "release allowed_parties",
+        "release allowed_parties forms [boolean]",
+    );
+    refused(
+        g.t.call(
+            &g.ben_dev,
+            "POST",
+            "/v1/plans",
+            Some(json!({"project": g.project, "program": forms})),
+        ),
+        "ENC1907",
+    );
+    // The boolean itself is within the class.
+    let (_, _, _, j) = g.job("2026-q2", |_| {});
+    assert_eq!(j["state"], "queued", "{j}");
+}
+
+#[test]
+fn program_weaker_than_registered_refused() {
+    let Some(g) = world() else { return };
+    let v = g.version(
+        "2026-q1",
+        json!({"ir_policy": registered_policy(), "release_class": "boolean-only"}),
+    );
+    // Declaring no forms is weaker than the registered `forms [boolean]`.
+    let weak = program(&[&v.asset], PURPOSE, BEN);
+    let plan = g.plan(&g.ben_dev, &weak);
+    refused(
+        g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k1"),
+        "ENC2709",
+    );
+    // Another purpose beside the job's.
+    let two = weak
+        .replace(
+            "release allowed_parties",
+            "release allowed_parties forms [boolean]",
+        )
+        .replace(
+            &format!("purposes [\"{PURPOSE}\"]"),
+            &format!("purposes [\"{PURPOSE}\", \"statistics\"]"),
+        );
+    let plan = g.plan(&g.ben_dev, &two);
+    refused(
+        g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k2"),
+        "ENC2702",
+    );
+    // At least as strict: it runs under the owner's authorization.
+    let strict = weak.replace(
+        "release allowed_parties",
+        "release allowed_parties forms [boolean]",
+    );
+    g.authorize(g.body(&v, &strict));
+    let plan = g.plan(&g.ben_dev, &strict);
+    let (s, j) = g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k3");
+    assert_eq!(s, 201, "{j}");
+    // A version registered as aggregate-only: a boolean-only authorization
+    // of it, or a boolean-only output, is beyond it.
+    let agg = g.version(
+        "2026-q2",
+        json!({"ir_policy": registered_policy(), "release_class": "aggregate-only"}),
+    );
+    let p = strict.replace(&v.asset, &agg.asset);
+    refused(
+        g.t.call(
+            &g.tax_owner,
+            "POST",
+            "/v1/authorizations",
+            Some(json!({"body": g.body(&agg, &p)})),
+        ),
+        "ENC2709",
+    );
+    let plan = g.plan(&g.ben_dev, &p);
+    let r = g.submit(&g.ben_dev, g.request(&plan, &[&agg.asset], &[BEN]), "k4");
+    assert!(
+        r.1["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("aggregate-only"),
+        "{}",
+        r.1
+    );
+    refused(r, "ENC2709");
+    // The registered policy and class are fixed with the version.
+    let mut c = g.t.control.db.conn().unwrap();
+    for sql in [
+        "UPDATE assets SET release_class = 'authorized-agency-only' WHERE id = $1",
+        "UPDATE assets SET ir_policy = NULL WHERE id = $1",
+    ] {
+        let e = c.execute(sql, &[&v.asset]).unwrap_err();
+        let m = e
+            .as_db_error()
+            .map(|d| d.message().to_owned())
+            .unwrap_or_default();
+        assert!(m.contains("immutable"), "{e:?}");
+    }
+    // Registration: versions only, owned by the registering organization
+    // alone, canonical, a known class.
+    let register = |label: &str, extra: Value| {
+        let mut b = json!({"organization": TAX, "kind": "dataset",
+                           "name": format!("income@{label}"), "series": "income",
+                           "version": label, "digest": "c".repeat(64), "project": g.project,
+                           "key_ref": {"broker": "tax-broker", "provider": "openbao-transit",
+                                       "key_ref": format!("income-{label}"), "key_version": 1}});
+        if let (Value::Object(b), Value::Object(e)) = (&mut b, extra) {
+            b.extend(e);
+        }
+        g.t.call(&g.tax_owner, "POST", "/v1/assets", Some(b))
+    };
+    let mut other = registered_policy();
+    other["owners"] = json!([BEN]);
+    let mut unknown = registered_policy();
+    unknown["forms_extra"] = json!(true);
+    let mut two = registered_policy();
+    two["forms"] = json!([{"bounded_category": {"max": 2}}, {"bounded_category": {"max": 3}}]);
+    for (label, extra) in [
+        ("x1", json!({"ir_policy": other})),
+        ("x2", json!({"ir_policy": unknown})),
+        ("x3", json!({"ir_policy": two})),
+        ("x4", json!({"release_class": "sometimes"})),
+    ] {
+        let (s, e) = register(label, extra);
+        assert_eq!(s, 400, "{label}: {e}");
+    }
+    let (s, e) = g.t.call(
+        &g.tax_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": TAX, "kind": "dataset", "name": "plain",
+                    "digest": "c".repeat(64), "release_class": "boolean-only"}),
+        ),
+    );
+    assert_eq!(s, 400, "{e}");
+}
+
+#[test]
+fn standard_project_outputs_unchanged() {
+    let Some(g) = world() else { return };
+    let p = g.t.ok(
+        &g.tax_admin,
+        "POST",
+        "/v1/projects",
+        Some(json!({"organization": TAX, "name": "statistics"})),
+    );
+    let standard = id(&p);
+    // A standard project's job releases a value with no release class.
+    let value = EXACT.replace("ge %0, %1 : secret bool", "add %0, %1 : secret u8");
+    for (i, program) in [EXACT.to_owned(), value].into_iter().enumerate() {
+        let plan = g.t.ok(
+            &g.tax_dev,
+            "POST",
+            "/v1/plans",
+            Some(json!({"project": standard, "program": program})),
+        );
+        let (s, j) = g.submit(
+            &g.tax_dev,
+            json!({"project": standard, "plan": plan["id"], "purpose": "statistics",
+                   "source_assets": [], "requested_output": "out"}),
+            &format!("std-{i}"),
+        );
+        assert_eq!(s, 201, "{j}");
+        assert!(j.get("governance_id").is_none(), "{j}");
+        // Governed outputs belong to governed projects.
+        let (s, _) = g.submit(
+            &g.tax_dev,
+            json!({"project": standard, "plan": plan["id"], "purpose": "statistics",
+                   "source_assets": [], "requested_output": "out",
+                   "outputs": {"out": {"release_class": "boolean-only", "recipients": [TAX]}}}),
+            &format!("std-o-{i}"),
+        );
+        assert_eq!(s, 400);
+    }
+}
+
+// --- step 5 review: probing, registered policies, never ------------------------------
+
+#[test]
+fn boolean_authorization_without_probing_limits_refused_2709() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    for (e, r) in [(None, Some(10)), (Some(10), None), (None, None)] {
+        let mut body = g.body(&v, &p);
+        body.limits.max_executions = e;
+        body.limits.max_releases = r;
+        refused(
+            g.t.call(
+                &g.tax_owner,
+                "POST",
+                "/v1/authorizations",
+                Some(json!({"body": body})),
+            ),
+            "ENC2709",
+        );
+    }
+}
+
+/// Two boolean outputs of one job could jointly encode more than one bit:
+/// one per job per source unless the owner allows more.
+#[test]
+fn boolean_outputs_per_job_capped_2709() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let two = program(&[&v.asset], PURPOSE, BEN)
+        .replace(
+            "%2 = ge %0, %1 : secret bool\n",
+            "%2 = ge %0, %1 : secret bool\n%3 = const [65.0] : public u8\n%4 = ge %0, %3 : secret bool\n",
+        )
+        .replace(
+            &format!("output \"out\" = %2 to \"{BEN}\"\n"),
+            &format!("output \"out\" = %2 to \"{BEN}\"\noutput \"old\" = %4 to \"{BEN}\"\n"),
+        );
+    g.authorize(g.body(&v, &two));
+    let plan = g.plan(&g.ben_dev, &two);
+    let mut body = g.request(&plan, &[&v.asset], &[BEN]);
+    body["outputs"]["old"] = json!({"release_class": "boolean-only", "recipients": [BEN]});
+    let r = g.submit(&g.ben_dev, body.clone(), "k1");
+    assert!(
+        r.1["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("boolean-only outputs"),
+        "{}",
+        r.1
+    );
+    refused(r, "ENC2709");
+    // One of them sealed: one boolean released.
+    let mut one = body.clone();
+    one["outputs"]["old"] = json!({"release_class": "never", "recipients": []});
+    let (s, j) = g.submit(&g.ben_dev, one, "k2");
+    assert_eq!(s, 201, "{j}");
+    // The owner allows two per job.
+    let v2 = g.version("2026-q2", json!({}));
+    let two2 = two.replace(&v.asset, &v2.asset);
+    let mut b = g.body(&v2, &two2);
+    b.limits.max_outputs_per_job = Some(2);
+    g.authorize(b);
+    let plan = g.plan(&g.ben_dev, &two2);
+    let mut body = g.request(&plan, &[&v2.asset], &[BEN]);
+    body["outputs"]["old"] = json!({"release_class": "boolean-only", "recipients": [BEN]});
+    let (s, j) = g.submit(&g.ben_dev, body, "k3");
+    assert_eq!(s, 201, "{j}");
+}
+
+/// A governed source is always a version with its owner's registered
+/// policy and release class.
+#[test]
+fn governed_source_without_registered_policy_refused() {
+    let Some(g) = world() else { return };
+    let bare = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": TAX, "kind": "dataset", "name": "income@bare",
+                    "series": "income", "version": "bare", "digest": "c".repeat(64),
+                    "project": g.project,
+                    "key_ref": {"broker": "tax-broker", "provider": "openbao-transit",
+                                "key_ref": "income-bare", "key_version": 1}}),
+        ),
+    );
+    let asset = id(&bare);
+    let p = program(&[&asset], PURPOSE, BEN);
+    let plan = g.plan(&g.ben_dev, &p);
+    let r = g.submit(&g.ben_dev, g.request(&plan, &[&asset], &[BEN]), "k1");
+    assert!(
+        r.1["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("registered policy"),
+        "{}",
+        r.1
+    );
+    refused(r, "ENC2709");
+}
+
+#[test]
+fn authorization_for_unregistered_version_refused() {
+    let Some(g) = world() else { return };
+    let v = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": TAX, "kind": "dataset", "name": "income@bare",
+                    "series": "income", "version": "bare", "digest": "c".repeat(64),
+                    "project": g.project,
+                    "key_ref": {"broker": "tax-broker", "provider": "openbao-transit",
+                                "key_ref": "income-bare", "key_version": 1}}),
+        ),
+    );
+    let version = Version {
+        asset: id(&v),
+        version: v["version_id"].as_str().unwrap().to_owned(),
+    };
+    let p = program(&[&version.asset], PURPOSE, BEN);
+    refused(
+        g.t.call(
+            &g.tax_owner,
+            "POST",
+            "/v1/authorizations",
+            Some(json!({"body": g.body(&version, &p)})),
+        ),
+        "ENC2709",
+    );
+    // Only a registered class and policy together will do.
+    let half = g.version("half", json!({"ir_policy": null}));
+    let p = program(&[&half.asset], PURPOSE, BEN);
+    refused(
+        g.t.call(
+            &g.tax_owner,
+            "POST",
+            "/v1/authorizations",
+            Some(json!({"body": g.body(&half, &p)})),
+        ),
+        "ENC2709",
+    );
+}
+
+/// An output released as `never` names no recipient, and nothing about the
+/// job lets anyone decrypt it: the grant binds it to nobody, the only
+/// ticket the job gets releases its source key to the attested evaluator,
+/// and there is no export (exports arrive with derived assets).
+#[test]
+fn never_output_is_released_to_nobody() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    // Never, yet naming a recipient: refused.
+    let mut named = g.request(&plan, &[&v.asset], &[BEN]);
+    named["outputs"]["out"]["release_class"] = json!("never");
+    let (s, e) = g.submit(&g.ben_dev, named, "k1");
+    assert_eq!(s, 400, "{e}");
+    let mut sealed = g.request(&plan, &[&v.asset], &[]);
+    sealed["outputs"]["out"]["release_class"] = json!("never");
+    let (s, j) = g.submit(&g.ben_dev, sealed, "k2");
+    assert_eq!(s, 201, "{j}");
+    let job = id(&j);
+    let grant = g.grant(&job);
+    let out = &grant.governance.unwrap().binding.outputs["out"];
+    assert_eq!(out.release_class, ReleaseClass::Never);
+    assert!(out.recipients.is_empty());
+    let (s, t) = ticket(&g, &job, &v.version);
+    assert_eq!(s, 201, "{t}");
+    let t: encompute_verification::ticket::ReleaseTicket =
+        serde_json::from_value(t["ticket"].clone()).unwrap();
+    assert_eq!(
+        t.kind,
+        encompute_verification::ticket::TicketKind::KeyRelease
+    );
+    let text = serde_json::to_string(&t).unwrap();
+    assert!(!text.contains(BEN), "{text}");
+    // No export route (derived assets and exports are the next step).
+    let (s, _) = g.t.call(
+        &g.ben_dev,
+        "POST",
+        &format!("/v1/assets/{}/exports", v.asset),
+        Some(json!({"recipient": BEN})),
+    );
+    assert_eq!(s, 404);
 }
