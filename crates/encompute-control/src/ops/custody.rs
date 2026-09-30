@@ -22,6 +22,7 @@ use postgres::GenericClient;
 use serde_json::{json, Value};
 
 use encompute_ir::{Code, Error, Result};
+use encompute_trust::authz::AuthorizationSetId;
 use encompute_verification::governance::is_hex32;
 use encompute_verification::service::{now, verify_signed, JOB_GRANT};
 use encompute_verification::ticket::{
@@ -279,6 +280,17 @@ impl Control {
     /// cache emptied when full), so repeated ticket requests do not
     /// recompile it.
     fn cached_plan_spec(&self, plan: &str) -> Result<encompute_verification::ExecutionSpec> {
+        let mut c = self.db.conn()?;
+        self.cached_plan_spec_in(&mut *c, plan)
+    }
+
+    /// [`Self::cached_plan_spec`], compiling on connection `c` (a caller's
+    /// transaction) when the plan is not cached.
+    pub(crate) fn cached_plan_spec_in(
+        &self,
+        c: &mut impl GenericClient,
+        plan: &str,
+    ) -> Result<encompute_verification::ExecutionSpec> {
         if let Some(s) = self
             .plan_specs
             .lock()
@@ -287,10 +299,7 @@ impl Control {
         {
             return Ok(s.clone());
         }
-        let spec = {
-            let mut c = self.db.conn()?;
-            self.plan_spec(&mut *c, plan)?
-        };
+        let spec = self.plan_spec(c, plan)?;
         let mut m = self.plan_specs.lock().unwrap_or_else(|p| p.into_inner());
         if m.len() >= PLAN_SPEC_CACHE {
             m.clear();
@@ -422,10 +431,18 @@ impl Control {
                     r.asset_version_id
                 )));
             }
-            if status == "revoked" || expired {
+            // A revoked source is withdrawn (ENC2706); an expired one is
+            // past its owner's retention, an expiry (ENC2705).
+            if status == "revoked" {
                 return Err(Error::new(
                     Code::GovernanceAuthorizationRevoked,
-                    format!("the source is {}", if expired { "expired" } else { "revoked" }),
+                    "the source is revoked",
+                ));
+            }
+            if expired {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationExpired,
+                    "the source is expired",
                 ));
             }
             let broker = key_ref
@@ -437,53 +454,62 @@ impl Control {
             }
             require_own_broker(t, &owner, broker.as_deref())?;
             let broker = broker.expect("checked");
-            // The owner's authorizations for this version and purpose that
-            // may be used now (a revoked one only explains a refusal).
-            let candidates: Vec<(String, Option<String>, i64)> = t
+            // The job's own authorization for this source (recorded at
+            // submission), checked exactly as scheduling and start check
+            // it: never another authorization of the owner, however broad.
+            let bound: BTreeMap<String, String> = t
                 .query(
-                    "SELECT id, authorization_id, valid_until FROM authorizations
-                      WHERE project_id = $1 AND organization_id = $2 AND asset_version_id = $3
-                        AND purpose_id = $4 AND status IN ('active', 'revoked') ORDER BY id
-                        FOR SHARE",
-                    &[&project, &owner, &r.asset_version_id, &g.binding.purpose_id],
+                    "SELECT authorization_row, authorization_id FROM job_authorizations
+                      WHERE job_id = $1 ORDER BY authorization_row",
+                    &[&id],
                 )
                 .map_err(db_err)?
                 .iter()
-                .map(|x| (x.get(0), x.get(1), x.get(2)))
+                .map(|x| (x.get(0), x.get(1)))
                 .collect();
+            if bound.is_empty()
+                || AuthorizationSetId::of(bound.values().cloned())?.hex() != g.authorization_set_id
+            {
+                return Err(Error::new(
+                    Code::GovernanceProgramNotAuthorized,
+                    "the job's authorizations are not the set its grant names",
+                ));
+            }
+            let mine: Vec<(String, String)> = t
+                .query(
+                    "SELECT authorization_row, authorization_id FROM job_authorizations
+                      WHERE job_id = $1 AND asset_id = $2 ORDER BY authorization_row",
+                    &[&id, &asset],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|x| (x.get(0), x.get(1)))
+                .collect();
+            if mine.is_empty() {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationMissing,
+                    format!("job {id} runs under no authorization of {owner} for this source"),
+                ));
+            }
+            let versions = BTreeMap::from([(asset.clone(), r.asset_version_id.clone())]);
+            let spec_hex = spec.id().hex();
             let mut authorization_ids = BTreeSet::new();
             let mut until = u64::MAX;
-            let mut refusal = None;
-            // What the anchor holds revoked stays revoked, whatever the
-            // database says now.
-            let anchored = self.anchor.snapshot().revoked_authorizations;
-            for (row, aid, valid_until) in candidates {
-                if anchored.contains(&row) || aid.as_ref().is_some_and(|a| anchored.contains(a)) {
-                    refusal.get_or_insert(Error::new(
-                        Code::GovernanceAuthorizationRevoked,
-                        format!("authorization {row} was revoked"),
-                    ));
-                    continue;
-                }
-                match crate::ops::governance::usable_at(t, &row, at) {
-                    Ok(()) => {
-                        if let Some(aid) = aid {
-                            authorization_ids.insert(aid);
-                            until = until.min(valid_until.max(0) as u64);
-                        }
-                    }
-                    Err(e) => {
-                        refusal.get_or_insert(e);
-                    }
-                }
-            }
-            if authorization_ids.is_empty() {
-                return Err(refusal.unwrap_or_else(|| {
-                    Error::new(
-                        Code::GovernanceAuthorizationMissing,
-                        format!("{owner} has no active authorization for this source and purpose"),
-                    )
-                }));
+            for (row, aid) in &mine {
+                let valid_until = self.check_bound_authorization(
+                    t,
+                    crate::ops::jobs::BoundAuthorization {
+                        row,
+                        authorization_id: aid,
+                        binding: &g.binding,
+                        base_spec: &base_spec,
+                        spec_id: &spec_hex,
+                        versions: &versions,
+                    },
+                    at,
+                )?;
+                authorization_ids.insert(aid.clone());
+                until = until.min(valid_until);
             }
             let not_after = (at + MAX_TICKET_TTL_SECS)
                 .min(g.not_after)

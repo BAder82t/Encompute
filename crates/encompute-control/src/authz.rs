@@ -218,7 +218,14 @@ pub fn asset_row(c: &mut impl GenericClient, id: &str) -> Result<Option<AssetRow
 
 /// An asset its owner's members see, or that its owner approved for a
 /// project the principal's organization collaborates in, while that
-/// organization was a member (a later member needs a new approval).
+/// organization was a member (a later member needs a new approval). In a
+/// governed project, where consent is an owner-signed authorization and
+/// not an approval, a source is visible beyond its owner only to an
+/// organization an active authorization of it names as a recipient (while
+/// a member of that project), and to the submitting organization of a job
+/// that runs under an authorization of it. Anyone else gets "not found".
+/// Other organizations get the row without where it is stored, which key
+/// protects it or its size.
 pub fn asset_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Result<AssetRow> {
     let a = asset_row(c, id)?.ok_or_else(|| not_found("asset", id))?;
     if p.member_of(&a.organization) {
@@ -230,12 +237,28 @@ pub fn asset_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Res
             "SELECT 1 FROM asset_approval_members am
                JOIN project_members pm ON pm.project_id = am.project_id
                 AND pm.organization_id = am.organization_id AND pm.status = 'active'
-              WHERE am.asset_id = $1 AND am.organization_id = ANY($2) LIMIT 1",
+              WHERE am.asset_id = $1 AND am.organization_id = ANY($2)
+             UNION ALL
+             SELECT 1 FROM authorizations z
+               JOIN authorization_recipients ar ON ar.authorization_row = z.id
+               JOIN project_members pm ON pm.project_id = z.project_id
+                AND pm.organization_id = ar.organization_id AND pm.status = 'active'
+              WHERE z.asset_id = $1 AND z.status = 'active' AND ar.organization_id = ANY($2)
+             UNION ALL
+             SELECT 1 FROM job_authorizations ja JOIN jobs j ON j.id = ja.job_id
+              WHERE ja.asset_id = $1 AND j.organization_id = ANY($2)
+             LIMIT 1",
             &[&id, &orgs],
         )
         .map_err(db_err)?;
     if shared.is_some() {
-        Ok(a)
+        Ok(AssetRow {
+            key_ref: None,
+            storage_uri: None,
+            size_bytes: None,
+            media_type: None,
+            ..a
+        })
     } else {
         Err(not_found("asset", id))
     }

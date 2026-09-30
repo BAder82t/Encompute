@@ -4,7 +4,7 @@
 
 Work toward confidential cross-agency computation
 ([docs/public-sector.md](docs/public-sector.md)). None of it is part of
-0.3, and jobs in governed projects are still refused.
+0.3.
 
 - **Governed projects (phase 1):** governance keys, purposes, owner-signed
   authorizations with four-eyes approval, immutable dataset versions,
@@ -47,6 +47,24 @@ Work toward confidential cross-agency computation
   every anchored revocation, disable, ended job and expiry: start is
   refused until recovery acknowledges the loss, and the ID stays blocked.
   Governance tables refuse DELETE. Migration 0006; ENC2713 to ENC2715.
+- **Governed jobs (phase 3).** A job in a governed project names its
+  purpose (`purpose_id`) and each output's release (`outputs`), and is
+  submitted only under an active authorization signed by every source's
+  owner, its own sources included, covering its program, policies,
+  linkage and recipients. The governance binding is built at submission
+  and carried in the job's spec; the job is scheduled with a version 2
+  grant capped at the end of every authorization, purpose and source
+  window; validity is checked again at scheduling and start (a failing
+  job is anchored as ended); revoking an authorization fails the jobs
+  under it that have not started; completion needs a version 4 receipt
+  naming the job's own grant. A job that started inside its window may
+  complete after it, and its trust report judges validity at its start.
+  Dataset versions may carry `delete_after`, which may be brought forward
+  but never extended. An expired source now gets ENC2705 at ticket issue.
+  A release ticket names only the job's own authorization for its source,
+  checked as at start; in a governed project a source is visible only to
+  its owner, the recipients an active authorization names, and the
+  submitters of jobs under one. Migration 0007.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody)
   and INV-236 (the control plane can only deny; broker state cannot be
   rolled back); 159 invariants.

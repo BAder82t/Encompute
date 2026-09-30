@@ -203,8 +203,14 @@ Built on the development branch, not released:
   management system. The owner can revoke at its broker even when the
   control plane is down.
 
-Not yet built: running jobs in governed projects end to end (they are
-still refused), release classes, placement and operator rules (a broker
+Jobs in governed projects run under their owners' authorizations: each
+source's owner must have authorized the job's purpose, program and
+releases, and validity is checked again at scheduling and start, strictly,
+on the control plane's clock. A job that started inside its window may
+finish after it.
+
+Not yet built: per-job four-eyes approval (an authorization that asks for
+it refuses jobs for now), release classes, placement and operator rules (a broker
 refuses any execution that declares placement until placement can be
 attested), record linkage, the governance report and evidence bundle. The
 limits of what exists are in [known limitations](../KNOWN_LIMITATIONS.md).

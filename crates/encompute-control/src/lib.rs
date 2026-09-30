@@ -27,6 +27,6 @@ pub mod transport;
 pub use control::{Control, Ctx};
 pub use ops::{
     asset_json, check_reservation, estimated_ms, job_profile, keybroker_lock, least_sensitivity,
-    legacy_service_admins, shared_asset_json, GATE_MS, HEARTBEAT_TIMEOUT_SECS,
+    legacy_service_admins, shared_asset_json, GovernedStage, GATE_MS, HEARTBEAT_TIMEOUT_SECS,
     LEGACY_SERVICE_ADMINS_REFUSED_FROM,
 };

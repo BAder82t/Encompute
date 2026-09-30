@@ -40,6 +40,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "sovereign_custody",
         include_str!("../migrations/0006_sovereign_custody.sql"),
     ),
+    (
+        7,
+        "governed_jobs",
+        include_str!("../migrations/0007_governed_jobs.sql"),
+    ),
 ];
 
 /// Serializes migrations across control-plane replicas.

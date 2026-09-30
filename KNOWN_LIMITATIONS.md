@@ -356,10 +356,13 @@ Governed projects are being built after 0.3 (see
 [docs/public-sector.md](docs/public-sector.md)). What exists so far has
 these limits:
 
-- **Jobs in governed projects are refused.** Owner authorizations,
-  release tickets, sovereign custody and governed key brokers exist, but
-  the control plane does not yet accept a job in a governed project, so
-  nothing runs end to end through the API yet.
+- **Governed jobs have no per-job four-eyes approval, release forms or
+  derived assets yet.** A job runs under its owners' authorizations, but an
+  authorization that asks for per-job approval refuses jobs until that
+  approval exists; a release class is compared by equality with the
+  authorization's (not yet by a partial order of classes, nor against the
+  program's output forms); and a released result cannot yet be registered
+  or exported as a derived asset.
 - **Declared placement is refused.** A governed broker releases no key
   for an execution that declares placement until attested placement can
   be checked.

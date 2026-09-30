@@ -25,11 +25,12 @@
 //! (`authorization.revoked`, see `ops/custody.rs`); release tickets are
 //! issued there too.
 //!
-//! Not yet (later phases): enforcement of authorizations at job
-//! submission, scheduling and start (jobs in governed projects are refused
-//! meanwhile; those phases call [`Control::authorization_usable_at`]), and
-//! anchoring of purpose retirements and governance-key revocations against
-//! database rollback.
+//! Jobs run under these authorizations (`ops/jobs.rs`): checked at
+//! submission, scheduling, start and ticket issue with [`usable_at`], and a
+//! revocation fails the jobs under it that have not started.
+//!
+//! Not yet (later phases): anchoring of purpose retirements and
+//! governance-key revocations against database rollback.
 
 use std::collections::BTreeMap;
 
@@ -956,6 +957,18 @@ impl Control {
     ) -> Result<Value> {
         check_name("reason", &r.reason)?;
         let out = self.db.tx(|t| {
+            // One lock order everywhere: jobs (by ID) before the
+            // authorizations they run under, as scheduling, start and
+            // release tickets take them. The unstarted jobs under this
+            // authorization are locked first, then the authorization.
+            t.execute(
+                "SELECT j.id FROM jobs j JOIN job_authorizations ja ON ja.job_id = j.id
+                  WHERE ja.authorization_row = $1
+                    AND j.state IN ('created', 'planning', 'planned', 'waiting_for_approval', 'authorized', 'queued')
+                  ORDER BY j.id FOR UPDATE OF j",
+                &[&id],
+            )
+            .map_err(db_err)?;
             let row = authorization_row(t, ctx, id)?;
             require_human(
                 &ctx.principal,
@@ -994,6 +1007,22 @@ impl Control {
                 ],
             )
             .map_err(db_err)?;
+            // Jobs that run under it and have not started cannot start now
+            // (rows locked before the audit chain, which every transaction
+            // takes last). One that runs already may finish: revocation
+            // blocks new use, it is not retroactive.
+            let failed = self.fail_unstarted_jobs(
+                t,
+                ctx,
+                "SELECT j.id, j.organization_id FROM jobs j
+                   JOIN job_authorizations ja ON ja.job_id = j.id
+                  WHERE ja.authorization_row = $1
+                    AND j.state IN ('created', 'planning', 'planned', 'waiting_for_approval', 'authorized', 'queued')
+                  ORDER BY j.id FOR UPDATE OF j",
+                &[&id],
+                "an owner authorization the job runs under was revoked",
+                ("revoked_authorization", id),
+            )?;
             let mut d = ctx
                 .draft(
                     "authorization.revoked",
@@ -1011,7 +1040,7 @@ impl Control {
             // The owner's brokers stop using it too: queued now, sent once
             // the revocation is anchored.
             self.queue_authorization_revoked(t, ctx.actor(), &ctx.request_id, id)?;
-            Ok(json!({"id": id, "status": "revoked"}))
+            Ok(json!({"id": id, "status": "revoked", "failed_jobs": failed}))
         })?;
         // Anchored before acknowledging (a retry of a revoked one
         // re-anchors); the brokers' messages go out only after that.
@@ -1047,7 +1076,11 @@ fn purpose_row(
 
 /// An active purpose of `project` (ENC2702 if there is none, ENC2706 if it
 /// is retired), locked against a concurrent retirement.
-fn usable_purpose(t: &mut postgres::Transaction<'_>, project: &str, id: &str) -> Result<Purpose> {
+pub(crate) fn usable_purpose(
+    t: &mut postgres::Transaction<'_>,
+    project: &str,
+    id: &str,
+) -> Result<Purpose> {
     let r = t
         .query_opt(
             "SELECT status, document FROM purposes WHERE id = $1 AND project_id = $2 FOR SHARE",

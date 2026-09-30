@@ -528,6 +528,11 @@ pub struct RegisterAsset {
     /// asset's own organization registered.
     #[serde(default)]
     pub project: Option<String>,
+    /// A dataset version's deletion date (Unix seconds; versions only,
+    /// never changed): no job uses the version from then on, and no grant
+    /// outlives it.
+    #[serde(default)]
+    pub delete_after: Option<u64>,
 }
 
 /// Where an asset's key lives. Only references: the key broker holds the
@@ -567,6 +572,16 @@ pub struct SubmitJob {
     pub requested_output: String,
     #[serde(default)]
     pub policy: Option<String>,
+    /// Governed projects (required there, refused elsewhere): the active
+    /// purpose the job runs for (its PurposeId, hex). Its name is
+    /// `purpose`, and the program's declared purpose.
+    #[serde(default)]
+    pub purpose_id: Option<String>,
+    /// Governed projects (required there, refused elsewhere): each program
+    /// output's release class and recipients, within the purpose and every
+    /// source's authorization.
+    #[serde(default)]
+    pub outputs: Option<BTreeMap<String, encompute_verification::governance::GovernanceOutput>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -656,4 +671,10 @@ pub struct JobView {
     /// Worker threads the chosen evaluator uses per job (its advertised
     /// `max_parallel_gates`), when it said.
     pub evaluator_parallel_gates: Option<u32>,
+    /// Governed projects: the purpose (PurposeId) the job runs for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose_id: Option<String>,
+    /// Governed projects: the GovernanceId its execution spec carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub governance_id: Option<String>,
 }

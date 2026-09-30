@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 
 use common::*;
 use encompute_control::authn::DEV_ISSUER;
-use encompute_trust::authz::AuthorizationV2;
+use encompute_trust::authz::{AuthorizationSetId, AuthorizationV2};
 use encompute_verification::governance::{
     GovernanceBinding, GovernanceInput, GovernanceOutput, GrantGovernance, ProgramRef,
     ReleaseClass, GOVERNANCE_BINDING_VERSION,
@@ -250,6 +250,19 @@ impl C {
     }
 
     fn authorization(&self, purpose: &str, version: &str, k: &SigningKey) -> (String, String) {
+        self.authorization_for(purpose, version, k, &"a".repeat(64), &"b".repeat(64))
+    }
+
+    /// An active authorization of `version` for `program_id` under
+    /// `policy_id`.
+    fn authorization_for(
+        &self,
+        purpose: &str,
+        version: &str,
+        k: &SigningKey,
+        program_id: &str,
+        policy_id: &str,
+    ) -> (String, String) {
         let mut nonce = [0u8; 16];
         getrandom::getrandom(&mut nonce).unwrap();
         let body = AuthorizationV2 {
@@ -260,9 +273,9 @@ impl C {
             asset_version_id: version.into(),
             asset_digest_commitment: "d".repeat(64),
             program: ProgramRef::Program {
-                program_id: "a".repeat(64),
+                program_id: program_id.into(),
             },
-            policy_id: "b".repeat(64),
+            policy_id: policy_id.into(),
             privacy_policy_id: None,
             linkage_policy_id: None,
             release_class: ReleaseClass::BooleanOnly,
@@ -367,7 +380,16 @@ impl C {
         );
         let version = v["version_id"].as_str().unwrap().to_owned();
         let asset = v["id"].as_str().unwrap().to_owned();
-        let (authorization_row, authorization_id) = self.authorization(&purpose, &version, &k);
+        // Authorized for the program the fixture jobs run: tax's version,
+        // read by `reading`.
+        let spec = reading_spec(&asset);
+        let (authorization_row, authorization_id) = self.authorization_for(
+            &purpose,
+            &version,
+            &k,
+            &spec.program_id,
+            spec.policy_id.as_deref().unwrap(),
+        );
         Ready {
             purpose,
             version,
@@ -378,9 +400,9 @@ impl C {
         }
     }
 
-    /// A governed job row as submission will write it (job submission in
-    /// governed projects is refused until owner authorizations are
-    /// enforced at execution): planned by tax's developer, over `asset`
+    /// A governed job row as submission writes it, with its grant's window
+    /// chosen by the test: planned by tax's developer (a program reading
+    /// the ready version), under the ready authorization, over `asset`
     /// (version `version`), queued on evaluator-1 under a grant the control
     /// plane signed, with `not_after` and `expires_at` as given.
     fn governed_job(
@@ -396,7 +418,7 @@ impl C {
             &self.tax_dev,
             "POST",
             "/v1/plans",
-            Some(json!({"project": self.project, "program": EXACT})),
+            Some(json!({"project": self.project, "program": reading(&[&r.asset])})),
         );
         let plan_row = plan["id"].as_str().unwrap().to_owned();
         let binding = GovernanceBinding {
@@ -405,7 +427,7 @@ impl C {
             purpose_id: r.purpose.clone(),
             linkage_policy_id: None,
             inputs: BTreeMap::from([(
-                "age".to_string(),
+                "x0".to_string(),
                 GovernanceInput {
                     asset_version_id: version.into(),
                     digest_commitment: "d".repeat(64),
@@ -423,14 +445,7 @@ impl C {
             project_policy_digest: None,
             asset_brokers: BTreeMap::new(),
         };
-        let program = encompute_ir::parse(EXACT).unwrap();
-        let compiled = encompute_evaluator::compile_program(&program).unwrap();
-        let spec = encompute_evaluator::execution_spec(
-            &encompute_evaluator::Ids::of(&program, &compiled),
-            &compiled,
-            compiled.target_backend(),
-        )
-        .governed(&binding);
+        let spec = reading_spec(&r.asset).governed(&binding);
         let job = format!("job_{}", hex(&rand16()));
         let signer = &self.t.control.signer;
         let mut g = JobGrant {
@@ -453,7 +468,10 @@ impl C {
                 purpose_id: r.purpose.clone(),
                 governance_id: binding.id().hex(),
                 binding,
-                authorization_set_id: "f".repeat(64),
+                authorization_set_id: AuthorizationSetId::of([r.authorization_id.clone()])
+                    .unwrap()
+                    .hex()
+                    .to_owned(),
                 not_after,
             }),
             signature: String::new(),
@@ -481,6 +499,12 @@ impl C {
                 &self.evaluator.id,
                 &serde_json::to_value(&g).unwrap(),
             ],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO job_authorizations (job_id, authorization_row, authorization_id, asset_id)
+             VALUES ($1, $2, $3, $4)",
+            &[&job, &r.authorization_row, &r.authorization_id, &r.asset],
         )
         .unwrap();
         job
@@ -883,14 +907,20 @@ fn ticket_only_for_scheduled_evaluator() {
         c.ticket(&c.evaluator.service, &forged, &r.version),
         "ENC2604",
     );
-    // Not once the owner revoked its authorization.
+    // Not once the owner revoked its authorization: the revocation fails
+    // the queued job, and a running one gets no ticket (ENC2706).
+    let running = c.governed_job(&r, &r.asset, &r.version, "running", far, far);
     c.t.ok(
         &c.tax_sec1,
         "POST",
         &format!("/v1/authorizations/{}/revoke", r.authorization_row),
         Some(json!({"reason": "withdrawn"})),
     );
-    refused(c.ticket(&c.evaluator.service, &job, &r.version), "ENC2706");
+    refused(c.ticket(&c.evaluator.service, &job, &r.version), "ENC2604");
+    refused(
+        c.ticket(&c.evaluator.service, &running, &r.version),
+        "ENC2706",
+    );
 }
 
 #[test]
@@ -1102,7 +1132,8 @@ fn authorization_revoked_sent_only_after_anchor() {
 }
 
 /// An asset's expiry (its owner's retention ended) is anchored, and only
-/// then its broker is told; the expired source gets no ticket.
+/// then its broker is told; the expired source gets no ticket (an expiry,
+/// ENC2705, not a revocation).
 #[test]
 fn asset_expiry_is_anchored_before_the_broker_hears_of_it() {
     let Some(c) = world() else { return };
@@ -1126,7 +1157,7 @@ fn asset_expiry_is_anchored_before_the_broker_hears_of_it() {
             && m.payload["key_ref"] == "income-2026-q3"),
         "{sent:?}"
     );
-    refused(c.ticket(&c.evaluator.service, &job, &r.version), "ENC2706");
+    refused(c.ticket(&c.evaluator.service, &job, &r.version), "ENC2705");
     let e =
         c.t.control
             .db
@@ -1432,6 +1463,17 @@ fn reading(assets: &[&str]) -> String {
         n + 1
     ));
     p
+}
+
+/// The execution spec (before any binding) of `reading(&[asset])`.
+fn reading_spec(asset: &str) -> encompute_verification::ExecutionSpec {
+    let program = encompute_ir::parse(&reading(&[asset])).unwrap();
+    let compiled = encompute_evaluator::compile_program(&program).unwrap();
+    encompute_evaluator::execution_spec(
+        &encompute_evaluator::Ids::of(&program, &compiled),
+        &compiled,
+        compiled.target_backend(),
+    )
 }
 
 impl C {

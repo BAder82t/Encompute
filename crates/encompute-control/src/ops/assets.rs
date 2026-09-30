@@ -183,6 +183,20 @@ impl Control {
                 ))
             }
         };
+        // A version's deletion date: in the future, and fixed for good.
+        let delete_after = match r.delete_after {
+            None => None,
+            Some(_) if version.is_none() => {
+                return Err(bad("only a dataset version has a deletion date"))
+            }
+            Some(d) if d > i64::MAX as u64 => {
+                return Err(bad("delete_after is Unix seconds below 2^63"))
+            }
+            Some(d) if d <= encompute_verification::service::now() => {
+                return Err(bad("delete_after is in the past"))
+            }
+            Some(d) => Some(d as i64),
+        };
         let id = new_id("ast");
         let policy = if r.policy.is_null() {
             json!({})
@@ -277,8 +291,8 @@ impl Control {
             t.execute(
                 "INSERT INTO assets (id, organization_id, kind, name, digest, size_bytes, media_type,
                      storage_uri, policy, lineage_root, parents, key_ref, status, created_by,
-                     series, version, version_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', $13, $14, $15, $16)",
+                     series, version, version_id, delete_after)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', $13, $14, $15, $16, $17)",
                 &[
                     &id,
                     &r.organization,
@@ -296,6 +310,7 @@ impl Control {
                     &version.as_ref().map(|v| v.series.clone()),
                     &version.as_ref().map(|v| v.label.clone()),
                     &version.as_ref().map(|v| v.id().hex()),
+                    &delete_after,
                 ],
             )
             .map_err(|e| {

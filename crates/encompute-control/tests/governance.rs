@@ -941,8 +941,12 @@ fn dataset_versions_register_once_and_never_change() {
     assert!(db_msg(&e).contains("stays revoked"), "{e}");
 }
 
+/// A job in a governed project names its purpose object and each output's
+/// release, and reads registered versions under their owners'
+/// authorizations: without them it is refused (the full enforcement is in
+/// `tests/governed_jobs.rs`).
 #[test]
-fn jobs_in_governed_projects_are_refused_until_enforcement_ships() {
+fn a_governed_job_needs_its_purpose_outputs_and_an_owner_authorization() {
     let Some(g) = gov_world() else { return };
     evaluator(
         &g.t,
@@ -952,22 +956,46 @@ fn jobs_in_governed_projects_are_refused_until_enforcement_ships() {
         &["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"],
         4,
     );
+    let k = key(1);
+    let (purpose, _) = g.ready(&k);
+    let program = "encompute 0.1
+program adult precision 0.001 purpose \"benefits-eligibility\"
+party \"tax-agency\" \"Tax\"
+asset \"not-registered\" dataset owners [\"tax-agency\"] readers [\"tax-agency\"] purposes [\"benefits-eligibility\"] release allowed_parties
+%0 = input \"age\" [0.0, 120.0] asset \"not-registered\" : secret u8
+%1 = const [18.0] : public u8
+%2 = ge %0, %1 : secret bool
+output \"out\" = %2 to \"tax-agency\"
+";
     let plan = g.t.ok(
         &g.tax_dev,
         "POST",
         "/v1/plans",
-        Some(json!({"project": g.project, "program": EXACT})),
+        Some(json!({"project": g.project, "program": program})),
     );
-    refused(
+    let submit = |body: Value, k: &str| {
         g.t.call_with(
             &g.tax_dev,
             "POST",
             "/v1/jobs",
-            Some(
-                json!({"project": g.project, "plan": plan["id"], "purpose": "benefits-eligibility",
-                        "source_assets": [], "requested_output": "out"}),
-            ),
-            &[("Idempotency-Key", "k1")],
+            Some(body),
+            &[("Idempotency-Key", k)],
+        )
+    };
+    // The v1 request alone is not enough in a governed project.
+    let (s, v) = submit(
+        json!({"project": g.project, "plan": plan["id"], "purpose": "benefits-eligibility",
+               "source_assets": [], "requested_output": "out"}),
+        "k1",
+    );
+    assert_eq!(s, 400, "{v}");
+    // With them, a program reading no authorized source is refused.
+    refused(
+        submit(
+            json!({"project": g.project, "plan": plan["id"], "purpose": "benefits-eligibility",
+                   "purpose_id": purpose, "source_assets": [], "requested_output": "out",
+                   "outputs": {"out": {"release_class": "boolean-only", "recipients": [TAX]}}}),
+            "k2",
         ),
         "ENC2701",
     );
@@ -1268,7 +1296,7 @@ fn version_4_databases_migrate_to_standard_projects() {
                   VALUES ('a', 'o', 'dataset', 'a', 'd', '{}', 'a', '[]', 'active', 'u');",
         )
         .unwrap();
-    assert_eq!(db.migrate().unwrap(), 6);
+    assert_eq!(db.migrate().unwrap(), 7);
     let mut c = db.conn().unwrap();
     let r = c
         .query_one(

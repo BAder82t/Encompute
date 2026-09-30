@@ -8,6 +8,8 @@
 //! or cancelled after scheduling never starts), and reports completion as a
 //! signed message.
 
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use postgres::{GenericClient, Transaction};
@@ -19,7 +21,12 @@ use encompute_planner::{
     plan_or_fail, verify_plan, verify_plan_with, BackendCatalog, ConfidentialExecutionPlan,
     Infrastructure, PlanFloor, PlanningContext, Preferences, Profile, ProgramFacts, SourceCustody,
 };
-use encompute_verification::service::{now, sha256_hex, verify_signed, JOB_GRANT};
+use encompute_trust::authz::{AuthorizationSetId, SignedAuthorizationV2};
+use encompute_verification::governance::{
+    is_hex32, GovernanceBinding, GovernanceInput, GrantGovernance, ReleaseClass,
+    GOVERNANCE_BINDING_VERSION,
+};
+use encompute_verification::service::{now, sha256_hex, verify_signed, JOB_GRANT, JOB_GRANT_V2};
 use encompute_verification::{
     verify_receipt, EvaluatorIdentity, ExecutionSpec, ExpectedExecution, SignedExecutionReceipt,
 };
@@ -28,6 +35,7 @@ use crate::audit::{self, Outcome};
 use crate::authn::PrincipalKind;
 use crate::authz::{
     asset_visible, conflict, forbidden, not_found, project_role_orgs, project_visible, require,
+    ProjectRow,
 };
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
@@ -279,6 +287,51 @@ impl SourceBinding {
     }
 }
 
+/// What a governed job is bound to (`jobs.governance`), fixed at
+/// submission: the governance binding its execution spec carries, the
+/// plan's PlanId, and the owner authorizations it runs under (one per
+/// source).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobGovernance {
+    binding: GovernanceBinding,
+    governance_id: String,
+    /// The plan's PlanId (hex), which the version 2 grant carries.
+    plan_hash: String,
+    authorization_set_id: String,
+    /// Authorization row → its AuthorizationId.
+    authorizations: BTreeMap<String, String>,
+}
+
+/// The lifecycle transitions of a governed job that revalidate it:
+/// submission builds and checks its binding and authorizations, then
+/// scheduling and start each call `revalidate_governed` once. Completion
+/// does not (a job that started inside its window may complete after it);
+/// release tickets are checked again at the owner's broker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GovernedStage {
+    Schedule,
+    Start,
+}
+
+impl GovernedStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GovernedStage::Schedule => "schedule",
+            GovernedStage::Start => "start",
+        }
+    }
+}
+
+/// A refusal in a governed project.
+fn gov(code: Code, msg: impl Into<String>) -> Error {
+    Error::new(code, msg)
+}
+
+/// A submission refusal to audit: (resource type, resource, organization,
+/// reason).
+type Denied = RefCell<Option<(&'static str, String, String, &'static str)>>;
+
 struct JobRow {
     id: String,
     organization: String,
@@ -302,13 +355,19 @@ struct JobRow {
     created_at: SystemTime,
     estimated_gates: u64,
     estimated_ms: Option<u64>,
+    /// Governed jobs: the purpose, the binding and authorizations, and
+    /// when the job started (Unix seconds).
+    purpose_id: Option<String>,
+    governance: Option<JobGovernance>,
+    started_at: Option<u64>,
 }
 
 fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<JobRow>> {
     let q = format!(
         "SELECT id, organization_id, project_id, plan_id, spec_id, program_id, purpose, source_assets,
                 requested_output, scheme, backend, profile, state, evaluator_id, job_grant, receipt,
-                evidence, error, initiated_by, created_at, estimated_gates, estimated_ms
+                evidence, error, initiated_by, created_at, estimated_gates, estimated_ms,
+                purpose_id, governance, floor(extract(epoch FROM started_at))::bigint
            FROM jobs WHERE id = $1 {}",
         if lock { "FOR UPDATE" } else { "" }
     );
@@ -340,6 +399,13 @@ fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<Jo
         created_at: r.get(19),
         estimated_gates: r.get::<_, i64>(20).max(0) as u64,
         estimated_ms: r.get::<_, Option<i64>>(21).map(|v| v.max(0) as u64),
+        purpose_id: r.get(22),
+        governance: r
+            .get::<_, Option<Value>>(23)
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| db_err(format!("stored job governance: {e}")))?,
+        started_at: r.get::<_, Option<i64>>(24).map(|v| v.max(0) as u64),
     }))
 }
 
@@ -695,21 +761,18 @@ impl Control {
         key: &str,
         digest: &str,
     ) -> Result<(Value, bool)> {
-        let denied = std::cell::RefCell::new(None);
+        let denied: Denied = RefCell::new(None);
         let out = self.db.tx(|t| {
             let project = project_visible(t, &ctx.principal, &r.project)?;
             let orgs = project_role_orgs(&ctx.principal, &project, &[Role::MlDeveloper]);
             let Some(org) = orgs.first().cloned() else {
                 return Err(forbidden("submitting a job needs ml_developer in a project member organization"));
             };
-            // Fail closed: a governed project runs a job only once its
-            // purpose, program and source authorizations are enforced at
-            // submission, scheduling, start and key release, which this
-            // release does not do yet.
-            if project.governed() {
-                return Err(Error::new(
-                    Code::GovernanceAuthorizationMissing,
-                    "jobs in governed projects are not enabled in this release: owner authorizations are registered but not yet enforced at execution",
+            // A purpose object and declared releases belong to governed
+            // projects; a standard project's request is as it always was.
+            if !project.governed() && (r.purpose_id.is_some() || r.outputs.is_some()) {
+                return Err(bad(
+                    "purpose_id and outputs belong to jobs in governed projects",
                 ));
             }
             if let Some(row) = t
@@ -737,6 +800,23 @@ impl Control {
             // the program's declarations (bound into its program and spec
             // IDs), never only the request's word.
             let program = encompute_ir::parse(plan.get::<_, &str>(3))?;
+            if project.governed() {
+                return self.submit_governed(
+                    t,
+                    ctx,
+                    r,
+                    Submission {
+                        project: &project,
+                        org: &org,
+                        key,
+                        digest,
+                        doc: &doc,
+                        program: &program,
+                        program_id: plan.get(1),
+                    },
+                    &denied,
+                );
+            }
             let binding = SourceBinding::of(t, &program)?;
             // A listed asset the program does not bind is refused below;
             // one the caller cannot see is not found, as anywhere else (the
@@ -883,6 +963,807 @@ impl Control {
         out
     }
 
+    /// Submits a job in a governed project (in the caller's transaction,
+    /// after authorization and the idempotency check). The job runs for one
+    /// active purpose whose name the program and the request declare
+    /// (ENC2702), inside the purpose's window (ENC2705), over registered
+    /// dataset versions only (ENC2704), each under an active authorization
+    /// its owner signed (ENC2701; the submitter's own sources too), usable
+    /// now (ENC2705, ENC2706, ENC2708), covering the program, its policies
+    /// and any spec pin (ENC2703), the purpose's linkage (ENC2711) and every
+    /// output's release (ENC2709). The rows every decision reads are
+    /// share-locked, so a concurrent revocation either commits first and is
+    /// seen here, or waits and then finds (and fails) this job.
+    fn submit_governed(
+        &self,
+        t: &mut Transaction<'_>,
+        ctx: &Ctx,
+        r: &SubmitJob,
+        s: Submission<'_>,
+        denied: &Denied,
+    ) -> Result<(Value, bool)> {
+        let org = s.org;
+        let deny = |rtype: &'static str, rid: &str, why: &'static str, e: Error| -> Error {
+            *denied.borrow_mut() = Some((rtype, rid.to_owned(), org.to_owned(), why));
+            e
+        };
+        let (Some(purpose_id), Some(outputs)) = (&r.purpose_id, &r.outputs) else {
+            return Err(bad(
+                "a job in a governed project names its purpose (purpose_id) and each output's release (outputs)",
+            ));
+        };
+        if !is_hex32(purpose_id) {
+            return Err(bad("purpose_id must be 32 bytes of lowercase hex"));
+        }
+        // The plan's execution spec (compiled once per plan, before any
+        // row is locked).
+        let spec = self.cached_plan_spec_in(t, &r.plan)?;
+        let at = now();
+        // The purpose: active in this project, named alike by the request
+        // and the program, and inside its window.
+        let purpose = crate::ops::governance::usable_purpose(t, &r.project, purpose_id)
+            .map_err(|e| deny("plan", &r.plan, "purpose", e))?;
+        let binding = SourceBinding::of(t, s.program)?;
+        if binding.purpose.as_deref() != Some(purpose.name.as_str()) || r.purpose != purpose.name {
+            return Err(deny(
+                "plan",
+                &r.plan,
+                "purpose_mismatch",
+                gov(
+                    Code::GovernancePurposeMismatch,
+                    format!(
+                        "the job's purpose {:?}, the program's declared purpose {:?} and the purpose's name {:?} must be the same",
+                        r.purpose, binding.purpose, purpose.name
+                    ),
+                ),
+            ));
+        }
+        if !purpose.is_valid_at(at) {
+            return Err(deny(
+                "plan",
+                &r.plan,
+                "purpose_expired",
+                gov(
+                    Code::GovernanceAuthorizationExpired,
+                    format!(
+                        "the purpose is valid from {} until {}, not at {at}",
+                        purpose.valid_from, purpose.valid_until
+                    ),
+                ),
+            ));
+        }
+        // The sources: exactly the program's bound assets, as for any job.
+        for a in r
+            .source_assets
+            .iter()
+            .filter(|a| !binding.assets.contains(*a))
+        {
+            asset_visible(t, &ctx.principal, a)?;
+        }
+        if let Err((why, e)) = binding.check(&r.purpose, &r.source_assets) {
+            return Err(deny("plan", &r.plan, why, e));
+        }
+        let sources = binding.sources();
+        if sources.is_empty() {
+            return Err(deny(
+                "plan",
+                &r.plan,
+                "no_source",
+                gov(
+                    Code::GovernanceAuthorizationMissing,
+                    "a job in a governed project reads registered dataset versions, each under its owner's authorization: this program binds none",
+                ),
+            ));
+        }
+        if let Some(pol) = &r.policy {
+            let ok = t
+                .query_opt(
+                    "SELECT 1 FROM policies WHERE id = $1 AND project_id = $2 AND status = 'approved'",
+                    &[pol, &r.project],
+                )
+                .map_err(db_err)?;
+            if ok.is_none() {
+                return Err(not_found("approved policy", pol));
+            }
+        }
+        t.execute(
+            "SELECT 1 FROM assets WHERE id = ANY($1) ORDER BY id FOR SHARE",
+            &[&sources],
+        )
+        .map_err(db_err)?;
+        // Source → (owner, version, the broker's key ID).
+        let mut versions: BTreeMap<String, (String, String, Option<String>)> = BTreeMap::new();
+        for a in &sources {
+            let row = t
+                .query_one(
+                    "SELECT organization_id, status, version_id, expired_at IS NOT NULL, delete_after, key_ref
+                       FROM assets WHERE id = $1",
+                    &[a],
+                )
+                .map_err(db_err)?;
+            let owner: String = row.get(0);
+            // A source of an organization outside the project is not one
+            // its members may know of.
+            if !s.project.members.contains(&owner) {
+                return Err(not_found("asset", a));
+            }
+            if row.get::<_, String>(1) == "revoked" {
+                return Err(deny(
+                    "asset",
+                    a,
+                    "revoked",
+                    gov(
+                        Code::GovernanceAuthorizationRevoked,
+                        format!("asset {a} is revoked"),
+                    ),
+                ));
+            }
+            if row.get::<_, bool>(3)
+                || row
+                    .get::<_, Option<i64>>(4)
+                    .is_some_and(|d| d.max(0) as u64 <= at)
+            {
+                return Err(deny(
+                    "asset",
+                    a,
+                    "expired",
+                    gov(
+                        Code::GovernanceAuthorizationExpired,
+                        format!("asset {a} is past its deletion date"),
+                    ),
+                ));
+            }
+            let Some(version) = row.get::<_, Option<String>>(2) else {
+                return Err(deny(
+                    "asset",
+                    a,
+                    "not_a_version",
+                    gov(
+                        Code::GovernanceAssetVersionMismatch,
+                        format!("asset {a} is not a dataset version: a governed job reads registered versions only"),
+                    ),
+                ));
+            };
+            let key = row
+                .get::<_, Option<Value>>(5)
+                .and_then(|k| serde_json::from_value::<KeyRef>(k).ok())
+                .map(|k| k.key_ref);
+            versions.insert(a.clone(), (owner, version, key));
+        }
+        // Governed projects are always in sovereign custody: each source's
+        // key at a broker its own organization registered (ENC2715).
+        let custody = binding
+            .custody(t)
+            .map_err(|e| deny("plan", &r.plan, "source_custody", e))?;
+        // Every output of the program is declared, within the purpose.
+        let declared: BTreeSet<&str> = s
+            .program
+            .outputs()
+            .iter()
+            .map(|o| o.name.as_str())
+            .collect();
+        if let Some(n) = outputs.keys().find(|n| !declared.contains(n.as_str())) {
+            return Err(bad(format!("the program has no output {n:?}")));
+        }
+        let release = |m: String| gov(Code::GovernanceReleaseClass, m);
+        if let Some(n) = declared.iter().find(|n| !outputs.contains_key(**n)) {
+            return Err(deny(
+                "plan",
+                &r.plan,
+                "undeclared_output",
+                release(format!(
+                    "output {n:?} has no declared release class and recipients"
+                )),
+            ));
+        }
+        for (n, o) in outputs {
+            check_name("output", n)?;
+            if o.release_class != ReleaseClass::Never
+                && !purpose.allowed_release_classes.contains(&o.release_class)
+            {
+                return Err(deny(
+                    "plan",
+                    &r.plan,
+                    "release_class",
+                    release(format!(
+                        "the purpose does not allow release class {} (output {n:?})",
+                        o.release_class.as_str()
+                    )),
+                ));
+            }
+            if let Some(x) = o
+                .recipients
+                .iter()
+                .find(|x| !purpose.recipients.contains(*x))
+            {
+                return Err(deny(
+                    "plan",
+                    &r.plan,
+                    "recipient",
+                    release(format!(
+                        "{x} is not a recipient the purpose allows (output {n:?})"
+                    )),
+                ));
+            }
+        }
+        // One owner authorization per source. What the anchor holds revoked
+        // stays revoked, whatever the database says now.
+        let anchored = self.anchor.snapshot().revoked_authorizations;
+        let mut chosen: BTreeMap<String, (String, SignedAuthorizationV2)> = BTreeMap::new();
+        for a in &sources {
+            let (owner, version, _) = &versions[a];
+            let candidates: Vec<(String, Option<String>, Option<Value>)> = t
+                .query(
+                    "SELECT id, authorization_id, signed FROM authorizations
+                      WHERE project_id = $1 AND organization_id = $2 AND asset_version_id = $3
+                        AND purpose_id = $4 AND status IN ('active', 'revoked')
+                      ORDER BY id FOR SHARE",
+                    &[&r.project, owner, version, purpose_id],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|x| (x.get(0), x.get(1), x.get(2)))
+                .collect();
+            let mut refusal: Option<(&'static str, Error)> = None;
+            let mut four_eyes: Option<(&'static str, Error)> = None;
+            for (row, aid, signed) in candidates {
+                if anchored.contains(&row) || aid.as_ref().is_some_and(|x| anchored.contains(x)) {
+                    refusal.get_or_insert((
+                        "revoked_authorization",
+                        gov(
+                            Code::GovernanceAuthorizationRevoked,
+                            format!("authorization {row} was revoked"),
+                        ),
+                    ));
+                    continue;
+                }
+                if let Err(e) = crate::ops::governance::usable_at(t, &row, at) {
+                    refusal.get_or_insert(("unusable_authorization", e));
+                    continue;
+                }
+                let signed: SignedAuthorizationV2 = signed
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| db_err(format!("stored authorization: {e}")))?
+                    .ok_or_else(|| db_err("a usable authorization is signed"))?;
+                // Every candidate is looked at: one that would cover the job
+                // but asks for per-job four-eyes approval is never shadowed
+                // by a broader one (a later phase makes it require the
+                // job's four-eyes approval instead).
+                match covers(&signed, &spec, &purpose.linkage_policy_id, outputs) {
+                    Ok(()) => {
+                        chosen.entry(a.clone()).or_insert((row, signed));
+                    }
+                    Err(e) if e.1.code == Code::GovernanceFourEyesIncomplete => {
+                        four_eyes.get_or_insert(e);
+                    }
+                    Err(e) => {
+                        refusal.get_or_insert(e);
+                    }
+                }
+            }
+            if let Some((why, e)) = four_eyes {
+                chosen.remove(a);
+                return Err(deny("asset", a, why, e));
+            }
+            if !chosen.contains_key(a) {
+                let (why, e) = refusal.unwrap_or((
+                    "not_authorized",
+                    gov(
+                        Code::GovernanceAuthorizationMissing,
+                        format!(
+                            "{owner} has not authorized its dataset version {version} (asset {a}) for this purpose: every source's owner authorizes it, its own jobs included"
+                        ),
+                    ),
+                ));
+                return Err(deny("asset", a, why, e));
+            }
+        }
+        // The binding: each input's version with its owner's commitment,
+        // each output's release, each source key's broker.
+        let conf = s
+            .program
+            .confidentiality()
+            .ok_or_else(|| bad("a program binding sources declares them"))?;
+        let inputs = conf
+            .inputs
+            .iter()
+            .filter_map(|(name, a)| chosen.get(a).map(|(_, x)| (name, x)))
+            .map(|(name, x)| {
+                (
+                    name.clone(),
+                    GovernanceInput {
+                        asset_version_id: x.body.asset_version_id.clone(),
+                        digest_commitment: x.body.asset_digest_commitment.clone(),
+                        organization: x.body.party.clone(),
+                    },
+                )
+            })
+            .collect();
+        let asset_brokers = custody
+            .iter()
+            .filter_map(|c| {
+                versions[&c.asset]
+                    .2
+                    .clone()
+                    .map(|key| (key, c.broker.clone()))
+            })
+            .collect();
+        let binding = GovernanceBinding {
+            version: GOVERNANCE_BINDING_VERSION,
+            project: r.project.clone(),
+            purpose_id: purpose_id.clone(),
+            linkage_policy_id: purpose.linkage_policy_id.clone(),
+            inputs,
+            outputs: outputs.clone(),
+            placement_digest: None,
+            project_policy_digest: None,
+            asset_brokers,
+        };
+        binding.check()?;
+        let spec = spec.governed(&binding);
+        let spec_id = spec.id().hex();
+        // An authorization pinned to execution specs covers only those.
+        for (a, (row, x)) in &chosen {
+            if x.body
+                .execution_spec_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&spec_id))
+            {
+                return Err(deny(
+                    "asset",
+                    a,
+                    "spec_not_authorized",
+                    gov(
+                        Code::GovernanceProgramNotAuthorized,
+                        format!("authorization {row} is pinned to other execution specs"),
+                    ),
+                ));
+            }
+        }
+        let authorizations: BTreeMap<String, String> = chosen
+            .values()
+            .map(|(row, x)| (row.clone(), x.body.id()))
+            .collect();
+        let set = AuthorizationSetId::of(authorizations.values().cloned())?;
+        let plan_hash = s
+            .doc
+            .plan_id
+            .strip_prefix("encplan1:")
+            .unwrap_or(&s.doc.plan_id)
+            .to_owned();
+        let governance = JobGovernance {
+            governance_id: binding.id().hex(),
+            binding,
+            plan_hash,
+            authorization_set_id: set.hex().to_owned(),
+            authorizations,
+        };
+        let id = new_id("job");
+        t.execute(
+            "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, policy_id, purpose,
+                 source_assets, requested_output, scheme, backend, profile, state, initiated_by,
+                 idempotency_key, request_digest, estimated_gates, purpose_id, governance)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17, $18, $19)",
+            &[
+                &id,
+                &org,
+                &r.project,
+                &r.plan,
+                &spec_id,
+                &s.program_id,
+                &r.policy,
+                &r.purpose,
+                &json!(sources),
+                &r.requested_output,
+                &s.doc.scheme,
+                &s.doc.backend,
+                &s.doc.profile,
+                &ctx.actor(),
+                &s.key,
+                &s.digest,
+                &(s.doc.estimated_gates.min(i64::MAX as u64) as i64),
+                purpose_id,
+                &serde_json::to_value(&governance).expect("serializable"),
+            ],
+        )
+        .map_err(|e| {
+            if e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION) {
+                Error::new(Code::Remote, "unique idempotency key race")
+            } else {
+                db_err(e)
+            }
+        })?;
+        for (a, (row, x)) in &chosen {
+            t.execute(
+                "INSERT INTO job_authorizations (job_id, authorization_row, authorization_id, asset_id)
+                 VALUES ($1, $2, $3, $4)",
+                &[&id, row, &x.body.id(), a],
+            )
+            .map_err(db_err)?;
+        }
+        let actor = ctx.actor();
+        for to in [JobState::Planning, JobState::Planned, JobState::Authorized] {
+            self.transition_in(t, actor, &ctx.request_id, &id, to, None)?;
+        }
+        audit::append(
+            t,
+            ctx.draft("job.created", "job", &id, Outcome::Succeeded)
+                .org(org)
+                .project(&r.project)
+                .r#ref("plan", r.plan.clone())
+                .r#ref("plan_id", s.doc.plan_id.clone())
+                .r#ref("spec", spec_id)
+                .r#ref("purpose", purpose_id.clone())
+                .r#ref("governance", governance.governance_id.clone())
+                .r#ref("authorization_set", governance.authorization_set_id.clone())
+                .r#ref("state", JobState::Authorized.as_str()),
+        )?;
+        Ok((json!({"id": id}), true))
+    }
+
+    /// Revalidates governed job `j` at `at` for the lifecycle transition
+    /// `stage`: the one check scheduling and start make (and a later layer
+    /// may bind to, see [`Control::revalidate_governed_job`]), with every
+    /// row it reads share-locked against a concurrent change. Refused
+    /// when anything changed since submission:
+    ///
+    /// 1. identities: the governance binding, the authorization set, the
+    ///    plan's spec under the binding or the plan's PlanId no longer
+    ///    recompute to the job's stored IDs, or (at start) the grant is not
+    ///    this control plane's for them (ENC2703);
+    /// 2. the purpose: retired (ENC2706) or outside its window (ENC2705);
+    /// 3. each source: revoked (ENC2706), expired (ENC2705), its version
+    ///    substituted (ENC2704), or its key's broker disabled, not its
+    ///    organization's own, or re-bound away from the binding's broker
+    ///    (ENC2715);
+    /// 4. each authorization: not the document recorded (ENC2703), no
+    ///    longer active (revoked, in the database or the anchor: ENC2706;
+    ///    otherwise ENC2701), for another version (ENC2704), unusable at
+    ///    `at` (its window, governance key, purpose or version: ENC2705,
+    ///    ENC2706, ENC2708), or no longer covering the job (ENC2703,
+    ///    ENC2709, ENC2711);
+    /// 5. the privacy budget ([`Control::governed_privacy_budget`], a hook
+    ///    for now);
+    /// 6. `at` at or after `not_after`, the strict end of every
+    ///    authorization, purpose and source window, deletion dates
+    ///    included (ENC2705).
+    ///
+    /// Returns `not_after`.
+    fn revalidate_governed(
+        &self,
+        t: &mut Transaction<'_>,
+        j: &JobRow,
+        stage: GovernedStage,
+        at: u64,
+    ) -> Result<u64> {
+        let g = j
+            .governance
+            .as_ref()
+            .ok_or_else(|| conflict(format!("job {} is not a governed job", j.id)))?;
+        let identity = |m: String| gov(Code::GovernanceProgramNotAuthorized, m);
+        let expired = |m: String| gov(Code::GovernanceAuthorizationExpired, m);
+        let withdrawn = |m: String| gov(Code::GovernanceAuthorizationRevoked, m);
+        let version = |m: String| gov(Code::GovernanceAssetVersionMismatch, m);
+        // 1. The stored identities recompute.
+        g.binding.check().map_err(|e| identity(e.message))?;
+        if g.binding.id().hex() != g.governance_id
+            || g.binding.project != j.project
+            || j.purpose_id.as_deref() != Some(g.binding.purpose_id.as_str())
+        {
+            return Err(identity(
+                "the job's governance binding no longer recomputes to its GovernanceId".into(),
+            ));
+        }
+        let recorded: BTreeMap<String, String> = t
+            .query(
+                "SELECT authorization_row, authorization_id FROM job_authorizations WHERE job_id = $1",
+                &[&j.id],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+        if recorded != g.authorizations
+            || AuthorizationSetId::of(g.authorizations.values().cloned())?.hex()
+                != g.authorization_set_id
+        {
+            return Err(identity(
+                "the job's authorizations no longer recompute to its authorization set".into(),
+            ));
+        }
+        let base = self.cached_plan_spec_in(t, &j.plan)?;
+        let spec = base.clone().governed(&g.binding);
+        if spec.id().hex() != j.spec_id || spec.program_id != j.program_id {
+            return Err(identity(
+                "the plan's spec under the job's binding no longer recomputes to the job's spec"
+                    .into(),
+            ));
+        }
+        let doc: PlanDoc = serde_json::from_value(
+            t.query_one("SELECT document FROM plans WHERE id = $1", &[&j.plan])
+                .map_err(db_err)?
+                .get(0),
+        )
+        .map_err(db_err)?;
+        if doc
+            .plan_id
+            .strip_prefix("encplan1:")
+            .unwrap_or(&doc.plan_id)
+            != g.plan_hash
+        {
+            return Err(identity(
+                "the job's plan is not the one it was bound to".into(),
+            ));
+        }
+        if stage == GovernedStage::Start {
+            let grant = j.grant.as_ref().ok_or_else(|| conflict("no grant"))?;
+            let pk = self.signer.public_key_hex();
+            let bound = grant.governance.as_ref().is_some_and(|x| {
+                x.governance_id == g.governance_id
+                    && x.binding == g.binding
+                    && x.authorization_set_id == g.authorization_set_id
+                    && x.plan_hash == g.plan_hash
+                    && x.purpose_id == g.binding.purpose_id
+            });
+            if grant.issuer_public_key != pk
+                || verify_signed(&pk, JOB_GRANT, &grant.unsigned(), &grant.signature).is_err()
+                || grant.job_id != j.id
+                || grant.spec_id != j.spec_id
+                || !bound
+            {
+                return Err(identity(
+                    "the job's grant is not this control plane's grant for its binding".into(),
+                ));
+            }
+        }
+        // 2. The purpose.
+        let purpose = crate::ops::governance::usable_purpose(t, &j.project, &g.binding.purpose_id)?;
+        if !purpose.is_valid_at(at) {
+            return Err(expired(format!(
+                "the purpose is valid from {} until {}, not at {at}",
+                purpose.valid_from, purpose.valid_until
+            )));
+        }
+        let mut not_after = purpose.valid_until;
+        // 3. The sources, their versions and their keys' brokers.
+        let rows = t
+            .query(
+                "SELECT id, organization_id, status, expired_at IS NOT NULL, delete_after, version_id, key_ref
+                   FROM assets WHERE id = ANY($1) ORDER BY id FOR SHARE",
+                &[&j.sources],
+            )
+            .map_err(db_err)?;
+        if rows.len() != j.sources.len() {
+            return Err(version("a source of the job is not on record".into()));
+        }
+        let mut keys = BTreeMap::new();
+        let mut versions = BTreeMap::new();
+        for r in &rows {
+            let (a, owner): (String, String) = (r.get(0), r.get(1));
+            if r.get::<_, String>(2) == "revoked" {
+                return Err(withdrawn(format!("source {a} was revoked")));
+            }
+            if r.get::<_, bool>(3) {
+                return Err(expired(format!("source {a} expired")));
+            }
+            if let Some(d) = r.get::<_, Option<i64>>(4) {
+                not_after = not_after.min(d.max(0) as u64);
+            }
+            let v: Option<String> = r.get(5);
+            let Some(v) = v.filter(|v| {
+                g.binding
+                    .inputs
+                    .values()
+                    .any(|i| &i.asset_version_id == v && i.organization == owner)
+            }) else {
+                return Err(version(format!(
+                    "source {a} is no longer the dataset version the job is bound to"
+                )));
+            };
+            versions.insert(a.clone(), v);
+            let key = r
+                .get::<_, Option<Value>>(6)
+                .and_then(|k| serde_json::from_value::<KeyRef>(k).ok());
+            super::require_own_broker(t, &owner, key.as_ref().map(|k| k.broker.as_str()))
+                .map_err(|e| Error::new(e.code, format!("source {a}: {}", e.message)))?;
+            let key = key.expect("checked above");
+            keys.insert(key.key_ref, key.broker);
+        }
+        if !g.binding.asset_brokers.is_empty() && keys != g.binding.asset_brokers {
+            return Err(gov(
+                Code::GovernanceCustody,
+                "a source's key is no longer at the broker the job's binding names",
+            ));
+        }
+        // 4. The authorizations the job runs under.
+        let base_spec = base.clone();
+        for (row, aid) in &g.authorizations {
+            let until = self.check_bound_authorization(
+                t,
+                BoundAuthorization {
+                    row,
+                    authorization_id: aid,
+                    binding: &g.binding,
+                    base_spec: &base_spec,
+                    spec_id: &j.spec_id,
+                    versions: &versions,
+                },
+                at,
+            )?;
+            not_after = not_after.min(until);
+        }
+        // 5. The privacy budget.
+        self.governed_privacy_budget(t, j, stage)?;
+        // 6. The window, strictly.
+        if at >= not_after {
+            return Err(expired(format!(
+                "the job's governed window ended at {not_after}"
+            )));
+        }
+        Ok(not_after)
+    }
+
+    /// One authorization a governed job runs under (row `row`, document
+    /// `authorization_id`), checked at `at` with its row share-locked: the
+    /// per-authorization step of [`Self::revalidate_governed`], and what a
+    /// release ticket checks for its source. Refused: revoked in the anchor
+    /// or the database (ENC2706), no longer active (ENC2701), not the
+    /// recorded document or its purpose (ENC2703), for another version
+    /// than its source in `versions` (asset → version, ENC2704), unusable at
+    /// `at` (ENC2705, ENC2706, ENC2708), no longer matching the binding's
+    /// input, or not covering the program, policies, linkage, releases or
+    /// spec pin ([`covers`]). Returns its `valid_until`.
+    pub(crate) fn check_bound_authorization(
+        &self,
+        t: &mut Transaction<'_>,
+        b: BoundAuthorization<'_>,
+        at: u64,
+    ) -> Result<u64> {
+        let (row, aid) = (b.row, b.authorization_id);
+        let identity = |m: String| gov(Code::GovernanceProgramNotAuthorized, m);
+        let withdrawn = |m: String| gov(Code::GovernanceAuthorizationRevoked, m);
+        let anchored = self.anchor.snapshot().revoked_authorizations;
+        if anchored.contains(row) || anchored.contains(aid) {
+            return Err(withdrawn(format!("authorization {row} was revoked")));
+        }
+        let r = t
+            .query_opt(
+                "SELECT status, authorization_id, asset_id, asset_version_id, purpose_id, valid_until, signed
+                   FROM authorizations WHERE id = $1 FOR SHARE",
+                &[&row],
+            )
+            .map_err(db_err)?
+            .ok_or_else(|| {
+                gov(
+                    Code::GovernanceAuthorizationMissing,
+                    format!("authorization {row} is not on record"),
+                )
+            })?;
+        let status: String = r.get(0);
+        match status.as_str() {
+            "active" => {}
+            "revoked" => return Err(withdrawn(format!("authorization {row} was revoked"))),
+            s => {
+                return Err(gov(
+                    Code::GovernanceAuthorizationMissing,
+                    format!("authorization {row} is {s}, not active"),
+                ))
+            }
+        }
+        let (stored_id, asset, v, p): (Option<String>, String, String, String) =
+            (r.get(1), r.get(2), r.get(3), r.get(4));
+        if stored_id.as_deref() != Some(aid) || p != b.binding.purpose_id {
+            return Err(identity(format!(
+                "authorization {row} is no longer the document the job was submitted under"
+            )));
+        }
+        if b.versions.get(&asset) != Some(&v) {
+            return Err(gov(
+                Code::GovernanceAssetVersionMismatch,
+                format!("authorization {row} is for another version than the job's source"),
+            ));
+        }
+        crate::ops::governance::usable_at(t, row, at)?;
+        let signed: SignedAuthorizationV2 = r
+            .get::<_, Option<Value>>(6)
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| db_err(format!("stored authorization: {e}")))?
+            .ok_or_else(|| db_err("a usable authorization is signed"))?;
+        if signed.body.id() != aid
+            || !b.binding.inputs.values().any(|i| {
+                i.asset_version_id == v
+                    && i.digest_commitment == signed.body.asset_digest_commitment
+                    && i.organization == signed.body.party
+            })
+        {
+            return Err(identity(format!(
+                "authorization {row} no longer matches the job's binding"
+            )));
+        }
+        covers(
+            &signed,
+            b.base_spec,
+            &b.binding.linkage_policy_id,
+            &b.binding.outputs,
+        )
+        .map_err(|(_, e)| e)?;
+        if signed
+            .body
+            .execution_spec_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.contains(b.spec_id))
+        {
+            return Err(identity(format!(
+                "authorization {row} is pinned to other execution specs"
+            )));
+        }
+        Ok(r.get::<_, i64>(5).max(0) as u64)
+    }
+
+    /// The privacy-budget step of [`Self::revalidate_governed`]: a hook
+    /// that passes until governed privacy scopes and population caps exist,
+    /// when it will check that the job's scope can still pay for it.
+    fn governed_privacy_budget(
+        &self,
+        _t: &mut Transaction<'_>,
+        _j: &JobRow,
+        _stage: GovernedStage,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Revalidates governed job `id` now for `stage`, without changing it:
+    /// exactly the check scheduling and start make (a refusal carries the
+    /// same code and message). Returns `not_after`. For a later layer (an
+    /// execution epoch) to bind to; the transitions themselves call it.
+    pub fn revalidate_governed_job(&self, id: &str, stage: GovernedStage) -> Result<u64> {
+        self.db.tx(|t| {
+            let j = job_row(t, id, false)?.ok_or_else(|| not_found("job", id))?;
+            self.revalidate_governed(t, &j, stage, now())
+        })
+    }
+
+    /// Fails governed job `j` (in the caller's transaction) for `e`,
+    /// audited with its code; the caller anchors the ended job after
+    /// commit.
+    fn fail_governed(
+        &self,
+        t: &mut Transaction<'_>,
+        actor: &str,
+        request_id: &str,
+        j: &JobRow,
+        stage: GovernedStage,
+        e: &Error,
+    ) -> Result<()> {
+        self.transition_in(
+            t,
+            actor,
+            request_id,
+            &j.id,
+            JobState::Failed,
+            Some(&e.message),
+        )?;
+        audit::append(
+            t,
+            audit::AuditDraft::new(
+                actor,
+                request_id,
+                "job.failed",
+                "job",
+                &j.id,
+                Outcome::Failed,
+            )
+            .org(&j.organization)
+            .project(&j.project)
+            .r#ref("reason", e.code.as_str())
+            .r#ref("check", "revalidate_governed")
+            .r#ref("stage", stage.as_str()),
+        )?;
+        Ok(())
+    }
+
     pub fn job_view(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         let mut c = self.db.conn()?;
         let j = job_row(&mut *c, id, false)?.ok_or_else(|| not_found("job", id))?;
@@ -962,6 +1843,8 @@ impl Control {
             estimated_gates: j.estimated_gates,
             estimated_ms: j.estimated_ms,
             evaluator_parallel_gates: parallel.map(|p| p.max(1) as u32),
+            purpose_id: j.purpose_id,
+            governance_id: j.governance.map(|g| g.governance_id),
         };
         Ok(serde_json::to_value(v).expect("serializable"))
     }
@@ -1114,12 +1997,29 @@ impl Control {
     /// completion time ([`estimated_ms`]: its queued and running work plus
     /// this job, over its advertised parallelism); ties go to the lowest
     /// evaluator ID. Returns whether it was placed.
+    ///
+    /// A governed job is checked again first, on the control plane's clock:
+    /// if anything it runs under was revoked or its window is over, it
+    /// fails (anchored as ended). Its version 2 grant carries the binding,
+    /// the plan's PlanId and the authorization set, and never outlives
+    /// `not_after`, the strict end of every authorization, purpose and
+    /// source window.
     pub fn schedule_job(&self, id: &str) -> Result<bool> {
-        self.db.tx(|t| {
-            let Some(j) = job_row(t, id, true)? else { return Ok(false) };
+        let (placed, ended) = self.db.tx(|t| {
+            let Some(j) = job_row(t, id, true)? else { return Ok((false, false)) };
             if j.state != JobState::Authorized {
-                return Ok(false);
+                return Ok((false, false));
             }
+            let governed = match &j.governance {
+                None => None,
+                Some(g) => match self.revalidate_governed(t, &j, GovernedStage::Schedule, now()) {
+                    Ok(not_after) => Some((g, not_after)),
+                    Err(e) => {
+                        self.fail_governed(t, &self.service_id, "scheduler", &j, GovernedStage::Schedule, &e)?;
+                        return Ok((false, true));
+                    }
+                },
+            };
             // Hard constraints first (backend, profile, health, freshness,
             // capacity); cost only orders what is left.
             let candidates = t
@@ -1151,11 +2051,27 @@ impl Control {
                 })
                 .min()
             else {
-                return Ok(false);
+                return Ok((false, false));
             };
             let t0 = now();
-            let mut g = JobGrant { governance: None,
-                version: JOB_GRANT_VERSION,
+            let (version, governance, expires_at) = match governed {
+                None => (JOB_GRANT_VERSION, None, t0 + JOB_GRANT_TTL_SECS),
+                Some((g, not_after)) => (
+                    JOB_GRANT_V2,
+                    Some(GrantGovernance {
+                        plan_hash: g.plan_hash.clone(),
+                        purpose_id: g.binding.purpose_id.clone(),
+                        governance_id: g.governance_id.clone(),
+                        binding: g.binding.clone(),
+                        authorization_set_id: g.authorization_set_id.clone(),
+                        not_after,
+                    }),
+                    (t0 + JOB_GRANT_TTL_SECS).min(not_after),
+                ),
+            };
+            let mut g = JobGrant {
+                governance,
+                version,
                 job_id: j.id.clone(),
                 organization: j.organization.clone(),
                 project: j.project.clone(),
@@ -1166,7 +2082,7 @@ impl Control {
                 backend: j.backend.clone(),
                 profile: j.profile.clone(),
                 issued_at: t0,
-                expires_at: t0 + JOB_GRANT_TTL_SECS,
+                expires_at,
                 issuer: self.service_id.clone(),
                 issuer_public_key: self.signer.public_key_hex(),
                 signature: String::new(),
@@ -1193,8 +2109,13 @@ impl Control {
                     .r#ref("estimated_gates", j.estimated_gates.to_string())
                     .r#ref("estimated_ms", estimate.to_string()),
             )?;
-            Ok(true)
-        })
+            Ok((true, false))
+        })?;
+        if ended {
+            // Anchored as ended: a restored database cannot revive it.
+            self.sync_anchor()?;
+        }
+        Ok(placed)
     }
 
     /// The scheduled evaluator asks to start: allowed only if the job is
@@ -1204,7 +2125,9 @@ impl Control {
         if ctx.principal.service_kind() != Some(ServiceKind::Evaluator) {
             return Err(forbidden("only the scheduled evaluator starts a job"));
         }
+        let ended = std::cell::Cell::new(false);
         let r = self.db.tx(|t| {
+            ended.set(false);
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             if j.evaluator.as_deref() != Some(ctx.actor()) {
                 return Err(not_found("job", id));
@@ -1216,6 +2139,25 @@ impl Control {
                 )));
             }
             let g = j.grant.clone().ok_or_else(|| conflict("no grant"))?;
+            // A governed job starts only while everything it runs under is
+            // still valid, strictly, on the control plane's clock; otherwise
+            // it fails and is anchored as ended.
+            if j.governance.is_some() {
+                if let Err(e) = self.revalidate_governed(t, &j, GovernedStage::Start, now()) {
+                    self.fail_governed(
+                        t,
+                        ctx.actor(),
+                        &ctx.request_id,
+                        &j,
+                        GovernedStage::Start,
+                        &e,
+                    )?;
+                    ended.set(true);
+                    return Ok(Err(e));
+                }
+                t.execute("UPDATE jobs SET started_at = now() WHERE id = $1", &[&id])
+                    .map_err(db_err)?;
+            }
             if now() > g.expires_at {
                 return Err(conflict("the job's grant expired"));
             }
@@ -1254,6 +2196,9 @@ impl Control {
             )?;
             Ok(Ok(json!({"id": id, "state": "running", "grant": g})))
         })?;
+        if ended.get() {
+            self.sync_anchor()?;
+        }
         r
     }
 
@@ -1305,6 +2250,9 @@ impl Control {
                     Code::Receipt,
                     "the receipt is for another execution spec or program",
                 ));
+            }
+            if j.governance.is_some() {
+                governed_receipt(&j, &signed)?;
             }
             if let Some(prev) = &j.receipt {
                 if prev != receipt {
@@ -1377,6 +2325,12 @@ impl Control {
                 .map_err(db_err)?
                 .get(0);
             let (_, compiled, spec, doc) = self.load_plan(t, &j.plan)?;
+            // A governed job's spec is its plan's under its binding (and
+            // its transcript is the one for that spec).
+            let spec = match &j.governance {
+                Some(g) => spec.governed(&g.binding),
+                None => spec,
+            };
             let transcript = transcript_for(&compiled, &spec).map(|x| x.id().hex());
             let ident = EvaluatorIdentity::from_public_key_hex(&key)?;
             let check = verify_receipt(
@@ -1390,7 +2344,13 @@ impl Control {
                     proof_expected: doc.doc.proof_required,
                     trusted_evaluator: &ident,
                 },
-            );
+            )
+            .and_then(|v| {
+                if j.governance.is_some() {
+                    governed_receipt(&j, &signed)?;
+                }
+                Ok(v)
+            });
             let evaluator_receipt_differs = j.receipt.as_ref().is_some_and(|x| x != &r.receipt);
             let evidence = json!({
                 "request_commitment": r.request_commitment,
@@ -1490,6 +2450,10 @@ impl Control {
             }
         };
         let (program, compiled, spec, doc) = self.load_plan(&mut *c, &j.plan)?;
+        let spec = match &j.governance {
+            Some(g) => spec.governed(&g.binding),
+            None => spec,
+        };
         check(
             "plan",
             self.verify_stored_plan(&program, &doc.doc.plan)
@@ -1523,6 +2487,19 @@ impl Control {
                             "the grant does not bind this job, spec and evaluator",
                         ));
                     }
+                    if let Some(jg) = &j.governance {
+                        let gg = g.governance.as_ref().ok_or_else(|| {
+                            conflict("a governed job's grant carries its governance")
+                        })?;
+                        gg.check(&j.project)?;
+                        if gg.governance_id != jg.governance_id
+                            || gg.authorization_set_id != jg.authorization_set_id
+                        {
+                            return Err(conflict(
+                                "the grant does not bind the job's governance and authorizations",
+                            ));
+                        }
+                    }
                     Ok(format!("signed for evaluator {}", g.evaluator))
                 })(),
             },
@@ -1550,6 +2527,9 @@ impl Control {
                         trusted_evaluator: &ident,
                     },
                 )?;
+                if j.governance.is_some() {
+                    governed_receipt(&j, &signed)?;
+                }
                 Ok(format!(
                     "signed by registered evaluator {e}; binds the request and response bytes"
                 ))
@@ -1591,6 +2571,42 @@ impl Control {
                 "status": if revoked.is_empty() { "VERIFIED" } else { "REVOKED" },
                 "sources": derived,
                 "detail": format!("the program's bound assets: {named}; {note}")}));
+        }
+        // A governed job: every authorization it ran under is judged at the
+        // job's start (execution time, on the control plane's clock), never
+        // now: evidence of a job that ran inside its window stays valid
+        // after the window ends. Whether each may be used now is shown
+        // apart and never fails the report.
+        if let Some(g) = &j.governance {
+            let status = match j.started_at {
+                None => Err(conflict("the job never started")),
+                Some(at) => self.db.tx(|t| {
+                    let mut current = vec![];
+                    for row in g.authorizations.keys() {
+                        crate::ops::governance::usable_at(t, row, at)?;
+                        current.push(match crate::ops::governance::usable_at(t, row, now()) {
+                            Ok(()) => format!("{row}: VALID"),
+                            Err(e) if e.code == Code::GovernanceAuthorizationExpired => {
+                                format!("{row}: EXPIRED")
+                            }
+                            Err(e) => format!("{row}: REVOKED ({})", e.code.as_str()),
+                        });
+                    }
+                    Ok(current)
+                }),
+            };
+            match status {
+                Ok(current) => checks.push(json!({"check": "governance", "status": "VERIFIED",
+                    "detail": format!(
+                        "purpose {}, governance {}, authorization set {}: VALID AT EXECUTION (started at {})",
+                        g.binding.purpose_id, g.governance_id, g.authorization_set_id,
+                        j.started_at.unwrap_or_default()),
+                    "now": current})),
+                Err(e) => {
+                    ok = false;
+                    checks.push(json!({"check": "governance", "status": "FAILED", "detail": e.message}));
+                }
+            }
         }
         let verdict = if ok && j.state == JobState::Succeeded {
             "SATISFIED"
@@ -2100,4 +3116,115 @@ impl Control {
 /// A loaded plan's document.
 struct PlanDocView {
     doc: PlanDoc,
+}
+
+/// What [`Control::submit_governed`] needs from the checks before it.
+struct Submission<'a> {
+    project: &'a ProjectRow,
+    org: &'a str,
+    key: &'a str,
+    digest: &'a str,
+    doc: &'a PlanDoc,
+    program: &'a Program,
+    program_id: String,
+}
+
+/// Whether owner authorization `a` covers an execution of `spec` (before
+/// its binding) with the purpose's `linkage` and `outputs`: the same checks
+/// the owner's key broker makes. Refusals carry their audit reason.
+fn covers(
+    a: &SignedAuthorizationV2,
+    spec: &ExecutionSpec,
+    linkage: &Option<String>,
+    outputs: &BTreeMap<String, encompute_verification::governance::GovernanceOutput>,
+) -> std::result::Result<(), (&'static str, Error)> {
+    let b = &a.body;
+    let program = |m: &str| {
+        (
+            "program_not_authorized",
+            gov(Code::GovernanceProgramNotAuthorized, m.to_owned()),
+        )
+    };
+    if !b.program.covers(&spec.program_id) {
+        return Err(program("the owner did not authorize this program"));
+    }
+    if spec.policy_id.as_deref() != Some(b.policy_id.as_str()) {
+        return Err(program(
+            "the program runs under another confidentiality policy than the owner authorized",
+        ));
+    }
+    if spec.privacy_policy_id != b.privacy_policy_id {
+        return Err(program(
+            "the program runs under another privacy policy than the owner authorized",
+        ));
+    }
+    if b.linkage_policy_id != *linkage {
+        return Err((
+            "linkage",
+            gov(
+                Code::GovernanceLinkageMismatch,
+                "the owner authorized another linkage policy than the purpose's",
+            ),
+        ));
+    }
+    for (name, o) in outputs {
+        let class_ok = o.release_class == b.release_class || o.release_class == ReleaseClass::Never;
+        if !class_ok || !o.recipients.is_subset(&b.recipients) {
+            return Err((
+                "release",
+                gov(
+                    Code::GovernanceReleaseClass,
+                    format!("output {name} releases more, or to others, than the owner authorized"),
+                ),
+            ));
+        }
+    }
+    if b.per_job_four_eyes {
+        return Err((
+            "per_job_four_eyes",
+            gov(
+                Code::GovernanceFourEyesIncomplete,
+                "the owner requires a per-job approval by two people, which this release does not collect yet",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// A governed job's receipt: a version 4 receipt naming the digest of the
+/// job's own grant (so of its signed issue time, binding and authorization
+/// set), for a job that started inside the grant's window. A job that
+/// started before `not_after` may complete after it.
+fn governed_receipt(j: &JobRow, signed: &SignedExecutionReceipt) -> Result<()> {
+    let receipt = |m: &str| Error::new(Code::Receipt, m.to_owned());
+    let grant = j
+        .grant
+        .as_ref()
+        .ok_or_else(|| receipt("the job has no grant"))?;
+    let not_after = grant
+        .governance
+        .as_ref()
+        .map(|g| g.not_after)
+        .ok_or_else(|| receipt("a governed job's grant carries its governance"))?;
+    if signed.receipt.grant_digest.as_deref() != Some(grant.digest().as_str()) {
+        return Err(receipt(
+            "a governed job's receipt names the digest of the grant it ran under (version 4), and this names no grant or another one",
+        ));
+    }
+    if j.started_at.is_none_or(|s| s >= not_after) {
+        return Err(receipt("the job did not start inside its governed window"));
+    }
+    Ok(())
+}
+
+/// What [`Control::check_bound_authorization`] checks one authorization
+/// against: the job's binding, its plan's spec before the binding, its
+/// governed spec ID, and its sources' versions (asset → version).
+pub(crate) struct BoundAuthorization<'a> {
+    pub row: &'a str,
+    pub authorization_id: &'a str,
+    pub binding: &'a GovernanceBinding,
+    pub base_spec: &'a ExecutionSpec,
+    pub spec_id: &'a str,
+    pub versions: &'a BTreeMap<String, String>,
 }
