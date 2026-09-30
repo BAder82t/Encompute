@@ -10,14 +10,21 @@
 //! Flow: [`KeyBroker::challenge`] → the workload attests, binding the
 //! challenge → [`KeyBroker::verify_attestation`] (consumes the challenge;
 //! a replay finds none) → [`KeyBroker::release_key`] per asset.
+//!
+//! In a governed project the owner's broker is the final release
+//! authority: a key bound to a source version is released only through
+//! [`KeyBroker::prepare_governed_release`] and
+//! [`KeyBroker::finish_release`], with the owner's signed authorization and
+//! a control-plane release ticket (see the `governed` module).
 
 mod client;
+mod governed;
 pub mod root;
 mod server;
 pub mod store;
 mod workload;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,9 +38,14 @@ use encompute_attestation::{
     Verifier, WorkloadSession, GRANT_VERSION,
 };
 use encompute_ir::{Code, Error, Result};
+use encompute_trust::authz::{GovernanceKey, SignedAuthorizationV2};
 use encompute_verification::{hex, unhex};
 
 pub use client::BrokerClient;
+pub use governed::{
+    GovernanceConfig, GovernedGrant, GovernedReleaseRequest, PendingRelease,
+    MAX_REVOKED_AUTHORIZATIONS,
+};
 pub use root::{
     DevelopmentRootKey, OpenBaoTransit, RootKeyProvider, RootRotation, RootWrappedKekStore,
     WrappedKek,
@@ -44,7 +56,7 @@ pub use server::{
 pub use store::{
     DevelopmentFileStore, KeyContext, LocalKekStore, SecretStore, StoreSecurity, StoredKey,
 };
-pub use workload::{acquire_keys, AcquiredKey};
+pub use workload::{acquire_keys, acquire_keys_governed, AcquiredKey, GovernedKeyRequest};
 
 /// Challenges live this long.
 pub const CHALLENGE_TTL_SECS: u64 = 300;
@@ -138,6 +150,27 @@ pub struct ProtectedSecret {
     /// revocation for another organization never touches it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
+    /// Hex `AssetVersionId` of the source version this key protects (set
+    /// once, never changed). A bound key is governed: it is released only
+    /// with its owner's authorization and a release ticket, never on the
+    /// plain release path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_version_id: Option<String>,
+    /// The asset expired (its owner's retention ended): never released
+    /// again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expired: bool,
+}
+
+/// How often an owner authorization has been used at this broker.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthCounter {
+    /// Keys released under it.
+    pub releases: u64,
+    /// Jobs it released keys to (kept only when it limits executions).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub jobs: BTreeSet<String>,
 }
 
 /// What a broker persists: its identity, mode, secrets and open
@@ -161,6 +194,26 @@ pub struct BrokerState {
     /// (created when missing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_signing_key: Option<StoredKey>,
+    /// The owner organization's governance key (pinned once by the owner).
+    /// Once pinned, the broker is governed: only bound keys are released,
+    /// and only through a governed release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance_key: Option<GovernanceKey>,
+    /// Installed owner authorizations, by ID, each verified under the
+    /// pinned governance key when installed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authorizations: BTreeMap<String, SignedAuthorizationV2>,
+    /// Revoked authorizations: ID → the time the revocation takes effect.
+    /// Kept after the authorization is gone, so it is never reinstalled.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub revoked_authorizations: BTreeMap<String, u64>,
+    /// Use counters per authorization ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub counters: BTreeMap<String, AuthCounter>,
+    /// Release tickets already used: ticket ID → until when it is kept
+    /// (its end plus the clock skew), so each is accepted once.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seen_tickets: BTreeMap<String, u64>,
     /// Incremented by every save: of two copies of a broker's state, the
     /// one with the lower generation is older. Informational only: it is
     /// not compared against anything persistent, so restoring an older
@@ -284,6 +337,9 @@ pub struct KeyBroker {
     grant_signer: GrantSigner,
     /// The generation of the last state loaded or saved.
     generation: AtomicU64,
+    /// The control plane whose release tickets are accepted (governed
+    /// release); not part of the state.
+    governance: Option<GovernanceConfig>,
 }
 
 fn check_broker_id(id: &str) -> Result<()> {
@@ -332,6 +388,11 @@ impl KeyBroker {
                 challenges: Vec::new(),
                 organization: None,
                 grant_signing_key: None,
+                governance_key: None,
+                authorizations: BTreeMap::new(),
+                revoked_authorizations: BTreeMap::new(),
+                counters: BTreeMap::new(),
+                seen_tickets: BTreeMap::new(),
                 generation: 0,
                 mac: None,
             },
@@ -413,6 +474,7 @@ impl KeyBroker {
             sessions: BTreeMap::new(),
             clock: Box::new(unix_now),
             grant_signer,
+            governance: None,
         })
     }
 
@@ -528,6 +590,8 @@ impl KeyBroker {
                 )]
                 .into(),
                 organization: self.state.organization.clone(),
+                asset_version_id: None,
+                expired: false,
             },
         );
         Ok(1)
@@ -571,6 +635,28 @@ impl KeyBroker {
         }
         match self.state.secrets.get(asset_id) {
             Some(s) if s.organization.as_deref() == Some(organization) => self.revoke_all(asset_id),
+            _ => Err(err(
+                Code::KeyRelease,
+                format!("no key for asset {asset_id} of organization {organization}"),
+            )),
+        }
+    }
+
+    /// A control plane's notice, on behalf of `organization`, that
+    /// `asset_id` expired (its retention ended): it is never released
+    /// again. Only for the organization this broker serves; idempotent.
+    pub fn expire_for(&mut self, organization: &str, asset_id: &str) -> Result<()> {
+        if self.state.organization.as_deref() != Some(organization) {
+            return Err(err(
+                Code::ServiceAuthentication,
+                format!("this broker does not serve organization {organization:?}"),
+            ));
+        }
+        match self.state.secrets.get_mut(asset_id) {
+            Some(s) if s.organization.as_deref() == Some(organization) => {
+                s.expired = true;
+                Ok(())
+            }
             _ => Err(err(
                 Code::KeyRelease,
                 format!("no key for asset {asset_id} of organization {organization}"),
@@ -690,6 +776,9 @@ impl KeyBroker {
     fn prune(&mut self, now: u64) {
         self.state.challenges.retain(|c| c.expires_at >= now);
         self.sessions.retain(|_, s| s.info.expires_at > now);
+        // A used ticket is kept until its window (and the skew) is over:
+        // after that it is refused as expired anyway.
+        self.state.seen_tickets.retain(|_, until| *until >= now);
     }
 
     /// A fresh single-use challenge.
@@ -778,6 +867,20 @@ impl KeyBroker {
             .secrets
             .get(asset_id)
             .ok_or_else(|| err(Code::KeyRelease, format!("no key for asset {asset_id}")))?;
+        // A governed key, or any key of a governed broker, is released only
+        // with its owner's authorization and a release ticket.
+        if secret.asset_version_id.is_some() || self.state.governance_key.is_some() {
+            return Err(err(
+                Code::GovernanceAuthorizationMissing,
+                format!(
+                    "the key of {asset_id} is released only in a governed release, with its \
+                     owner's authorization and a release ticket"
+                ),
+            ));
+        }
+        if secret.expired {
+            return Err(err(Code::KeyRelease, format!("{asset_id} has expired")));
+        }
         let policy = &secret.release_policy;
         policy.check(&s.workload)?;
         if s.workload
@@ -812,6 +915,7 @@ impl KeyBroker {
             attestation_digest: s.info.attestation_digest.clone(),
             expires_at: s.info.expires_at,
             broker_public_key: self.grant_signer.public_key_hex(),
+            governance: None,
         };
         let key = self.store.unwrap_for_release(
             &KeyContext {

@@ -14,9 +14,10 @@ use encompute_runtime::attestation::{
     TcbStatus, TeeKind, VerifiedWorkload, Verifier, WorkloadSession,
 };
 use encompute_runtime::keybroker::{
-    acquire_keys, BrokerClient, BrokerMode, DevelopmentFileStore, KeyBroker, KeyMaterial,
-    LocalKekStore, SecretStore,
+    acquire_keys, BrokerClient, BrokerMode, DevelopmentFileStore, GovernanceConfig, KeyBroker,
+    KeyMaterial, LocalKekStore, SecretStore,
 };
+use encompute_runtime::trust::authz::{SignedAuthorizationV2, SignedRevocationV2};
 use encompute_runtime::verification::{hex, EvaluatorSigner};
 use encompute_runtime::{BackendKind, Model};
 
@@ -553,6 +554,29 @@ pub enum BrokerCmd {
         #[command(flatten)]
         file: BrokerFile,
     },
+    /// Governed projects: pin the owner organization's governance key at
+    /// this broker. From then on only authorizations it signed are
+    /// installed, and every key is released only in a governed release.
+    GovernanceKey {
+        #[command(subcommand)]
+        cmd: GovernanceKeyCmd,
+    },
+    /// Governed projects: bind an asset's key to one registered source
+    /// version (its version ID, 64 hex characters). Set once; a bound key
+    /// is released only with its owner's authorization and a release
+    /// ticket.
+    BindVersion {
+        asset: String,
+        version_id: String,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+    /// Governed projects: install or revoke the owner's authorizations at
+    /// this broker.
+    Authorization {
+        #[command(subcommand)]
+        cmd: AuthorizationCmd,
+    },
     /// Serve challenges, attestation and key release over HTTP. With
     /// ENCOMPUTE_CONTROL_PUBLIC_KEY and ENCOMPUTE_SERVICE_ID set, also accept
     /// revocations from that control plane, for the one organization this
@@ -563,11 +587,74 @@ pub enum BrokerCmd {
         /// Requests allowed per source address per minute.
         #[arg(long, default_value_t = encompute_runtime::keybroker::REQUESTS_PER_MINUTE)]
         requests_per_minute: u32,
+        /// The control plane's public key (64 hex characters): governed
+        /// releases need a release ticket it signed. Defaults to
+        /// ENCOMPUTE_CONTROL_PUBLIC_KEY.
+        #[arg(long)]
+        control_key: Option<String>,
+        /// Development only (a development broker with
+        /// ENCOMPUTE_ENV=development): release governed keys without a
+        /// release ticket. The owner's authorization is still required.
+        #[arg(long)]
+        no_require_ticket: bool,
         #[command(flatten)]
         trust: TrustArgs,
         #[command(flatten)]
         file: BrokerFile,
     },
+}
+
+#[derive(Subcommand)]
+pub enum GovernanceKeyCmd {
+    /// Pin the organization's governance public key (set once).
+    Pin {
+        /// The governance public key (64 hex characters, as `encompute
+        /// governance keygen` prints it).
+        #[arg(long)]
+        key: String,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthorizationCmd {
+    /// Install an owner-signed authorization (from `encompute governance
+    /// sign`). It is verified under the pinned governance key. With --url,
+    /// installed at that running broker; otherwise in the state file.
+    Install {
+        document: PathBuf,
+        /// A running broker's URL.
+        #[arg(long)]
+        url: Option<String>,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+    /// Revoke an authorization at this broker. By ID, offline in the state
+    /// file (the owner's own act: it takes effect at once, with or without
+    /// the control plane); or an owner-signed revocation (--revocation),
+    /// in the state file or at a running broker (--url).
+    Revoke {
+        /// The authorization ID (64 hex characters).
+        id: Option<String>,
+        /// Why (printed, for the operator's records).
+        #[arg(long)]
+        reason: Option<String>,
+        /// An owner-signed revocation (from `encompute governance sign
+        /// --kind revocation`).
+        #[arg(long)]
+        revocation: Option<PathBuf>,
+        /// A running broker's URL (with --revocation).
+        #[arg(long)]
+        url: Option<String>,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(p: &Path, what: &str) -> Result<T> {
+    serde_json::from_slice(&read(p)?)
+        .map_err(|e| Error::new(Code::BadInput, format!("{}: not {what}: {e}", p.display())))
 }
 
 fn open_broker(file: &BrokerFile, trust: Option<&TrustArgs>) -> Result<KeyBroker> {
@@ -781,13 +868,125 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        BrokerCmd::GovernanceKey {
+            cmd: GovernanceKeyCmd::Pin { key, file },
+        } => {
+            let mut b = open_broker(&file, None)?;
+            if let Some(org) = &file.organization {
+                b.set_organization(org)?;
+            }
+            b.pin_governance_key(&key)?;
+            b.save(&file.broker)?;
+            println!(
+                "governance key {} of {} pinned: only authorizations it signed are installed, \
+                 and keys are released only in governed releases",
+                encompute_runtime::trust::authz::governance_key_id(&key),
+                b.organization().unwrap_or("?")
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::BindVersion {
+            asset,
+            version_id,
+            file,
+        } => {
+            let mut b = open_broker(&file, None)?;
+            b.bind_version(&asset, &version_id)?;
+            b.save(&file.broker)?;
+            println!("{asset}: bound to source version {version_id}");
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::Authorization {
+            cmd:
+                AuthorizationCmd::Install {
+                    document,
+                    url,
+                    file,
+                },
+        } => {
+            let a: SignedAuthorizationV2 = read_json(&document, "a signed authorization")?;
+            let id = match url {
+                Some(u) => BrokerClient::new(&u).install_authorization(&a)?,
+                None => {
+                    let mut b = open_broker(&file, None)?;
+                    let id = b.install_authorization(&a)?;
+                    b.save(&file.broker)?;
+                    id
+                }
+            };
+            println!(
+                "authorization {id} installed: {} in project {}, valid [{}, {})",
+                a.body.party, a.body.project, a.body.valid_from, a.body.valid_until
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::Authorization {
+            cmd:
+                AuthorizationCmd::Revoke {
+                    id,
+                    reason,
+                    revocation,
+                    url,
+                    file,
+                },
+        } => {
+            let id = match (revocation, id, url) {
+                (Some(p), None, url) => {
+                    let r: SignedRevocationV2 = read_json(&p, "a signed revocation")?;
+                    match url {
+                        Some(u) => BrokerClient::new(&u).revoke_authorization(&r)?,
+                        None => {
+                            let mut b = open_broker(&file, None)?;
+                            b.revoke_authorization_signed(&r)?;
+                            b.save(&file.broker)?;
+                        }
+                    }
+                    r.body.authorization
+                }
+                (None, Some(id), None) => {
+                    let mut b = open_broker(&file, None)?;
+                    b.revoke_authorization_local(&id, None)?;
+                    b.save(&file.broker)?;
+                    id
+                }
+                _ => {
+                    return Err(Error::new(
+                        Code::BadInput,
+                        "revoke an authorization by ID (in the state file), or pass \
+                         --revocation FILE (optionally with --url)",
+                    ))
+                }
+            };
+            println!(
+                "authorization {id} revoked at this broker{}",
+                reason.map(|r| format!(": {r}")).unwrap_or_default()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         BrokerCmd::Serve {
             listen,
             requests_per_minute,
+            control_key,
+            no_require_ticket,
             trust,
             file,
         } => {
             let mut b = open_broker(&file, Some(&trust))?;
+            let control_key =
+                control_key.or_else(|| std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY").ok());
+            b = match control_key {
+                Some(k) => b.with_governance(GovernanceConfig {
+                    control_key: k,
+                    require_ticket: !no_require_ticket,
+                })?,
+                None if no_require_ticket => {
+                    return Err(Error::new(
+                        Code::InsecureConfiguration,
+                        "--no-require-ticket needs the control plane's key (--control-key)",
+                    ))
+                }
+                None => b,
+            };
             // Keeps a grant-signing key created for an older state file.
             b.save(&file.broker)?;
             let control = match std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY") {
@@ -877,6 +1076,15 @@ fn print_state(b: &KeyBroker) {
         s.organization.as_deref().unwrap_or("(none)")
     );
     println!("{:<14}{}", "Grant key", b.grant_public_key());
+    if let Some(k) = &s.governance_key {
+        println!("{:<14}{} (governed)", "Governance", k.key_id());
+        println!(
+            "{:<14}{} installed, {} revoked",
+            "Authorizations",
+            s.authorizations.len(),
+            s.revoked_authorizations.len()
+        );
+    }
     for (asset, k) in &s.secrets {
         let p = &k.release_policy;
         let revoked: Vec<String> = k
@@ -887,6 +1095,12 @@ fn print_state(b: &KeyBroker) {
             .collect();
         section(&format!("Asset {asset}"));
         println!("  {:<18}{}", "Current version", k.key_version);
+        if let Some(v) = &k.asset_version_id {
+            println!("  {:<18}{v}", "Source version");
+        }
+        if k.expired {
+            println!("  {:<18}EXPIRED", "Retention");
+        }
         println!(
             "  {:<18}{}",
             "Revoked versions",

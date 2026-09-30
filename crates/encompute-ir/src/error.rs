@@ -179,6 +179,8 @@ pub enum Code {
     GovernanceLinkageMismatch,
     /// A key-release ticket is invalid, expired or replayed (ENC2712).
     GovernanceReleaseTicket,
+    /// An owner authorization's usage limit (releases or executions) is exhausted at the key broker (ENC2714).
+    GovernanceAuthorizationLimit,
 }
 
 impl Code {
@@ -256,13 +258,14 @@ impl Code {
             Code::GovernanceResidency => "ENC2710",
             Code::GovernanceLinkageMismatch => "ENC2711",
             Code::GovernanceReleaseTicket => "ENC2712",
+            Code::GovernanceAuthorizationLimit => "ENC2714",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 72] = [
+    pub const ALL: [Code; 73] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -335,6 +338,7 @@ impl Code {
         Code::GovernanceResidency,
         Code::GovernanceLinkageMismatch,
         Code::GovernanceReleaseTicket,
+        Code::GovernanceAuthorizationLimit,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

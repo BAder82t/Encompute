@@ -30,7 +30,9 @@ mod util;
 
 pub use binding::{AttestationChallenge, WorkloadBinding, BINDING_VERSION};
 pub use grant::{
-    seal_grant, EncryptedKeyGrant, GrantHeader, GrantSigner, WorkloadSession, GRANT_VERSION,
+    seal_grant, EncryptedKeyGrant, GrantGovernanceHeader, GrantHeader, GrantSigner,
+    KeyReleaseReceipt, WorkloadSession, GRANT_VERSION, GRANT_VERSION_GOVERNED,
+    RELEASE_RECEIPT_VERSION,
 };
 pub use policy::{
     public_denial, AttestationPolicy, DebugPolicy, Security, TcbStatus, TeeKind, VerifiedGpu,

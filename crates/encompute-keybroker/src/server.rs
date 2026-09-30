@@ -4,13 +4,22 @@
 //! - `POST /v1/attest` (evidence) → [`SessionInfo`](crate::SessionInfo)
 //! - `POST /v1/release` (`{"session", "asset_id"}`) → [`EncryptedKeyGrant`](encompute_attestation::EncryptedKeyGrant)
 //!
+//! - `POST /v1/release/governed` ([`GovernedReleaseRequest`](crate::GovernedReleaseRequest))
+//!   → [`GovernedGrant`](crate::GovernedGrant): a governed release, persisted
+//!   before the key is sealed
+//! - `POST /v1/authorizations` (an owner-signed authorization) and
+//!   `POST /v1/authorizations/revoke` (an owner-signed revocation): both
+//!   verified under the owner's pinned governance key, then persisted
+//!
 //! - `POST /v1/messages`: signed messages from the pinned control plane
-//!   (`asset.revoked`: every version of the asset's key is destroyed)
+//!   (`asset.revoked`: every version of the asset's key is destroyed;
+//!   `authorization.revoked`: an authorization is no longer used;
+//!   `asset.expired`: the asset is never released again)
 //! - `GET /live`, `GET /ready`
 //!
 //! There is no endpoint that returns a key in the clear, and none that
 //! manages keys: owners manage them offline with the CLI. The control plane
-//! can only revoke.
+//! can only deny.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -18,11 +27,12 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use encompute_attestation::{public_denial, AttestationEvidence};
+use encompute_attestation::{public_denial, AttestationEvidence, KeyReleaseReceipt};
 use encompute_ir::{Code, Error};
+use encompute_trust::authz::{SignedAuthorizationV2, SignedRevocationV2};
 use encompute_verification::http;
 
-use crate::KeyBroker;
+use crate::{GovernedGrant, GovernedReleaseRequest, KeyBroker};
 
 const MAX_BODY: u64 = 96 << 10;
 
@@ -152,17 +162,32 @@ impl ControlChannel {
     }
 
     /// Best effort, off the request path: a release is never delayed or
-    /// changed by reporting it.
-    fn report_release(&self, asset: &str, allowed: bool, reason: Option<&str>) {
+    /// changed by reporting it. A governed release also names its
+    /// authorization, job and (when granted) the broker's receipt.
+    fn report_release(
+        &self,
+        asset: &str,
+        allowed: bool,
+        reason: Option<&str>,
+        governed: Option<Governed<'_>>,
+    ) {
         let Some((url, signer)) = &self.reporter else {
             return;
         };
+        let mut payload = serde_json::json!({"asset": asset, "allowed": allowed, "reason": reason});
+        if let Some(g) = governed {
+            payload["authorization_id"] = g.authorization_id.into();
+            payload["job_id"] = g.job_id.into();
+            if let Some(r) = g.receipt {
+                payload["receipt"] = serde_json::to_value(r).unwrap_or_default();
+            }
+        }
         let msg = encompute_verification::service::seal(
             signer,
             "key.release",
             &self.control_id,
             Default::default(),
-            &serde_json::json!({"asset": asset, "allowed": allowed, "reason": reason}),
+            &payload,
             3600,
         );
         let Ok(m) = msg else { return };
@@ -189,6 +214,20 @@ impl ControlChannel {
                 );
             }
         });
+    }
+
+    /// The organization a message names must be this broker's.
+    fn for_me(&self, kind: &str, organization: Option<&str>) -> Result<(), Error> {
+        if organization != Some(self.organization.as_str()) {
+            return Err(Error::new(
+                Code::ServiceAuthentication,
+                format!(
+                    "{kind} is for organization {organization:?}; this broker serves {:?}",
+                    self.organization
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Applies a signed message; revocations are idempotent.
@@ -258,6 +297,41 @@ impl ControlChannel {
                 };
                 json(&serde_json::json!({"asset": asset, "revoked_versions": revoked}))
             }
+            // Deny-only: the control plane cannot sign an owner's
+            // revocation, but it may stop releases under an authorization
+            // it revoked (anchored first). It never enables one.
+            "authorization.revoked" => {
+                self.for_me("authorization.revoked", m.organization.as_deref())?;
+                let id = m.payload["authorization_id"].as_str().ok_or_else(|| {
+                    Error::new(
+                        Code::BadInput,
+                        "authorization.revoked names no authorization",
+                    )
+                })?;
+                let now = now();
+                let at = m.payload["revoked_at"].as_u64().map_or(now, |t| t.min(now));
+                // Only an authorization installed here is recorded: an
+                // unknown ID is acknowledged and changes nothing.
+                let revoked = b.revoke_authorization_from_control(id, at)?;
+                json(&serde_json::json!({
+                    "authorization_id": id,
+                    "revoked": revoked,
+                    "revoked_at": at
+                }))
+            }
+            "asset.expired" => {
+                self.for_me("asset.expired", m.organization.as_deref())?;
+                let asset = m.payload["key_ref"]
+                    .as_str()
+                    .ok_or_else(|| Error::new(Code::BadInput, "asset.expired names no key"))?;
+                let expired = match b.expire_for(&self.organization, asset) {
+                    Ok(()) => true,
+                    // Not held here for this organization: nothing to expire.
+                    Err(e) if e.code == Code::KeyRelease => false,
+                    Err(e) => return Err(e),
+                };
+                json(&serde_json::json!({"asset": asset, "expired": expired}))
+            }
             other => Err(Error::new(
                 Code::BadInput,
                 format!("unknown message kind {other}"),
@@ -289,9 +363,21 @@ pub fn serve(broker: &Mutex<KeyBroker>, server: http::Server) {
     serve_with_limit(broker, server, REQUESTS_PER_MINUTE)
 }
 
-/// Serves `broker` with its own per-address request limit.
+/// Serves `broker` with its own per-address request limit. Without a way
+/// to persist its state, it refuses governed releases and authorization
+/// changes (their counters, used tickets and revocations must survive a
+/// restart): serve those with [`serve_with_control`].
 pub fn serve_with_limit(broker: &Mutex<KeyBroker>, server: http::Server, per_minute: u32) {
-    serve_with_control(broker, server, per_minute, None, &|_| Ok(()))
+    let h = Broker {
+        broker,
+        control: None,
+        persist: None,
+        limit: Mutex::new(RateLimit {
+            per_minute,
+            ..RateLimit::default()
+        }),
+    };
+    server.serve(&h)
 }
 
 /// Serves `broker`, accepting revocations from `control`; `persist` saves
@@ -308,7 +394,7 @@ pub fn serve_with_control(
     let h = Broker {
         broker,
         control,
-        persist,
+        persist: Some(persist),
         limit: Mutex::new(RateLimit {
             per_minute,
             ..RateLimit::default()
@@ -320,8 +406,76 @@ pub fn serve_with_control(
 struct Broker<'a> {
     broker: &'a Mutex<KeyBroker>,
     control: Option<&'a ControlChannel>,
-    persist: &'a (dyn Fn(&KeyBroker) -> Result<(), Error> + Sync),
+    persist: Option<&'a Persist<'a>>,
     limit: Mutex<RateLimit>,
+}
+
+/// Saves the broker's state.
+type Persist<'a> = dyn Fn(&KeyBroker) -> Result<(), Error> + Sync + 'a;
+
+/// What a governed release report names.
+struct Governed<'a> {
+    authorization_id: &'a str,
+    job_id: Option<&'a str>,
+    receipt: Option<&'a KeyReleaseReceipt>,
+}
+
+impl<'a> Broker<'a> {
+    fn persist(&self) -> Result<&'a Persist<'a>, Error> {
+        self.persist.ok_or_else(|| {
+            Error::new(
+                Code::KeyRelease,
+                "this broker does not persist its state; it makes no governed release and \
+                 installs or revokes no authorization",
+            )
+        })
+    }
+
+    /// Prepare, persist, then seal: a release that was not persisted grants
+    /// nothing. (A generation mark in the organization's KMS, advanced
+    /// after the write and before sealing, fits between the two.)
+    fn release_governed(&self, body: &[u8]) -> Result<String, Error> {
+        let req: GovernedReleaseRequest = serde_json::from_slice(body)
+            .map_err(|e| Error::new(Code::Remote, format!("malformed release request: {e}")))?;
+        let persist = self.persist();
+        let r = persist.and_then(|persist| {
+            let mut b = self.broker.lock().unwrap_or_else(|p| p.into_inner());
+            let pending = b.prepare_governed_release(&req)?;
+            persist(&b)?;
+            let (grant, receipt) = b.finish_release(pending)?;
+            Ok(GovernedGrant { grant, receipt })
+        });
+        if let Some(c) = self.control {
+            c.report_release(
+                &req.asset_id,
+                r.is_ok(),
+                r.as_ref().err().map(|e| e.code.as_str()),
+                Some(Governed {
+                    authorization_id: &req.authorization_id,
+                    job_id: req.ticket.as_ref().map(|t| t.job_id.as_str()),
+                    receipt: r.as_ref().ok().map(|g| &g.receipt),
+                }),
+            );
+        }
+        json(&r?)
+    }
+
+    fn authorizations(&self, path: &str, body: &[u8]) -> Result<String, Error> {
+        let bad = |e: serde_json::Error| Error::new(Code::Remote, format!("malformed body: {e}"));
+        let persist = self.persist()?;
+        let mut b = self.broker.lock().unwrap_or_else(|p| p.into_inner());
+        if path == "/v1/authorizations" {
+            let a: SignedAuthorizationV2 = serde_json::from_slice(body).map_err(bad)?;
+            let id = b.install_authorization(&a)?;
+            persist(&b)?;
+            json(&serde_json::json!({ "authorization_id": id }))
+        } else {
+            let r: SignedRevocationV2 = serde_json::from_slice(body).map_err(bad)?;
+            b.revoke_authorization_signed(&r)?;
+            persist(&b)?;
+            json(&serde_json::json!({ "authorization_id": r.body.authorization }))
+        }
+    }
 }
 
 impl http::Handler for Broker<'_> {
@@ -353,16 +507,20 @@ impl http::Handler for Broker<'_> {
         let body = &req.body;
         let out = if path == "/v1/messages" {
             match self.control {
-                Some(c) => {
+                Some(c) => self.persist().and_then(|persist| {
                     let mut b = self.broker.lock().unwrap_or_else(|p| p.into_inner());
                     c.receive(&mut b, &req.headers, body)
-                        .and_then(|r| (self.persist)(&b).map(|_| r))
-                }
+                        .and_then(|r| persist(&b).map(|_| r))
+                }),
                 None => Err(Error::new(
                     Code::ServiceAuthentication,
                     "no control plane is configured",
                 )),
             }
+        } else if path == "/v1/release/governed" {
+            self.release_governed(body)
+        } else if path == "/v1/authorizations" || path == "/v1/authorizations/revoke" {
+            self.authorizations(&path, body)
         } else {
             let r = handle(self.broker, &path, body);
             if path == "/v1/release" {
@@ -370,7 +528,7 @@ impl http::Handler for Broker<'_> {
                     (self.control, serde_json::from_slice::<ReleaseRequest>(body))
                 {
                     let reason = r.as_ref().err().map(|e| e.code.as_str());
-                    c.report_release(&req.asset_id, r.is_ok(), reason);
+                    c.report_release(&req.asset_id, r.is_ok(), reason, None);
                 }
             }
             r

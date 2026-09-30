@@ -283,8 +283,10 @@ fn every_code_round_trips_and_is_unique() {
     }
 }
 
-/// The governance block ENC2701..ENC2712 (public-sector governed projects)
-/// is complete, in order, and each code is documented in docs/errors.md.
+/// The governance block from ENC2701 (public-sector governed projects) is
+/// complete, in order, and each code is documented in docs/errors.md.
+/// ENC2713 (broker state rollback) is reserved for the broker's KMS
+/// generation mark.
 #[test]
 fn the_governance_codes_are_the_2701_block() {
     let block: Vec<&str> = Code::ALL
@@ -292,7 +294,10 @@ fn the_governance_codes_are_the_2701_block() {
         .map(|c| c.as_str())
         .filter(|s| s.starts_with("ENC27"))
         .collect();
-    let expected: Vec<String> = (2701..=2712).map(|n| format!("ENC{n}")).collect();
+    let expected: Vec<String> = (2701..=2712)
+        .chain([2714])
+        .map(|n| format!("ENC{n}"))
+        .collect();
     assert_eq!(block, expected);
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/errors.md"),
@@ -306,4 +311,5 @@ fn the_governance_codes_are_the_2701_block() {
     }
     assert_eq!(Code::GovernanceAuthorizationMissing.as_str(), "ENC2701");
     assert_eq!(Code::GovernanceReleaseTicket.as_str(), "ENC2712");
+    assert_eq!(Code::GovernanceAuthorizationLimit.as_str(), "ENC2714");
 }

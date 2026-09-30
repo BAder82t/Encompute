@@ -587,3 +587,137 @@ fn an_unauthenticated_broker_state_needs_its_owner_to_upgrade_it() {
     std::fs::write(&b, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     refused(&rotate, &[], "ENC2004");
 }
+
+/// Governed projects at the broker, offline: an authorization is installed
+/// only once the owner's governance key is pinned and only if that key
+/// signed it; the owner revokes it locally and it is never reinstalled; a
+/// key is bound to one source version; and the no-ticket escape is refused
+/// outside development.
+#[test]
+fn governed_broker_commands() {
+    let d = Dir::new("governed");
+    let root = setup(&d);
+    let b = d.p("b.json");
+    let org = ["--organization", "tax-agency"];
+    ok(
+        &strs(&protect(
+            &d,
+            "dev-policy.json",
+            &["--development", org[0], org[1]],
+        )),
+        &[],
+    );
+    let keygen = |f: &str| -> String {
+        let v: serde_json::Value =
+            serde_json::from_str(&ok(&["governance", "keygen", "--out", &d.p(f)], &[])).unwrap();
+        v["public_key"].as_str().unwrap().to_owned()
+    };
+    let pk = keygen("gov.key");
+    keygen("rogue.key");
+    let h = |c: char| c.to_string().repeat(64);
+    let body = serde_json::json!({
+        "version": 2, "party": "tax-agency", "project": "prj_1",
+        "purpose_id": h('1'), "asset_version_id": h('3'),
+        "asset_digest_commitment": h('4'),
+        "program": {"kind": "program", "program_id": h('a')},
+        "policy_id": h('d'), "release_class": "boolean-only",
+        "recipients": ["benefits-agency"], "per_job_four_eyes": false,
+        "valid_from": 1, "valid_until": 4_000_000_000u64, "issued_at": 1,
+        "nonce": "ab".repeat(16), "approvals": []
+    });
+    std::fs::write(d.p("auth.json"), body.to_string()).unwrap();
+    let sign = |key: &str, out: &str| {
+        let s = ok(
+            &["governance", "sign", "--key", &d.p(key), &d.p("auth.json")],
+            &[],
+        );
+        std::fs::write(d.p(out), s).unwrap();
+    };
+    sign("gov.key", "signed.json");
+    sign("rogue.key", "forged.json");
+    let install = |f: &str| {
+        vec![
+            "keys".to_owned(),
+            "authorization".into(),
+            "install".into(),
+            d.p(f),
+            "--broker".into(),
+            b.clone(),
+        ]
+    };
+    // No governance key pinned yet.
+    refused(&strs(&install("signed.json")), &[], "ENC2708");
+    ok(
+        &["keys", "bind-version", "weights", &h('3'), "--broker", &b],
+        &[],
+    );
+    refused(
+        &["keys", "bind-version", "weights", &h('8'), "--broker", &b],
+        &[],
+        "ENC2704",
+    );
+    ok(
+        &[
+            "keys",
+            "governance-key",
+            "pin",
+            "--key",
+            &pk,
+            "--broker",
+            &b,
+        ],
+        &[],
+    );
+    refused(&strs(&install("forged.json")), &[], "ENC2708");
+    let out = ok(&strs(&install("signed.json")), &[]);
+    let id = out
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(':')
+        .to_owned();
+    assert_eq!(id.len(), 64, "{out}");
+    ok(
+        &[
+            "keys",
+            "authorization",
+            "revoke",
+            &id,
+            "--reason",
+            "withdrawn",
+            "--broker",
+            &b,
+        ],
+        &[],
+    );
+    refused(&strs(&install("signed.json")), &[], "ENC2706");
+    // The development escape is refused outside development.
+    refused(
+        &[
+            "keys",
+            "serve",
+            "--no-require-ticket",
+            "--control-key",
+            &h('a'),
+            "--mock-root",
+            &root,
+            "--broker",
+            &b,
+        ],
+        &[("ENCOMPUTE_ENV", "production")],
+        "ENC2605",
+    );
+    refused(
+        &[
+            "keys",
+            "serve",
+            "--no-require-ticket",
+            "--mock-root",
+            &root,
+            "--broker",
+            &b,
+        ],
+        &[("ENCOMPUTE_ENV", "development")],
+        "ENC2605",
+    );
+}

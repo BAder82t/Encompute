@@ -298,6 +298,7 @@ fn grants_open_only_in_their_session() {
         attestation_digest: "00".repeat(32),
         expires_at: NOW + 300,
         broker_public_key: String::new(),
+        governance: None,
     };
     let key = [42u8; 32];
     let broker = GrantSigner::from_seed(&[8; 32]);
@@ -338,6 +339,7 @@ fn grants_are_signed_by_the_broker() {
         attestation_digest: "00".repeat(32),
         expires_at: NOW + 300,
         broker_public_key: String::new(),
+        governance: None,
     };
     let broker = GrantSigner::from_seed(&[8; 32]);
     let g = seal_grant(header.clone(), &b, &[42; 32], &broker).unwrap();

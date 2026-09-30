@@ -6,8 +6,10 @@ use serde::de::DeserializeOwned;
 use encompute_attestation::{AttestationChallenge, AttestationEvidence, EncryptedKeyGrant};
 use encompute_ir::{Code, Error, Result};
 
+use encompute_trust::authz::{SignedAuthorizationV2, SignedRevocationV2};
+
 use crate::server::{ErrorBody, ReleaseRequest};
-use crate::SessionInfo;
+use crate::{GovernedGrant, GovernedReleaseRequest, SessionInfo};
 
 /// A key broker over HTTP.
 #[derive(Clone, Debug)]
@@ -126,5 +128,31 @@ impl BrokerClient {
         })
         .map_err(|e| Error::new(Code::Remote, e.to_string()))?;
         self.post("/v1/release", &body)
+    }
+
+    /// A governed release: the key under the owner's authorization, with
+    /// the control plane's ticket; returns the grant and the broker's
+    /// key-release receipt.
+    pub fn release_governed(&self, req: &GovernedReleaseRequest) -> Result<GovernedGrant> {
+        let body = serde_json::to_vec(req).map_err(|e| Error::new(Code::Remote, e.to_string()))?;
+        self.post("/v1/release/governed", &body)
+    }
+
+    /// Installs an owner authorization (verified by the broker under the
+    /// owner's pinned governance key); returns its ID.
+    pub fn install_authorization(&self, a: &SignedAuthorizationV2) -> Result<String> {
+        let body = serde_json::to_vec(a).map_err(|e| Error::new(Code::Remote, e.to_string()))?;
+        let r: serde_json::Value = self.post("/v1/authorizations", &body)?;
+        r["authorization_id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::new(Code::Remote, "malformed broker reply"))
+    }
+
+    /// Delivers the owner's signed revocation of an authorization.
+    pub fn revoke_authorization(&self, r: &SignedRevocationV2) -> Result<()> {
+        let body = serde_json::to_vec(r).map_err(|e| Error::new(Code::Remote, e.to_string()))?;
+        let _: serde_json::Value = self.post("/v1/authorizations/revoke", &body)?;
+        Ok(())
     }
 }
