@@ -2,8 +2,11 @@
 
 Status: **Accepted** (2026-09-29) for the two-part release rule, custody
 modes, release tickets and the fail-closed behaviour, as design.
-The items under "Open decisions" are **Proposed** and not decided.
-Implementation starts after 0.3.0 ships; nothing here is part of 0.3.
+**Implemented** (2026-09-30) as phase 2 of the public-sector milestone:
+two-part release, tickets, sovereign custody, per-asset broker binding and
+the broker-state generation mark; see "Phase 2 as built" below. K-1, K-4
+and K-5 are **decided**; the other items under "Open decisions" are
+**Proposed** and not decided. Nothing here is part of 0.3.
 
 ## Context
 
@@ -63,8 +66,9 @@ protects data.
 
 ### 3. Custody modes
 
-- `Custody{Standard, Sovereign}`. **Sovereign is the default in governed
-  projects.**
+- `Custody{Standard, Sovereign}`. **Governed projects are always
+  sovereign** (decided in phase 2; standard custody exists only for
+  standard projects, and a project's custody never changes).
 - Brokers are registered per organization:
   `POST /v1/organizations/{org}/key-brokers` (grant public key, provider
   kind, `key_ref` namespace, location).
@@ -126,7 +130,7 @@ and refuses at the first failure:
    skew, applied toward denial) and has not been seen;
 9. the authorization's limits allow the release; counters are incremented
    and persisted **before** the key is granted;
-10. a grant header v2 is issued, naming the authorization, project, purpose,
+10. a grant header (version 3 as built; see below) is issued, naming the authorization, project, purpose,
     `valid_until` and ticket, with
     `expires_at = min(session expiry, valid_until)`.
 
@@ -168,15 +172,71 @@ evidence bundle.
 - How placement constraints are declared, combined, planned and enforced
   is in ADR-026.
 
+## Phase 2 as built
+
+Recorded 2026-09-30, closing phase 2. Where this differs from the design
+above, this section is what was built.
+
+- **Grant header version 3.** The governed grant header is version 3,
+  not 2 as section 5 first said: version 2 was already taken by the
+  governed job grant of phase 1. Version 2 grants are byte-identical to
+  before.
+- **Placement in phase 2.** Check 7 cannot be met yet, because there is no
+  attested placement. The rule until it exists: a governed execution that
+  declares placement is refused (ENC2710); one that declares none passes
+  the check. Declared placement is never taken as evidence.
+- **K-1 (decided): tickets are mandatory in governed projects.** A broker
+  releases without a ticket only as a development broker in an
+  environment that says so explicitly (`ENCOMPUTE_ENV=development` and
+  development mode, `serve --no-require-ticket`); a production broker
+  refuses the setting. An authorization is required either way. Once a
+  governance key is pinned, the plain release path refuses every key.
+- **K-4 (decided): platform brokers are refused in sovereign custody,**
+  and governed projects are always sovereign. The control plane refuses a
+  platform broker when an organization registers it as its own, when an
+  asset of a governed project names it, when a ticket is requested and
+  when a program reading such a source is planned.
+- **K-5 (decided and built): the generation mark.** A governed broker
+  records its state generation and state MAC in the organization's KMS
+  (OpenBao or Vault KV-v2, compare-and-set) after writing its state file
+  and before it grants or acknowledges. It refuses a state older than the
+  mark, a different state at the mark's generation, and a state one save
+  ahead of the mark unless that state names the mark's MAC as its
+  previous state. Crash recovery at mark + 1 is therefore hash-chained:
+  only the write that was actually in flight is recovered, never a file
+  from another history. A governed production broker refuses to run
+  without a mark; an unreachable mark grants nothing (503). The first
+  marking can check an expected generation and MAC.
+- **Missing rows count as undone.** On the control plane, revoked
+  authorizations (row and document IDs) and expired assets are anchored,
+  and `authorization.revoked` and `asset.expired` reach brokers only after
+  anchoring. For every anchored security-negative set with rows (revoked
+  assets and authorizations, disabled users and service accounts, ended
+  jobs, expired assets), a row missing from the database refuses start as
+  a rollback would; only recovery can acknowledge the loss, which it
+  records in the signed anchor and the audit trail, and the ID stays
+  blocked. Governance tables refuse DELETE.
+- **Per-asset broker binding** is built as `asset_brokers` (key ID to
+  broker) and `broker_organizations` (broker to party) in the training
+  spec, and `asset_brokers` in the GovernanceBinding. Without them, IDs
+  and the rc.4 one-broker rule are unchanged.
+- **Tickets are issued on request only** (`POST /v1/jobs/{id}/release-ticket`,
+  by the job's scheduled evaluator), not at scheduling. The ticket's
+  `anchor_counter` is carried but not yet checked by brokers.
+- **Invariants.** INV-232 (release tickets and two-part release), INV-235
+  (sovereign custody and per-asset binding) and INV-236 (the control
+  plane can only deny; broker-state rollback), in the `public-sector`
+  area.
+
 ## Open decisions
 
 These are recorded in the milestone plan's open decisions and are not
 decided here:
 
-- **K-1 Development exception to tickets.** Whether a
-  `require_ticket = false` setting exists for air-gapped development only,
-  refused in production. Recommendation: yes. In production governed
-  projects, tickets are required by the two-part rule above.
+- **K-1 Development exception to tickets.** Decided 2026-09-30: tickets
+  are mandatory in governed projects; the exception exists only for a
+  development broker with `ENCOMPUTE_ENV=development` (see "Phase 2 as
+  built").
 - **K-2 Decryption-key custody for record-level and statistics
   collaboration.** M1, recipient-held and KMS-wrapped (ships soonest;
   confidentiality against the recipient rests on the evaluator operator not
@@ -187,12 +247,12 @@ decided here:
 - **K-3 Location evidence in production.** `OperatorDeclared` as the floor;
   whether `Attested` is required when prohibited locations are declared.
   Recommendation: the floor now, `Attested` in the strong profile.
-- **K-4 Platform brokers in sovereign projects.** Whether to forbid them
-  outright. Recommendation: yes.
-- **K-5 Broker state rollback guard.** A generation high-water mark in the
-  organization's KMS (KV-v2 with compare-and-set). Recommendation: yes,
-  before any invariant claims that broker state cannot be rolled back.
-  Until then, broker rollback is handled by procedure only.
+- **K-4 Platform brokers in sovereign projects.** Decided 2026-09-30:
+  forbidden outright, and governed projects are always sovereign.
+- **K-5 Broker state rollback guard.** Decided and built 2026-09-30: a
+  generation mark in the organization's KMS (KV-v2 with compare-and-set),
+  required for a governed production broker. A standard broker may still
+  run without one, and there rollback is handled by procedure only.
 - **K-6 One FHE key per (project, purpose, linkage epoch).** Cryptographic
   purpose separation, at about 525 MiB of BinFHE evaluation keys each.
   Recommendation: yes.
@@ -221,7 +281,9 @@ Together with ADR-024's linkage review:
 - Each agency can check, from its own broker's state and receipts, that no
   key left it without its own signature.
 - Brokers gain state (installed authorizations, counters, seen tickets),
-  which makes broker state rollback matter; K-5 addresses it.
+  which makes broker state rollback matter; the K-5 generation mark
+  addresses it. Governed releases at one broker are serialized behind the
+  mark's compare-and-set.
 - Key release needs the control plane and the broker both to be up. That
   is the price of the control plane not being an authority.
 - Per-asset broker binding lifts the rc.4 one-broker restriction without
@@ -244,7 +306,17 @@ Together with ADR-024's linkage review:
 
 ## Relevant source modules
 
-Planned changes touch:
+Phase 2 changed:
+
+- `crates/encompute-keybroker/src/{governed,generation,server,workload,lib}.rs`
+- `crates/encompute-verification/src/ticket.rs`
+- `crates/encompute-attestation/src/grant.rs` (grant header version 3)
+- `crates/encompute-control/src/ops/custody.rs`, `anchor.rs`,
+  migration `0006_sovereign_custody.sql`
+- `crates/encompute-training/src/spec.rs` (`asset_brokers`)
+- `crates/encompute-assurance/src/catalog.rs` (INV-232, 235, 236)
+
+Still planned:
 
 - `crates/encompute-keybroker/src/{server,store,root}.rs`
 - `crates/encompute-attestation/src/{grant,gcp,policy}.rs`

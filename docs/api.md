@@ -206,3 +206,29 @@ The control plane sends key brokers `asset.revoked`, `authorization.revoked`
 its organization registered and the broker its dataset version's key
 names) and `asset.expired` (the asset's retention ended: to the broker its
 key names), each only once the state anchor holds the revocation or expiry.
+
+## Key broker routes for governed projects
+
+These are routes of the organization's own key broker
+(`encompute keys serve`), not of the control plane. Like the rest of the
+key broker's HTTP API they are experimental (see
+[api-stability.md](api-stability.md)). A broker becomes governed when its
+owner pins a governance key (`encompute keys governance-key pin`); from
+then on it releases keys only through `/v1/release/governed`, and the plain
+`/v1/release` refuses every key. Every route below changes the broker's
+state: the state file is written and, when a generation mark is
+configured, the mark in the organization's KMS is advanced before the
+reply. A broker that cannot record the change answers with an error and
+changes nothing (ENC2713, or 503 when the mark is unreachable); a broker
+that does not persist its state serves none of these routes.
+
+| | |
+|---|---|
+| `POST /v1/release/governed` | the attested workload. `{session, asset_id, authorization_id, ticket}`: the session from `/v1/attest`, the key's asset ID, the owner authorization the release is under, and the `ReleaseTicket` the control plane issued for this job and source. The broker checks, in order and stopping at the first failure: the session, the key and its bound version, the release policy, that the authorization is installed and not revoked, that it covers the spec, confidentiality and privacy policies and program, its strict validity window on the broker's clock, declared placement (refused until attested placement exists, ENC2710), the ticket (ENC2712), then the authorization's limits (ENC2714). Counters and the seen ticket are persisted before the grant is sealed. Returns `{grant, receipt}`: a version 3 grant header naming the authorization, project, purpose, validity and ticket, and a signed `KeyRelease` receipt that never contains a key. Without a ticket (`execution_spec` and `binding` instead) only on a development broker with `ENCOMPUTE_ENV=development` |
+| `POST /v1/authorizations` | the owner (the body is its proof). A signed `AuthorizationV2` of the broker's own organization, verified under the pinned governance key (ENC2701 for another organization, ENC2708 for another key). Idempotent; a revoked authorization is never installed again (ENC2706). Returns `{authorization_id}` |
+| `POST /v1/authorizations/revoke` | the owner. A signed `RevocationV2` of the broker's own organization, verified under the pinned governance key. It takes effect at once, from its issue time, whether or not the control plane is reachable. Returns `{authorization_id}`. When the broker cannot record it, revoke offline in the state file (`encompute keys authorization revoke ID`) |
+
+The control plane reaches a broker only through `/v1/messages`, and its
+governed messages (`authorization.revoked`, `asset.expired`) can only stop
+releases: they are accepted only for the broker's own organization and
+recorded only for authorizations installed there.

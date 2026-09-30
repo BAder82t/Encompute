@@ -14,7 +14,8 @@ Related: [support matrix](docs/support-matrix.md),
 - **No formal proof of the whole system.** The cryptographic building
   blocks (CKKS, BinFHE, BGV, Ed25519, HPKE, secure aggregation, the
   discrete Gaussian) have published analyses. Their composition in
-  Encompute has none. The assurance suite tests 150 security invariants
+  Encompute has none. The assurance suite tests 159 security invariants
+  (150 in 0.3; the rest cover the public-sector governance work below)
   with positive, negative, adversarial and end-to-end evidence. A passing
   report means those invariants held for the tested cases. It does not
   prove the system secure.
@@ -201,9 +202,9 @@ Related: [support matrix](docs/support-matrix.md),
   authenticated still opens, and restoring it brings revoked keys back, so
   rollback is guarded by procedure only. The first start under a mark
   trusts the state file it finds, unless the operator passes the expected
-  generation and MAC (`--expect-generation`, `--expect-state-mac`). Revocation does not crypto-shred: an old
-  state file plus the unchanged KEK still yields the revoked keys. Keep
-  broker backups access-controlled.
+  generation and MAC (`--expect-generation`, `--expect-state-mac`).
+  Revocation does not crypto-shred: an old state file plus the unchanged
+  KEK still yields the revoked keys. Keep broker backups access-controlled.
 - **Evaluator upload grants are reusable** until they expire, and are not
   bound to a client.
 - **A co-tenant can block a victim's evaluation-key upload.** A client that
@@ -348,6 +349,34 @@ Related: [support matrix](docs/support-matrix.md),
 - **The plan validator is only partly independent.** It recomputes the
   program's semantics and applies its own floor of core requirements, but
   its exact-equality check still uses the planner's own derivation.
+
+## Public-sector governance (not part of 0.3)
+
+Governed projects are being built after 0.3 (see
+[docs/public-sector.md](docs/public-sector.md)). What exists so far has
+these limits:
+
+- **Jobs in governed projects are refused.** Owner authorizations,
+  release tickets, sovereign custody and governed key brokers exist, but
+  the control plane does not yet accept a job in a governed project, so
+  nothing runs end to end through the API yet.
+- **Declared placement is refused.** A governed broker releases no key
+  for an execution that declares placement until attested placement can
+  be checked.
+- **A compromised control plane can still deny and delay.** It cannot
+  release a key without an owner-signed authorization installed at the
+  owner's broker, but it can withhold tickets and delay revocation
+  messages. The owner's local revocation at its broker does not depend on
+  it.
+- **The ticket's anchor counter is carried but not yet checked** by
+  brokers.
+- **Governed releases are serialized** at a broker with a generation mark:
+  each one waits for the compare-and-set in the organization's KMS.
+- **The generation mark needs a KMS write permission** scoped to one KV-v2
+  path, in addition to Transit. Revoking an authorization offline, and
+  binding a key to a source version, are operator acts on the broker.
+- **Standard key brokers may run without a generation mark** (see "A key
+  broker without a generation mark" above).
 
 ## Compatibility and upgrades
 

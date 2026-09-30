@@ -259,7 +259,9 @@ evaluators must run the same Encompute minor release.
 
 The key broker's HTTP API (`POST /v1/challenge`, `/v1/attest`,
 `/v1/release`, `/v1/messages`; `GET /live`, `/ready`) is experimental in
-the same way.
+the same way, and so are the routes of a governed broker
+(`/v1/release/governed`, `/v1/authorizations`,
+`/v1/authorizations/revoke`), which are not part of 0.3.
 
 ## Rust crates: internal
 

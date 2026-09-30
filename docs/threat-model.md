@@ -81,7 +81,7 @@ evaluator always learns, and what no part of Encompute covers.
 | Client (CLI, Python SDK) | Trusted by its owner | It holds the secret key, encrypts, decrypts and verifies. Everything protects the client's data from others, not from the client. |
 | OpenFHE v1.5.1 | Trusted (library) | Correct implementation of CKKS, BinFHE and BGV, and the hardness of RLWE/LWE at the chosen parameters. Encompute does not re-verify OpenFHE. |
 | Evaluator | Untrusted for confidentiality; trusted for correctness unless a proof is required; trusted for availability | It never receives a secret key. Without an execution proof, a wrong result it signs is attributable but not detected. |
-| Control plane | Partially trusted | Trusted for coordination and authorization decisions (who may act, which job exists). Not trusted for confidentiality (it holds no key, plaintext or ciphertext), for trust decisions (reports are rebuilt from signed evidence), or for which evaluator key a client accepts (clients pin receipt keys themselves, section 5). See 4.2 and 4.6 for what a compromised control plane can still do. |
+| Control plane | Partially trusted | Trusted for coordination and authorization decisions (who may act, which job exists). Not trusted for confidentiality (it holds no key, plaintext or ciphertext), for trust decisions (reports are rebuilt from signed evidence), or for which evaluator key a client accepts (clients pin receipt keys themselves, section 5). See 4.2 and 4.6 for what a compromised control plane can still do, and 4.9 for governed projects (not part of 0.3), where it can only deny. |
 | PostgreSQL | Partially trusted | Holds identities, roles, jobs, ledgers and the audit chain. Trusted for availability and for authorization state; rollback of privacy and audit state is detected against the anchor. |
 | State anchor | Trusted storage | Must be outside the database attacker's reach. It holds a signed, monotonic counter with the audit root and ledger checkpoints. |
 | Key broker | Trusted by its owner | Each owner runs its own. It decides key release against the owner's attestation policy. |
@@ -518,6 +518,54 @@ attestation policies name artifact or code digests.
 - `secret.key` on the client is not encrypted at rest (see
   [cryptography.md](cryptography.md), section 3). Storage of the client's
   key directory is the client's responsibility.
+
+### 4.9 Compromised control plane (governed projects)
+
+This section describes the public-sector governance work, which is not
+part of Encompute 0.3.
+
+The attacker controls the control plane of a governed project: its
+process, its database, and its signing key. It can issue any job grant or
+release ticket, send any control message, and answer any API call as it
+likes. It does not hold an organization's governance key, a key broker's
+KEK, or the organization's KMS.
+
+**Protected assets:** the keys each organization's broker holds; each
+owner's authorizations and revocations; the broker's release counters and
+seen tickets.
+
+**Trusted components:** each organization's own key broker and KMS; its
+governance key; the attested workload.
+
+**Assumptions:** each broker pins its owner's governance key and the
+control plane's ticket key itself. Governed projects are always in
+sovereign custody, so every source's key is at a broker its own
+organization registered, never at a platform broker.
+
+**Prevented or detected:**
+
+| Attack | Enforced by | Evidence |
+|---|---|---|
+| Release a key by forging, replaying or reusing a release ticket | A ticket releases nothing without an owner-signed authorization installed at the broker; its signature is checked before any field is used, and it is single-use, job-bound and short-lived (`crates/encompute-keybroker/src/governed.rs`, `crates/encompute-verification/src/ticket.rs`) | INV-232, INV-236; `ticket_without_local_authorization_refused`, `forged_ticket_refused`, `replayed_ticket_refused` |
+| Install an authorization the owner did not sign, or undo an owner's revocation | Authorizations and revocations verify under the owner's pinned governance key; a revoked authorization is never installed again; the control plane's own messages can only revoke or expire (`governed.rs`) | INV-236; `authorization_from_unpinned_governance_key_refused`, `install_of_revoked_authorization_refused`, `control_plane_messages_only_deny` |
+| Keep a key flowing by suppressing a revocation | The owner revokes at its own broker, which takes effect at once without the control plane (`server.rs` `/v1/authorizations/revoke`, `encompute keys authorization revoke`) | INV-236; `ticket_refused_after_owner_revokes_locally_even_if_control_offline` |
+| Point a source at a broker the owner does not run, such as a platform broker | Sovereign custody is fixed for governed projects; registration, ticket issue and planning require the owner's own registered broker; the workload accepts a key's grant only from the broker bound to it (`ops/custody.rs`, `crates/encompute-training/src/spec.rs`, `workload.rs`) | INV-235; `sovereign_project_refuses_platform_broker`, `a_grant_for_an_asset_from_another_owners_broker_is_refused` |
+| Stretch an authorization past its limits or window | Counters and the strict window are the broker's own, on its own clock, persisted before the grant (`governed.rs`) | INV-232; `max_releases_exhausted_refused`, `expiry_at_valid_until_boundary_refused` |
+
+**Out of scope:**
+
+- **Denial of service.** It can refuse or delay tickets, jobs and the
+  delivery of revocations; nothing is released meanwhile, but the owner's
+  own revocation at its broker is the reliable path.
+- **Misuse inside an authorization.** Within what an owner signed, and
+  while it is valid, a compromised control plane decides which scheduled
+  job gets a ticket. The owner's limits (`max_releases`,
+  `max_executions`) bound how often.
+- **Placement.** Declared placement is refused at the broker until
+  attested placement exists; the control plane's choice of evaluator is
+  otherwise trusted for scheduling only.
+- **Standard projects.** There the broker trusts the control plane's grant
+  as in 0.3.
 
 ## 5. Conditions the deployment must uphold
 

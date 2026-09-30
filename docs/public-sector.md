@@ -1,11 +1,12 @@
 # Confidential cross-agency computation
 
-> **Status: planned for after 0.3.0; design stage.** Nothing on this page
-> is part of Encompute 0.3. It describes what is being designed, so that
-> institutions, reviewers and design partners can comment on it. Features,
-> names and formats may change before they ship. Where this page says
-> Encompute "refuses" or "checks" something, it describes the design, not
-> released behaviour.
+> **Status: in development after 0.3.0; not released.** Nothing on this
+> page is part of Encompute 0.3. It describes what is being designed and
+> built, so that institutions, reviewers and design partners can comment on
+> it. Features, names and formats may change before they ship. Where this
+> page says Encompute "refuses" or "checks" something, it describes the
+> design or unreleased code, not released behaviour. What is built so far
+> is listed under "Development status" below.
 
 Encompute lets public institutions compute across organizational
 boundaries without centralizing sensitive data. Each institution retains
@@ -181,6 +182,32 @@ Encompute will not be:
 - a data-quality platform;
 - a full data catalog;
 - a user interface for every workflow.
+
+## Development status
+
+Built on the development branch, not released:
+
+- **Phase 1, governed projects and owner-signed authorizations.**
+  Governance keys, purposes, owner authorizations with four-eyes
+  approval, immutable dataset versions, strict validity windows and
+  non-retroactive revocation.
+- **Phase 2, sovereign keys and two-part key release.** Each
+  institution's key broker releases a key only when it holds that
+  institution's signed authorization and a short-lived, single-use
+  release ticket for the job; a ticket alone releases nothing, so a
+  compromised control plane can only deny. Governed projects always keep
+  each source's key at a broker its own institution registered, never at
+  a platform broker, and keys are bound to brokers one by one. The
+  broker's own state cannot be rolled back to undo a revocation or reset
+  a limit: it is guarded by a generation mark in the institution's key
+  management system. The owner can revoke at its broker even when the
+  control plane is down.
+
+Not yet built: running jobs in governed projects end to end (they are
+still refused), release classes, placement and operator rules (a broker
+refuses any execution that declares placement until placement can be
+attested), record linkage, the governance report and evidence bundle. The
+limits of what exists are in [known limitations](../KNOWN_LIMITATIONS.md).
 
 ## Design records
 

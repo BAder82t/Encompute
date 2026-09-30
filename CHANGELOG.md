@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased (public-sector governance, not in 0.3)
+
+Work toward confidential cross-agency computation
+([docs/public-sector.md](docs/public-sector.md)). None of it is part of
+0.3, and jobs in governed projects are still refused.
+
+- **Governed projects (phase 1):** governance keys, purposes, owner-signed
+  authorizations with four-eyes approval, immutable dataset versions,
+  strict validity windows and non-retroactive revocation; migration 0005;
+  ENC2701 to ENC2712; INV-218, INV-219, INV-220, INV-222, INV-228,
+  INV-231.
+- **Two-part key release (phase 2).** A governed key broker releases a key
+  only with an owner-signed authorization installed at the broker and a
+  single-use, job-bound release ticket signed by the pinned control-plane
+  key (300 seconds at most, 60 seconds of clock skew counted toward
+  denial). The ticket's signature is checked before any of its fields is
+  used, and the release is counted and persisted before the key is
+  granted. New broker routes `/v1/release/governed`, `/v1/authorizations`
+  and `/v1/authorizations/revoke`; grant header version 3 (version 2
+  grants are unchanged); a `KeyRelease` receipt that never contains a
+  key. Once a governance key is pinned, the plain release path refuses
+  every key; releasing without a ticket needs a development broker with
+  `ENCOMPUTE_ENV=development`. Declared placement is refused until
+  attested placement exists.
+- **Broker state rollback guard.** A governed broker records its state
+  generation and MAC in the organization's KMS (OpenBao or Vault KV-v2,
+  compare-and-set) and refuses an older, forked or unchained state
+  (ENC2713). Crash recovery accepts only the write that was in flight.
+  A governed production broker needs a mark; an unreachable mark grants
+  nothing. Standard brokers without a mark are unchanged.
+- **Sovereign custody.** Governed projects are always sovereign: each
+  source's key must be held by a broker its own organization registered
+  (`POST` and `GET /v1/organizations/{id}/key-brokers`), and platform
+  brokers are refused (ENC2715). Release tickets from
+  `POST /v1/jobs/{id}/release-ticket`, for the job's scheduled evaluator
+  only, audited.
+- **Per-asset broker binding.** Training specs can bind each key to its
+  owner's broker (`asset_brokers`, `broker_organizations`), and a workload
+  accepts a key's grant only from that broker; the governance binding
+  carries the map, and planning binds each source's owner broker into the
+  PlanId. Specs without the map keep their IDs and the one-broker rule.
+- **The control plane can only deny.** Revoked authorizations and expired
+  assets are anchored before brokers are told (`authorization.revoked`,
+  `asset.expired`, deny-only). A missing row now counts as undone for
+  every anchored revocation, disable, ended job and expiry: start is
+  refused until recovery acknowledges the loss, and the ID stays blocked.
+  Governance tables refuse DELETE. Migration 0006; ENC2713 to ENC2715.
+- **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody)
+  and INV-236 (the control plane can only deny; broker state cannot be
+  rolled back); 159 invariants.
+
 ## 0.3.0-rc.4 — 2026-09-29
 
 - **Fine-tuning resume after a coordinator crash.** Every aggregation
