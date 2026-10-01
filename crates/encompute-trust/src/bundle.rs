@@ -61,6 +61,9 @@ pub const MAX_BUNDLE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_EVENTS: usize = 5_000;
 pub const MAX_ITEMS: usize = 1_000;
 pub const MAX_SIGNATURES: usize = 100;
+pub const MAX_NODES: usize = 10_000;
+pub const MAX_EDGES: usize = 50_000;
+pub const MAX_APPROVALS: usize = 100;
 /// The most siblings an inclusion proof has (a tree of 2^64 leaves).
 pub const MAX_PROOF_PATH: usize = 64;
 
@@ -138,6 +141,17 @@ pub struct BundleSignature {
     pub signature: String,
 }
 
+/// The verdict a signer claims.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatementVerdict {
+    /// The signer verified nothing: attribution only.
+    NotVerified,
+    Satisfied,
+    NotFullyEvidenced,
+    NotSatisfied,
+}
+
 /// What a signature of a bundle states: which bundle, and what its signer
 /// verified before signing (nothing, or a verdict against pins it names by
 /// digest, with the acceptances it made).
@@ -145,8 +159,9 @@ pub struct BundleSignature {
 #[serde(deny_unknown_fields)]
 pub struct SignatureStatement {
     pub bundle_id: String,
-    /// `not_verified`, or the verdict the signer's machine reached.
-    pub verdict: String,
+    /// What the signer claims its machine concluded (a claim, not
+    /// evidence: it adds no trust).
+    pub verdict: StatementVerdict,
     /// The digest of the pins it verified against, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pins_digest: Option<String>,
@@ -170,6 +185,18 @@ pub struct Provenance {
     pub sigstore_bundle_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluator_image_digest: Option<String>,
+}
+
+impl SignatureStatement {
+    /// The claimed verdict in words.
+    pub fn verdict_name(&self) -> &'static str {
+        match self.verdict {
+            StatementVerdict::NotVerified => "nothing verified",
+            StatementVerdict::Satisfied => "satisfied",
+            StatementVerdict::NotFullyEvidenced => "not fully evidenced",
+            StatementVerdict::NotSatisfied => "not satisfied",
+        }
+    }
 }
 
 impl Default for Provenance {
@@ -443,6 +470,7 @@ impl GovernanceBundle {
         let orgs: Vec<&String> = self.signatures.iter().map(|s| &s.organization).collect();
         for s in &self.signatures {
             check_ident("a signer's organization", &s.organization)?;
+            check_statement(&s.statement)?;
         }
         if orgs.windows(2).any(|w| w[0] >= w[1]) {
             return Err(malformed("signatures are sorted by organization, one each"));
@@ -506,7 +534,7 @@ impl GovernanceBundle {
     pub fn sign(&mut self, organization: &str, key: &SigningKey) -> Result<()> {
         let st = SignatureStatement {
             bundle_id: self.id()?,
-            verdict: "not_verified".into(),
+            verdict: StatementVerdict::NotVerified,
             pins_digest: None,
             accepted_unchecked: false,
             accepted_unpinned: false,
@@ -522,6 +550,7 @@ impl GovernanceBundle {
         st: SignatureStatement,
     ) -> Result<()> {
         check_ident("an organization", organization)?;
+        check_statement(&st)?;
         if st.bundle_id != self.id()? {
             return Err(malformed("the statement is about another bundle"));
         }
@@ -537,6 +566,26 @@ impl GovernanceBundle {
             .sort_by(|a, b| a.organization.cmp(&b.organization));
         Ok(())
     }
+}
+
+/// A claim to have verified something names the pins it was verified
+/// against; nothing else is a claim.
+fn check_statement(st: &SignatureStatement) -> Result<()> {
+    let claims = st.verdict != StatementVerdict::NotVerified;
+    if claims && st.pins_digest.is_none() {
+        return Err(malformed(
+            "a signature that claims a verdict names the pins it verified against",
+        ));
+    }
+    if !claims && (st.pins_digest.is_some() || st.accepted_unchecked) {
+        return Err(malformed(
+            "a signature that verified nothing names no pins and accepts nothing",
+        ));
+    }
+    if st.accepted_unpinned && st.pins_digest.is_some() {
+        return Err(malformed("a signature cannot be both pinned and unpinned"));
+    }
+    Ok(())
 }
 
 fn signature_input(st: &SignatureStatement) -> Result<Vec<u8>> {
@@ -685,6 +734,7 @@ impl Pins {
 
     pub fn check(&self) -> Result<()> {
         for (o, p) in &self.organizations {
+            check_ident("a pinned organization", o)?;
             check_key(o, &p.identity_key)?;
             check_obtained(o, &p.obtained)?;
         }

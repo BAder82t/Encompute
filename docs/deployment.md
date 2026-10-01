@@ -764,11 +764,14 @@ auditor and verify offline. Everything below is `encompute governance`
   of its own date. By default a bundle is checked for the time of the run
   (the grant's signed time); `--as-of T` checks it for a later use, and a
   head dated before `T` is UNCHECKED, never covered.
-- **Limits.** One bundle carries at most 5,000 of the log's events that
-  concern the job (membership changes, revocations and heads, the job's
-  own), each proven against the signed checkpoint; more is refused with
-  ENC2730, never truncated, so a busy project does not block its jobs'
-  exports. A file is at most 32 MiB, and its counts of witnesses, heads,
+- **Limits.** One bundle carries a contiguous run of at most 5,000 of the project's
+  log events, ending at the signed checkpoint and starting at the earliest
+  of the issuance of the job's authorizations and each owner's latest
+  revocation head (the log's first event for an owner with none). The
+  verifier checks the run: a gap, a duplicate or an end short of the
+  checkpoint is refused, and a run that does not reach back far enough
+  leaves the revocation rows UNCHECKED ("sign a fresh revocation head":
+  owners who sign heads periodically keep their bundles checkable). A file is at most 32 MiB, and its counts of witnesses, heads,
   members, authorizations and signatures are bounded (ENC2730). Every
   identifier in it is `[A-Za-z0-9._-]{1,200}` (ENC2727): the default file
   name is built from them and is never a path. The route is limited to 12

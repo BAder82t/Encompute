@@ -767,13 +767,13 @@ fn a_signature_states_what_its_signer_verified() {
     // The statement is signed: changing what it says breaks the signature.
     let mut s = b.clone();
     s.sign(TAX, &fx.tax).unwrap();
-    s.signatures[0].statement.accepted_unchecked = true;
+    s.signatures[0].statement.accepted_unpinned = true;
     assert_eq!(code(s.verify(&opts(&p))), Code::GovernanceBundleUnverified);
     // A verified statement is carried into the findings.
     let mut s = b.clone();
     let st = encompute_trust::SignatureStatement {
         bundle_id: s.id().unwrap(),
-        verdict: "not_fully_evidenced".into(),
+        verdict: encompute_trust::StatementVerdict::NotFullyEvidenced,
         pins_digest: Some(p.digest().unwrap()),
         accepted_unchecked: true,
         accepted_unpinned: false,
@@ -792,4 +792,38 @@ fn one_key_has_one_role_in_the_pins() {
     let mut p = pins(&fx);
     p.control_plane.as_mut().unwrap().key = p.organizations[TAX].identity_key.clone();
     assert!(p.check().is_err());
+}
+
+#[test]
+fn a_signed_claim_names_its_pins_and_nothing_else_does() {
+    let fx = Fixture::build();
+    let mut b = shared_bundle(&fx);
+    let st = |v, pins: Option<String>, unchecked| encompute_trust::SignatureStatement {
+        bundle_id: b.id().unwrap(),
+        verdict: v,
+        pins_digest: pins,
+        accepted_unchecked: unchecked,
+        accepted_unpinned: false,
+    };
+    use encompute_trust::StatementVerdict as V;
+    // A claim without the pins it rests on, and "verified nothing" that
+    // accepts something, are refused.
+    assert!(b
+        .clone()
+        .sign_statement(TAX, &fx.tax, st(V::Satisfied, None, false))
+        .is_err());
+    assert!(b
+        .clone()
+        .sign_statement(TAX, &fx.tax, st(V::NotFullyEvidenced, None, true))
+        .is_err());
+    assert!(b
+        .clone()
+        .sign_statement(
+            TAX,
+            &fx.tax,
+            st(V::NotVerified, Some("0".repeat(64)), false)
+        )
+        .is_err());
+    b.sign_statement(TAX, &fx.tax, st(V::NotVerified, None, false))
+        .unwrap();
 }

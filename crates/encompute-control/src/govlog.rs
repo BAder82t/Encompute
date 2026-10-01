@@ -1473,40 +1473,43 @@ pub fn leaves(
     prove_events(c, cache, partition, size, events)
 }
 
-/// The events of `partition` up to `size` that a reader of one job needs
-/// (membership changes, every revocation and head, and what happened to
-/// the job), with inclusion proofs against the checkpoint of `size`. At
-/// most `max` of them: more is `None`.
-pub fn relevant_leaves(
+/// Where a bundle's run of a project's events starts: the earliest of the
+/// issuance of each of `authorizations` and each of `owners`' latest head
+/// (the first event when any has none), so that nothing that can bear on
+/// them is left before it. A run longer than `max` is cut to its last `max`
+/// events: the verifier then finds it does not reach back far enough.
+pub fn run_start(
     c: &mut impl GenericClient,
-    cache: &NodeCache,
     partition: &str,
     size: u64,
-    job: &str,
+    authorizations: &[String],
+    owners: &[String],
     max: u64,
-) -> Result<Option<Vec<(GovEvent, String, InclusionProof)>>> {
-    let mut kinds: Vec<String> = encompute_trust::govlog::kind::REVOCATIONS
-        .iter()
-        .map(|k| (*k).to_owned())
-        .collect();
-    kinds.push(encompute_trust::govlog::kind::REVOCATION_HEAD_SIGNED.into());
-    let rows = c
-        .query(
-            "SELECT body FROM governance_events
-              WHERE partition = $1 AND pseq <= $2
-                AND (kind LIKE 'membership.%' OR kind = ANY($3) OR subject_id = $4)
-              ORDER BY pseq LIMIT $5",
-            &[&partition, &(size as i64), &kinds, &job, &(max as i64 + 1)],
-        )
-        .map_err(db_err)?;
-    if rows.len() as u64 > max {
-        return Ok(None);
+) -> Result<u64> {
+    let mut start = size;
+    let n = |r: Option<postgres::Row>| r.and_then(|r| r.get::<_, Option<i64>>(0));
+    for a in authorizations {
+        let at = n(c
+            .query_opt(
+                "SELECT min(pseq) FROM governance_events
+                  WHERE partition = $1 AND kind = 'authorization.issued' AND pseq <= $2
+                    AND body->'refs'->>'authorization_id' = $3",
+                &[&partition, &(size as i64), a],
+            )
+            .map_err(db_err)?);
+        start = start.min(at.map_or(1, |x| x.max(1) as u64));
     }
-    let events: Vec<GovEvent> = rows
-        .iter()
-        .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
-        .collect::<Result<_>>()?;
-    prove_events(c, cache, partition, size, events).map(Some)
+    for o in owners {
+        let at = n(c
+            .query_opt(
+                "SELECT max(pseq) FROM governance_events
+                  WHERE partition = $1 AND kind = 'revocation_head.signed' AND org_id = $2 AND pseq <= $3",
+                &[&partition, o, &(size as i64)],
+            )
+            .map_err(db_err)?);
+        start = start.min(at.map_or(1, |x| x.max(1) as u64));
+    }
+    Ok(start.max((size + 1).saturating_sub(max).max(1)))
 }
 
 fn prove_events(

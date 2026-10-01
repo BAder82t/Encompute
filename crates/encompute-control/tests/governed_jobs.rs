@@ -5548,6 +5548,23 @@ fn a_governed_jobs_bundle_verifies_offline_against_pinned_keys() {
     // a derived result yet, nobody witnessed the checkpoint but the owner.
     assert_ne!(row(&v, "Unauthorized releases"), RowStatus::Satisfied);
     assert_ne!(row(&v, "Audit chain"), RowStatus::Satisfied);
+    // The log is a contiguous run to the checkpoint, reaching back to the
+    // authorization's issuance: complete, nothing selective.
+    let cp = b.audit.checkpoint.as_ref().unwrap();
+    assert_eq!(b.audit.events.last().unwrap().event.pseq, cp.body.size);
+    assert!(b
+        .audit
+        .events
+        .windows(2)
+        .all(|w| w[1].event.pseq == w[0].event.pseq + 1));
+    assert!(
+        !v.report
+            .audit_notes
+            .iter()
+            .any(|n| n.contains("fresh revocation head")),
+        "{:?}",
+        v.report.audit_notes
+    );
     assert_ne!(v.outcome, Outcome::Satisfied);
     // The bundle is the same bytes for every member and auditor.
     let again = |who: &As| g.t.ok(who, "GET", &bundle_url(&job, ""), None);
@@ -5738,6 +5755,31 @@ fn the_log_is_never_partially_exported_and_the_route_is_rate_limited() {
         .bundle_max_events
         .store(cp.body.size, std::sync::atomic::Ordering::Relaxed);
     g.t.ok(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
+    // A run longer than the cap is cut to its tail, which the verifier
+    // finds does not reach back far enough (UNCHECKED), never complete.
+    g.t.control
+        .bundle_max_events
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+    let tail =
+        g.t.ok(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
+    let tail = GovernanceBundle::from_bytes(&canonical_bytes(&tail)).unwrap();
+    assert_eq!(tail.audit.events.len(), 1);
+    let v = tail
+        .verify(&VerifyOptions {
+            pins: &pins(&g),
+            base: ReportOptions::default(),
+            disclosures: vec![],
+            as_of: None,
+            now: None,
+        })
+        .unwrap();
+    assert_eq!(
+        v.report.row("Audit chain").unwrap().status,
+        RowStatus::Unchecked
+    );
+    g.t.control
+        .bundle_max_events
+        .store(cp.body.size, std::sync::atomic::Ordering::Relaxed);
     // At most a few bundles are built at once, whoever asks (503).
     g.t.control
         .bundle_slots

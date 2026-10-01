@@ -278,32 +278,48 @@ impl Control {
             .map(|r| serde_json::from_value(r.get(0)).map_err(|e| db_err(format!("stored release record: {e}"))))
             .collect::<Result<Vec<SignedReleaseRecord>>>()?;
         // The log, to one checkpoint, whole.
+        let g_authorizations = g.authorizations.clone();
+        let g_owners: std::collections::BTreeSet<String> = g
+            .binding
+            .inputs
+            .values()
+            .map(|i| i.organization.clone())
+            .collect();
         let partition = Partition::Project(j.project.clone()).to_string();
         let checkpoint = govlog::latest_checkpoint(t, &partition)?;
         let (mut events, mut witnesses, mut members) = (vec![], vec![], vec![]);
         if let Some(cp) = &checkpoint {
+            // The contiguous run of the project's events from where this job's
+            // authorizations and its owners' heads need it to the checkpoint:
+            // nothing selective, so what an export leaves out is detected.
+            let auth_ids: Vec<String> = g_authorizations.values().cloned().collect();
+            let owners: Vec<String> = g_owners.iter().cloned().collect();
             let max = self
                 .bundle_max_events
                 .load(std::sync::atomic::Ordering::Relaxed);
-            // The events one reader of this job needs, not the whole log: a
-            // busy project cannot make every job's export fail.
-            let page = govlog::relevant_leaves(
-                t,
-                &self.node_cache,
-                &partition,
-                cp.body.size,
-                &j.id,
-                max,
-            )?
-            .ok_or_else(|| {
-                limit(format!(
-                    "more than {max} of the project's log events concern this job, its revocations and its members; a partial selection is never exported"
-                ))
-            })?;
-            events = page
-                .into_iter()
-                .map(|(event, _, proof)| AuditEntry { event, proof })
-                .collect();
+            if max == 0 {
+                return Err(limit("this control plane exports no governance events"));
+            }
+            let start = govlog::run_start(t, &partition, cp.body.size, &auth_ids, &owners, max)?;
+            let mut after = start - 1;
+            while after < cp.body.size {
+                let page = govlog::leaves(
+                    t,
+                    &self.node_cache,
+                    &partition,
+                    after,
+                    cp.body.size,
+                    crate::ops::PROJECT_LOG_MAX_PAGE,
+                )?;
+                let Some(last) = page.last().map(|(e, _, _)| e.pseq) else {
+                    return Err(db_err("the log's events stop before its checkpoint"));
+                };
+                events.extend(
+                    page.into_iter()
+                        .map(|(event, _, proof)| AuditEntry { event, proof }),
+                );
+                after = last;
+            }
             witnesses = govlog::witnesses_at(t, &partition, cp.body.size)?;
             members = govlog::members_at(t, &j.project, cp.body.size)?;
         }

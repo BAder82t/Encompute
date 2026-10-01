@@ -305,10 +305,10 @@ pub fn report(a: VerifyArgs) -> Result<ExitCode> {
         println!("bundle {} ({} view)", v.bundle_id, v.view);
         for s in &v.signatures {
             println!(
-                "signed by {}: {:?}; it stated: {} (accepted unchecked: {}, unpinned: {})",
+                "signature of {}: {:?}; the signer claims: {} (accepted unchecked: {}, unpinned: {}) — a claim, not evidence",
                 tty(&s.organization),
                 s.status,
-                tty(&s.statement.verdict),
+                s.statement.verdict_name(),
                 s.statement.accepted_unchecked,
                 s.statement.accepted_unpinned
             );
@@ -363,9 +363,32 @@ fn write_new(p: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// What a signer's machine verified, as a statement to sign.
+fn statement_for(
+    v: &Verified,
+    pins: &Pins,
+    unpinned: bool,
+) -> Result<encompute_runtime::trust::SignatureStatement> {
+    use encompute_runtime::trust::{StatementVerdict, Verdict};
+    Ok(encompute_runtime::trust::SignatureStatement {
+        bundle_id: v.bundle_id.clone(),
+        verdict: if unpinned {
+            StatementVerdict::NotVerified
+        } else {
+            match v.report.verdict {
+                Verdict::Satisfied => StatementVerdict::Satisfied,
+                Verdict::NotFullyEvidenced => StatementVerdict::NotFullyEvidenced,
+                Verdict::NotSatisfied => StatementVerdict::NotSatisfied,
+            }
+        },
+        pins_digest: if unpinned { None } else { Some(pins.digest()?) },
+        accepted_unchecked: !unpinned && v.outcome == Outcome::Unchecked,
+        accepted_unpinned: unpinned,
+    })
+}
+
 fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
-    let seed: [u8; 32] = std::fs::read(p)
-        .map_err(|e| io(p, e))?
+    let seed: [u8; 32] = read_bounded(p, 64)?
         .try_into()
         .map_err(|_| err("a governance key file is a 32-byte seed"))?;
     Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
@@ -385,7 +408,7 @@ pub fn export(a: ExportArgs) -> Result<ExitCode> {
     let mut b: GovernanceBundle = GovernanceBundle::from_bytes(
         &canonical_json(&v).map_err(|e| err(format!("the answer is not a bundle: {e}")))?,
     )?;
-    let (verified, code) = verify_with(&b, &a.checks)?;
+    let (verified, code, pins) = verify_pins(&b, &a.checks)?;
     if code == 1 {
         eprintln!("refusing to write: the bundle does not verify");
         eprint!("{}", verified.report);
@@ -399,24 +422,18 @@ pub fn export(a: ExportArgs) -> Result<ExitCode> {
         return Ok(ExitCode::from(3));
     }
     if let (Some(k), Some(org)) = (&a.sign_key, &a.sign_as) {
-        b.sign(org, &key_file(k)?)?;
+        let unpinned = a.checks.pins.is_none() || pins.is_empty();
+        let st = statement_for(&verified, &pins, unpinned)?;
+        b.sign_statement(org, &key_file(k)?, st)?;
     }
     // The default name is built from the identifiers the bundle was checked
     // to carry (letters, digits, '.', '_' and '-'): never a path.
     let out = match &a.out {
         Some(o) => o.clone(),
-        None => {
-            for (what, v) in [
-                ("project", &b.manifest.project_id),
-                ("job", &b.governance.job_id),
-            ] {
-                encompute_runtime::trust::bundle::check_ident(what, v)?;
-            }
-            PathBuf::from(format!(
-                "{}-{}.encgov.json",
-                b.manifest.project_id, b.governance.job_id
-            ))
-        }
+        None => PathBuf::from(format!(
+            "{}-{}.encgov.json",
+            b.manifest.project_id, b.governance.job_id
+        )),
     };
     write_new(&out, &b.to_bytes()?)?;
     println!(
@@ -453,16 +470,7 @@ pub fn countersign(a: CountersignArgs) -> Result<ExitCode> {
         );
         return Ok(ExitCode::from(3));
     }
-    let statement = encompute_runtime::trust::SignatureStatement {
-        bundle_id: verified.bundle_id.clone(),
-        verdict: serde_json::to_value(verified.report.verdict)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default(),
-        pins_digest: if unpinned { None } else { Some(pins.digest()?) },
-        accepted_unchecked: unchecked,
-        accepted_unpinned: unpinned,
-    };
+    let statement = statement_for(&verified, &pins, unpinned)?;
     b.sign_statement(&a.organization, &key_file(&a.key)?, statement)?;
     let bytes = b.to_bytes()?;
     match &a.out {

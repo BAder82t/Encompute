@@ -1104,6 +1104,34 @@ pub fn check_revocation_heads(
     pinned_key: &str,
     bundle_leaves: Option<&[String]>,
 ) -> HeadCheck {
+    check_revocation_heads_from(
+        events,
+        heads,
+        organization,
+        project,
+        as_of,
+        pinned_key,
+        bundle_leaves,
+        true,
+    )
+}
+
+/// [`check_revocation_heads`] for events that may be a contiguous run
+/// that does not begin at the log's first event (`from_start` false): the
+/// head's root then covers revocations the run does not show, so it
+/// cannot be recomputed from the run, and only what the run shows (and
+/// its tail, which is complete) is judged.
+#[allow(clippy::too_many_arguments)]
+pub fn check_revocation_heads_from(
+    events: &[GovEvent],
+    heads: &[SignedRevocationHead],
+    organization: &str,
+    project: &str,
+    as_of: u64,
+    pinned_key: &str,
+    bundle_leaves: Option<&[String]>,
+    from_start: bool,
+) -> HeadCheck {
     let state = revocation_state(events, organization);
     let done = |verdict, reason: String, eq: Option<HeadEquivocation>| HeadCheck {
         verdict,
@@ -1203,6 +1231,15 @@ pub fn check_revocation_heads(
         return done(
             HeadVerdict::HeadTooOld,
             format!("a head is owed: revocations were recorded after head {seq} (since {since})"),
+            None,
+        );
+    }
+    if !from_start {
+        return done(
+            HeadVerdict::Covered,
+            format!(
+                "head {seq} covers every revocation as of its date (those before the run's start by its signed root only); the run shows none after it"
+            ),
             None,
         );
     }

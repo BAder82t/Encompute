@@ -483,10 +483,13 @@ these limits:
 - **Bundles are not signed by the control plane,** and carry no software
   provenance (release manifest, Sigstore bundle, evaluator image) yet; the
   report says so. A bundle holds at most 5,000 of the log events that
-  concern its job, each proven against the checkpoint; a bundle that
-  leaves out a membership event is not detected by the proofs (the
-  member list is the control plane's word, so every owner and participant
-  must witness whatever it says). `exported_at` is the time of the log
+  concern its job, each proven against the checkpoint; a run that does not begin at the log's first event cannot show who
+  joined before it, so the control plane's (unsigned) member list stays
+  required to witness, never dropped. Only events of the project's own
+  log are in the run: a user or service-account disable (organization or
+  platform log) is not, which is why per-job approvals are not counted.
+  The job's owners and its submitter must witness the checkpoint;
+  recipients that are neither need not. `exported_at` is the time of the log
   state, not of the request. The plaintext guard is a heuristic.
 
 ## Compatibility and upgrades

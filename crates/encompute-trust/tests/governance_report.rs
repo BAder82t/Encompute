@@ -816,3 +816,174 @@ fn duplicate_heads_cost_no_more_than_their_number() {
     );
     assert!(r.row("Audit chain").is_some());
 }
+
+fn audit_of(r: &GovernanceReport) -> String {
+    format!(
+        "{} | {}",
+        details(r, "Audit chain"),
+        r.audit_notes.join(" | ")
+    )
+}
+
+fn with_audit(
+    f: &Fixture,
+    edit: impl FnOnce(&mut encompute_trust::AuditEvidence),
+) -> GovernanceReport {
+    let mut a = f.audit.clone();
+    edit(&mut a);
+    f.graph
+        .governance_report(&f.evidence, &a, &f.options())
+        .unwrap()
+}
+
+/// A late event: after the owners' heads, so only the tail shows it.
+fn late(kind_: &str, subject: &str) -> Knobs {
+    Knobs {
+        late: vec![(TAX.to_owned(), kind_.to_owned(), subject.to_owned())],
+        ..Knobs::default()
+    }
+}
+
+#[test]
+fn exporter_omitting_a_late_revocation_is_detected() {
+    let f = Fixture::with(late(kind::AUTHORIZATION_REVOKED, "row"));
+    // Whole, the late revocation is seen (the owner owes a head: UNCHECKED).
+    assert_ne!(status(&show(&f), "Audit chain"), Status::Satisfied);
+    // Left out of the run, the run no longer reaches the checkpoint: the
+    // verifier refuses it, it does not read as covered.
+    let r = with_audit(&f, |a| {
+        a.events.pop();
+    });
+    assert_eq!(
+        status(&r, "Audit chain"),
+        Status::Failed,
+        "{}",
+        audit_of(&r)
+    );
+    assert!(details(&r, "Audit chain").contains("left out"));
+    assert_ne!(status(&r, "Authorization window"), Status::Satisfied);
+}
+
+#[test]
+fn exporter_omitting_a_job_cancel_event_is_detected() {
+    let f = Fixture::with(late(kind::JOB_CANCELLED, JOB));
+    assert_eq!(status(&show(&f), "Audit chain"), Status::Failed);
+    let r = with_audit(&f, |a| {
+        a.events.pop();
+    });
+    assert_eq!(status(&r, "Audit chain"), Status::Failed);
+    assert!(
+        details(&r, "Audit chain").contains("left out"),
+        "{}",
+        audit_of(&r)
+    );
+}
+
+#[test]
+fn run_with_a_gap_is_refused() {
+    let f = Fixture::with(Knobs {
+        filler: 5,
+        ..Knobs::default()
+    });
+    for k in [0, 3, 6] {
+        let r = with_audit(&f, |a| {
+            a.events.remove(k);
+        });
+        // Removing the first one is only a later start; any other is a gap.
+        if k == 0 {
+            continue;
+        }
+        assert_eq!(status(&r, "Audit chain"), Status::Failed, "gap at {k}");
+        assert!(details(&r, "Audit chain").contains("contiguous"));
+    }
+    // A duplicate is out of sequence too.
+    let r = with_audit(&f, |a| {
+        let e = a.events[2].clone();
+        a.events.insert(3, e);
+    });
+    assert_eq!(status(&r, "Audit chain"), Status::Failed);
+}
+
+#[test]
+fn run_not_reaching_the_checkpoint_size_is_refused() {
+    let f = Fixture::build();
+    let r = with_audit(&f, |a| {
+        a.events.pop();
+    });
+    assert_eq!(status(&r, "Audit chain"), Status::Failed);
+    assert!(details(&r, "Audit chain").contains("checkpoint"));
+    // An empty run under a checkpoint is the same.
+    let r = with_audit(&f, |a| a.events.clear());
+    assert_eq!(status(&r, "Audit chain"), Status::Failed);
+}
+
+#[test]
+fn run_from_the_latest_head_is_sufficient() {
+    // Twenty events of other jobs, then both authorizations' issuance,
+    // then the heads.
+    let f = Fixture::with(Knobs {
+        filler: 20,
+        ..Knobs::default()
+    });
+    assert_eq!(status(&show(&f), "Audit chain"), Status::Satisfied);
+    // The run may begin at the first issuance: nothing about the
+    // authorizations can precede it, and the heads cover what came before.
+    let r = with_audit(&f, |a| {
+        a.events.drain(..20);
+    });
+    assert_eq!(
+        status(&r, "Audit chain"),
+        Status::Satisfied,
+        "{}",
+        audit_of(&r)
+    );
+    assert_eq!(status(&r, "Authorization window"), Status::Satisfied);
+    // Later than that, nothing shows the authorizations' history.
+    let r = with_audit(&f, |a| {
+        a.events.drain(..21);
+    });
+    assert_eq!(status(&r, "Audit chain"), Status::Unchecked);
+    assert!(audit_of(&r).contains("fresh revocation head"));
+    assert_eq!(status(&r, "Authorization window"), Status::Unchecked);
+}
+
+#[test]
+fn no_head_requires_the_full_run_or_unchecked() {
+    let f = Fixture::with(Knobs {
+        filler: 5,
+        heads: false,
+        ..Knobs::default()
+    });
+    // No head: owed, UNCHECKED, whatever the run.
+    assert_eq!(status(&show(&f), "Audit chain"), Status::Unchecked);
+    let r = with_audit(&f, |a| {
+        a.events.drain(..6);
+    });
+    assert_eq!(status(&r, "Audit chain"), Status::Unchecked);
+    assert_eq!(status(&r, "Authorization window"), Status::Unchecked);
+}
+
+#[test]
+fn membership_event_omission_cannot_drop_a_witness_requirement() {
+    let f = Fixture::with(Knobs {
+        filler: 3,
+        ..Knobs::default()
+    });
+    // A run that does not begin at the log's start cannot show who joined
+    // before it: the control plane's list stays required, never dropped.
+    let r = with_audit(&f, |a| {
+        a.events.drain(..3);
+        a.members.push("org-z".into());
+    });
+    assert_eq!(status(&r, "Audit chain"), Status::Unchecked);
+    // An organization of the job dropped from the list still has to
+    // witness.
+    let r = with_audit(&f, |a| {
+        a.events.drain(..3);
+        a.witnesses.retain(|w| w.body.organization != BEN);
+        a.members.retain(|m| m != BEN);
+    });
+    assert_eq!(status(&r, "Audit chain"), Status::Unchecked);
+    // Whole and honest it is fine.
+    assert_eq!(status(&show(&f), "Audit chain"), Status::Satisfied);
+}

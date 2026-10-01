@@ -91,6 +91,12 @@ pub struct Knobs {
     pub privacy_policy: bool,
     /// The submitting organization.
     pub submitter: &'static str,
+    /// Events of other jobs before the authorizations were issued.
+    pub filler: usize,
+    /// Events after the owners' heads: (organization, kind, subject).
+    pub late: Vec<(String, String, String)>,
+    /// Whether the owners sign a head.
+    pub heads: bool,
 }
 
 impl Default for Knobs {
@@ -108,6 +114,9 @@ impl Default for Knobs {
             placement: false,
             privacy_policy: false,
             submitter: OTHER,
+            filler: 0,
+            late: vec![],
+            heads: true,
         }
     }
 }
@@ -432,7 +441,7 @@ impl Fixture {
             submitter: Some("psn_submitter".into()),
         };
 
-        let audit = Self::log(&k, &control, &tax, &ben, &other);
+        let audit = Self::log(&k, &control, &tax, &ben, &other, &ids, &[TAX, BEN]);
         Self {
             graph,
             evidence,
@@ -485,8 +494,31 @@ impl Fixture {
         tax: &SigningKey,
         ben: &SigningKey,
         other: &SigningKey,
+        ids: &[String],
+        parties: &[&str],
     ) -> AuditEvidence {
         let mut events: Vec<GovEvent> = vec![];
+        for _ in 0..k.filler {
+            events.push(Self::event(
+                events.len() as u64 + 1,
+                kind::JOB_FAILED,
+                "job_other",
+                TAX,
+                T0 - 100,
+                &[],
+            ));
+        }
+        // Each authorization's issuance, in the project's log.
+        for (id, party) in ids.iter().zip(parties) {
+            events.push(Self::event(
+                events.len() as u64 + 1,
+                kind::AUTHORIZATION_ISSUED,
+                "row",
+                party,
+                T0 - 900,
+                &[("authorization_id", id)],
+            ));
+        }
         for (org, kind_, refs, at) in &k.revocations {
             let refs: Vec<(&str, &str)> =
                 refs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
@@ -500,7 +532,7 @@ impl Fixture {
             ));
         }
         let mut heads = vec![];
-        for (org, key_) in [(TAX, tax), (BEN, ben)] {
+        for (org, key_) in [(TAX, tax), (BEN, ben)].into_iter().filter(|_| k.heads) {
             let leaves = crate::govlog::revocation_leaves(&events, org);
             let head = RevocationHead {
                 version: GOVLOG_VERSION,
@@ -521,6 +553,16 @@ impl Fixture {
                 &[("seq", "1"), ("root", &head.body.root)],
             ));
             heads.push(head);
+        }
+        for (org, kind_, subject) in &k.late {
+            events.push(Self::event(
+                events.len() as u64 + 1,
+                kind_,
+                subject,
+                org,
+                T0 + 20,
+                &[],
+            ));
         }
         let leaves: Vec<_> = events.iter().map(|e| e.leaf_hash().unwrap()).collect();
         let partition = format!("p:{PROJECT}");

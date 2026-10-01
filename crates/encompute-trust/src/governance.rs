@@ -52,8 +52,8 @@ use crate::authz::{
     SignedReleaseRecord, SignedRevocationV2,
 };
 use crate::govlog::{
-    check_revocation_heads, kind, members_at, GovEvent, HeadVerdict, InclusionProof, Partition,
-    SignedCheckpointWitness, SignedProjectCheckpoint, SignedRevocationHead,
+    check_revocation_heads_from, kind, members_at, GovEvent, HeadVerdict, InclusionProof,
+    Partition, SignedCheckpointWitness, SignedProjectCheckpoint, SignedRevocationHead,
 };
 use crate::graph::{node_id, Evidence, NodeKind, TrustGraph};
 use crate::report::{Anchors, ReportOptions, Status, Tally, TrustReport};
@@ -459,6 +459,10 @@ pub struct AuditFindings {
     pub witnessed: bool,
     pub heads: Vec<HeadFinding>,
     pub notes: Vec<String>,
+    /// The run reaches back to what the verdict depends on: the log's first
+    /// event, or the issuance of every authorization the job runs under.
+    /// Without it, nothing shows what happened to them in between.
+    pub complete: bool,
 }
 
 impl AuditFindings {
@@ -471,6 +475,7 @@ impl AuditFindings {
             witnessed: false,
             heads: vec![],
             notes: vec![note.to_owned()],
+            complete: false,
         }
     }
 
@@ -489,6 +494,7 @@ pub fn check_audit(
     a: &GovernanceAnchors,
     owners: &BTreeSet<String>,
     required: &BTreeSet<String>,
+    authorizations: &BTreeSet<String>,
     as_of: u64,
 ) -> AuditFindings {
     if audit.version != GOVERNANCE_EVIDENCE_VERSION {
@@ -520,24 +526,47 @@ pub fn check_audit(
             cp.body.partition
         ));
     }
-    // The events a reader of this job needs, each proven against the
-    // checkpoint, in order (not the whole log).
-    let mut last = 0;
+    // A contiguous run of the project's events from some start to the
+    // checkpoint's size, each proven against it: no gap, no duplicate, the
+    // last one the checkpoint's own. What an exporter leaves out of such a
+    // run is detected, so what follows the start is complete.
+    let mut prev: Option<u64> = None;
     for e in &audit.events {
-        if e.event.pseq <= last || e.event.pseq > cp.body.size {
+        if prev.is_some_and(|p| e.event.pseq != p + 1) {
             return fail(format!(
-                "event {} is out of order or beyond the checkpoint",
-                e.event.pseq
+                "the events are not a contiguous run: event {} follows {}",
+                e.event.pseq,
+                prev.unwrap_or(0)
             ));
         }
-        last = e.event.pseq;
+        prev = Some(e.event.pseq);
         if let Err(x) = cp.includes(&e.event, &e.proof) {
             return fail(format!("event {}: {}", e.event.pseq, x.message));
         }
     }
+    if prev.unwrap_or(0) != cp.body.size {
+        return fail(format!(
+            "the run ends at event {}, not at the checkpoint's {}: what came after was left out",
+            prev.unwrap_or(0),
+            cp.body.size
+        ));
+    }
     let events: Vec<GovEvent> = audit.events.iter().map(|e| e.event.clone()).collect();
     let members = members_at(&events, cp.body.size, &audit.members);
     let mut notes = vec![];
+    let first = events.first().map_or(1, |e| e.pseq);
+    let from_start = first <= 1;
+    // Reaches back far enough: the first event, or the issuance of every
+    // authorization of the set (a revocation of one can only come after).
+    let issued: BTreeSet<&str> = events
+        .iter()
+        .filter(|e| e.kind == kind::AUTHORIZATION_ISSUED)
+        .filter_map(|e| e.refs.get("authorization_id").map(String::as_str))
+        .collect();
+    let complete = from_start || authorizations.iter().all(|a| issued.contains(a.as_str()));
+    if !complete {
+        notes.push("the run of events does not reach back to the issuance of every authorization the job ran under: nothing shows what happened to them in between. Sign a fresh revocation head (or export from a log that reaches back) to make this bundle checkable".into());
+    }
     let mut witnessed_by = vec![];
     for w in &audit.witnesses {
         let org = &w.body.organization;
@@ -562,6 +591,11 @@ pub fn check_audit(
     // changes nothing.
     let mut must: BTreeSet<&String> = members.iter().collect();
     must.extend(required.iter());
+    // A run that does not begin at the log's start cannot show who joined
+    // before it: the control plane's baseline stays required, never dropped.
+    if !from_start {
+        must.extend(audit.members.iter());
+    }
     let witnessed = !must.is_empty() && must.iter().all(|o| witnessed_by.contains(*o));
     for o in required {
         if !members.contains(o) {
@@ -598,7 +632,7 @@ pub fn check_audit(
             });
             continue;
         };
-        let c = check_revocation_heads(
+        let c = check_revocation_heads_from(
             &events,
             &audit.revocation_heads,
             &org,
@@ -606,6 +640,7 @@ pub fn check_audit(
             as_of,
             key,
             None,
+            from_start,
         );
         let head_at = c.head_seq.and_then(|s| {
             audit
@@ -629,6 +664,7 @@ pub fn check_audit(
         witnessed,
         heads,
         notes,
+        complete,
     }
 }
 
@@ -1508,9 +1544,14 @@ fn row_window(j: &Job<'_>) -> GovernanceRow {
                 ));
             }
         }
-        if !j.audit.is_verified() {
+        if !j.audit.is_verified() || !j.audit.complete {
             t.unanchored(format!(
-                "{what}: whether it or its key was revoked before the run rests on the project's log, which is not verified"
+                "{what}: whether it or its key was revoked before the run rests on the project's log, which is {}",
+                if j.audit.is_verified() {
+                    "not shown back to its issuance"
+                } else {
+                    "not verified"
+                }
             ));
         }
         sig_status(&mut t, j, a);
@@ -1791,6 +1832,11 @@ fn row_audit(j: &Job<'_>, as_of: u64) -> (GovernanceRow, Vec<String>) {
         }
         AuditState::Verified => {
             t.present = true;
+            if !a.complete {
+                t.unanchored(
+                    "the run of events does not reach back to the issuance of every authorization: sign a fresh revocation head to make this bundle checkable".into(),
+                );
+            }
             for e in &a.events {
                 if e.subject == j.ev.job_id
                     && (e.kind == kind::JOB_CANCELLED || e.kind == kind::JOB_FAILED)
@@ -1927,7 +1973,18 @@ impl TrustGraph {
             .values()
             .map(|i| i.organization.clone())
             .collect();
-        let findings = check_audit(audit, &opts.anchors, &owners, &participants, as_of);
+        let auth_ids: BTreeSet<String> = authorizations(ev, &opts.anchors)
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        let findings = check_audit(
+            audit,
+            &opts.anchors,
+            &owners,
+            &participants,
+            &auth_ids,
+            as_of,
+        );
         let job = Job {
             ev,
             gg,

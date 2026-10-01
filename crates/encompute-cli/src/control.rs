@@ -155,13 +155,31 @@ impl ControlClient {
     }
 }
 
+/// The longest answer read from a control plane (a governance bundle is at
+/// most 32 MiB): a larger one is refused, not buffered.
+const MAX_ANSWER: u64 = 48 * 1024 * 1024;
+
+fn bounded_json(r: ureq::Response) -> std::result::Result<Value, String> {
+    use std::io::Read;
+    let mut b = vec![];
+    r.into_reader()
+        .take(MAX_ANSWER + 1)
+        .read_to_end(&mut b)
+        .map_err(|e| e.to_string())?;
+    if b.len() as u64 > MAX_ANSWER {
+        return Err(format!("the answer is over {MAX_ANSWER} bytes"));
+    }
+    if b.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&b).map_err(|e| e.to_string())
+}
+
 fn reply(r: std::result::Result<ureq::Response, ureq::Error>) -> Result<Value> {
     match r {
-        Ok(r) => r
-            .into_json()
-            .map_err(|e| Error::new(Code::Remote, e.to_string())),
+        Ok(r) => bounded_json(r).map_err(|e| Error::new(Code::Remote, e)),
         Err(ureq::Error::Status(status, r)) => {
-            let v: Value = r.into_json().unwrap_or(Value::Null);
+            let v: Value = bounded_json(r).unwrap_or(Value::Null);
             let code = v["code"]
                 .as_str()
                 .and_then(Code::parse)
