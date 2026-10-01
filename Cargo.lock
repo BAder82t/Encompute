@@ -813,6 +813,7 @@ dependencies = [
  "encompute-ir",
  "encompute-protocol",
  "encompute-runtime",
+ "encompute-trust",
  "encompute-verification",
  "getrandom 0.2.17",
  "jsonwebtoken",

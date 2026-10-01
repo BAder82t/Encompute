@@ -4,6 +4,7 @@ mod aggregate;
 mod attest;
 mod control;
 mod governance;
+mod governance_bundle;
 mod launcher_sim;
 mod migrate;
 mod plan;
