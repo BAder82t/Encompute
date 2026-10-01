@@ -392,12 +392,18 @@ pub struct AssetRow {
     pub size_bytes: Option<i64>,
     pub media_type: Option<String>,
     pub storage_uri: Option<String>,
+    /// A derived result (governed projects): the job that released it.
+    pub derived_from_job: Option<String>,
+    /// When a source of it was revoked (Unix seconds): never erased,
+    /// never used again.
+    pub source_revoked_at: Option<i64>,
 }
 
 pub fn asset_row(c: &mut impl GenericClient, id: &str) -> Result<Option<AssetRow>> {
     Ok(c.query_opt(
         "SELECT id, organization_id, kind, name, digest, status, lineage_root, parents, key_ref,
-                    policy, size_bytes, media_type, storage_uri
+                    policy, size_bytes, media_type, storage_uri, derived_from_job,
+                    floor(extract(epoch FROM source_revoked_at))::bigint
              FROM assets WHERE id = $1",
         &[&id],
     )
@@ -416,6 +422,8 @@ pub fn asset_row(c: &mut impl GenericClient, id: &str) -> Result<Option<AssetRow
         size_bytes: r.get(10),
         media_type: r.get(11),
         storage_uri: r.get(12),
+        derived_from_job: r.get(13),
+        source_revoked_at: r.get(14),
     }))
 }
 
@@ -427,8 +435,11 @@ pub fn asset_row(c: &mut impl GenericClient, id: &str) -> Result<Option<AssetRow
 /// organization an active authorization of it names as a recipient (while
 /// a member of that project), to the submitting organization of a job
 /// that runs under an authorization of it, and to the project's auditor
-/// organizations (the version an authorization names). Anyone else gets
-/// "not found".
+/// organizations (the version an authorization names). A derived result
+/// is visible beyond its custodian only to the recipients its signed
+/// release record names, the owners of the data it is derived from (every
+/// hop up its lineage) and the auditor organizations of the project of
+/// the job that released it. Anyone else gets "not found".
 /// Other organizations get the row without where it is stored, which key
 /// protects it or its size.
 pub fn asset_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Result<AssetRow> {
@@ -457,6 +468,26 @@ pub fn asset_visible(c: &mut impl GenericClient, p: &Principal, id: &str) -> Res
                JOIN project_members pm ON pm.project_id = z.project_id AND pm.participation = 'auditor'
                 AND pm.status = 'active'
               WHERE z.asset_id = $1 AND pm.organization_id = ANY($2)
+             UNION ALL
+             SELECT 1 FROM assets d JOIN jobs j ON j.id = d.derived_from_job
+               JOIN project_members pm ON pm.project_id = j.project_id AND pm.status = 'active'
+                AND pm.participation = 'auditor'
+              WHERE d.id = $1 AND pm.organization_id = ANY($2)
+             UNION ALL
+             SELECT 1 FROM assets d
+              WHERE d.id = $1 AND d.derived_from_job IS NOT NULL
+                AND d.release_record->'body'->'recipients' ?| $2
+             UNION ALL
+             SELECT 1 FROM (
+                 WITH RECURSIVE anc(id) AS (
+                     SELECT jsonb_array_elements_text(parents) FROM assets
+                      WHERE id = $1 AND derived_from_job IS NOT NULL
+                     UNION
+                     SELECT jsonb_array_elements_text(a.parents) FROM assets a JOIN anc ON a.id = anc.id
+                 )
+                 SELECT id FROM anc
+             ) l JOIN assets a ON a.id = l.id
+              WHERE a.organization_id = ANY($2)
              LIMIT 1",
             &[&id, &orgs],
         )

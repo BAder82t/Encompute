@@ -669,6 +669,59 @@ fn governed_broker_commands() {
         ],
         &[],
     );
+    // A lineage owner's governance key is pinned only from the control
+    // plane's attestation of it, verified under the control-plane key.
+    {
+        use encompute_runtime::trust::authz::{
+            governance_key_id, GovernanceKeyAttestation, GovernanceKeyStatus,
+        };
+        use encompute_runtime::verification::ServiceSigner;
+        let lineage_pk = keygen("lineage.key");
+        let attest = |signer: &ServiceSigner, out: &str| {
+            let a = GovernanceKeyAttestation {
+                version: 1,
+                organization: "statistics-agency".into(),
+                key_id: governance_key_id(&lineage_pk),
+                public_key: lineage_pk.clone(),
+                status: GovernanceKeyStatus::Active,
+                revoked_at: None,
+                issued_at: 100,
+            }
+            .sign(signer)
+            .unwrap();
+            std::fs::write(d.p(out), serde_json::to_string(&a).unwrap()).unwrap();
+        };
+        let control = ServiceSigner::from_seed("control-plane", &[42; 32]).unwrap();
+        let rogue = ServiceSigner::from_seed("control-plane", &[43; 32]).unwrap();
+        attest(&control, "attestation.json");
+        attest(&rogue, "forged-attestation.json");
+        let ck = control.public_key_hex();
+        let pin = |f: &str, key: Option<&str>| {
+            let mut v = vec![
+                "keys".to_owned(),
+                "governance-key".into(),
+                "pin-lineage".into(),
+                "--for".into(),
+                "statistics-agency".into(),
+                "--attestation".into(),
+                d.p(f),
+                "--broker".into(),
+                b.clone(),
+            ];
+            if let Some(k) = key {
+                v.extend(["--control-key".to_owned(), k.to_owned()]);
+            }
+            v
+        };
+        refused(&strs(&pin("attestation.json", None)), &[], "ENC2708");
+        refused(
+            &strs(&pin("forged-attestation.json", Some(&ck))),
+            &[],
+            "ENC2708",
+        );
+        let out = ok(&strs(&pin("attestation.json", Some(&ck))), &[]);
+        assert!(out.contains("pinned"), "{out}");
+    }
     refused(&strs(&install("forged.json")), &[], "ENC2708");
     let out = ok(&strs(&install("signed.json")), &[]);
     let id = out

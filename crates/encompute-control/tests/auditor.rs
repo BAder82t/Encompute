@@ -601,6 +601,34 @@ impl W {
                 format!("/v1/jobs/{j}/release-ticket"),
                 Some(json!({"asset_version_id": self.version})),
             ),
+            "/v1/jobs/{}/derived-assets" => (
+                format!("/v1/jobs/{j}/derived-assets"),
+                Some(
+                    json!({"output": "out", "kind": "dataset", "series": "result", "version": "1",
+                            "digest": "e".repeat(64),
+                            "key_ref": {"broker": "ben-broker", "provider": "openbao-transit",
+                                        "key_ref": "result-1", "key_version": 1},
+                            "ir_policy": registered(BEN)["ir_policy"], "release_class": "boolean-only",
+                            "release_record": encompute_trust::authz::ReleaseRecord {
+                                version: 1, party: BEN.into(), project: p.clone(),
+                                purpose_id: pu.clone(), job_id: j.clone(),
+                                governance_id: "2".repeat(64), output: "out".into(),
+                                output_commitment: "3".repeat(64),
+                                derived_version_id: "4".repeat(64),
+                                release_class: encompute_verification::governance::ReleaseClass::BooleanOnly,
+                                parents: [self.version.clone()].into(),
+                                authorization_ids: ["6".repeat(64)].into(),
+                                onward_policy_id: "8".repeat(64),
+                                recipients: [(BEN.to_string(), "7".repeat(64))].into(),
+                                lineage_owners: Default::default(),
+                                issued_at: now(),
+                            }.sign(&key(8)).unwrap()}),
+                ),
+            ),
+            "/v1/assets/{}/exports" => (
+                format!("/v1/assets/{}/exports", self.ben_asset),
+                Some(json!({"recipient": BEN})),
+            ),
             "/v1/jobs/{}/complete" => (
                 format!("/v1/jobs/{j}/complete"),
                 Some(json!({"receipt": {}, "request_commitment": "0".repeat(64),
@@ -650,6 +678,11 @@ impl W {
             "/v1/projects/{}" => vec![format!("/v1/projects/{p}")],
             "/v1/organizations/{}/governance-keys" => {
                 vec![format!("/v1/organizations/{TAX}/governance-keys")]
+            }
+            "/v1/organizations/{}/governance-key-attestation" => {
+                vec![format!(
+                    "/v1/organizations/{TAX}/governance-key-attestation"
+                )]
             }
             "/v1/projects/{}/purposes" => vec![format!("/v1/projects/{p}/purposes")],
             "/v1/purposes/{}" => vec![format!("/v1/purposes/{pu}")],

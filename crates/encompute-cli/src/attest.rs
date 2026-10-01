@@ -625,6 +625,17 @@ pub enum BrokerCmd {
     BindVersion {
         asset: String,
         version_id: String,
+        /// The version is a derived result this organization holds as
+        /// custodian: the organization's signed release record of it (JSON),
+        /// which binds the key to the result and its lineage owners.
+        #[arg(long, value_name = "RELEASE_RECORD", requires = "cosignature")]
+        derived: Option<PathBuf>,
+        /// With --derived: the control plane's co-signature of the record
+        /// (`release_cosignature`, returned when the result was recorded).
+        #[arg(long, value_name = "COSIGNATURE", requires = "derived")]
+        cosignature: Option<PathBuf>,
+        #[command(flatten)]
+        control: ControlKeyArg,
         #[command(flatten)]
         file: BrokerFile,
     },
@@ -664,6 +675,37 @@ pub enum BrokerCmd {
     },
 }
 
+/// The control plane's public key, which statements it signed (key
+/// attestations, co-signatures) are verified under.
+#[derive(Args)]
+pub struct ControlKeyArg {
+    /// The control plane's public key (64 hex characters). Defaults to
+    /// ENCOMPUTE_CONTROL_PUBLIC_KEY.
+    #[arg(long = "control-key")]
+    control_key: Option<String>,
+}
+
+impl ControlKeyArg {
+    /// `b`, accepting statements signed by the control plane's key.
+    fn configure(&self, b: KeyBroker) -> Result<KeyBroker> {
+        let key = self
+            .control_key
+            .clone()
+            .or_else(|| std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY").ok())
+            .ok_or_else(|| {
+                Error::new(
+                    Code::GovernanceKeyRevoked,
+                    "the control plane's public key is needed to verify what it signed: \
+                     --control-key, or ENCOMPUTE_CONTROL_PUBLIC_KEY",
+                )
+            })?;
+        b.with_governance(GovernanceConfig {
+            control_key: key,
+            require_ticket: true,
+        })
+    }
+}
+
 #[derive(Subcommand)]
 pub enum GovernanceKeyCmd {
     /// Pin the organization's governance public key (set once).
@@ -672,6 +714,33 @@ pub enum GovernanceKeyCmd {
         /// governance keygen` prints it).
         #[arg(long)]
         key: String,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+    /// Pin the governance key of another organization whose data this
+    /// organization's derived results come from, from the control plane's
+    /// signed attestation of it (--attestation FILE, or fetched with --url):
+    /// its authorizations of their use are then installed and required
+    /// here. A later attestation of another key replaces the pin (a
+    /// rotation); an attestation that the key was revoked unpins it.
+    PinLineage {
+        /// The other organization.
+        #[arg(long = "for", id = "lineage_owner", value_name = "ORG")]
+        organization: String,
+        /// The control plane's attestation (JSON, from GET
+        /// /v1/organizations/{org}/governance-key-attestation).
+        #[arg(long, conflicts_with = "url", required_unless_present = "url")]
+        attestation: Option<PathBuf>,
+        /// Fetch the attestation from this control plane (logged in, or
+        /// ENCOMPUTE_TOKEN).
+        #[arg(long)]
+        url: Option<String>,
+        /// With --url: the key to attest (its key ID; default the active
+        /// key). Name the pinned key to learn whether it was revoked.
+        #[arg(long, requires = "url")]
+        key_id: Option<String>,
+        #[command(flatten)]
+        control: ControlKeyArg,
         #[command(flatten)]
         file: BrokerFile,
     },
@@ -958,15 +1027,84 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
+        BrokerCmd::GovernanceKey {
+            cmd:
+                GovernanceKeyCmd::PinLineage {
+                    organization,
+                    attestation,
+                    url,
+                    key_id,
+                    control,
+                    file,
+                },
+        } => {
+            let a: encompute_runtime::trust::authz::SignedGovernanceKeyAttestation =
+                match (attestation, url) {
+                    (Some(path), _) => read_json(&path, "a governance key attestation")?,
+                    (None, Some(url)) => {
+                        let c = crate::control::ControlClient::from_env(Some(&url))?;
+                        let mut path =
+                            format!("/v1/organizations/{organization}/governance-key-attestation");
+                        if let Some(k) = &key_id {
+                            path.push_str(&format!("?key_id={k}"));
+                        }
+                        serde_json::from_value(c.get(&path)?).map_err(|e| {
+                            Error::new(
+                                Code::BadInput,
+                                format!("the control plane's attestation: {e}"),
+                            )
+                        })?
+                    }
+                    (None, None) => unreachable!("clap requires --attestation or --url"),
+                };
+            let mut b = control.configure(open_broker(&file, None)?)?;
+            let pinned = b.pin_lineage_governance_key(&organization, &a)?;
+            b.save(&file.broker)?;
+            if pinned {
+                println!(
+                    "governance key {} of {organization} pinned (attested at {}): its \
+                     authorizations of results derived from its data are installed and \
+                     required here",
+                    a.body.key_id, a.body.issued_at
+                );
+            } else {
+                println!(
+                    "governance key {} of {organization} was revoked: it is no longer pinned, and \
+                     nothing it signed is used here",
+                    a.body.key_id
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         BrokerCmd::BindVersion {
             asset,
             version_id,
+            derived,
+            cosignature,
+            control,
             file,
         } => {
             let mut b = open_broker(&file, None)?;
-            b.bind_version(&asset, &version_id)?;
-            b.save(&file.broker)?;
-            println!("{asset}: bound to source version {version_id}");
+            if let (Some(path), Some(cosigned)) = (derived, cosignature) {
+                let record: encompute_runtime::trust::authz::SignedReleaseRecord =
+                    read_json(&path, "a signed release record")?;
+                let cosignature: encompute_runtime::trust::authz::SignedDerivedReleaseCosignature =
+                    read_json(&cosigned, "the control plane's co-signature")?;
+                if record.body.derived_version_id != version_id {
+                    return Err(Error::new(
+                        Code::GovernanceAssetVersionMismatch,
+                        "the release record is for another version",
+                    ));
+                }
+                b = control.configure(b)?;
+                b.bind_derived_version(&asset, &record, &cosignature)?;
+                b.save(&file.broker)?;
+                println!("{asset}: bound to derived result {version_id} (co-signed by the control plane)");
+            } else {
+                b.bind_version(&asset, &version_id)?;
+                b.save(&file.broker)?;
+                println!("{asset}: bound to source version {version_id}");
+            }
             Ok(ExitCode::SUCCESS)
         }
         BrokerCmd::Authorization {

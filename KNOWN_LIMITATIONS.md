@@ -356,8 +356,47 @@ Governed projects are being built after 0.3 (see
 [docs/public-sector.md](docs/public-sector.md)). What exists so far has
 these limits:
 
-- **Governed jobs have no derived assets or exports yet.** A released
-  result cannot yet be registered or exported as a derived asset.
+- **`source_revoked_at` is not erasure.** Revoking a source marks the
+  derived results downstream and blocks their new use, derivation and
+  export; it does not recall or delete anything already released. Copies
+  recipients hold, and results exported before the revocation, stay
+  where they are; the control plane records the later revocation and
+  never claims otherwise. Only derived results recorded through
+  `POST /v1/jobs/{id}/derived-assets` are marked; an asset registered
+  with parents by other means is not (every governed use walks its
+  ancestors all the same).
+- **Export keys are the custodian's word.** The custodian's signed
+  release record names each recipient's export key; neither the control
+  plane nor the broker can check that the key belongs to that
+  organization. A custodian that names a wrong key exports to whoever
+  holds it.
+- **An owner's `max_releases` counts exports separately from key
+  releases.** The control plane counts exports of results released under
+  an authorization, and jobs reading them, through every derivation hop.
+  Each key broker counts the releases and exports it makes itself: a
+  lineage owner's authorization installed at a custodian's broker is
+  counted there, separately from its own broker's count.
+- **Lineage owners share their governance key with custodians.** A
+  custodian's broker releases or exports a derived result's key only with
+  an authorization of every organization whose data it derives from,
+  verified under that organization's governance key, which the
+  custodian's owner pins at its broker from the control plane's signed
+  attestation of it (`encompute keys governance-key pin-lineage`), and
+  each lineage owner must install its authorization there. A lineage
+  owner's revocation reaches a custodian's broker from the control plane
+  once anchored (deny-only), or directly as a signed revocation; the
+  control plane stops issuing tickets at once. A rotated lineage owner's
+  key is pinned again from a newer attestation; results whose record
+  names the old key are then neither released nor exported.
+- **The custodian is trusted for derived data it holds.** The custodian
+  runs the broker that holds a derived result's key. Its lineage checks
+  defend against a compromised control plane and a careless custodian,
+  not a malicious one, which holds the key material. The control plane
+  attests lineage owners' keys and co-signs release records, so a
+  compromised control plane and a malicious custodian together could fake
+  a lineage owner's consent; neither can alone.
+- **No decryption tickets.** Tickets of kind `decrypt` are neither issued
+  nor accepted; exports cover released results for now.
 - **Boolean releases still leak through repeated questions.** A
   boolean-only output reveals one bit per job; a bounded category a few.
   Probing limits bound this channel, they do not eliminate it: an

@@ -553,6 +553,10 @@ organization registered, never at a platform broker.
 | Keep a key flowing by suppressing a revocation | The owner revokes at its own broker, which takes effect at once without the control plane (`server.rs` `/v1/authorizations/revoke`, `encompute keys authorization revoke`) | INV-236; `ticket_refused_after_owner_revokes_locally_even_if_control_offline` |
 | Point a source at a broker the owner does not run, such as a platform broker | Sovereign custody is fixed for governed projects; registration, ticket issue and planning require the owner's own registered broker; the workload accepts a key's grant only from the broker bound to it (`ops/custody.rs`, `crates/encompute-training/src/spec.rs`, `workload.rs`) | INV-235; `sovereign_project_refuses_platform_broker`, `a_grant_for_an_asset_from_another_owners_broker_is_refused` |
 | Stretch an authorization past its limits or window | Counters and the strict window are the broker's own, on its own clock, persisted before the grant (`governed.rs`) | INV-232; `max_releases_exhausted_refused`, `expiry_at_valid_until_boundary_refused` |
+| Redirect or replay an export of a derived result | An export ticket names one recipient and is single-use; the custodian's broker runs the same ticket checks as for a key release and seals the key only to the export key that the custodian's release record, verified under its pinned governance key, gives a recipient it names (`governed.rs` `prepare_governed_export`); the control plane records one export row per ticket (`ops/derived.rs`, migration 0011) | INV-221, INV-232; `broker_export_only_for_named_recipient`, `replayed_export_ticket_refused_2712` |
+| A custodian pins a fake governance key for a lineage owner, or binds a release record that leaves a lineage owner out, to self-authorize that owner's consent | The custodian's broker pins a lineage owner's key only from the control plane's attestation of it, signed under the pinned control-plane key, for that organization and with the key's own ID (a later one replaces it, a revoked one unpins it), and binds a derived key only to a record the control plane co-signed after checking it against the result's ancestry (`governed.rs` `pin_lineage_governance_key`, `bind_derived_version`; `ops/derived.rs`, `ops/governance.rs`). Residual: the custodian holds the key material, so this defends against a careless custodian and a compromised control plane, not a malicious custodian; both compromised together could fake a lineage owner's consent | INV-236, INV-245; `forged_attestation_refused`, `attestation_for_other_org_refused`, `bind_with_record_omitting_owner_refused`, `revoked_lineage_key_unpins` |
+| An original owner's revocation never reaches the custodian's broker, which keeps releasing a derived result | Once anchored, `authorization.revoked` goes to every custodian broker holding a result derived from a job under the authorization, every hop down, through the anchor-gated outbox (`ops/custody.rs` `queue_authorization_revoked`) | INV-236; `lineage_revocation_forwarded_to_custodian_brokers` |
+| Use, derive from or export a result after its source was revoked, for instance from a restored database that lost the mark | Every governed use, derivation, ticket and export walks the result's ancestors, whose revocation the state anchor holds; after an authorization ends nothing released under it is exported (`ops/derived.rs` `check_lineage`, `export_asset`) | INV-245; `export_of_derived_asset_whose_source_was_revoked_2706`, `export_after_valid_until_refused_2705` |
 
 **Out of scope:**
 
@@ -566,6 +570,10 @@ organization registered, never at a platform broker.
 - **Placement.** Declared placement is refused at the broker until
   attested placement exists; the control plane's choice of evaluator is
   otherwise trusted for scheduling only.
+- **Released copies.** Revoking a source blocks new use of what was
+  derived from it; it cannot recall a result a recipient already holds or
+  one exported before (see KNOWN_LIMITATIONS, "`source_revoked_at` is not
+  erasure").
 - **Standard projects.** There the broker trusts the control plane's grant
   as in 0.3.
 

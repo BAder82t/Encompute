@@ -228,6 +228,68 @@ above, this section is what was built.
   plane can only deny; broker-state rollback), in the `public-sector`
   area.
 
+## Exports as built (phase 3)
+
+- **Export tickets.** `TicketKind::Export` is issued by the one ticket
+  path the control plane has (`issue_ticket`), to a person of a derived
+  result's custodian for one recipient: the ticket names the recipient
+  (`recipient`, present only on export tickets, so key-release tickets
+  are unchanged), the result's version as `asset_version_id` (not a source
+  in the binding), the job's execution spec, binding and authorizations,
+  and, as `workload_or_recipient`, the export key the custodian's signed
+  release record gives that recipient.
+- **Redeemed at the custodian's broker** (`POST /v1/export/governed`),
+  only for a key bound to a derived result (`bind_derived_version`, set
+  once; such a key is never re-bound as a source, and a source key is
+  never exported). The broker verifies the custodian's release record
+  under its pinned governance key, then runs the same ticket functions a
+  key release runs (signature before any field is used, window with the
+  skew toward denial, kind, organization, broker and version, single use
+  through the same seen-ticket set, persisted before the key is sealed),
+  requires the ticket's job, binding and authorizations to be the
+  record's and its recipient and key to be ones the record names, and
+  seals the key to that export key. A compromised control plane can deny
+  an export, never redirect one.
+- **Lineage owners at the custodian's broker.** A derived result's release
+  record names every other organization whose data it derives from, with
+  its governance key ID; the custodian binds the result's key with the
+  record and the control plane's co-signature of it
+  (`bind_derived_version`, ENC2704 without a valid one for this record,
+  broker, key and set of lineage owners), so a record the control plane
+  did not validate against the result's ancestry, such as one leaving a
+  lineage owner out, is never bound. Its owner pins each lineage owner's
+  governance key at its broker from the control plane's attestation of it
+  (`pin_lineage_governance_key`, `encompute keys governance-key
+  pin-lineage --attestation FILE` or `--url`): signed under the pinned
+  control-plane key, for that organization, with the key's own ID
+  (ENC2708 otherwise). A later attestation of another key replaces the pin
+  (rotation; results whose record names the old key then fail closed), an
+  earlier one never does, and an attestation that the key was revoked
+  unpins it for good. Each lineage owner installs its authorization there.
+  A key release for a job over the result, and an export, then require an
+  installed authorization of every lineage owner, named by the ticket,
+  verified under its pinned key and passing the same coverage, window and
+  limit checks as the custodian's own, and count against each. A missing
+  or different pinned key is ENC2708, a missing authorization ENC2701. The
+  control plane therefore cannot substitute for any lineage owner's
+  consent.
+- **Revocations reach custodians.** Once an original owner's revoked
+  authorization is anchored, the control plane sends
+  `authorization.revoked` to the broker of every custodian holding a
+  result derived from a job under it (every hop), naming the custodian's
+  organization; like any control-plane message it only denies, and only
+  for an authorization installed there.
+- **Who is trusted for what.** The custodian runs its broker and holds the
+  derived result's key, so it is trusted for that data. The broker's
+  lineage checks defend against a compromised control plane (it cannot
+  sign a lineage owner's authorization) and a careless custodian (it
+  cannot pin a key or bind a record the control plane did not vouch
+  for), not a malicious one, which can use the key material it holds
+  directly. A compromised control plane and a malicious custodian
+  together could fake a lineage owner's consent (an attested rogue key,
+  a co-signed record): that combined compromise is the residual.
+- **Decryption tickets** are neither issued nor accepted.
+
 ## Open decisions
 
 These are recorded in the milestone plan's open decisions and are not

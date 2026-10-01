@@ -42,6 +42,7 @@
 //! | POST | `/v1/messages` | services only |
 //! | POST, GET | `/v1/organizations/{id}/governance-keys` | governed projects: an organization's governance public keys |
 //! | POST | `/v1/organizations/{id}/governance-keys/{key}/approve`, `.../revoke` | a different security admin approves |
+//! | GET | `/v1/organizations/{id}/governance-key-attestation?key_id=` | the control plane's signed attestation of an organization's governance key (active, or the one named), to members of organizations sharing a project with it |
 //! | POST, GET | `/v1/projects/{id}/purposes` | governed projects |
 //! | GET | `/v1/purposes/{id}` | |
 //! | POST | `/v1/purposes/{id}/approve`, `/accept`, `/retire` | acceptance carries the organization's governance-key signature |
@@ -50,6 +51,8 @@
 //! | POST | `/v1/authorizations/{id}/approve`, `/signature`, `/revoke` | four eyes, then the owner's governance-key signature |
 //! | POST, GET | `/v1/organizations/{id}/key-brokers` | an organization's own key brokers (sovereign custody); a security admin registers |
 //! | POST | `/v1/jobs/{id}/release-ticket` | governed projects: the scheduled evaluator asks for a key-release ticket |
+//! | POST | `/v1/jobs/{id}/derived-assets` | governed projects: a person of a recipient records a succeeded job's result as a derived asset |
+//! | POST | `/v1/assets/{id}/exports` | governed projects: the custodian of a derived result asks for an export ticket to one recipient |
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -364,6 +367,10 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("GET", ["v1", "organizations", id, "governance-keys"]) => {
             ok(control.list_governance_keys(ctx, id)?)
         }
+        ("GET", ["v1", "organizations", id, "governance-key-attestation"]) => {
+            let q = query(&r.url);
+            ok(control.governance_key_attestation(ctx, id, q.get("key_id").map(String::as_str))?)
+        }
         ("POST", ["v1", "organizations", id, "governance-keys", key, "approve"]) => {
             ok(control.approve_governance_key(ctx, id, key)?)
         }
@@ -415,6 +422,9 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
             ok(control.withdraw_asset_approval(ctx, id, parse(&r.body)?)?)
         }
         ("POST", ["v1", "assets", id, "revoke"]) => ok(control.revoke_asset(ctx, id)?),
+        ("POST", ["v1", "assets", id, "exports"]) => {
+            created(control.export_asset(ctx, id, parse(&r.body)?)?)
+        }
 
         ("POST", ["v1", "plans"]) => created(control.create_plan(ctx, parse(&r.body)?)?),
 
@@ -435,6 +445,9 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "jobs", id, "start"]) => ok(control.start_job(ctx, id)?),
         ("POST", ["v1", "jobs", id, "release-ticket"]) => {
             created(control.issue_release_ticket(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "jobs", id, "derived-assets"]) => {
+            created(control.register_derived_asset(ctx, id, parse(&r.body)?)?)
         }
         ("POST", ["v1", "jobs", id, "complete"]) => {
             ok(control.complete_job(ctx, id, parse(&r.body)?)?)
@@ -561,6 +574,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/projects/{}/members/remove"),
     ("POST", "/v1/organizations/{}/governance-keys"),
     ("GET", "/v1/organizations/{}/governance-keys"),
+    ("GET", "/v1/organizations/{}/governance-key-attestation"),
     ("POST", "/v1/organizations/{}/governance-keys/{}/approve"),
     ("POST", "/v1/organizations/{}/governance-keys/{}/revoke"),
     ("POST", "/v1/projects/{}/purposes"),
@@ -585,6 +599,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/assets/{}/approvals"),
     ("POST", "/v1/assets/{}/approvals/withdraw"),
     ("POST", "/v1/assets/{}/revoke"),
+    ("POST", "/v1/assets/{}/exports"),
     ("POST", "/v1/plans"),
     ("POST", "/v1/jobs"),
     ("GET", "/v1/jobs"),
@@ -593,6 +608,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/jobs/{}/approve"),
     ("POST", "/v1/jobs/{}/start"),
     ("POST", "/v1/jobs/{}/release-ticket"),
+    ("POST", "/v1/jobs/{}/derived-assets"),
     ("POST", "/v1/jobs/{}/complete"),
     ("POST", "/v1/jobs/{}/receipt"),
     ("POST", "/v1/evaluators"),

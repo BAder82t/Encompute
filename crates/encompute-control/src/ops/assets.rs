@@ -23,6 +23,28 @@ use crate::model::{
 };
 use crate::transport::{seal, Scope};
 
+/// One asset in a lineage view: a derived result also shows its job and,
+/// once a source of it was revoked, when (a later revocation is shown; it
+/// erased nothing).
+fn lineage_entry(x: &AssetRow) -> Value {
+    let mut v =
+        json!({"id": x.id, "kind": x.kind, "status": x.status, "organization": x.organization});
+    if let Some(j) = &x.derived_from_job {
+        v["derived_from_job"] = json!(j);
+    }
+    if let Some(t) = x.source_revoked_at {
+        v["source_revoked_at"] = json!(t);
+    }
+    v
+}
+
+/// What a revocation did: the jobs it failed and the derived results
+/// downstream it marked (none of them erased).
+pub(crate) struct Revoked {
+    pub failed_jobs: Vec<String>,
+    pub downstream: Vec<String>,
+}
+
 fn owner_roles(kind: &str) -> &'static [Role] {
     match kind {
         "dataset" => &[Role::DataOwner, Role::OrganizationAdmin],
@@ -106,12 +128,26 @@ pub(crate) fn withdraw_grants(
 
 /// An asset as its owner's members see it.
 pub fn asset_json(a: &AssetRow) -> Value {
-    json!({
+    let mut v = json!({
         "id": a.id, "organization": a.organization, "kind": a.kind, "name": a.name,
         "digest": a.digest, "status": a.status, "lineage_root": a.lineage_root,
         "parents": a.parents, "key_ref": a.key_ref, "policy": a.policy,
         "size_bytes": a.size_bytes, "media_type": a.media_type, "storage_uri": a.storage_uri,
-    })
+    });
+    derived_fields(a, &mut v);
+    v
+}
+
+/// A derived result's job and custodian, and when a source of it was
+/// revoked: only on assets that have them, so other views are unchanged.
+fn derived_fields(a: &AssetRow, v: &mut Value) {
+    if let Some(j) = &a.derived_from_job {
+        v["derived_from_job"] = json!(j);
+        v["custodian"] = json!(a.organization);
+    }
+    if let Some(t) = a.source_revoked_at {
+        v["source_revoked_at"] = json!(t);
+    }
 }
 
 /// An asset as another organization it is shared with sees it: what
@@ -124,11 +160,13 @@ pub fn shared_asset_json(a: &AssetRow) -> Value {
     if let Some(v) = a.policy.get("require_job_approval") {
         policy.insert("require_job_approval".into(), v.clone());
     }
-    json!({
+    let mut v = json!({
         "id": a.id, "organization": a.organization, "kind": a.kind, "name": a.name,
         "digest": a.digest, "status": a.status, "lineage_root": a.lineage_root,
         "parents": a.parents, "policy": policy,
-    })
+    });
+    derived_fields(a, &mut v);
+    v
 }
 
 /// The view of `a` for `p`: in full to its owner's members, redacted to
@@ -651,8 +689,15 @@ impl Control {
             if a.status == "revoked" {
                 return Ok(json!({"id": id, "status": "revoked", "already": true}));
             }
-            let failed = self.revoke_in(t, ctx.actor(), &ctx.request_id, &a, None)?;
-            Ok(json!({"id": id, "status": "revoked", "failed_jobs": failed}))
+            let r = self.revoke_in(t, ctx.actor(), &ctx.request_id, &a, None)?;
+            let mut out = json!({"id": id, "status": "revoked", "failed_jobs": r.failed_jobs});
+            // The derived results downstream are listed; nothing already
+            // released is erased, and the answer says so.
+            if !r.downstream.is_empty() {
+                out["downstream"] = json!(r.downstream);
+                out["erased"] = json!(false);
+            }
+            Ok(out)
         })?;
         // Anchored before acknowledging (a retry, "already", re-anchors),
         // with the jobs it failed; the broker's revocation message is sent
@@ -665,10 +710,12 @@ impl Control {
     }
 
     /// Revokes `a` in the caller's transaction (authorization done): marks
-    /// it revoked, fails the jobs not yet running that use it, and queues
-    /// the key broker's revocation. Returns the failed jobs. `reason`
-    /// annotates the audit event (recovery re-applying an anchored
-    /// revocation).
+    /// it revoked, marks the derived results downstream of it
+    /// `source_revoked_at` (set once; nothing released is erased), fails
+    /// the jobs not yet running that use it or one of them, and queues the
+    /// key broker's revocation. Returns the failed jobs and the derived
+    /// results downstream. `reason` annotates the audit event (recovery
+    /// re-applying an anchored revocation).
     pub(crate) fn revoke_in(
         &self,
         t: &mut postgres::Transaction<'_>,
@@ -676,23 +723,59 @@ impl Control {
         request_id: &str,
         a: &crate::authz::AssetRow,
         reason: Option<&str>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Revoked> {
         let id = a.id.as_str();
         t.execute(
             "UPDATE assets SET status = 'revoked', revoked_at = now() WHERE id = $1",
             &[&id],
         )
         .map_err(db_err)?;
+        // The derived results downstream (governed only: a standard
+        // asset's children are unchanged), each marked once. A derivation
+        // racing this one holds its parents shared, so it either finished
+        // (and is found here) or sees the revocation.
+        // Until none is new: marking one waits for a derivation holding it,
+        // whose result the next round finds.
+        let mut downstream: Vec<String> = vec![];
+        loop {
+            let found: Vec<String> = t
+                .query(
+                    "WITH RECURSIVE d(id) AS (
+                         SELECT x.id FROM assets x WHERE x.parents ? $1 AND x.derived_from_job IS NOT NULL
+                         UNION
+                         SELECT x.id FROM assets x JOIN d ON x.parents ? d.id
+                          WHERE x.derived_from_job IS NOT NULL
+                     )
+                     SELECT id FROM d ORDER BY id",
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            if found.len() == downstream.len() {
+                break;
+            }
+            t.execute(
+                "UPDATE assets SET source_revoked_at = now()
+                  WHERE id = ANY($1) AND source_revoked_at IS NULL",
+                &[&found],
+            )
+            .map_err(db_err)?;
+            downstream = found;
+        }
         // Jobs that have not started cannot start now. (Rows are locked
         // before the audit chain: every transaction takes the audit head
         // last, so no two wait on each other.)
+        let mut used = downstream.clone();
+        used.push(id.to_owned());
         let jobs: Vec<(String, String, String)> = t
             .query(
                 "SELECT id, state, organization_id FROM jobs
-                  WHERE source_assets ? $1
+                  WHERE source_assets ?| $1
                     AND state IN ('created', 'planning', 'planned', 'waiting_for_approval', 'authorized', 'queued')
-                  FOR UPDATE",
-                &[&id],
+                  ORDER BY id FOR UPDATE",
+                &[&used],
             )
             .map_err(db_err)?
             .iter()
@@ -705,7 +788,23 @@ impl Control {
         if let Some(r) = reason {
             d = d.r#ref("reason", r.to_owned());
         }
+        if !downstream.is_empty() {
+            d = d.r#ref("downstream", downstream.len().to_string());
+        }
         audit::append(t, d)?;
+        // Each derived result's custodian learns its source was revoked.
+        for x in &downstream {
+            let org: String = t
+                .query_one("SELECT organization_id FROM assets WHERE id = $1", &[x])
+                .map_err(db_err)?
+                .get(0);
+            audit::append(
+                t,
+                draft("asset.source_revoked", "asset", x, Outcome::Succeeded)
+                    .org(&org)
+                    .r#ref("revoked_source", id),
+            )?;
+        }
         for (job, _, org) in &jobs {
             self.transition_in(
                 t,
@@ -762,7 +861,10 @@ impl Control {
                 )?;
             }
         }
-        Ok(jobs.into_iter().map(|j| j.0).collect())
+        Ok(Revoked {
+            failed_jobs: jobs.into_iter().map(|j| j.0).collect(),
+            downstream,
+        })
     }
 
     /// Lineage: ancestors and descendants the caller may see; others are
@@ -781,7 +883,7 @@ impl Control {
             match asset_visible(&mut *c, &ctx.principal, &p) {
                 Ok(x) => {
                     todo.extend(x.parents.clone());
-                    ancestors.push(json!({"id": x.id, "kind": x.kind, "status": x.status, "organization": x.organization}));
+                    ancestors.push(lineage_entry(&x));
                 }
                 Err(_) => hidden += 1,
             }
@@ -802,17 +904,21 @@ impl Control {
             for k in kids {
                 match asset_visible(&mut *c, &ctx.principal, &k) {
                     Ok(x) => {
-                        descendants.push(json!({"id": x.id, "kind": x.kind, "status": x.status, "organization": x.organization}));
+                        descendants.push(lineage_entry(&x));
                         todo.push(k);
                     }
                     Err(_) => hidden += 1,
                 }
             }
         }
-        Ok(json!({
+        let mut out = json!({
             "asset": id, "lineage_root": a.lineage_root, "status": a.status,
             "ancestors": ancestors, "descendants": descendants, "not_visible": hidden,
-        }))
+        });
+        if let Some(t) = a.source_revoked_at {
+            out["source_revoked_at"] = json!(t);
+        }
+        Ok(out)
     }
 
     // --- privacy --------------------------------------------------------------

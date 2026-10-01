@@ -226,6 +226,7 @@ fn transcript(program: &str, spec: &ExecutionSpec) -> Option<String> {
 }
 
 /// A dataset version of tax's income series, its key at tax's broker.
+#[derive(Clone)]
 struct Version {
     asset: String,
     version: String,
@@ -3003,4 +3004,1355 @@ fn never_output_is_released_to_nobody() {
         Some(json!({"recipient": BEN})),
     );
     assert_eq!(s, 404);
+}
+
+// --- step 6: derived results, source revocation downstream, exports ------------------
+
+/// A governed job that ran to success: its source version, authorization,
+/// job and GovernanceId.
+struct Released {
+    v: Version,
+    a: Auth,
+    job: String,
+    governance_id: String,
+}
+
+fn succeeded(g: &G, label: &str, edit: impl FnOnce(&mut AuthorizationV2)) -> Released {
+    let (v, a, program, j) = g.job(label, edit);
+    let job = id(&j);
+    let governance_id = run(g, &program, &job);
+    Released {
+        v,
+        a,
+        job,
+        governance_id,
+    }
+}
+
+/// Runs queued governed job `job` of `program` to success: start, the
+/// evaluator's v4 receipt, completion. Returns its GovernanceId.
+fn run(g: &G, program: &str, job: &str) -> String {
+    let grant = g.grant(job);
+    let gov = grant.governance.clone().unwrap();
+    g.t.ok(
+        &g.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{job}/start"),
+        None,
+    );
+    let spec = base_spec(program).governed(&gov.binding);
+    let r = g.receipt(program, &spec, Some(grant.digest()));
+    let msg = serde_json::to_value(
+        encompute_control::transport::seal(
+            &g.evaluator.signer,
+            "job.completed",
+            "control-plane",
+            encompute_control::transport::Scope {
+                job: Some(job.to_owned()),
+                ..Default::default()
+            },
+            &json!({"receipt": r}),
+            300,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    g.t.ok(&g.evaluator.service, "POST", "/v1/messages", Some(msg));
+    let (s, done) = g.complete(job, &r);
+    assert_eq!(
+        (s, done["state"].as_str()),
+        (200, Some("succeeded")),
+        "{done}"
+    );
+    gov.governance_id
+}
+
+/// Benefits as a custodian: its active governance key and its own key
+/// broker.
+struct Custodian {
+    sec: As,
+    owner: As,
+    key: SigningKey,
+}
+
+fn custodian(g: &G) -> Custodian {
+    let admin = As::User("b-admin".into());
+    let sec = user(&g.t, &admin, BEN, "b-sec1", &["security_admin"]);
+    let governance = key(9);
+    let v = g.t.ok(
+        &admin,
+        "POST",
+        &format!("/v1/organizations/{BEN}/governance-keys"),
+        Some(json!({"public_key": pk(&governance), "kms_key_ref": "vault:transit/governance"})),
+    );
+    g.t.ok(
+        &sec,
+        "POST",
+        &format!("/v1/organizations/{BEN}/governance-keys/{}/approve", id(&v)),
+        None,
+    );
+    broker_account(&g.t, &admin, BEN, "ben-broker", 32);
+    let (s, v) = g.t.call(
+        &sec,
+        "POST",
+        &format!("/v1/organizations/{BEN}/key-brokers"),
+        Some(json!({"id": "ben-broker", "grant_public_key": pk(&key(43)),
+                    "provider_kind": "openbao-transit", "key_ref_namespace": "transit/ben"})),
+    );
+    assert_eq!(s, 201, "{v}");
+    let owner = user(&g.t, &admin, BEN, "b-owner", &["data_owner"]);
+    // Benefits accepts the purpose, so it can authorize its results.
+    let acceptance = PurposeAcceptance {
+        version: 1,
+        organization: BEN.into(),
+        project: g.project.clone(),
+        purpose_id: g.purpose.clone(),
+        accepted_at: now(),
+    }
+    .sign(&governance)
+    .unwrap();
+    g.t.ok(
+        &sec,
+        "POST",
+        &format!("/v1/purposes/{}/accept", g.purpose),
+        Some(json!({"acceptance": acceptance})),
+    );
+    Custodian {
+        sec,
+        owner,
+        key: governance,
+    }
+}
+
+/// The derived result's onward policy: tax's registered policy, unchanged.
+fn onward() -> Value {
+    registered(TAX)["ir_policy"].clone()
+}
+
+fn derived_version(label: &str) -> String {
+    encompute_verification::governance::AssetVersion {
+        version: encompute_verification::governance::ASSET_VERSION_VERSION,
+        organization: BEN.into(),
+        series: "eligibility".into(),
+        label: label.into(),
+        digest: "e".repeat(64),
+    }
+    .id()
+    .hex()
+}
+
+/// The custodian's record of `rel`'s output as version `label`, exported
+/// to benefits under `export_key`.
+fn record(
+    g: &G,
+    rel: &Released,
+    label: &str,
+    policy: &Value,
+    export_key: &str,
+) -> encompute_trust::authz::ReleaseRecord {
+    encompute_trust::authz::ReleaseRecord {
+        version: 1,
+        party: BEN.into(),
+        project: g.project.clone(),
+        purpose_id: g.purpose.clone(),
+        job_id: rel.job.clone(),
+        governance_id: rel.governance_id.clone(),
+        output: "out".into(),
+        output_commitment: "f".repeat(64),
+        derived_version_id: derived_version(label),
+        release_class: ReleaseClass::BooleanOnly,
+        parents: [rel.v.version.clone()].into(),
+        authorization_ids: [rel.a.id.clone()].into(),
+        onward_policy_id: encompute_control::onward_policy_id(policy).unwrap(),
+        recipients: [(BEN.to_string(), export_key.to_owned())].into(),
+        lineage_owners: [(
+            TAX.to_string(),
+            encompute_trust::authz::governance_key_id(&pk(&g.tax_key)),
+        )]
+        .into(),
+        issued_at: now(),
+    }
+}
+
+fn derived_body(
+    label: &str,
+    policy: &Value,
+    class: &str,
+    record: encompute_trust::authz::ReleaseRecord,
+    key: &SigningKey,
+) -> Value {
+    json!({"output": "out", "kind": "dataset", "series": "eligibility", "version": label,
+           "digest": "e".repeat(64),
+           "key_ref": {"broker": "ben-broker", "provider": "openbao-transit",
+                       "key_ref": format!("result-{label}"), "key_version": 1},
+           "ir_policy": policy, "release_class": class,
+           "release_record": record.sign(key).unwrap()})
+}
+
+fn register_derived(g: &G, who: &As, job: &str, body: Value) -> (u16, Value) {
+    g.t.call(
+        who,
+        "POST",
+        &format!("/v1/jobs/{job}/derived-assets"),
+        Some(body),
+    )
+}
+
+/// A succeeded job's result, recorded by benefits as a derived asset: (the
+/// release, the custodian, the derived asset's ID, the recipient's export
+/// key pair).
+fn derived(
+    g: &G,
+    label: &str,
+    edit: impl FnOnce(&mut AuthorizationV2),
+) -> (
+    Released,
+    Custodian,
+    String,
+    encompute_attestation::ExportRecipient,
+) {
+    let rel = succeeded(g, label, edit);
+    let c = custodian(g);
+    let recipient = encompute_attestation::ExportRecipient::generate();
+    let policy = onward();
+    let rec = record(g, &rel, label, &policy, &recipient.public_key_hex());
+    let (s, v) = register_derived(
+        g,
+        &g.ben_dev,
+        &rel.job,
+        derived_body(label, &policy, "boolean-only", rec, &c.key),
+    );
+    assert_eq!(s, 201, "{v}");
+    let d = id(&v);
+    (rel, c, d, recipient)
+}
+
+fn export(g: &G, who: &As, asset: &str, body: Value) -> (u16, Value) {
+    g.t.call(
+        who,
+        "POST",
+        &format!("/v1/assets/{asset}/exports"),
+        Some(body),
+    )
+}
+
+/// A derived result's policy and class are never wider than its parents':
+/// a wider onward policy, a wider class, or a record naming a recipient no
+/// authorization names is refused (ENC2709); within them it is recorded,
+/// its parents the job's exact source versions.
+#[test]
+fn derived_policy_wider_than_parents_fails() {
+    let Some(g) = world() else { return };
+    let rel = succeeded(&g, "2026-q1", |_| {});
+    let c = custodian(&g);
+    let xk = encompute_attestation::ExportRecipient::generate().public_key_hex();
+    let label = "2026-q1-result";
+    // Readers wider than the parent's.
+    let mut wide = onward();
+    wide["readers"] = json!([BEN, OTHER, TAX]);
+    let rec = record(&g, &rel, label, &wide, &xk);
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body(label, &wide, "boolean-only", rec, &c.key),
+        ),
+        "ENC2709",
+    );
+    // A release weaker than the parent's.
+    let mut public = onward();
+    public["release"] = json!("public");
+    let rec = record(&g, &rel, label, &public, &xk);
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body(label, &public, "boolean-only", rec, &c.key),
+        ),
+        "ENC2709",
+    );
+    // A class wider than the output's, the parent's and the ceiling.
+    let policy = onward();
+    let mut rec = record(&g, &rel, label, &policy, &xk);
+    rec.release_class = ReleaseClass::AuthorizedAgencyOnly;
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body(label, &policy, "authorized-agency-only", rec, &c.key),
+        ),
+        "ENC2709",
+    );
+    // A record naming a recipient the authorization does not.
+    let mut rec = record(&g, &rel, label, &policy, &xk);
+    rec.recipients.insert(OTHER.into(), xk.clone());
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body(label, &policy, "boolean-only", rec, &c.key),
+        ),
+        "ENC2709",
+    );
+    // A record of other parents, or signed with another key.
+    let mut rec = record(&g, &rel, label, &policy, &xk);
+    rec.parents = ["3".repeat(64)].into();
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body(label, &policy, "boolean-only", rec, &c.key),
+        ),
+        "ENC2704",
+    );
+    let rec = record(&g, &rel, label, &policy, &xk);
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body(label, &policy, "boolean-only", rec, &key(10)),
+        ),
+        "ENC2701",
+    );
+    // Narrower is fine: fewer readers, a stricter release.
+    let mut narrow = onward();
+    narrow["readers"] = json!([BEN]);
+    narrow["release"] = json!("owner_only");
+    let rec = record(&g, &rel, label, &narrow, &xk);
+    let (s, v) = register_derived(
+        &g,
+        &g.ben_dev,
+        &rel.job,
+        derived_body(label, &narrow, "boolean-only", rec, &c.key),
+    );
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["custodian"], BEN);
+    assert_eq!(v["parents"], json!([rel.v.asset]));
+    assert_eq!(v["version_id"], derived_version(label));
+    // Its lineage names its parent and the job.
+    let d =
+        g.t.ok(&g.ben_dev, "GET", &format!("/v1/assets/{}", id(&v)), None);
+    assert_eq!(d["derived_from_job"], json!(rel.job));
+    assert_eq!(d["organization"], BEN);
+    assert!(d.get("source_revoked_at").is_none(), "{d}");
+    // Frozen: the database refuses to move it to another job or custodian.
+    let e =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE assets SET derived_output = 'other' WHERE id = $1",
+                &[&id(&v)],
+            )
+            .unwrap_err();
+    assert!(
+        e.to_string().contains("immutable") || format!("{e:?}").contains("immutable"),
+        "{e:?}"
+    );
+}
+
+/// Only a person of a recipient organization of the output records it,
+/// and only once its job succeeded: not the source owner, not another
+/// member, not a service account, not before success; once per output.
+#[test]
+fn derived_asset_only_by_recipient_human() {
+    let Some(g) = world() else { return };
+    let c = custodian(&g);
+    let xk = encompute_attestation::ExportRecipient::generate().public_key_hex();
+    let policy = onward();
+    // Before success.
+    let (v, a, _, j) = g.job("2026-q0", |_| {});
+    let early = Released {
+        v,
+        a,
+        job: id(&j),
+        governance_id: g.grant(&id(&j)).governance.unwrap().governance_id,
+    };
+    let rec = record(&g, &early, "early", &policy, &xk);
+    let (s, e) = register_derived(
+        &g,
+        &g.ben_dev,
+        &early.job,
+        derived_body("early", &policy, "boolean-only", rec, &c.key),
+    );
+    assert_eq!(s, 409, "{e}");
+    let rel = succeeded(&g, "2026-q1", |_| {});
+    let body = || {
+        derived_body(
+            "q1",
+            &policy,
+            "boolean-only",
+            record(&g, &rel, "q1", &policy, &xk),
+            &c.key,
+        )
+    };
+    // The source owner is no recipient of the output.
+    refused_status(register_derived(&g, &g.tax_dev, &rel.job, body()), 403);
+    // Another member of the project is none either.
+    refused_status(register_derived(&g, &g.other_dev, &rel.job, body()), 403);
+    // An automation account of benefits is not a person.
+    let bot = std::sync::Arc::new(ServiceSigner::from_seed("ben-bot", &[54; 32]).unwrap());
+    g.t.ok(
+        &As::User("b-admin".into()),
+        "POST",
+        &format!("/v1/organizations/{BEN}/service-accounts"),
+        Some(
+            json!({"id": "ben-bot", "kind": "automation", "public_key": bot.public_key_hex(),
+                    "roles": ["ml_developer"]}),
+        ),
+    );
+    refused(
+        register_derived(&g, &As::Service(bot), &rel.job, body()),
+        "ENC2707",
+    );
+    // Benefits' person records it; its custodian is benefits.
+    let (s, v) = register_derived(&g, &c.sec, &rel.job, body());
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["custodian"], BEN);
+    // Once per output and custodian.
+    let (s, again) = register_derived(&g, &g.ben_dev, &rel.job, body());
+    assert!(s >= 400, "{again}");
+}
+
+fn refused_status(r: (u16, Value), s: u16) {
+    assert_eq!(r.0, s, "{}", r.1);
+}
+
+/// K-7: a job inside its window finished, but nothing it released is
+/// exported after the window ends (ENC2705).
+#[test]
+fn export_after_valid_until_refused_2705() {
+    let Some(g) = world() else { return };
+    let until = now() + 15;
+    let (_, _, d, _) = derived(&g, "2026-q1", |b| b.valid_until = until);
+    after(until);
+    refused(
+        export(&g, &g.ben_dev, &d, json!({"recipient": BEN})),
+        "ENC2705",
+    );
+    let n: i64 =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one("SELECT count(*) FROM exports WHERE asset_id = $1", &[&d])
+            .unwrap()
+            .get(0);
+    assert_eq!(n, 0);
+}
+
+/// Once a source is revoked, no derived result of it is exported (ENC2706),
+/// even when a restored database lost the mark: the ancestors decide.
+#[test]
+fn export_of_derived_asset_whose_source_was_revoked_2706() {
+    let Some(g) = world() else { return };
+    let (rel, _, d, _) = derived(&g, "2026-q1", |_| {});
+    g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/assets/{}/revoke", rel.v.asset),
+        None,
+    );
+    refused(
+        export(&g, &g.ben_dev, &d, json!({"recipient": BEN})),
+        "ENC2706",
+    );
+    // An attacker clears the mark: the revoked ancestor still refuses.
+    attacker(
+        &g.t.env0.url,
+        &["assets"],
+        &format!("UPDATE assets SET source_revoked_at = NULL WHERE id = '{d}'"),
+    );
+    refused(
+        export(&g, &g.ben_dev, &d, json!({"recipient": BEN})),
+        "ENC2706",
+    );
+}
+
+/// An export goes only to a recipient every authorization in the lineage
+/// names (and never to an auditor or an unknown organization).
+#[test]
+fn export_to_unnamed_recipient_2709() {
+    let Some(g) = world() else { return };
+    let (_, _, d, _) = derived(&g, "2026-q1", |_| {});
+    refused(
+        export(&g, &g.ben_dev, &d, json!({"recipient": OTHER})),
+        "ENC2709",
+    );
+    refused(
+        export(&g, &g.ben_dev, &d, json!({"recipient": TAX})),
+        "ENC2709",
+    );
+    // The custodian's export to benefits itself is named.
+    let (s, v) = export(&g, &g.ben_dev, &d, json!({"recipient": BEN}));
+    assert_eq!(s, 201, "{v}");
+    // Only the custodian's people export it.
+    refused_status(export(&g, &g.tax_owner, &d, json!({"recipient": BEN})), 404);
+}
+
+/// The export's class is within the result's own class and every ancestor
+/// authorization's ceiling.
+#[test]
+fn export_class_within_every_ancestor() {
+    let Some(g) = world() else { return };
+    let (_, _, d, _) = derived(&g, "2026-q1", |_| {});
+    // Wider than the result's class and the authorization's ceiling (both
+    // boolean-only).
+    refused(
+        export(
+            &g,
+            &g.ben_dev,
+            &d,
+            json!({"recipient": BEN, "release_class": "aggregate-only"}),
+        ),
+        "ENC2709",
+    );
+    refused(
+        export(
+            &g,
+            &g.ben_dev,
+            &d,
+            json!({"recipient": BEN, "release_class": "authorized-agency-only"}),
+        ),
+        "ENC2709",
+    );
+    let (s, v) = export(
+        &g,
+        &g.ben_dev,
+        &d,
+        json!({"recipient": BEN, "release_class": "boolean-only"}),
+    );
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["release_class"], "boolean-only");
+}
+
+/// Benefits' key broker as custodian of derived result `d` (key
+/// `result-2026-q1`): its governance key pinned, the result's key bound to
+/// the custodian's record with the control plane's co-signature (as stored
+/// at registration), and tax's governance key pinned from the control
+/// plane's attestation of it (fetched by a benefits member). Returns the
+/// broker and the record.
+fn custodian_broker(
+    g: &G,
+    c: &Custodian,
+    d: &str,
+    execution_spec_id: &str,
+) -> (
+    encompute_keybroker::KeyBroker,
+    encompute_trust::authz::SignedReleaseRecord,
+) {
+    use encompute_keybroker::{
+        BrokerMode, DevelopmentFileStore, GovernanceConfig, KeyBroker, KeyMaterial,
+    };
+    let mut db = g.t.control.db.conn().unwrap();
+    let row = db
+        .query_one(
+            "SELECT release_record, release_cosignature FROM assets WHERE id = $1",
+            &[&d],
+        )
+        .unwrap();
+    let record: encompute_trust::authz::SignedReleaseRecord =
+        serde_json::from_value(row.get(0)).unwrap();
+    let cosignature: encompute_trust::authz::SignedDerivedReleaseCosignature =
+        serde_json::from_value(row.get(1)).unwrap();
+    let mut b = KeyBroker::new(
+        "ben-broker",
+        BrokerMode::Development,
+        encompute_attestation::Verifier::new(),
+        Box::new(DevelopmentFileStore),
+    )
+    .unwrap()
+    .with_governance(GovernanceConfig {
+        control_key: g.t.control.signer.public_key_hex(),
+        require_ticket: true,
+    })
+    .unwrap();
+    b.set_organization(BEN).unwrap();
+    // (An exported key needs no attestation; the policy only guards a
+    // key release of it as a source.)
+    let mut policy = encompute_attestation::AttestationPolicy::new(execution_spec_id, None);
+    policy.allowed_tee = vec![encompute_attestation::TeeKind::Mock];
+    policy.allowed_images = vec![format!("sha256:{}", "4".repeat(64))];
+    policy.allow_development = true;
+    b.add_secret(
+        "result-2026-q1",
+        Some(KeyMaterial::from_bytes(b"the derived result's key").unwrap()),
+        policy,
+    )
+    .unwrap();
+    b.pin_governance_key(&pk(&c.key)).unwrap();
+    b.bind_derived_version("result-2026-q1", &record, &cosignature)
+        .unwrap();
+    // Tax, whose data the result derives from: its key pinned here from
+    // the control plane's attestation of it.
+    let a: encompute_trust::authz::SignedGovernanceKeyAttestation = serde_json::from_value(g.t.ok(
+        &g.ben_dev,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-key-attestation"),
+        None,
+    ))
+    .unwrap();
+    assert!(b.pin_lineage_governance_key(TAX, &a).unwrap());
+    (b, record)
+}
+
+/// An export ticket is single-use: the control plane records each once
+/// (UNIQUE, append-only), and the custodian's broker, which verifies it
+/// under the pinned control-plane key and the custodian's signed record,
+/// accepts it once (ENC2712).
+#[test]
+fn replayed_export_ticket_refused_2712() {
+    use encompute_keybroker::GovernedExportRequest;
+    let Some(g) = world() else { return };
+    let (rel, c, d, recipient) = derived(&g, "2026-q1", |_| {});
+    let (s, v) = export(&g, &g.ben_dev, &d, json!({"recipient": BEN}));
+    assert_eq!(s, 201, "{v}");
+    let ticket: encompute_verification::ticket::ReleaseTicket =
+        serde_json::from_value(v["ticket"].clone()).unwrap();
+    assert_eq!(
+        ticket.kind,
+        encompute_verification::ticket::TicketKind::Export
+    );
+    assert_eq!(ticket.recipient.as_deref(), Some(BEN));
+    assert_eq!(ticket.workload_or_recipient, recipient.public_key_hex());
+    assert_eq!(ticket.broker, "ben-broker");
+    assert_eq!(ticket.asset_version_id, derived_version("2026-q1"));
+    // The control plane: one export row per ticket, never changed.
+    let mut db = g.t.control.db.conn().unwrap();
+    let e = db
+        .execute(
+            "INSERT INTO exports (id, asset_id, ticket_id, recipient, release_class, requested_by)
+             VALUES ('exp_replay', $1, $2, $3, 'boolean-only', 'x')",
+            &[&d, &ticket.ticket_id, &BEN],
+        )
+        .unwrap_err();
+    assert_eq!(
+        e.code(),
+        Some(&postgres::error::SqlState::UNIQUE_VIOLATION),
+        "{e:?}"
+    );
+    for sql in [
+        "UPDATE exports SET recipient = 'other-co'",
+        "DELETE FROM exports",
+    ] {
+        let e = db.execute(sql, &[]).unwrap_err();
+        assert!(format!("{e:?}").contains("append-only"), "{sql}: {e:?}");
+    }
+    // The custodian's broker.
+    let (mut b, record) = custodian_broker(&g, &c, &d, &ticket.execution_spec_id);
+    let doc: AuthorizationV2 = serde_json::from_value(
+        g.t.ok(
+            &g.tax_sec1,
+            "GET",
+            &format!("/v1/authorizations/{}", rel.a.row),
+            None,
+        )["body"]
+            .clone(),
+    )
+    .unwrap();
+    let req0 = GovernedExportRequest {
+        asset_id: "result-2026-q1".into(),
+        ticket: ticket.clone(),
+        release_record: record.clone(),
+    };
+    // Without it nothing is exported (and the ticket is not spent).
+    assert_eq!(
+        b.prepare_governed_export(&req0).unwrap_err().code.as_str(),
+        "ENC2701"
+    );
+    b.install_authorization(&doc.sign(&g.tax_key).unwrap())
+        .unwrap();
+    let req = GovernedExportRequest {
+        asset_id: "result-2026-q1".into(),
+        ticket,
+        release_record: record,
+    };
+    let p = b.prepare_governed_export(&req).unwrap();
+    let (grant, _) = b.finish_release(p).unwrap();
+    assert_eq!(
+        recipient.open(&grant).unwrap().as_slice(),
+        b"the derived result's key"
+    );
+    let e = b.prepare_governed_export(&req).unwrap_err();
+    assert_eq!(e.code.as_str(), "ENC2712", "{e}");
+}
+
+/// Revoking a source lists the derived results downstream and marks them,
+/// never claiming to erase them: they stay on record (active, their source
+/// revocation shown), their job stays succeeded, and nothing more is
+/// derived from them.
+#[test]
+fn revocation_lists_downstream_without_claiming_erasure() {
+    let Some(g) = world() else { return };
+    let (rel, c, d, _) = derived(&g, "2026-q1", |_| {});
+    let r = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/assets/{}/revoke", rel.v.asset),
+        None,
+    );
+    assert_eq!(r["downstream"], json!([d]), "{r}");
+    assert_eq!(r["erased"], json!(false), "{r}");
+    // Still on record, its source revocation shown.
+    let v = g.t.ok(&g.ben_dev, "GET", &format!("/v1/assets/{d}"), None);
+    assert_eq!(v["status"], "active", "{v}");
+    assert!(v["source_revoked_at"].as_i64().is_some(), "{v}");
+    let l = g.t.ok(
+        &g.tax_owner,
+        "GET",
+        &format!("/v1/assets/{}/lineage", rel.v.asset),
+        None,
+    );
+    let desc = l["descendants"].as_array().unwrap();
+    assert!(
+        desc.iter()
+            .any(|x| x["id"] == json!(d) && x["source_revoked_at"].as_i64().is_some()),
+        "{l}"
+    );
+    assert!(!l.to_string().contains("erased\":true"), "{l}");
+    // The job that released it is not undone.
+    assert_eq!(g.state(&rel.job), "succeeded");
+    // Nothing more is derived from the revoked source.
+    let xk = encompute_attestation::ExportRecipient::generate().public_key_hex();
+    let policy = onward();
+    let rec = record(&g, &rel, "again", &policy, &xk);
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body("again", &policy, "boolean-only", rec, &c.key),
+        ),
+        "ENC2706",
+    );
+    // The custodian's trail records it.
+    let n: i64 =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT count(*) FROM audit_events WHERE action = 'asset.source_revoked'
+                AND resource_id = $1 AND organization_id = $2",
+                &[&d, &BEN],
+            )
+            .unwrap()
+            .get(0);
+    assert_eq!(n, 1);
+}
+
+/// Standard projects are unchanged: a revoked asset's children are not
+/// marked and the answer lists nothing downstream; derived results and
+/// exports belong to governed projects.
+#[test]
+fn standard_project_unchanged() {
+    let Some(g) = world() else { return };
+    let parent = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/assets",
+        Some(json!({"organization": TAX, "kind": "dataset", "name": "raw", "digest": "a".repeat(64)})),
+    );
+    let child = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/assets",
+        Some(json!({"organization": TAX, "kind": "dataset", "name": "clean", "digest": "b".repeat(64),
+                    "parents": [id(&parent)]})),
+    );
+    let r = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/assets/{}/revoke", id(&parent)),
+        None,
+    );
+    let keys: BTreeSet<&str> = r.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    assert_eq!(keys, BTreeSet::from(["id", "status", "failed_jobs"]), "{r}");
+    let c = g.t.ok(
+        &g.tax_owner,
+        "GET",
+        &format!("/v1/assets/{}", id(&child)),
+        None,
+    );
+    for k in ["source_revoked_at", "derived_from_job", "custodian"] {
+        assert!(c.get(k).is_none(), "{k}: {c}");
+    }
+    assert_eq!(c["status"], "active");
+    // A standard job's result is not a derived asset; a standard asset is
+    // not exported.
+    let p = g.t.ok(
+        &g.tax_admin,
+        "POST",
+        "/v1/projects",
+        Some(json!({"organization": TAX, "name": "statistics"})),
+    );
+    let plan = g.t.ok(
+        &g.tax_dev,
+        "POST",
+        "/v1/plans",
+        Some(json!({"project": id(&p), "program": EXACT})),
+    );
+    let (s, j) = g.submit(
+        &g.tax_dev,
+        json!({"project": id(&p), "plan": plan["id"], "purpose": "statistics",
+               "source_assets": [], "requested_output": "out"}),
+        "std-derived",
+    );
+    assert_eq!(s, 201, "{j}");
+    let policy = onward();
+    let xk = "7".repeat(64);
+    let body = json!({"output": "out", "kind": "dataset", "series": "s", "version": "1",
+                      "digest": "e".repeat(64),
+                      "key_ref": {"broker": "tax-broker", "provider": "p", "key_ref": "k", "key_version": 1},
+                      "ir_policy": policy, "release_class": "boolean-only",
+                      "release_record": encompute_trust::authz::ReleaseRecord {
+                          version: 1, party: TAX.into(), project: id(&p), purpose_id: "1".repeat(64),
+                          job_id: id(&j), governance_id: "2".repeat(64), output: "out".into(),
+                          output_commitment: "3".repeat(64), derived_version_id: "4".repeat(64),
+                          release_class: ReleaseClass::BooleanOnly, parents: ["5".repeat(64)].into(),
+                          authorization_ids: ["6".repeat(64)].into(), onward_policy_id: "8".repeat(64),
+                          recipients: [(TAX.to_string(), xk)].into(),
+                          lineage_owners: Default::default(), issued_at: now(),
+                      }.sign(&g.tax_key).unwrap()});
+    refused_status(register_derived(&g, &g.tax_dev, &id(&j), body), 409);
+    refused_status(
+        export(&g, &g.tax_owner, &id(&child), json!({"recipient": TAX})),
+        409,
+    );
+}
+
+/// Probing: an owner's `max_releases` bounds the exports of results
+/// released under its authorization (ENC2714).
+#[test]
+fn export_respects_release_limits_2714() {
+    let Some(g) = world() else { return };
+    let (_, _, d, _) = derived(&g, "2026-q1", |b| b.limits.max_releases = Some(1));
+    let (s, v) = export(&g, &g.ben_dev, &d, json!({"recipient": BEN}));
+    assert_eq!(s, 201, "{v}");
+    refused(
+        export(&g, &g.ben_dev, &d, json!({"recipient": BEN})),
+        "ENC2714",
+    );
+}
+
+// --- derived results as sources: consent and limits carry through ---------------------
+
+/// `body` proposed by `owner`, approved by `owner` (data owner) and `sec`
+/// (security admin), signed with `key`.
+fn authorize_with(g: &G, owner: &As, sec: &As, key: &SigningKey, body: AuthorizationV2) -> Auth {
+    let v = g.t.ok(
+        owner,
+        "POST",
+        "/v1/authorizations",
+        Some(json!({"body": body})),
+    );
+    let row = id(&v);
+    for (who, role) in [(owner, "data_owner"), (sec, "security_admin")] {
+        g.t.ok(
+            who,
+            "POST",
+            &format!("/v1/authorizations/{row}/approve"),
+            Some(json!({"role": role})),
+        );
+    }
+    let v =
+        g.t.ok(sec, "GET", &format!("/v1/authorizations/{row}"), None);
+    let doc: AuthorizationV2 = serde_json::from_value(v["body"].clone()).unwrap();
+    let s = doc.sign(key).unwrap();
+    let v = g.t.ok(
+        sec,
+        "POST",
+        &format!("/v1/authorizations/{row}/signature"),
+        Some(json!({"public_key": s.public_key, "signature": s.signature})),
+    );
+    Auth {
+        row,
+        id: v["authorization_id"].as_str().unwrap().to_owned(),
+    }
+}
+
+/// Benefits' own authorization of its derived result `d` for `program`.
+fn custodian_authorizes(g: &G, c: &Custodian, d: &Version, program: &str) -> Auth {
+    let mut b = g.body(d, program);
+    b.party = BEN.into();
+    authorize_with(g, &c.owner, &c.sec, &c.key, b)
+}
+
+/// A second job, by benefits, reading derived result `d`.
+fn submit_over(g: &G, d: &Version, program: &str, key: &str) -> (u16, Value) {
+    let plan = g.plan(&g.ben_dev, program);
+    g.submit(&g.ben_dev, g.request(&plan, &[&d.asset], &[BEN]), key)
+}
+
+fn derived_version_of(d: &str, label: &str) -> Version {
+    Version {
+        asset: d.to_owned(),
+        version: derived_version(label),
+    }
+}
+
+/// A derived result used as a source needs an authorization from every
+/// owner in its lineage, not only from its custodian (ENC2701); with both,
+/// the job runs under both.
+#[test]
+fn derived_source_needs_every_lineage_owners_authorization() {
+    let Some(g) = world() else { return };
+    let (_, c, d, _) = derived(&g, "2026-q1", |_| {});
+    let d1 = derived_version_of(&d, "2026-q1");
+    let p2 = program(&[&d1.asset], PURPOSE, BEN);
+    // The custodian alone authorizes its own derived result.
+    let ben = custodian_authorizes(&g, &c, &d1, &p2);
+    refused(submit_over(&g, &d1, &p2, "k-d2"), "ENC2701");
+    // Another organization cannot authorize it, not owning its data.
+    let mut other = g.body(&d1, &p2);
+    other.party = OTHER.into();
+    let (s, _) = g.t.call(
+        &As::User("o-admin".into()),
+        "POST",
+        "/v1/authorizations",
+        Some(json!({"body": other})),
+    );
+    assert!(s >= 400);
+    // Tax, whose data it derives from, authorizes too: the job runs under
+    // both.
+    let tax = g.authorize(g.body(&d1, &p2));
+    let (s, j) = submit_over(&g, &d1, &p2, "k-d2b");
+    assert_eq!(s, 201, "{j}");
+    let bound: BTreeSet<String> =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query(
+                "SELECT authorization_id FROM job_authorizations WHERE job_id = $1",
+                &[&id(&j)],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+    assert_eq!(bound, BTreeSet::from([ben.id, tax.id.clone()]));
+    // Tax revokes its authorization: the queued job fails.
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{}/revoke", tax.row),
+        Some(json!({"reason": "withdrawn"})),
+    );
+    assert_eq!(g.state(&id(&j)), "failed");
+}
+
+/// Executions of jobs reading a derived result count against the original
+/// source's authorization (ENC2714), however many hops away.
+#[test]
+fn multi_hop_executions_count_against_original_authorization_2714() {
+    let Some(g) = world() else { return };
+    let (_, c, d, _) = derived(&g, "2026-q1", |b| b.limits.max_executions = Some(1));
+    let d1 = derived_version_of(&d, "2026-q1");
+    let p2 = program(&[&d1.asset], PURPOSE, BEN);
+    custodian_authorizes(&g, &c, &d1, &p2);
+    g.authorize(g.body(&d1, &p2));
+    // Both authorizations of the derived result allow 1000 executions; the
+    // original allowed one, used by the first job.
+    refused(submit_over(&g, &d1, &p2, "k-d2"), "ENC2714");
+}
+
+/// Exports of results derived from a derived result count against the
+/// original source's authorization (ENC2714).
+#[test]
+fn multi_hop_exports_count_against_original_authorization_2714() {
+    let Some(g) = world() else { return };
+    let (_, c, d, recipient) = derived(&g, "2026-q1", |b| b.limits.max_releases = Some(1));
+    let d1 = derived_version_of(&d, "2026-q1");
+    let p2 = program(&[&d1.asset], PURPOSE, BEN);
+    let ben = custodian_authorizes(&g, &c, &d1, &p2);
+    let tax = g.authorize(g.body(&d1, &p2));
+    let (s, j) = submit_over(&g, &d1, &p2, "k-d2");
+    assert_eq!(s, 201, "{j}");
+    let j2 = id(&j);
+    let gid = run(&g, &p2, &j2);
+    // The second hop's result.
+    let policy = onward();
+    let rel2 = Released {
+        v: d1.clone(),
+        a: Auth {
+            row: ben.row.clone(),
+            id: ben.id.clone(),
+        },
+        job: j2.clone(),
+        governance_id: gid,
+    };
+    let mut rec = record(&g, &rel2, "2026-q1-b", &policy, &recipient.public_key_hex());
+    rec.authorization_ids = [ben.id.clone(), tax.id.clone()].into();
+    let (s, v) = register_derived(
+        &g,
+        &g.ben_dev,
+        &j2,
+        derived_body("2026-q1-b", &policy, "boolean-only", rec, &c.key),
+    );
+    assert_eq!(s, 201, "{v}");
+    let d2 = id(&v);
+    // One export of the first result uses the original's one release.
+    let (s, v) = export(&g, &g.ben_dev, &d, json!({"recipient": BEN}));
+    assert_eq!(s, 201, "{v}");
+    // The second hop's export counts against it too.
+    refused(
+        export(&g, &g.ben_dev, &d2, json!({"recipient": BEN})),
+        "ENC2714",
+    );
+}
+
+/// A queued job over a derived result fails when the original source is
+/// revoked, cannot start, and no new one is submitted (ENC2706).
+#[test]
+fn job_over_derived_source_fails_after_original_source_revoked() {
+    let Some(g) = world() else { return };
+    let (rel, c, d, _) = derived(&g, "2026-q1", |_| {});
+    let d1 = derived_version_of(&d, "2026-q1");
+    let p2 = program(&[&d1.asset], PURPOSE, BEN);
+    custodian_authorizes(&g, &c, &d1, &p2);
+    g.authorize(g.body(&d1, &p2));
+    let (s, j) = submit_over(&g, &d1, &p2, "k-d2");
+    assert_eq!(s, 201, "{j}");
+    assert_eq!(j["state"], "queued", "{j}");
+    let r = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/assets/{}/revoke", rel.v.asset),
+        None,
+    );
+    assert!(
+        r["failed_jobs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(id(&j))),
+        "{r}"
+    );
+    assert_eq!(g.state(&id(&j)), "failed");
+    let (s, _) = g.start(&id(&j));
+    assert!(s >= 400);
+    refused(submit_over(&g, &d1, &p2, "k-d2c"), "ENC2706");
+}
+
+/// A derived result is hidden from a project member that is neither its
+/// custodian, a recipient its record names, nor an owner of its data.
+#[test]
+fn derived_asset_hidden_from_unrelated_member() {
+    let Some(g) = world() else { return };
+    let (rel, _, d, _) = derived(&g, "2026-q1", |_| {});
+    refused_status(
+        g.t.call(&g.other_dev, "GET", &format!("/v1/assets/{d}"), None),
+        404,
+    );
+    let l = g.t.ok(
+        &g.tax_owner,
+        "GET",
+        &format!("/v1/assets/{}/lineage", rel.v.asset),
+        None,
+    );
+    assert!(l.to_string().contains(&d), "{l}");
+    let l = g.t.call(
+        &g.other_dev,
+        "GET",
+        &format!("/v1/assets/{d}/lineage"),
+        None,
+    );
+    assert_eq!(l.0, 404, "{}", l.1);
+}
+
+/// The owners of the data a result derives from, and the recipients its
+/// record names, see it (redacted); its custodian sees it in full.
+#[test]
+fn derived_asset_visible_to_lineage_owner_and_recipient() {
+    let Some(g) = world() else { return };
+    let (_, _, d, _) = derived(&g, "2026-q1", |_| {});
+    let owner =
+        g.t.ok(&g.tax_owner, "GET", &format!("/v1/assets/{d}"), None);
+    assert!(owner["derived_from_job"].is_string(), "{owner}");
+    assert!(owner.get("key_ref").is_none(), "{owner}");
+    let custodian = g.t.ok(&g.ben_dev, "GET", &format!("/v1/assets/{d}"), None);
+    assert!(custodian["key_ref"].is_object(), "{custodian}");
+    // A recipient the record names that is neither custodian nor owner
+    // sees it too. (No authorization here names another organization, so
+    // the record is edited in place, bypassing its guards, to show the
+    // rule alone decides.)
+    refused_status(
+        g.t.call(&g.other_dev, "GET", &format!("/v1/assets/{d}"), None),
+        404,
+    );
+    attacker(
+        &g.t.env0.url,
+        &["assets"],
+        &format!(
+            "UPDATE assets SET release_record = jsonb_set(release_record, '{{body,recipients,{OTHER}}}', '\"{}\"')
+              WHERE id = '{d}'",
+            "8".repeat(64)
+        ),
+    );
+    let seen =
+        g.t.ok(&g.other_dev, "GET", &format!("/v1/assets/{d}"), None);
+    assert!(seen.get("key_ref").is_none(), "{seen}");
+}
+
+// --- what the custodian's broker takes from the control plane -------------------------
+
+/// The control plane attests an organization's governance key, signed
+/// under its own domain with its service key, from its record of approved
+/// keys: the active key, or the one named (revoked ones as revoked), to
+/// members of organizations that share a project with it only.
+#[test]
+fn control_plane_attests_governance_keys() {
+    let Some(g) = world() else { return };
+    let control = g.t.control.signer.public_key_hex();
+    let url = format!("/v1/organizations/{TAX}/governance-key-attestation");
+    let a: encompute_trust::authz::SignedGovernanceKeyAttestation =
+        serde_json::from_value(g.t.ok(&g.ben_dev, "GET", &url, None)).unwrap();
+    a.verify(&control).unwrap();
+    assert_eq!(a.body.organization, TAX);
+    assert_eq!(a.body.public_key, pk(&g.tax_key));
+    assert_eq!(
+        a.body.key_id,
+        encompute_trust::authz::governance_key_id(&pk(&g.tax_key))
+    );
+    assert_eq!(
+        a.body.status,
+        encompute_trust::authz::GovernanceKeyStatus::Active
+    );
+    // Not a release ticket or any other statement: its own domain.
+    assert!(encompute_verification::service::verify_signed(
+        &control,
+        encompute_verification::ticket::KEY_TICKET,
+        &a.body,
+        &a.signature
+    )
+    .is_err());
+    // Its own members, and other project members, see it; an organization
+    // sharing no project with it does not.
+    g.t.ok(&g.tax_dev, "GET", &url, None);
+    g.t.ok(&g.other_dev, "GET", &url, None);
+    let platform = As::User("platform-admin".into());
+    g.t.ok(
+        &platform,
+        "POST",
+        "/v1/organizations",
+        Some(json!({"id": "outsider-co", "display_name": "outsider-co",
+                    "admin": {"issuer": DEV_ISSUER, "subject": "x-admin"}})),
+    );
+    let outsider = user(
+        &g.t,
+        &As::User("x-admin".into()),
+        "outsider-co",
+        "x-dev",
+        &["ml_developer"],
+    );
+    refused_status(g.t.call(&outsider, "GET", &url, None), 404);
+    // Revoked: attested as revoked, by key ID; no active key is attested.
+    let keys = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    let row = keys
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["status"] == "active")
+        .unwrap()
+        .clone();
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!(
+            "/v1/organizations/{TAX}/governance-keys/{}/revoke",
+            row["id"].as_str().unwrap()
+        ),
+        None,
+    );
+    refused(g.t.call(&g.ben_dev, "GET", &url, None), "ENC2708");
+    let r: encompute_trust::authz::SignedGovernanceKeyAttestation = serde_json::from_value(g.t.ok(
+        &g.ben_dev,
+        "GET",
+        &format!("{url}?key_id={}", a.body.key_id),
+        None,
+    ))
+    .unwrap();
+    r.verify(&control).unwrap();
+    assert_eq!(
+        r.body.status,
+        encompute_trust::authz::GovernanceKeyStatus::Revoked
+    );
+    assert!(r.body.revoked_at.is_some());
+    refused_status(
+        g.t.call(
+            &g.ben_dev,
+            "GET",
+            &format!("{url}?key_id={}", "0".repeat(64)),
+            None,
+        ),
+        404,
+    );
+}
+
+/// Recording a derived result, the control plane co-signs the custodian's
+/// record it validated against the result's real ancestry (every lineage
+/// owner named), for the custodian's broker and key; a record leaving a
+/// lineage owner out is refused and never co-signed (ENC2704).
+#[test]
+fn derived_registration_cosigns_validated_record() {
+    let Some(g) = world() else { return };
+    let rel = succeeded(&g, "2026-q1", |_| {});
+    let c = custodian(&g);
+    let xk = encompute_attestation::ExportRecipient::generate().public_key_hex();
+    let policy = onward();
+    // Leaving tax out.
+    let mut omitting = record(&g, &rel, "2026-q1", &policy, &xk);
+    omitting.lineage_owners.clear();
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body("2026-q1", &policy, "boolean-only", omitting, &c.key),
+        ),
+        "ENC2704",
+    );
+    let honest = record(&g, &rel, "2026-q1", &policy, &xk);
+    let honest_id = honest.id();
+    let (s, v) = register_derived(
+        &g,
+        &g.ben_dev,
+        &rel.job,
+        derived_body("2026-q1", &policy, "boolean-only", honest.clone(), &c.key),
+    );
+    assert_eq!(s, 201, "{v}");
+    let cs: encompute_trust::authz::SignedDerivedReleaseCosignature =
+        serde_json::from_value(v["release_cosignature"].clone()).unwrap();
+    cs.verify(&g.t.control.signer.public_key_hex()).unwrap();
+    assert_eq!(cs.body.organization, BEN);
+    assert_eq!(cs.body.asset_id, id(&v));
+    assert_eq!(cs.body.broker, "ben-broker");
+    assert_eq!(cs.body.key_ref, "result-2026-q1");
+    assert_eq!(cs.body.release_record_id, honest_id);
+    assert_eq!(cs.body.lineage_owners, honest.lineage_owners);
+    assert!(cs.body.lineage_owners.contains_key(TAX));
+    // Stored with the result, and as immutable as its record.
+    let mut db = g.t.control.db.conn().unwrap();
+    let e = db
+        .execute(
+            "UPDATE assets SET release_cosignature = '{}' WHERE id = $1",
+            &[&id(&v)],
+        )
+        .unwrap_err();
+    assert!(format!("{e:?}").contains("immutable"), "{e:?}");
+}
+
+/// Revoking an original owner's authorization tells, once the revocation
+/// is anchored and never before, the key broker of every custodian holding
+/// a result derived from a job under it (deny-only, naming the custodian's
+/// organization), and that broker then exports nothing more (ENC2706).
+#[test]
+fn lineage_revocation_forwarded_to_custodian_brokers() {
+    use encompute_keybroker::GovernedExportRequest;
+    let Some(g) = world() else { return };
+    let (rel, c, d, _) = derived(&g, "2026-q1", |_| {});
+    let (s, v) = export(&g, &g.ben_dev, &d, json!({"recipient": BEN}));
+    assert_eq!(s, 201, "{v}");
+    let ticket: encompute_verification::ticket::ReleaseTicket =
+        serde_json::from_value(v["ticket"].clone()).unwrap();
+    let (mut b, record) = custodian_broker(&g, &c, &d, &ticket.execution_spec_id);
+    let doc: AuthorizationV2 = serde_json::from_value(
+        g.t.ok(
+            &g.tax_sec1,
+            "GET",
+            &format!("/v1/authorizations/{}", rel.a.row),
+            None,
+        )["body"]
+            .clone(),
+    )
+    .unwrap();
+    b.install_authorization(&doc.sign(&g.tax_key).unwrap())
+        .unwrap();
+    g.t.transport.drain();
+    // Committed but not yet anchored (a crash between the two): queued for
+    // the owner's and the custodian's brokers, and sent to neither.
+    let queued =
+        g.t.control
+            .db
+            .tx(|t| {
+                t.execute(
+                "UPDATE authorizations SET status = 'revoked', revoked_by = 'x', revoked_at = now()
+                  WHERE id = $1",
+                &[&rel.a.row],
+            )
+            .unwrap();
+                g.t.control
+                    .queue_authorization_revoked(t, "x", "test", &rel.a.row)
+            })
+            .unwrap();
+    assert_eq!(queued, 2, "the owner's broker and the custodian's");
+    g.t.control.deliver_outbox().unwrap();
+    assert!(
+        g.t.transport.drain().is_empty(),
+        "sent before it was anchored"
+    );
+    assert!(!g
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .revoked_authorizations
+        .contains(&rel.a.row));
+    // Anchored: delivered to the custodian's broker, for its organization.
+    g.t.control.tick();
+    assert!(g
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .revoked_authorizations
+        .contains(&rel.a.row));
+    let sent = g.t.transport.drain();
+    let (_, m) = sent
+        .iter()
+        .find(|(u, m)| u == "http://ben-broker.internal:8760" && m.kind == "authorization.revoked")
+        .unwrap_or_else(|| panic!("{sent:?}"));
+    assert_eq!(m.recipient, "ben-broker");
+    assert_eq!(m.organization.as_deref(), Some(BEN));
+    assert_eq!(m.payload["authorization_id"], rel.a.id.as_str());
+    assert!(sent
+        .iter()
+        .any(|(u, m)| u == "http://tax-broker.internal:8760" && m.kind == "authorization.revoked"));
+    // The custodian's trail records it.
+    let trail = g.t.ok(
+        &As::User("b-admin".into()),
+        "GET",
+        &format!("/v1/audit?organization={BEN}"),
+        None,
+    );
+    assert!(
+        trail.to_string().contains("authorization.revocation.sent"),
+        "{trail}"
+    );
+    // At the custodian's broker the message only denies: nothing more is
+    // exported under the revoked authorization.
+    let at = m.payload["revoked_at"].as_u64().unwrap();
+    assert!(b
+        .revoke_authorization_from_control(rel.a.id.as_str(), at)
+        .unwrap());
+    let e = b
+        .prepare_governed_export(&GovernedExportRequest {
+            asset_id: "result-2026-q1".into(),
+            ticket,
+            release_record: record,
+        })
+        .unwrap_err();
+    assert_eq!(e.code.as_str(), "ENC2706", "{e}");
 }

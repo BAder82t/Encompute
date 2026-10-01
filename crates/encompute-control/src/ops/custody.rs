@@ -29,6 +29,7 @@ use encompute_verification::ticket::{
     ReleaseTicket, TicketKind, MAX_TICKET_TTL_SECS, TICKET_SKEW_SECS, TICKET_VERSION,
 };
 
+use super::derived::JOBS_UNDER;
 use crate::audit::{self, AuditDraft, Outcome};
 use crate::authz::{
     auditor_organization, conflict, deny_auditor, deny_auditor_in, forbidden, not_found,
@@ -466,6 +467,10 @@ impl Control {
                     "the source is expired",
                 ));
             }
+            // A derived source's ancestors: none revoked or expired, and
+            // every owner of them authorized the job.
+            self.check_lineage(t, std::slice::from_ref(&asset), at)?;
+            crate::ops::derived::require_lineage_consent(t, id, std::slice::from_ref(&asset))?;
             let broker = key_ref
                 .and_then(|k| serde_json::from_value::<KeyRef>(k).ok())
                 .map(|k| k.broker);
@@ -563,6 +568,7 @@ impl Control {
                 execution_spec_id: spec.id().hex(),
                 policy_id: spec.policy_id.clone(),
                 workload_or_recipient: receipt_key,
+                recipient: None,
                 placement_digest: g.binding.placement_digest.clone(),
                 execution_spec: spec,
                 binding: g.binding.clone(),
@@ -572,53 +578,119 @@ impl Control {
                 issuer: String::new(),
                 issuer_public_key: String::new(),
                 signature: String::new(),
-            }
-            .sign(&self.signer)?;
-            ticket.check_consistent()?;
-            t.execute(
-                "INSERT INTO release_tickets (ticket_id, job_id, organization_id, broker_id,
-                     asset_version_id, issued_to, not_after, body)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                &[
-                    &ticket.ticket_id,
-                    &id,
-                    &owner,
-                    &broker,
-                    &ticket.asset_version_id,
-                    &ctx.actor(),
-                    &i64::try_from(not_after).unwrap_or(i64::MAX),
-                    &serde_json::to_value(&ticket).expect("serializable"),
-                ],
-            )
-            .map_err(db_err)?;
-            let draft = |org: &str| {
-                ctx.draft("release_ticket.issued", "job", id, Outcome::Succeeded)
-                    .org(org)
-                    .project(&project)
-                    .r#ref("ticket", ticket.ticket_id.clone())
-                    .r#ref("owner", owner.clone())
-                    .r#ref("broker", broker.clone())
-                    .r#ref("asset_version", ticket.asset_version_id.clone())
-                    .r#ref("not_after", not_after.to_string())
             };
             // The owner's trail, and the submitter's when it is another.
-            audit::append(t, draft(&owner))?;
+            let mut orgs = vec![owner.as_str()];
             if job_org != owner {
-                audit::append(t, draft(&job_org))?;
+                orgs.push(job_org.as_str());
             }
-            Ok(ticket)
+            self.issue_ticket(
+                t,
+                ctx,
+                ticket,
+                ctx.actor(),
+                ("job", id),
+                &project,
+                &orgs,
+                &[("owner", owner.clone())],
+            )
         })?;
         Ok(json!({"ticket": ticket}))
+    }
+
+    /// Signs `ticket` (built unsigned by the caller) as the control plane,
+    /// checks it is consistent, stores it and audits it for each of `orgs`
+    /// (on `resource`, with `refs`): the one way the control plane issues a
+    /// ticket of any kind, a key release to a scheduled evaluator or an
+    /// export to a recipient. Stored append-only, one row per ticket; the
+    /// broker that redeems it accepts it once.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_ticket(
+        &self,
+        t: &mut postgres::Transaction<'_>,
+        ctx: &Ctx,
+        ticket: ReleaseTicket,
+        issued_to: &str,
+        resource: (&'static str, &str),
+        project: &str,
+        orgs: &[&str],
+        refs: &[(&'static str, String)],
+    ) -> Result<ReleaseTicket> {
+        let ticket = ticket.sign(&self.signer)?;
+        ticket.check_consistent()?;
+        let kind = match ticket.kind {
+            TicketKind::KeyRelease => "key_release",
+            TicketKind::Export => "export",
+            TicketKind::Decrypt => {
+                return Err(Error::new(
+                    Code::GovernanceReleaseTicket,
+                    "decryption tickets are not issued",
+                ))
+            }
+        };
+        t.execute(
+            "INSERT INTO release_tickets (ticket_id, job_id, organization_id, broker_id,
+                 asset_version_id, issued_to, not_after, body, kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &ticket.ticket_id,
+                &ticket.job_id,
+                &ticket.organization,
+                &ticket.broker,
+                &ticket.asset_version_id,
+                &issued_to,
+                &i64::try_from(ticket.not_after).unwrap_or(i64::MAX),
+                &serde_json::to_value(&ticket).expect("serializable"),
+                &kind,
+            ],
+        )
+        .map_err(|e| {
+            if e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION) {
+                Error::new(
+                    Code::GovernanceReleaseTicket,
+                    "this ticket was issued already",
+                )
+            } else {
+                db_err(e)
+            }
+        })?;
+        for org in orgs {
+            let mut d = ctx
+                .draft(
+                    "release_ticket.issued",
+                    resource.0,
+                    resource.1,
+                    Outcome::Succeeded,
+                )
+                .org(org)
+                .project(project)
+                .r#ref("ticket", ticket.ticket_id.clone())
+                .r#ref("broker", ticket.broker.clone())
+                .r#ref("asset_version", ticket.asset_version_id.clone())
+                .r#ref("not_after", ticket.not_after.to_string());
+            if ticket.kind != TicketKind::KeyRelease {
+                d = d.r#ref("kind", kind);
+            }
+            for (k, v) in refs {
+                d = d.r#ref(k, v.clone());
+            }
+            audit::append(t, d)?;
+        }
+        Ok(ticket)
     }
 
     // --- deny-only messages to key brokers ----------------------------------------------
 
     /// Queues `authorization.revoked` for authorization row `row` (revoked
-    /// in the caller's transaction) to its owner's brokers, in the
-    /// caller's transaction; delivered only once the revocation is anchored
-    /// (`deliver_outbox`). An authorization that was never signed was never
-    /// installed at a broker: nothing is sent.
-    pub(crate) fn queue_authorization_revoked(
+    /// in the caller's transaction) to its owner's brokers and to the key
+    /// broker of every custodian holding a result derived (every hop) from
+    /// a job that ran under it (where the owner's authorization is
+    /// installed as a lineage owner's), in the caller's transaction;
+    /// delivered only once the revocation is anchored (`deliver_outbox`).
+    /// Each message names the broker's own organization: it only denies.
+    /// An authorization that was never signed was never installed at a
+    /// broker: nothing is sent. Returns how many messages were queued.
+    pub fn queue_authorization_revoked(
         &self,
         t: &mut postgres::Transaction<'_>,
         actor: &str,
@@ -639,14 +711,42 @@ impl Control {
         else {
             return Ok(0);
         };
-        let brokers = brokers_of(t, &org, Some(&asset))?;
-        for (broker, url) in &brokers {
+        // (broker, its organization) → URL: the owner's brokers, then every
+        // custodian broker downstream.
+        let mut brokers: BTreeMap<(String, String), String> = brokers_of(t, &org, Some(&asset))?
+            .into_iter()
+            .map(|(b, u)| ((b, org.clone()), u))
+            .collect();
+        let custodians: Vec<(String, String)> = t
+            .query(
+                &format!(
+                    "{JOBS_UNDER}
+                     SELECT DISTINCT d.organization_id, d.key_ref->>'broker' FROM assets d
+                      WHERE d.derived_from_job IN (SELECT id FROM under)
+                        AND d.key_ref->>'broker' IS NOT NULL
+                      ORDER BY 1, 2"
+                ),
+                &[&row],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+        for (custodian, broker) in custodians {
+            if brokers.keys().any(|(b, _)| *b == broker) {
+                continue;
+            }
+            if let Some(url) = broker_url(t, &custodian, &broker)? {
+                brokers.insert((broker, custodian), url);
+            }
+        }
+        for ((broker, holder), url) in &brokers {
             let m = seal(
                 &self.signer,
                 "authorization.revoked",
                 broker,
                 Scope {
-                    organization: Some(org.clone()),
+                    organization: Some(holder.clone()),
                     ..Scope::default()
                 },
                 &json!({"authorization": row, "authorization_id": authorization_id,
@@ -678,6 +778,25 @@ impl Control {
                 .r#ref("broker", broker.clone())
                 .r#ref("message", m.message_id.clone()),
             )?;
+            if *holder != org {
+                // The custodian's trail too: its broker was told.
+                audit::append(
+                    t,
+                    AuditDraft::new(
+                        actor,
+                        request_id,
+                        "authorization.revocation.sent",
+                        "authorization",
+                        row,
+                        Outcome::Succeeded,
+                    )
+                    .org(holder)
+                    .project(&project)
+                    .r#ref("broker", broker.clone())
+                    .r#ref("message", m.message_id.clone())
+                    .r#ref("reason", "lineage"),
+                )?;
+            }
         }
         Ok(brokers.len())
     }

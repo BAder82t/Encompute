@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use encompute_ir::{Code, Error, Result};
 use encompute_verification::canonical::canonical_json;
 use encompute_verification::governance::{is_hex32, ProgramRef, ReleaseClass};
+use encompute_verification::service::{verify_signed, ServiceSigner};
 use encompute_verification::{hex, unhex};
 
 use crate::tagged;
@@ -730,6 +731,308 @@ impl SignedPurposeAcceptance {
         check_label("project", &self.body.project)?;
         check_hex32("purpose ID", &self.body.purpose_id)?;
         verify(PURPOSE_ACCEPTANCE, self, governance_key)
+    }
+}
+
+// --- derived results: the custodian's signed release record -----------------
+
+pub const RELEASE_RECORD_VERSION: u32 = 1;
+const RELEASE_RECORD: &str = "encompute.release-record.v1";
+
+/// A released result recorded as a derived asset, signed by its custodian
+/// (the recipient organization that decrypted it) with its governance key:
+/// which job released which output, a salted commitment to it, its release
+/// class, the exact source versions it came from, the authorizations it
+/// was released under, the onward policy it is held under, and to whom,
+/// under which export key, it may be exported. The custodian's key broker
+/// holds the result's key and exports it only to a recipient this record
+/// names, sealed to the key it names for it: the control plane can deny an
+/// export, never redirect one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseRecord {
+    pub version: u32,
+    /// The custodian: the recipient organization that holds the result.
+    pub party: String,
+    pub project: String,
+    /// Hex `PurposeId`.
+    pub purpose_id: String,
+    pub job_id: String,
+    /// Hex `GovernanceId` of the job's binding.
+    pub governance_id: String,
+    /// The job's output the result is.
+    pub output: String,
+    /// Salted commitment to the released value (hex).
+    pub output_commitment: String,
+    /// Hex `AssetVersionId` of the derived asset.
+    pub derived_version_id: String,
+    pub release_class: ReleaseClass,
+    /// Hex `AssetVersionId`s of the job's sources: the result's parents.
+    pub parents: BTreeSet<String>,
+    /// Hex IDs of the owner authorizations the job ran under.
+    pub authorization_ids: BTreeSet<String>,
+    /// Hex digest of the onward policy the result is held under.
+    pub onward_policy_id: String,
+    /// Who may receive an export: organization → its export key (hex
+    /// X25519). Never wider than every parent authorization's recipients.
+    pub recipients: BTreeMap<String, String>,
+    /// Every other organization owning data the result derives from, every
+    /// hop up: organization → the ID of its governance key
+    /// ([`governance_key_id`]). The custodian's broker releases or exports
+    /// the result's key only with an installed authorization of each,
+    /// verified under that key, which it pins.
+    pub lineage_owners: BTreeMap<String, String>,
+    pub issued_at: u64,
+}
+
+pub type SignedReleaseRecord = Signed<ReleaseRecord>;
+
+impl ReleaseRecord {
+    /// Well formed: version 1, IDs and keys as 32-byte hex, labels
+    /// printable, at least one parent and one authorization.
+    pub fn check(&self) -> Result<()> {
+        if self.version != RELEASE_RECORD_VERSION {
+            return Err(err(format!("release record version {}", self.version)));
+        }
+        check_label("party", &self.party)?;
+        check_label("project", &self.project)?;
+        check_label("job", &self.job_id)?;
+        check_label("output", &self.output)?;
+        check_hex32("purpose ID", &self.purpose_id)?;
+        check_hex32("governance ID", &self.governance_id)?;
+        check_hex32("output commitment", &self.output_commitment)?;
+        check_hex32("derived version ID", &self.derived_version_id)?;
+        check_hex32("onward policy ID", &self.onward_policy_id)?;
+        if self.parents.is_empty() || self.authorization_ids.is_empty() {
+            return Err(err(
+                "a release record names the result's parents and the authorizations it was released under",
+            ));
+        }
+        for p in &self.parents {
+            check_hex32("parent version ID", p)?;
+        }
+        for a in &self.authorization_ids {
+            check_hex32("authorization ID", a)?;
+        }
+        for (r, k) in &self.recipients {
+            check_label("recipient", r)?;
+            check_hex32("recipient export key", k)?;
+        }
+        for (o, k) in &self.lineage_owners {
+            check_label("lineage owner", o)?;
+            check_hex32("lineage owner's governance key ID", k)?;
+        }
+        if self.lineage_owners.contains_key(&self.party) {
+            return Err(err(
+                "the custodian is not among its result's lineage owners",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The record's ID (hex): the tagged hash of its body.
+    pub fn id(&self) -> String {
+        crate::tagged_hex(
+            RELEASE_RECORD,
+            &canonical_json(self).expect("strings, integers and sets only"),
+        )
+    }
+
+    pub fn sign(self, key: &SigningKey) -> Result<SignedReleaseRecord> {
+        sign(RELEASE_RECORD, self, key)
+    }
+}
+
+impl SignedReleaseRecord {
+    /// Checks the body and the signature by `governance_key` (hex): the
+    /// custodian's governance key as the caller records it (a pinned or
+    /// active key), never the document's own alone.
+    pub fn verify(&self, governance_key: &str) -> Result<()> {
+        self.body.check()?;
+        verify(RELEASE_RECORD, self, governance_key)
+    }
+
+    pub fn id(&self) -> String {
+        self.body.id()
+    }
+}
+
+// --- the control plane's statements a custodian's broker relies on ---------
+//
+// A custodian runs its own key broker, so whatever it pins or binds there
+// it could invent. Two facts it cannot invent alone are signed by the
+// control plane, with its service key under domains of their own, and
+// checked by the custodian's broker under the control-plane key pinned
+// there: which governance key a lineage owner has (an attestation from the
+// control plane's record of approved keys), and that a release record is
+// the one the control plane validated against the result's real ancestry
+// (a co-signature made when it registered the derived result).
+
+pub const CONTROL_STATEMENT_VERSION: u32 = 1;
+/// Domain of the control plane's attestation of a governance key.
+pub const GOVERNANCE_KEY_ATTESTATION: &str = "encompute.governance-key-attestation.v1";
+/// Domain of the control plane's co-signature of a derived result's
+/// release record.
+pub const DERIVED_RELEASE_COSIGNATURE: &str = "encompute.derived-release-cosignature.v1";
+
+/// A statement signed by the control plane's service key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlSigned<T> {
+    pub body: T,
+    /// The control plane's service ID.
+    pub issuer: String,
+    /// Its service public key (hex Ed25519).
+    pub issuer_public_key: String,
+    pub signature: String,
+}
+
+impl<T: Serialize> ControlSigned<T> {
+    fn sign_as(domain: &str, body: T, signer: &ServiceSigner) -> Result<Self> {
+        Ok(Self {
+            signature: signer.sign(domain, &body)?,
+            issuer: signer.id().to_owned(),
+            issuer_public_key: signer.public_key_hex(),
+            body,
+        })
+    }
+
+    /// Signed under `domain` by `control_key` (hex): the control-plane key
+    /// the caller pinned, never the statement's own key alone.
+    fn verify_as(&self, domain: &str, control_key: &str) -> Result<()> {
+        if self.issuer_public_key != control_key {
+            return Err(err("not signed by the pinned control-plane key"));
+        }
+        verify_signed(control_key, domain, &self.body, &self.signature)
+            .map_err(|_| err("the control plane's signature is invalid"))
+    }
+}
+
+/// The control plane's attestation of an organization's governance key, from
+/// its own record of approved keys: active (the key the organization signs
+/// with now) or revoked (from `revoked_at` on). A custodian's broker pins a
+/// lineage owner's key only from an active one, replaces it only with a
+/// newer one, and unpins it on a revoked one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernanceKeyAttestation {
+    pub version: u32,
+    pub organization: String,
+    /// [`governance_key_id`] of `public_key`.
+    pub key_id: String,
+    /// Hex Ed25519 public key.
+    pub public_key: String,
+    pub status: GovernanceKeyStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<u64>,
+    /// When the control plane attested it (Unix seconds): of two
+    /// attestations for one organization, the later one wins.
+    pub issued_at: u64,
+}
+
+pub type SignedGovernanceKeyAttestation = ControlSigned<GovernanceKeyAttestation>;
+
+impl GovernanceKeyAttestation {
+    /// The key it attests.
+    pub fn key(&self) -> GovernanceKey {
+        GovernanceKey {
+            organization: self.organization.clone(),
+            public_key: self.public_key.clone(),
+            status: self.status,
+            revoked_at: self.revoked_at,
+        }
+    }
+
+    /// Version 1, a well-formed key whose ID is `key_id`.
+    pub fn check(&self) -> Result<()> {
+        if self.version != CONTROL_STATEMENT_VERSION {
+            return Err(err(format!(
+                "governance key attestation version {}",
+                self.version
+            )));
+        }
+        self.key().check()?;
+        if self.key_id != governance_key_id(&self.public_key) {
+            return Err(err("the attested key ID is not the key's"));
+        }
+        Ok(())
+    }
+
+    pub fn sign(self, signer: &ServiceSigner) -> Result<SignedGovernanceKeyAttestation> {
+        self.check()?;
+        ControlSigned::sign_as(GOVERNANCE_KEY_ATTESTATION, self, signer)
+    }
+}
+
+impl SignedGovernanceKeyAttestation {
+    /// Well formed and signed by `control_key` (hex).
+    pub fn verify(&self, control_key: &str) -> Result<()> {
+        self.body.check()?;
+        self.verify_as(GOVERNANCE_KEY_ATTESTATION, control_key)
+    }
+}
+
+/// The control plane's co-signature of a derived result's release record:
+/// made when it registered the result, after checking the record against
+/// the result's real ancestry (its parents, the authorizations it was
+/// released under and every lineage owner, under its active governance
+/// key). The custodian's broker binds the result's key only to a record
+/// the control plane co-signed, so a custodian cannot bind a record that
+/// leaves a lineage owner out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DerivedReleaseCosignature {
+    pub version: u32,
+    /// The custodian.
+    pub organization: String,
+    /// The derived asset's ID at the control plane.
+    pub asset_id: String,
+    /// The custodian's key broker and the key's reference there.
+    pub broker: String,
+    pub key_ref: String,
+    /// Hex `AssetVersionId` of the derived result.
+    pub derived_version_id: String,
+    /// [`ReleaseRecord::id`] of the record the control plane validated.
+    pub release_record_id: String,
+    /// The lineage owners it validated (as the record names them).
+    pub lineage_owners: BTreeMap<String, String>,
+    pub issued_at: u64,
+}
+
+pub type SignedDerivedReleaseCosignature = ControlSigned<DerivedReleaseCosignature>;
+
+impl DerivedReleaseCosignature {
+    pub fn check(&self) -> Result<()> {
+        if self.version != CONTROL_STATEMENT_VERSION {
+            return Err(err(format!(
+                "derived release co-signature version {}",
+                self.version
+            )));
+        }
+        check_label("organization", &self.organization)?;
+        check_label("asset", &self.asset_id)?;
+        check_label("broker", &self.broker)?;
+        check_label("key reference", &self.key_ref)?;
+        check_hex32("derived version ID", &self.derived_version_id)?;
+        check_hex32("release record ID", &self.release_record_id)?;
+        for (o, k) in &self.lineage_owners {
+            check_label("lineage owner", o)?;
+            check_hex32("lineage owner's governance key ID", k)?;
+        }
+        Ok(())
+    }
+
+    pub fn sign(self, signer: &ServiceSigner) -> Result<SignedDerivedReleaseCosignature> {
+        self.check()?;
+        ControlSigned::sign_as(DERIVED_RELEASE_COSIGNATURE, self, signer)
+    }
+}
+
+impl SignedDerivedReleaseCosignature {
+    /// Well formed and signed by `control_key` (hex).
+    pub fn verify(&self, control_key: &str) -> Result<()> {
+        self.body.check()?;
+        self.verify_as(DERIVED_RELEASE_COSIGNATURE, control_key)
     }
 }
 

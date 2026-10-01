@@ -52,7 +52,7 @@ pub use generation::{
     DevelopmentFileMark, GenerationMark, Mark, MarkRead, OpenBaoKvMark, MARK_UNAVAILABLE,
 };
 pub use governed::{
-    GovernanceConfig, GovernedGrant, GovernedReleaseRequest, PendingRelease,
+    GovernanceConfig, GovernedExportRequest, GovernedGrant, GovernedReleaseRequest, PendingRelease,
     MAX_REVOKED_AUTHORIZATIONS,
 };
 pub use root::{
@@ -165,10 +165,34 @@ pub struct ProtectedSecret {
     /// plain release path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_version_id: Option<String>,
+    /// The bound version is a derived result this broker's organization
+    /// holds as custodian ([`KeyBroker::bind_derived_version`], set once):
+    /// its key is exported, under the custodian's signed release record and
+    /// an export ticket, only to a recipient the record names. Skipped when
+    /// false, so existing state is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub derived: bool,
+    /// For a derived result: every other organization owning data it
+    /// derives from, and its governance key ID, as the custodian's release
+    /// record names them. Each must authorize every release and export of
+    /// this key. Skipped when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lineage_owners: BTreeMap<String, String>,
     /// The asset expired (its owner's retention ended): never released
     /// again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub expired: bool,
+}
+
+/// A lineage owner's governance key pinned at a custodian's broker, from
+/// the control plane's attestation of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineageKey {
+    pub key: GovernanceKey,
+    /// When the control plane attested it: only a later attestation
+    /// replaces it.
+    pub attested_at: u64,
 }
 
 /// How often an owner authorization has been used at this broker.
@@ -208,6 +232,16 @@ pub struct BrokerState {
     /// and only through a governed release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governance_key: Option<GovernanceKey>,
+    /// Governance keys of other organizations whose data this
+    /// organization's derived results come from (lineage owners), each
+    /// pinned from the control plane's attestation of it: only
+    /// authorizations they signed are installed for those organizations.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lineage_keys: BTreeMap<String, LineageKey>,
+    /// Lineage owners' governance keys the control plane attested revoked:
+    /// key ID → revocation time. Never pinned again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub revoked_lineage_keys: BTreeMap<String, u64>,
     /// Installed owner authorizations, by ID, each verified under the
     /// pinned governance key when installed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -465,6 +499,8 @@ impl KeyBroker {
                 organization: None,
                 grant_signing_key: None,
                 governance_key: None,
+                lineage_keys: BTreeMap::new(),
+                revoked_lineage_keys: BTreeMap::new(),
                 authorizations: BTreeMap::new(),
                 revoked_authorizations: BTreeMap::new(),
                 counters: BTreeMap::new(),
@@ -824,6 +860,8 @@ impl KeyBroker {
                 .into(),
                 organization: self.state.organization.clone(),
                 asset_version_id: None,
+                derived: false,
+                lineage_owners: BTreeMap::new(),
                 expired: false,
             },
         );

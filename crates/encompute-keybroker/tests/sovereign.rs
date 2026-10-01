@@ -994,3 +994,828 @@ fn broker_enforces_probing_limits() {
     let mut w = world_with(two, a);
     w.release_fresh().unwrap();
 }
+
+// --- exports of derived results (the custodian's broker) --------------------------
+
+const RESULT: &str = "eligibility-result";
+/// Another organization whose data the result derives from.
+const LINEAGE: &str = "statistics-agency";
+
+fn lineage_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[23; 32])
+}
+
+fn lineage_pk() -> String {
+    encompute_verification::hex(&lineage_key().verifying_key().to_bytes())
+}
+
+/// The control plane's attestation of `org`'s governance key `public_key`
+/// (active, or revoked at `revoked_at`), issued at `issued_at`, signed by
+/// `signer`.
+fn attestation_by(
+    signer: &encompute_verification::ServiceSigner,
+    org: &str,
+    public_key: &str,
+    revoked_at: Option<u64>,
+    issued_at: u64,
+) -> encompute_trust::authz::SignedGovernanceKeyAttestation {
+    encompute_trust::authz::GovernanceKeyAttestation {
+        version: 1,
+        organization: org.into(),
+        key_id: encompute_trust::authz::governance_key_id(public_key),
+        public_key: public_key.into(),
+        status: if revoked_at.is_some() {
+            encompute_trust::authz::GovernanceKeyStatus::Revoked
+        } else {
+            encompute_trust::authz::GovernanceKeyStatus::Active
+        },
+        revoked_at,
+        issued_at,
+    }
+    .sign(signer)
+    .unwrap()
+}
+
+/// The control plane's attestation of `LINEAGE`'s active key `public_key`.
+fn attested(
+    public_key: &str,
+    issued_at: u64,
+) -> encompute_trust::authz::SignedGovernanceKeyAttestation {
+    attestation_by(&control(), LINEAGE, public_key, None, issued_at)
+}
+
+/// The control plane's co-signature of `record`, bound as `key_ref` at the
+/// world's broker.
+fn cosigned(
+    record: &encompute_trust::authz::SignedReleaseRecord,
+    key_ref: &str,
+) -> encompute_trust::authz::SignedDerivedReleaseCosignature {
+    cosigned_by(&control(), record, key_ref)
+}
+
+fn cosigned_by(
+    signer: &encompute_verification::ServiceSigner,
+    record: &encompute_trust::authz::SignedReleaseRecord,
+    key_ref: &str,
+) -> encompute_trust::authz::SignedDerivedReleaseCosignature {
+    encompute_trust::authz::DerivedReleaseCosignature {
+        version: 1,
+        organization: record.body.party.clone(),
+        asset_id: "ast_derived".into(),
+        broker: BROKER.into(),
+        key_ref: key_ref.into(),
+        derived_version_id: record.body.derived_version_id.clone(),
+        release_record_id: record.id(),
+        lineage_owners: record.body.lineage_owners.clone(),
+        issued_at: T0,
+    }
+    .sign(signer)
+    .unwrap()
+}
+
+/// The lineage owner's authorization of the parent version (the world's
+/// source), signed with its own key.
+fn lineage_authorization(
+    edit: impl FnOnce(&mut encompute_trust::authz::AuthorizationV2),
+) -> encompute_trust::authz::SignedAuthorizationV2 {
+    let mut a = authorization();
+    a.party = LINEAGE.into();
+    a.nonce = "ef".repeat(16);
+    edit(&mut a);
+    a.sign(&lineage_key()).unwrap()
+}
+const RESULT_KEY: &[u8] = b"derived result key, 32 bytes...";
+const RECIPIENT: &str = "benefits-agency";
+
+fn derived_version() -> String {
+    h('e')
+}
+
+/// The custodian's broker (this world's organization) holding a derived
+/// result's key, the custodian's signed release record of it naming one
+/// recipient under its export key, and that recipient's key pair.
+fn export_world() -> (
+    World,
+    encompute_trust::authz::SignedReleaseRecord,
+    encompute_attestation::ExportRecipient,
+) {
+    let mut w = world();
+    w.broker
+        .add_secret(
+            RESULT,
+            Some(encompute_keybroker::KeyMaterial::from_bytes(RESULT_KEY).unwrap()),
+            release_policy(&w.spec),
+        )
+        .unwrap();
+    let recipient = encompute_attestation::ExportRecipient::generate();
+    let record = release_record(&w, &recipient.public_key_hex())
+        .sign(&governance_key())
+        .unwrap();
+    w.broker
+        .bind_derived_version(RESULT, &record, &cosigned(&record, RESULT))
+        .unwrap();
+    w.broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0))
+        .unwrap();
+    w.broker
+        .install_authorization(&lineage_authorization(|_| {}))
+        .unwrap();
+    (w, record, recipient)
+}
+
+fn release_record(w: &World, export_key: &str) -> encompute_trust::authz::ReleaseRecord {
+    encompute_trust::authz::ReleaseRecord {
+        version: 1,
+        party: ORG.into(),
+        project: PROJECT.into(),
+        purpose_id: h('1'),
+        job_id: "job_1".into(),
+        governance_id: w.binding.id().hex(),
+        output: "eligible".into(),
+        output_commitment: h('f'),
+        derived_version_id: derived_version(),
+        release_class: ReleaseClass::BooleanOnly,
+        parents: BTreeSet::from([asset_version()]),
+        authorization_ids: BTreeSet::from([lineage_authorization(|_| {}).id()]),
+        onward_policy_id: h('d'),
+        recipients: std::collections::BTreeMap::from([(RECIPIENT.into(), export_key.into())]),
+        lineage_owners: std::collections::BTreeMap::from([(
+            LINEAGE.into(),
+            encompute_trust::authz::governance_key_id(&lineage_pk()),
+        )]),
+        issued_at: T0,
+    }
+}
+
+/// An export ticket of the result for `recipient` under `key`, unsigned.
+fn export_ticket_body(
+    w: &World,
+    recipient: &str,
+    key: &str,
+) -> encompute_verification::ticket::ReleaseTicket {
+    let mut t = w.ticket_body();
+    t.authorization_ids = BTreeSet::from([lineage_authorization(|_| {}).id()]);
+    t.kind = TicketKind::Export;
+    t.asset_version_id = derived_version();
+    t.recipient = Some(recipient.into());
+    t.workload_or_recipient = key.into();
+    t
+}
+
+fn export_request(
+    ticket: encompute_verification::ticket::ReleaseTicket,
+    record: &encompute_trust::authz::SignedReleaseRecord,
+) -> encompute_keybroker::GovernedExportRequest {
+    encompute_keybroker::GovernedExportRequest {
+        asset_id: RESULT.into(),
+        ticket,
+        release_record: record.clone(),
+    }
+}
+
+fn export(
+    w: &mut World,
+    req: &encompute_keybroker::GovernedExportRequest,
+) -> encompute_ir::Result<(
+    encompute_attestation::EncryptedKeyGrant,
+    encompute_attestation::KeyReleaseReceipt,
+)> {
+    let p = w.broker.prepare_governed_export(req)?;
+    w.broker.finish_release(p)
+}
+
+/// The custodian's broker exports a derived result's key only to a
+/// recipient its signed release record names, sealed to the export key the
+/// record gives it: another recipient, another key, a ticket of another
+/// kind (decryption included), a source key, or a record the pinned
+/// governance key did not sign releases nothing, and none of those spends
+/// the honest ticket.
+#[test]
+fn broker_export_only_for_named_recipient() {
+    let (mut w, record, recipient) = export_world();
+    let key = recipient.public_key_hex();
+    let honest = export_ticket_body(&w, RECIPIENT, &key)
+        .sign(&control())
+        .unwrap();
+    // A recipient the record does not name.
+    let other = export_ticket_body(&w, "other-co", &key)
+        .sign(&control())
+        .unwrap();
+    assert_eq!(
+        code(export(&mut w, &export_request(other, &record))),
+        Code::GovernanceReleaseClass
+    );
+    // The named recipient, under a key the record does not give it.
+    let intruder = encompute_attestation::ExportRecipient::generate();
+    let redirected = export_ticket_body(&w, RECIPIENT, &intruder.public_key_hex())
+        .sign(&control())
+        .unwrap();
+    assert_eq!(
+        code(export(&mut w, &export_request(redirected, &record))),
+        Code::GovernanceReleaseTicket
+    );
+    // A key-release or decryption ticket is not an export ticket.
+    for kind in [TicketKind::KeyRelease, TicketKind::Decrypt] {
+        let mut t = export_ticket_body(&w, RECIPIENT, &key);
+        t.kind = kind;
+        assert_eq!(
+            code(export(
+                &mut w,
+                &export_request(t.sign(&control()).unwrap(), &record)
+            )),
+            Code::GovernanceReleaseTicket,
+            "{kind:?}"
+        );
+    }
+    // Not naming exactly the authorizations the result was released under.
+    let mut t = export_ticket_body(&w, RECIPIENT, &key);
+    t.authorization_ids.insert(h('5'));
+    assert_eq!(
+        code(export(
+            &mut w,
+            &export_request(t.sign(&control()).unwrap(), &record)
+        )),
+        Code::GovernanceReleaseTicket
+    );
+    // An unsigned (forged) ticket.
+    let mut forged = honest.clone();
+    forged.signature = "00".repeat(64);
+    assert_eq!(
+        code(export(&mut w, &export_request(forged, &record))),
+        Code::GovernanceReleaseTicket
+    );
+    // A record not signed by the pinned governance key.
+    let rogue = release_record(&w, &key)
+        .sign(&rogue_governance_key())
+        .unwrap();
+    assert_eq!(
+        code(export(&mut w, &export_request(honest.clone(), &rogue))),
+        Code::GovernanceKeyRevoked
+    );
+    // A source key is never exported.
+    let mut src = export_request(honest.clone(), &record);
+    src.asset_id = ASSET.into();
+    assert_eq!(
+        code(export(&mut w, &src)),
+        Code::GovernanceAssetVersionMismatch
+    );
+    // The honest export: sealed to the recipient's key, opened by it only.
+    let (grant, receipt) = export(&mut w, &export_request(honest.clone(), &record)).unwrap();
+    assert_eq!(recipient.open(&grant).unwrap().as_slice(), RESULT_KEY);
+    assert!(intruder.open(&grant).is_err());
+    assert_eq!(grant.header.version, GRANT_VERSION_GOVERNED);
+    assert_eq!(
+        grant
+            .header
+            .governance
+            .as_ref()
+            .unwrap()
+            .ticket_id
+            .as_deref(),
+        Some(honest.ticket_id.as_str())
+    );
+    receipt.verify(&w.broker.grant_public_key()).unwrap();
+    assert_eq!(receipt.asset_version_id, derived_version());
+    assert_eq!(receipt.authorization_id, record.id());
+    assert_eq!(receipt.grant_digest, grant.digest().unwrap());
+    // A derived result's binding is fixed: it is never re-bound as a
+    // source version, nor a source as a derived result.
+    assert_eq!(
+        code(w.broker.bind_version(RESULT, &derived_version())),
+        Code::GovernanceAssetVersionMismatch
+    );
+    assert_eq!(
+        code(
+            w.broker
+                .bind_derived_version(ASSET, &record, &cosigned(&record, ASSET))
+        ),
+        Code::GovernanceAssetVersionMismatch
+    );
+}
+
+/// An export ticket is single-use at the custodian's broker, across a
+/// restart (the seen-ticket set is part of the authenticated state).
+#[test]
+fn replayed_export_ticket_refused_2712() {
+    let (mut w, record, recipient) = export_world();
+    let ticket = export_ticket_body(&w, RECIPIENT, &recipient.public_key_hex())
+        .sign(&control())
+        .unwrap();
+    export(&mut w, &export_request(ticket.clone(), &record)).unwrap();
+    assert_eq!(
+        code(export(&mut w, &export_request(ticket.clone(), &record))),
+        Code::GovernanceReleaseTicket
+    );
+    let dir = tmp("export-replay");
+    let path = dir.join("broker.json");
+    w.broker.save(&path).unwrap();
+    let c = w.clock.clone();
+    w.broker = KeyBroker::load(&path, verifier(), Box::new(DevelopmentFileStore))
+        .unwrap()
+        .with_clock(move || c.load(std::sync::atomic::Ordering::SeqCst))
+        .with_governance(governance())
+        .unwrap();
+    assert_eq!(
+        code(export(&mut w, &export_request(ticket, &record))),
+        Code::GovernanceReleaseTicket
+    );
+    // A fresh ticket exports.
+    let fresh = export_ticket_body(&w, RECIPIENT, &recipient.public_key_hex())
+        .sign(&control())
+        .unwrap();
+    export(&mut w, &export_request(fresh, &record)).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// --- a derived result's key at its custodian's broker: every lineage owner --------
+
+/// The custodian's broker (this world's organization) holding the key of a
+/// derived result (bound to the world's version, so the world's execution
+/// reads it), whose record names `LINEAGE` as a lineage owner; its own
+/// authorization installed. `pin`: `LINEAGE`'s key pinned; `install`: its
+/// authorization (edited by `edit`) installed.
+fn derived_world(
+    pin: bool,
+    install: bool,
+    edit: impl FnOnce(&mut encompute_trust::authz::AuthorizationV2),
+) -> (World, String) {
+    let clock = Arc::new(AtomicU64::new(T0));
+    let spec = spec_for(&binding());
+    let mut b = bare_broker(&clock, &spec)
+        .with_governance(governance())
+        .unwrap();
+    b.pin_governance_key(&governance_public_key()).unwrap();
+    let mut w = World {
+        broker: b,
+        clock,
+        evaluator: encompute_verification::EvaluatorSigner::from_seed(&[9; 32]),
+        binding: binding(),
+        spec,
+        authorization: signed(authorization()),
+    };
+    let mut record = release_record(&w, &h('7'));
+    record.derived_version_id = asset_version();
+    let record = record.sign(&governance_key()).unwrap();
+    w.broker
+        .bind_derived_version(ASSET, &record, &cosigned(&record, ASSET))
+        .unwrap();
+    w.broker.install_authorization(&w.authorization).unwrap();
+    if pin {
+        w.broker
+            .pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0))
+            .unwrap();
+    }
+    let lineage = lineage_authorization(edit);
+    if install {
+        w.broker.install_authorization(&lineage).unwrap();
+    }
+    (w, lineage.id())
+}
+
+/// A ticket naming the custodian's and the lineage owner's authorization.
+fn derived_ticket(w: &World, lineage: &str) -> encompute_verification::ticket::ReleaseTicket {
+    let mut t = w.ticket_body();
+    t.authorization_ids = BTreeSet::from([w.authorization_id(), lineage.to_owned()]);
+    t.sign(&control()).unwrap()
+}
+
+fn release_derived(
+    w: &mut World,
+    lineage: &str,
+) -> encompute_ir::Result<(
+    encompute_attestation::EncryptedKeyGrant,
+    encompute_attestation::KeyReleaseReceipt,
+)> {
+    let s = w.session();
+    let handle = w.attest(&s);
+    let req = w.request(&handle, Some(derived_ticket(w, lineage)));
+    w.release(&req)
+}
+
+/// Without an installed authorization of the lineage owner, or with a
+/// ticket that does not name it, the custodian's own authorization
+/// releases nothing (ENC2701).
+#[test]
+fn custodian_broker_refuses_without_lineage_owner_authorization() {
+    let (mut w, lineage) = derived_world(true, false, |_| {});
+    assert_eq!(
+        code(release_derived(&mut w, &lineage)),
+        Code::GovernanceAuthorizationMissing
+    );
+    w.broker
+        .install_authorization(&lineage_authorization(|_| {}))
+        .unwrap();
+    // Installed, but the ticket names only the custodian's.
+    let s = w.session();
+    let handle = w.attest(&s);
+    let req = w.request(&handle, Some(w.ticket()));
+    assert_eq!(code(w.release(&req)), Code::GovernanceAuthorizationMissing);
+    // A lineage authorization that does not cover the execution (another
+    // program) does not count either.
+    let (mut w2, other) = derived_world(true, true, |a| {
+        a.program = ProgramRef::Program { program_id: h('9') }
+    });
+    assert_eq!(
+        code(release_derived(&mut w2, &other)),
+        Code::GovernanceProgramNotAuthorized
+    );
+    // Named and installed: released.
+    release_derived(&mut w, &lineage).unwrap();
+}
+
+/// A lineage owner whose governance key the custodian's owner has not
+/// pinned (or pinned another key for) gets nothing installed, and nothing
+/// is released (ENC2708).
+#[test]
+fn custodian_broker_refuses_unpinned_lineage_owner_key() {
+    let (mut w, lineage) = derived_world(false, false, |_| {});
+    assert_eq!(
+        code(
+            w.broker
+                .install_authorization(&lineage_authorization(|_| {}))
+        ),
+        Code::GovernanceAuthorizationMissing
+    );
+    assert_eq!(
+        code(release_derived(&mut w, &lineage)),
+        Code::GovernanceKeyRevoked
+    );
+    // Another key pinned for the lineage owner than the record names.
+    let other = encompute_verification::hex(
+        &ed25519_dalek::SigningKey::from_bytes(&[24; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+    w.broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&other, T0))
+        .unwrap();
+    assert_eq!(
+        code(release_derived(&mut w, &lineage)),
+        Code::GovernanceKeyRevoked
+    );
+    // A pin is never replaced by an attestation that is not later.
+    assert_eq!(
+        code(
+            w.broker
+                .pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0))
+        ),
+        Code::GovernanceKeyRevoked
+    );
+}
+
+/// With the custodian's and every lineage owner's authorization installed
+/// and named, the key is released, counted against both.
+#[test]
+fn custodian_broker_releases_with_all_lineage_authorizations() {
+    let (mut w, lineage) = derived_world(true, true, |_| {});
+    let (grant, receipt) = release_derived(&mut w, &lineage).unwrap();
+    receipt.verify(&w.broker.grant_public_key()).unwrap();
+    assert_eq!(grant.header.version, GRANT_VERSION_GOVERNED);
+    let counters = &w.broker.state().counters;
+    assert_eq!(counters[&w.authorization_id()].releases, 1);
+    assert_eq!(counters[&lineage].releases, 1);
+}
+
+/// The lineage owner's limits hold at the custodian's broker: each release
+/// counts against its authorization, persisted, and once its
+/// `max_releases` is used up nothing more is released (ENC2714), whatever
+/// the custodian's own allows.
+#[test]
+fn lineage_counters_at_custodian_broker() {
+    let (mut w, lineage) = derived_world(true, true, |a| a.limits.max_releases = Some(1));
+    release_derived(&mut w, &lineage).unwrap();
+    assert_eq!(
+        code(release_derived(&mut w, &lineage)),
+        Code::GovernanceAuthorizationLimit
+    );
+    let dir = tmp("lineage-counters");
+    let path = dir.join("broker.json");
+    w.broker.save(&path).unwrap();
+    let c = w.clock.clone();
+    w.broker = KeyBroker::load(&path, verifier(), Box::new(DevelopmentFileStore))
+        .unwrap()
+        .with_clock(move || c.load(std::sync::atomic::Ordering::SeqCst))
+        .with_governance(governance())
+        .unwrap();
+    assert_eq!(w.broker.state().counters[&lineage].releases, 1);
+    assert_eq!(
+        code(release_derived(&mut w, &lineage)),
+        Code::GovernanceAuthorizationLimit
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// --- what the custodian's broker takes from the control plane -------------------
+
+/// A lineage owner's governance key is pinned at the custodian's broker only
+/// from the control plane's attestation of it, signed under the pinned
+/// control-plane key: a broker without a control-plane key pins nothing,
+/// and a pin is never made from the bare key.
+#[test]
+fn lineage_key_pin_requires_control_plane_attestation() {
+    let (mut w, lineage) = derived_world(false, false, |_| {});
+    // Without a control-plane key configured, nothing is attested.
+    let clock = Arc::new(AtomicU64::new(T0));
+    let mut bare = bare_broker(&clock, &w.spec);
+    bare.pin_governance_key(&governance_public_key()).unwrap();
+    assert_eq!(
+        code(bare.pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0))),
+        Code::GovernanceKeyRevoked
+    );
+    assert!(bare.state().lineage_keys.is_empty());
+    // Attested by the pinned control plane: pinned, and the lineage owner's
+    // authorization is installed and released under.
+    assert!(w
+        .broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0))
+        .unwrap());
+    let pinned = &w.broker.state().lineage_keys[LINEAGE];
+    assert_eq!(pinned.key.public_key, lineage_pk());
+    assert_eq!(pinned.attested_at, T0);
+    w.broker
+        .install_authorization(&lineage_authorization(|_| {}))
+        .unwrap();
+    release_derived(&mut w, &lineage).unwrap();
+    // The same attestation again changes nothing.
+    w.broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0))
+        .unwrap();
+    // Its own organization's key is never a lineage key.
+    let own = attestation_by(&control(), ORG, &governance_public_key(), None, T0);
+    assert_eq!(
+        code(w.broker.pin_lineage_governance_key(ORG, &own)),
+        Code::KeyRelease
+    );
+}
+
+/// An attestation not signed by the pinned control-plane key (another
+/// service key, a tampered body, a stripped signature, a key ID that is not
+/// the key's) pins nothing (ENC2708).
+#[test]
+fn forged_attestation_refused() {
+    let (mut w, _) = derived_world(false, false, |_| {});
+    let rogue =
+        encompute_verification::ServiceSigner::from_seed("control-plane", &[77; 32]).unwrap();
+    let by_rogue = attestation_by(&rogue, LINEAGE, &lineage_pk(), None, T0);
+    // Claiming the pinned control plane's key does not help either.
+    let mut claimed = by_rogue.clone();
+    claimed.issuer_public_key = control().public_key_hex();
+    let other = encompute_verification::hex(
+        &ed25519_dalek::SigningKey::from_bytes(&[24; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+    let mut tampered = attested(&lineage_pk(), T0);
+    tampered.body.public_key = other.clone();
+    tampered.body.key_id = encompute_trust::authz::governance_key_id(&other);
+    let mut stripped = attested(&lineage_pk(), T0);
+    stripped.signature = "00".repeat(64);
+    let mut wrong_id = attested(&lineage_pk(), T0);
+    wrong_id.body.key_id = h('8');
+    for (what, a) in [
+        ("another signer", by_rogue),
+        ("claimed issuer", claimed),
+        ("tampered", tampered),
+        ("stripped", stripped),
+        ("wrong key ID", wrong_id),
+    ] {
+        assert_eq!(
+            code(w.broker.pin_lineage_governance_key(LINEAGE, &a)),
+            Code::GovernanceKeyRevoked,
+            "{what}"
+        );
+    }
+    assert!(w.broker.state().lineage_keys.is_empty());
+}
+
+/// An attestation of another organization's key is not one of the lineage
+/// owner's (ENC2708): a custodian cannot pin a key the control plane
+/// attested for someone else under the lineage owner's name.
+#[test]
+fn attestation_for_other_org_refused() {
+    let (mut w, _) = derived_world(false, false, |_| {});
+    let elsewhere = attestation_by(&control(), "other-agency", &lineage_pk(), None, T0);
+    assert_eq!(
+        code(w.broker.pin_lineage_governance_key(LINEAGE, &elsewhere)),
+        Code::GovernanceKeyRevoked
+    );
+    assert!(w.broker.state().lineage_keys.is_empty());
+}
+
+/// A later attestation of another key for the lineage owner (a rotation)
+/// replaces the pin, and survives a restart; an earlier one never rolls it
+/// back. Authorizations signed by the old key are no longer used, and a
+/// result whose record names the old key fails closed (ENC2708).
+#[test]
+fn rotated_lineage_key_replaces_pin() {
+    let (mut w, lineage) = derived_world(true, true, |_| {});
+    release_derived(&mut w, &lineage).unwrap();
+    let rotated = ed25519_dalek::SigningKey::from_bytes(&[25; 32]);
+    let rotated_pk = encompute_verification::hex(&rotated.verifying_key().to_bytes());
+    assert!(w
+        .broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&rotated_pk, T0 + 10))
+        .unwrap());
+    assert_eq!(
+        w.broker.state().lineage_keys[LINEAGE].key.public_key,
+        rotated_pk
+    );
+    // The old key's attestation, earlier, does not roll it back.
+    assert_eq!(
+        code(
+            w.broker
+                .pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0 + 5))
+        ),
+        Code::GovernanceKeyRevoked
+    );
+    // The result's record names the old key: nothing is released.
+    assert_eq!(
+        code(release_derived(&mut w, &lineage)),
+        Code::GovernanceKeyRevoked
+    );
+    // The pin is part of the persisted state.
+    let dir = tmp("lineage-rotation");
+    let path = dir.join("broker.json");
+    w.broker.save(&path).unwrap();
+    let b = KeyBroker::load(&path, verifier(), Box::new(DevelopmentFileStore))
+        .unwrap()
+        .with_governance(governance())
+        .unwrap();
+    assert_eq!(b.state().lineage_keys[LINEAGE].key.public_key, rotated_pk);
+    assert_eq!(b.state().lineage_keys[LINEAGE].attested_at, T0 + 10);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The control plane's attestation that the lineage owner's key was
+/// revoked unpins it: nothing it signed is installed or released under
+/// any more, and it is never pinned again, whatever later active
+/// attestation of it is presented.
+#[test]
+fn revoked_lineage_key_unpins() {
+    let (mut w, lineage) = derived_world(true, true, |_| {});
+    release_derived(&mut w, &lineage).unwrap();
+    let revoked = attestation_by(&control(), LINEAGE, &lineage_pk(), Some(T0 + 1), T0 + 1);
+    assert!(!w
+        .broker
+        .pin_lineage_governance_key(LINEAGE, &revoked)
+        .unwrap());
+    assert!(!w.broker.state().lineage_keys.contains_key(LINEAGE));
+    assert!(w
+        .broker
+        .state()
+        .revoked_lineage_keys
+        .contains_key(&encompute_trust::authz::governance_key_id(&lineage_pk())));
+    assert_eq!(
+        code(release_derived(&mut w, &lineage)),
+        Code::GovernanceKeyRevoked
+    );
+    let mut fresh = lineage_authorization(|_| {}).body;
+    fresh.nonce = "aa".repeat(16);
+    assert_eq!(
+        code(
+            w.broker
+                .install_authorization(&fresh.sign(&lineage_key()).unwrap())
+        ),
+        Code::GovernanceAuthorizationMissing
+    );
+    assert_eq!(
+        code(
+            w.broker
+                .pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0 + 100))
+        ),
+        Code::GovernanceKeyRevoked
+    );
+    // A forged revocation is refused like any forged attestation.
+    let rogue =
+        encompute_verification::ServiceSigner::from_seed("control-plane", &[77; 32]).unwrap();
+    let (mut w2, _) = derived_world(true, true, |_| {});
+    assert_eq!(
+        code(w2.broker.pin_lineage_governance_key(
+            LINEAGE,
+            &attestation_by(&rogue, LINEAGE, &lineage_pk(), Some(T0), T0)
+        )),
+        Code::GovernanceKeyRevoked
+    );
+    assert!(w2.broker.state().lineage_keys.contains_key(LINEAGE));
+}
+
+/// A derived result's key is bound only with the control plane's
+/// co-signature of exactly the custodian's record, for this broker and
+/// key, under the pinned control-plane key (ENC2704): none configured, a
+/// forged one, or one of another record, key or broker binds nothing.
+#[test]
+fn bind_derived_version_requires_control_plane_cosignature() {
+    let (w, record, _) = export_world();
+    let fresh = |w: &World| {
+        let clock = Arc::new(AtomicU64::new(T0));
+        let mut b = bare_broker(&clock, &w.spec)
+            .with_governance(governance())
+            .unwrap();
+        b.pin_governance_key(&governance_public_key()).unwrap();
+        b.add_secret(
+            RESULT,
+            Some(encompute_keybroker::KeyMaterial::from_bytes(RESULT_KEY).unwrap()),
+            release_policy(&w.spec),
+        )
+        .unwrap();
+        b
+    };
+    // No control-plane key configured.
+    let clock = Arc::new(AtomicU64::new(T0));
+    let mut bare = bare_broker(&clock, &w.spec);
+    bare.pin_governance_key(&governance_public_key()).unwrap();
+    bare.add_secret(
+        RESULT,
+        Some(encompute_keybroker::KeyMaterial::from_bytes(RESULT_KEY).unwrap()),
+        release_policy(&w.spec),
+    )
+    .unwrap();
+    assert_eq!(
+        code(bare.bind_derived_version(RESULT, &record, &cosigned(&record, RESULT))),
+        Code::GovernanceAssetVersionMismatch
+    );
+    let mut b = fresh(&w);
+    let rogue =
+        encompute_verification::ServiceSigner::from_seed("control-plane", &[77; 32]).unwrap();
+    let mut stripped = cosigned(&record, RESULT);
+    stripped.signature = "00".repeat(64);
+    let mut other_broker = cosigned(&record, RESULT).body;
+    other_broker.broker = "another-broker".into();
+    let mut other_record = release_record(&w, &h('7'));
+    other_record.output = "another-output".into();
+    let other_record = other_record.sign(&governance_key()).unwrap();
+    for (what, c) in [
+        ("another signer", cosigned_by(&rogue, &record, RESULT)),
+        ("stripped", stripped),
+        ("another key", cosigned(&record, ASSET)),
+        ("another broker", other_broker.sign(&control()).unwrap()),
+        ("another record", cosigned(&other_record, RESULT)),
+    ] {
+        assert_eq!(
+            code(b.bind_derived_version(RESULT, &record, &c)),
+            Code::GovernanceAssetVersionMismatch,
+            "{what}"
+        );
+        assert!(
+            b.state().secrets[RESULT].asset_version_id.is_none(),
+            "{what}"
+        );
+    }
+    // Co-signed: bound to the result and its lineage owners.
+    b.bind_derived_version(RESULT, &record, &cosigned(&record, RESULT))
+        .unwrap();
+    let s = &b.state().secrets[RESULT];
+    assert!(s.derived);
+    assert_eq!(s.lineage_owners, record.body.lineage_owners);
+}
+
+/// A custodian's record that leaves a lineage owner out is never bound:
+/// the control plane co-signed the record it validated against the
+/// result's real ancestry, which names every lineage owner, and the
+/// custodian cannot co-sign its own (ENC2704). Without the binding the
+/// key releases and exports nothing.
+#[test]
+fn bind_with_record_omitting_owner_refused() {
+    let (w, record, recipient) = export_world();
+    let clock = Arc::new(AtomicU64::new(T0));
+    let mut b = bare_broker(&clock, &w.spec)
+        .with_governance(governance())
+        .unwrap();
+    b.pin_governance_key(&governance_public_key()).unwrap();
+    b.add_secret(
+        RESULT,
+        Some(encompute_keybroker::KeyMaterial::from_bytes(RESULT_KEY).unwrap()),
+        release_policy(&w.spec),
+    )
+    .unwrap();
+    // The custodian's own record without the lineage owner, signed with
+    // its governance key.
+    let mut omitting = release_record(&w, &recipient.public_key_hex());
+    omitting.lineage_owners.clear();
+    let omitting = omitting.sign(&governance_key()).unwrap();
+    // The control plane co-signed the honest record, not this one.
+    assert_eq!(
+        code(b.bind_derived_version(RESULT, &omitting, &cosigned(&record, RESULT))),
+        Code::GovernanceAssetVersionMismatch
+    );
+    // A co-signature whose lineage owners were edited does not verify.
+    let mut edited = cosigned(&record, RESULT);
+    edited.body.lineage_owners.clear();
+    edited.body.release_record_id = omitting.id();
+    assert_eq!(
+        code(b.bind_derived_version(RESULT, &omitting, &edited)),
+        Code::GovernanceAssetVersionMismatch
+    );
+    // A co-signature made by the custodian itself is not the control
+    // plane's.
+    let custodian = encompute_verification::ServiceSigner::from_seed(BROKER, &[21; 32]).unwrap();
+    assert_eq!(
+        code(b.bind_derived_version(
+            RESULT,
+            &omitting,
+            &cosigned_by(&custodian, &omitting, RESULT)
+        )),
+        Code::GovernanceAssetVersionMismatch
+    );
+    assert!(b.state().secrets[RESULT].asset_version_id.is_none());
+}

@@ -1170,6 +1170,11 @@ impl Control {
             versions.insert(a.clone(), (owner, version, key));
             registered.insert(a.clone(), (row.get(6), row.get(7)));
         }
+        // Every source's ancestors too: a derived result whose source was
+        // revoked or expired is not used again (the walk, not only the
+        // mark, decides).
+        self.check_lineage(t, &sources, at)
+            .map_err(|e| deny("plan", &r.plan, "source_lineage", e))?;
         // Governed projects are always in sovereign custody: each source's
         // key at a broker its own organization registered (ENC2715).
         let custody = binding
@@ -1244,76 +1249,123 @@ impl Control {
         }
         release_forms(s.program, outputs, &purpose.name, &registered)
             .map_err(|(why, e)| deny("plan", &r.plan, why, e))?;
-        // One owner authorization per source. What the anchor holds revoked
-        // stays revoked, whatever the database says now.
+        // One owner authorization per source, and, for a derived result,
+        // one of every organization owning an ancestor of it (consent
+        // carries through derivation: the custodian's alone never
+        // suffices). What the anchor holds revoked stays revoked, whatever
+        // the database says now.
         let anchored = self.anchor.snapshot().revoked_authorizations;
-        let mut chosen: BTreeMap<String, (String, SignedAuthorizationV2)> = BTreeMap::new();
+        // (source, authorizing organization) → (row, document).
+        let mut chosen: BTreeMap<(String, String), (String, SignedAuthorizationV2)> =
+            BTreeMap::new();
         for a in &sources {
             let (owner, version, _) = &versions[a];
-            let candidates: Vec<(String, Option<String>, Option<Value>)> = t
-                .query(
-                    "SELECT id, authorization_id, signed FROM authorizations
-                      WHERE project_id = $1 AND organization_id = $2 AND asset_version_id = $3
-                        AND purpose_id = $4 AND status IN ('active', 'revoked')
-                      ORDER BY id FOR SHARE",
-                    &[&r.project, owner, version, purpose_id],
-                )
-                .map_err(db_err)?
-                .iter()
-                .map(|x| (x.get(0), x.get(1), x.get(2)))
-                .collect();
-            let mut refusal: Option<(&'static str, Error)> = None;
-            for (row, aid, signed) in candidates {
-                if anchored.contains(&row) || aid.as_ref().is_some_and(|x| anchored.contains(x)) {
-                    refusal.get_or_insert((
-                        "revoked_authorization",
-                        gov(
-                            Code::GovernanceAuthorizationRevoked,
-                            format!("authorization {row} was revoked"),
-                        ),
-                    ));
-                    continue;
-                }
-                if let Err(e) = crate::ops::governance::usable_at(t, &row, at) {
-                    refusal.get_or_insert(("unusable_authorization", e));
-                    continue;
-                }
-                let signed: SignedAuthorizationV2 = signed
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|e| db_err(format!("stored authorization: {e}")))?
-                    .ok_or_else(|| db_err("a usable authorization is signed"))?;
-                // Every candidate is looked at: one that covers the job and
-                // asks for per-job four-eyes approval is never shadowed by a
-                // broader one; the job runs under it and waits for that
-                // approval.
-                match covers(&signed, &spec, &purpose.linkage_policy_id, outputs) {
-                    Ok(()) => {
-                        let take = chosen.get(a).is_none_or(|(_, c)| {
-                            signed.body.per_job_four_eyes && !c.body.per_job_four_eyes
-                        });
-                        if take {
-                            chosen.insert(a.clone(), (row, signed));
+            let mut orgs = vec![owner.clone()];
+            orgs.extend(
+                super::derived::lineage_owners(t, a)?
+                    .into_iter()
+                    .filter(|o| o != owner),
+            );
+            for org in &orgs {
+                let key = (a.clone(), org.clone());
+                let candidates: Vec<(String, Option<String>, Option<Value>)> = t
+                    .query(
+                        "SELECT id, authorization_id, signed FROM authorizations
+                          WHERE project_id = $1 AND organization_id = $2 AND asset_version_id = $3
+                            AND purpose_id = $4 AND status IN ('active', 'revoked')
+                          ORDER BY id FOR SHARE",
+                        &[&r.project, org, version, purpose_id],
+                    )
+                    .map_err(db_err)?
+                    .iter()
+                    .map(|x| (x.get(0), x.get(1), x.get(2)))
+                    .collect();
+                // A lineage owner authorizes the same version, under the
+                // commitment its owner's authorization binds.
+                let commitment = chosen
+                    .get(&(a.clone(), owner.clone()))
+                    .map(|(_, x)| x.body.asset_digest_commitment.clone());
+                let mut refusal: Option<(&'static str, Error)> = None;
+                for (row, aid, signed) in candidates {
+                    if anchored.contains(&row) || aid.as_ref().is_some_and(|x| anchored.contains(x))
+                    {
+                        refusal.get_or_insert((
+                            "revoked_authorization",
+                            gov(
+                                Code::GovernanceAuthorizationRevoked,
+                                format!("authorization {row} was revoked"),
+                            ),
+                        ));
+                        continue;
+                    }
+                    if let Err(e) = crate::ops::governance::usable_at(t, &row, at) {
+                        refusal.get_or_insert(("unusable_authorization", e));
+                        continue;
+                    }
+                    let signed: SignedAuthorizationV2 = signed
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|e| db_err(format!("stored authorization: {e}")))?
+                        .ok_or_else(|| db_err("a usable authorization is signed"))?;
+                    if org != owner
+                        && commitment.as_deref()
+                            != Some(signed.body.asset_digest_commitment.as_str())
+                    {
+                        refusal.get_or_insert((
+                            "commitment_mismatch",
+                            gov(
+                                Code::GovernanceAssetVersionMismatch,
+                                format!(
+                                    "authorization {row} commits to another digest of the version than its owner's"
+                                ),
+                            ),
+                        ));
+                        continue;
+                    }
+                    // Every candidate is looked at: one that covers the job
+                    // and asks for per-job four-eyes approval is never
+                    // shadowed by a broader one; the job runs under it and
+                    // waits for that approval.
+                    match covers(&signed, &spec, &purpose.linkage_policy_id, outputs) {
+                        Ok(()) => {
+                            let take = chosen.get(&key).is_none_or(|(_, c)| {
+                                signed.body.per_job_four_eyes && !c.body.per_job_four_eyes
+                            });
+                            if take {
+                                chosen.insert(key.clone(), (row, signed));
+                            }
+                        }
+                        Err(e) => {
+                            refusal.get_or_insert(e);
                         }
                     }
-                    Err(e) => {
-                        refusal.get_or_insert(e);
-                    }
+                }
+                if !chosen.contains_key(&key) {
+                    let (why, e) = refusal.unwrap_or((
+                        "not_authorized",
+                        gov(
+                            Code::GovernanceAuthorizationMissing,
+                            if org == owner {
+                                format!(
+                                    "{owner} has not authorized its dataset version {version} (asset {a}) for this purpose: every source's owner authorizes it, its own jobs included"
+                                )
+                            } else {
+                                format!(
+                                    "{org} has not authorized dataset version {version} (asset {a}) for this purpose: it is derived from {org}'s data, and every owner in a derived source's lineage authorizes its use"
+                                )
+                            },
+                        ),
+                    ));
+                    return Err(deny("asset", a, why, e));
                 }
             }
-            if !chosen.contains_key(a) {
-                let (why, e) = refusal.unwrap_or((
-                    "not_authorized",
-                    gov(
-                        Code::GovernanceAuthorizationMissing,
-                        format!(
-                            "{owner} has not authorized its dataset version {version} (asset {a}) for this purpose: every source's owner authorizes it, its own jobs included"
-                        ),
-                    ),
-                ));
-                return Err(deny("asset", a, why, e));
-            }
         }
+        // Probing limits across derivation: one more execution under each
+        // authorization, the sources' ancestors' included.
+        let mut counted: Vec<(String, SignedAuthorizationV2)> = chosen.values().cloned().collect();
+        counted.extend(super::derived::ancestor_authorizations(t, &sources)?);
+        super::derived::check_executions(t, &counted, None)
+            .map_err(|e| deny("plan", &r.plan, "execution_limit", e))?;
         // The binding: each input's version with its owner's commitment,
         // each output's release, each source key's broker.
         let conf = s
@@ -1323,7 +1375,11 @@ impl Control {
         let inputs = conf
             .inputs
             .iter()
-            .filter_map(|(name, a)| chosen.get(a).map(|(_, x)| (name, x)))
+            .filter_map(|(name, a)| {
+                chosen
+                    .get(&(a.clone(), versions.get(a)?.0.clone()))
+                    .map(|(_, x)| (name, x))
+            })
             .map(|(name, x)| {
                 (
                     name.clone(),
@@ -1357,7 +1413,7 @@ impl Control {
         let spec = spec.governed(&binding);
         let spec_id = spec.id().hex();
         // An authorization pinned to execution specs covers only those.
-        for (a, (row, x)) in &chosen {
+        for ((a, _), (row, x)) in &chosen {
             if x.body
                 .execution_spec_ids
                 .as_ref()
@@ -1432,7 +1488,7 @@ impl Control {
                 db_err(e)
             }
         })?;
-        for (a, (row, x)) in &chosen {
+        for ((a, _), (row, x)) in &chosen {
             t.execute(
                 "INSERT INTO job_authorizations (job_id, authorization_row, authorization_id, asset_id)
                  VALUES ($1, $2, $3, $4)",
@@ -1481,7 +1537,8 @@ impl Control {
     /// 3. each source: revoked (ENC2706), expired (ENC2705), its version
     ///    substituted (ENC2704), or its key's broker disabled, not its
     ///    organization's own, or re-bound away from the binding's broker
-    ///    (ENC2715);
+    ///    (ENC2715); or, for a derived result, a source of it revoked or
+    ///    expired since (ENC2706, ENC2705);
     /// 4. each authorization: not the document recorded (ENC2703), no
     ///    longer active (revoked, in the database or the anchor: ENC2706;
     ///    otherwise ENC2701), for another version (ENC2704), unusable at
@@ -1492,7 +1549,9 @@ impl Control {
     ///    authorization asks for it without its quorum of distinct people
     ///    approving this job's spec and authorization set (ENC2707);
     /// 6. the privacy budget ([`Control::governed_privacy_budget`], a hook
-    ///    for now);
+    ///    for now), and (except when approving) each authorization's
+    ///    `max_executions`, counting every job under it through derived
+    ///    results (ENC2714);
     /// 7. `at` at or after `not_after`, the strict end of every
     ///    authorization, purpose and source window, deletion dates
     ///    included (ENC2705).
@@ -1644,13 +1703,17 @@ impl Control {
             }
             keys.insert(v.clone(), key.broker);
         }
+        // Their ancestors: none revoked or expired since.
+        self.check_lineage(t, &j.sources, at)?;
         if !g.binding.asset_brokers.is_empty() && keys != g.binding.asset_brokers {
             return Err(gov(
                 Code::GovernanceCustody,
                 "a source's key is no longer at the broker the job's binding names",
             ));
         }
-        // 4. The authorizations the job runs under.
+        // 4. The authorizations the job runs under: every lineage owner's
+        //    among them for a derived source.
+        super::derived::require_lineage_consent(t, &j.id, &j.sources)?;
         let base_spec = base.clone();
         for (row, aid) in &g.authorizations {
             let until = self.check_bound_authorization(
@@ -1673,8 +1736,16 @@ impl Control {
             let owners = four_eyes_owners(t, g)?;
             job_quorums(t, j, g, &owners)?;
         }
-        // 6. The privacy budget.
+        // 6. The privacy budget, and the owners' execution limits, counted
+        //    through derived results (every job reading one released under
+        //    an authorization counts against it).
         self.governed_privacy_budget(t, j, stage)?;
+        if stage != GovernedStage::Approve {
+            let mut counted =
+                super::derived::lineage_authorizations(t, std::slice::from_ref(&j.id))?;
+            counted.extend(super::derived::ancestor_authorizations(t, &j.sources)?);
+            super::derived::check_executions(t, &counted, Some(&j.id))?;
+        }
         // 7. The window, strictly.
         if at >= not_after {
             return Err(expired(format!(
@@ -1751,11 +1822,20 @@ impl Control {
             .transpose()
             .map_err(|e| db_err(format!("stored authorization: {e}")))?
             .ok_or_else(|| db_err("a usable authorization is signed"))?;
+        // The input's owner, or (for a derived source) an owner in its
+        // lineage.
+        let party = &signed.body.party;
+        let lineage_owner = b
+            .binding
+            .inputs
+            .values()
+            .any(|i| i.asset_version_id == v && &i.organization != party)
+            && super::derived::lineage_owners(t, &asset)?.contains(party);
         if signed.body.id() != aid
             || !b.binding.inputs.values().any(|i| {
                 i.asset_version_id == v
                     && i.digest_commitment == signed.body.asset_digest_commitment
-                    && i.organization == signed.body.party
+                    && (&i.organization == party || lineage_owner)
             })
         {
             return Err(identity(format!(
@@ -3696,4 +3776,59 @@ pub(crate) struct BoundAuthorization<'a> {
     pub base_spec: &'a ExecutionSpec,
     pub spec_id: &'a str,
     pub versions: &'a BTreeMap<String, String>,
+}
+
+/// What a derived result, and each export of it, needs of the governed
+/// job that released it: fixed at submission (the database refuses to
+/// change a governed job's execution, sources or binding).
+pub(crate) struct ReleasedJob {
+    pub id: String,
+    pub project: String,
+    pub plan: String,
+    pub spec_id: String,
+    pub succeeded: bool,
+    pub sources: Vec<String>,
+    pub binding: GovernanceBinding,
+    pub governance_id: String,
+    pub plan_hash: String,
+    /// Authorization row → its AuthorizationId.
+    pub authorizations: BTreeMap<String, String>,
+}
+
+/// Governed job `id` as [`ReleasedJob`] (not locked); a standard job is
+/// refused. With `ctx`, the caller must see the job, and an auditor is
+/// refused (D9): the job's project is returned.
+pub(crate) fn released_job(
+    c: &mut impl GenericClient,
+    ctx: Option<&Ctx>,
+    id: &str,
+) -> Result<(ReleasedJob, ProjectRow)> {
+    let j = job_row(c, id, false)?.ok_or_else(|| not_found("job", id))?;
+    let p = match ctx {
+        Some(ctx) => {
+            job_visible(c, ctx, &j)?;
+            job_project(c, ctx, &j)?
+        }
+        None => project_row(c, &j.project)?.ok_or_else(|| not_found("project", &j.project))?,
+    };
+    let g = j.governance.clone().ok_or_else(|| {
+        conflict(format!(
+            "job {id} is not a governed job: derived results and exports belong to governed projects"
+        ))
+    })?;
+    Ok((
+        ReleasedJob {
+            id: j.id,
+            project: j.project,
+            plan: j.plan,
+            spec_id: j.spec_id,
+            succeeded: j.state == JobState::Succeeded,
+            sources: j.sources,
+            binding: g.binding,
+            governance_id: g.governance_id,
+            plan_hash: g.plan_hash,
+            authorizations: g.authorizations,
+        },
+        p,
+    ))
 }

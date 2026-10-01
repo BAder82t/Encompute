@@ -382,6 +382,45 @@ pub struct RequestReleaseTicket {
     pub asset_version_id: String,
 }
 
+/// A recipient records a governed job's released result as a derived
+/// asset it holds as custodian (a dataset version of its own).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterDerivedAsset {
+    /// The job's output the result is.
+    pub output: String,
+    pub kind: AssetKind,
+    /// The result's series and version label (its name is
+    /// `series@version`).
+    pub series: String,
+    pub version: String,
+    pub digest: String,
+    /// The key at the custodian's own key broker.
+    pub key_ref: KeyRef,
+    /// The onward policy it is held under (the IR asset policy, in its
+    /// canonical JSON form): never wider than its parents' registered
+    /// policies joined.
+    pub ir_policy: serde_json::Value,
+    /// Its release class: within the output's, every parent's and every
+    /// authorization's.
+    pub release_class: encompute_verification::governance::ReleaseClass,
+    /// The custodian's release record of it, signed with its governance
+    /// key.
+    pub release_record: encompute_trust::authz::SignedReleaseRecord,
+}
+
+/// The custodian asks for an export ticket of a derived result to one
+/// recipient.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestExport {
+    pub recipient: String,
+    /// The export's release class (default: the result's own): within the
+    /// result's and every ancestor authorization's.
+    #[serde(default)]
+    pub release_class: Option<encompute_verification::governance::ReleaseClass>,
+}
+
 /// A project's mode. A governed project computes across organizations for
 /// declared purposes under owner-signed authorizations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

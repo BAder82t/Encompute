@@ -7,6 +7,10 @@
 //! - `POST /v1/release/governed` ([`GovernedReleaseRequest`](crate::GovernedReleaseRequest))
 //!   → [`GovernedGrant`](crate::GovernedGrant): a governed release, persisted
 //!   before the key is sealed
+//! - `POST /v1/export/governed` ([`GovernedExportRequest`](crate::GovernedExportRequest))
+//!   → [`GovernedGrant`](crate::GovernedGrant): an export of a derived result
+//!   the broker's organization holds, sealed to the recipient's export key,
+//!   persisted before the key is sealed
 //! - `POST /v1/authorizations` (an owner-signed authorization) and
 //!   `POST /v1/authorizations/revoke` (an owner-signed revocation): both
 //!   verified under the owner's pinned governance key, then persisted
@@ -32,7 +36,7 @@ use encompute_ir::{Code, Error};
 use encompute_trust::authz::{SignedAuthorizationV2, SignedRevocationV2};
 use encompute_verification::http;
 
-use crate::{GovernedGrant, GovernedReleaseRequest, KeyBroker};
+use crate::{GovernedExportRequest, GovernedGrant, GovernedReleaseRequest, KeyBroker};
 
 const MAX_BODY: u64 = 96 << 10;
 
@@ -479,6 +483,34 @@ impl<'a> Broker<'a> {
         json(&r?)
     }
 
+    /// An export: prepare, persist, then seal, as a governed release.
+    fn export_governed(&self, body: &[u8]) -> Result<String, Error> {
+        let req: GovernedExportRequest = serde_json::from_slice(body)
+            .map_err(|e| Error::new(Code::Remote, format!("malformed export request: {e}")))?;
+        let persist = self.persist();
+        let r = persist.and_then(|persist| {
+            let mut b = self.broker.lock().unwrap_or_else(|p| p.into_inner());
+            let pending = b.prepare_governed_export(&req)?;
+            persist(&b)?;
+            let (grant, receipt) = b.finish_release(pending)?;
+            Ok(GovernedGrant { grant, receipt })
+        });
+        if let Some(c) = self.control {
+            let record = req.release_record.id();
+            c.report_release(
+                &req.asset_id,
+                r.is_ok(),
+                r.as_ref().err().map(|e| e.code.as_str()),
+                Some(Governed {
+                    authorization_id: &record,
+                    job_id: Some(req.ticket.job_id.as_str()),
+                    receipt: r.as_ref().ok().map(|g| &g.receipt),
+                }),
+            );
+        }
+        json(&r?)
+    }
+
     fn authorizations(&self, path: &str, body: &[u8]) -> Result<String, Error> {
         let bad = |e: serde_json::Error| Error::new(Code::Remote, format!("malformed body: {e}"));
         let persist = self.persist()?;
@@ -548,6 +580,8 @@ impl http::Handler for Broker<'_> {
             }
         } else if path == "/v1/release/governed" {
             self.release_governed(body)
+        } else if path == "/v1/export/governed" {
+            self.export_governed(body)
         } else if path == "/v1/authorizations" || path == "/v1/authorizations/revoke" {
             self.authorizations(&path, body)
         } else {

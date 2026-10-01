@@ -288,19 +288,26 @@ impl KeyReleaseReceipt {
 /// Seals `key` to the session key in `binding` and signs the grant (the
 /// broker side).
 pub fn seal_grant(
-    mut header: GrantHeader,
+    header: GrantHeader,
     binding: &WorkloadBinding,
+    key: &[u8],
+    signer: &GrantSigner,
+) -> Result<EncryptedKeyGrant> {
+    seal_grant_to(header, &binding.session_public_key, key, signer)
+}
+
+/// Seals `key` to the X25519 key `recipient_key` (hex) and signs the grant:
+/// an attested session's key ([`seal_grant`]), or an export recipient's
+/// ([`ExportRecipient`]).
+pub fn seal_grant_to(
+    mut header: GrantHeader,
+    recipient_key: &str,
     key: &[u8],
     signer: &GrantSigner,
 ) -> Result<EncryptedKeyGrant> {
     header.broker_public_key = signer.public_key_hex();
     header.signature_domain()?;
-    let pk_bytes = check_hex(
-        Code::KeyRelease,
-        "session key",
-        &binding.session_public_key,
-        32,
-    )?;
+    let pk_bytes = check_hex(Code::KeyRelease, "session key", recipient_key, 32)?;
     let pk = <SessionKem as Kem>::PublicKey::from_bytes(&pk_bytes)
         .map_err(|e| err(Code::KeyRelease, format!("session key: {e}")))?;
     let aad = canonical_json(&header)?;
@@ -320,6 +327,62 @@ pub fn seal_grant(
     };
     g.signature = hex(&signer.0.sign(&g.signed_digest()?).to_bytes());
     Ok(g)
+}
+
+/// An export recipient's key pair (X25519): its public key is what the
+/// custodian's signed release record names for the recipient, and an
+/// exported key grant is sealed to it (its header's `session_id` is that
+/// public key). The private key stays with the recipient.
+pub struct ExportRecipient {
+    secret: <SessionKem as Kem>::PrivateKey,
+    public: <SessionKem as Kem>::PublicKey,
+}
+
+impl ExportRecipient {
+    pub fn generate() -> Self {
+        let (secret, public) = SessionKem::gen_keypair();
+        Self { secret, public }
+    }
+
+    pub fn public_key_hex(&self) -> String {
+        hex(&self.public.to_bytes())
+    }
+
+    /// Opens an export grant sealed to this key, after checking its broker
+    /// signature ([`EncryptedKeyGrant::verify_signature`]).
+    pub fn open(&self, grant: &EncryptedKeyGrant) -> Result<Zeroizing<Vec<u8>>> {
+        grant.verify_signature()?;
+        if grant.header.session_id != self.public_key_hex() {
+            return Err(err(
+                Code::KeyRelease,
+                "the key grant is for another recipient",
+            ));
+        }
+        open_sealed(&self.secret, grant)
+    }
+}
+
+fn open_sealed(
+    secret: &<SessionKem as Kem>::PrivateKey,
+    grant: &EncryptedKeyGrant,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let c = Code::KeyRelease;
+    let enc = check_hex(c, "encapsulated key", &grant.encapsulated_key, 32)?;
+    let ct = crate::util::unhex(&grant.ciphertext)
+        .ok_or_else(|| err(c, "grant ciphertext is not hex"))?;
+    let enc = <SessionKem as Kem>::EncappedKey::from_bytes(&enc)
+        .map_err(|e| err(c, format!("encapsulated key: {e}")))?;
+    let aad = canonical_json(&grant.header)?;
+    hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, SessionKem>(
+        &OpModeR::Base,
+        secret,
+        &enc,
+        GRANT_INFO,
+        &ct,
+        &aad,
+    )
+    .map(Zeroizing::new)
+    .map_err(|_| err(c, "the key grant does not open under this key"))
 }
 
 /// A workload session: the evaluator's identity plus an ephemeral HPKE key

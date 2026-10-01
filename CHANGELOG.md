@@ -139,10 +139,67 @@ Work toward confidential cross-agency computation
   boolean-only outputs per source (one when absent; control plane and
   broker share the check). An output released as `never` names no
   recipient.
+- **Derived results and exports (phase 3).** Once a governed job
+  succeeded, a person of a recipient organization of an output records
+  the result as a derived asset (`POST /v1/jobs/{id}/derived-assets`): a
+  dataset version its organization holds as custodian, whose parents are
+  the job's exact source versions, whose release class is within the
+  output's, every parent's and every authorization's, and whose onward
+  policy is never wider than the parents' registered policies joined
+  (ENC2709). Its key is at the custodian's own broker, and the custodian
+  signs a release record of it with its governance key
+  (`SignedReleaseRecord`: output commitment, class, parents,
+  authorizations, onward policy, recipients with their export keys).
+  Revoking a source marks every derived result downstream
+  `source_revoked_at` (set once), fails their jobs that have not started,
+  and lists them in its answer with `"erased": false`: revocation blocks
+  new use and is not retroactive. Every governed use, derivation, ticket
+  and export walks the ancestors themselves (ENC2706, ENC2705), so a
+  restored database that lost the mark changes nothing. The custodian
+  asks for an export (`POST /v1/assets/{id}/exports`): a single-use
+  `Export` ticket for one recipient, refused after any authorization in
+  the lineage ends (ENC2705), when the recipient is not named by every
+  such authorization and by the record, or the class is wider than any
+  ceiling (ENC2709), or an owner's `max_releases` is used up (ENC2714);
+  one export row per ticket (UNIQUE, append-only). The custodian's broker
+  redeems it at `POST /v1/export/governed` with the same ticket checks as
+  a key release (signature first, window, single use), only for a key
+  bound to that result (`encompute keys bind-version --derived`), under
+  the custodian's record verified under its pinned governance key, sealed
+  to the export key the record names; decryption tickets are refused.
+  A job reading a derived result needs an authorization from its
+  custodian and from every owner of the data it derives from (ENC2701),
+  and executions and exports count against every authorization up the
+  lineage (ENC2714). A derived result is visible only to its custodian,
+  the recipients its record names, the owners of its data and the
+  project's auditors. The custodian's broker enforces lineage consent
+  itself: the release record names every lineage owner and its governance
+  key, and a key release or export needs an installed authorization of
+  each, counted locally. Because the custodian runs that broker, it takes
+  two facts from the control plane, verified under the pinned
+  control-plane key: a lineage owner's key is pinned only from the
+  control plane's signed attestation of it (`GET
+  /v1/organizations/{id}/governance-key-attestation`; `encompute keys
+  governance-key pin-lineage --for ORG --attestation FILE` or `--url`),
+  replaced only by a later attestation and unpinned by a revoked one
+  (ENC2708); and a derived key is bound only to a release record the
+  control plane co-signed at registration (`release_cosignature`;
+  `bind-version --derived RECORD --cosignature FILE`), so a record leaving
+  a lineage owner out is never bound (ENC2704). An original owner's
+  revoked authorization is forwarded, once anchored, as deny-only
+  `authorization.revoked` to every custodian broker holding a result
+  derived from a job under it. The custodian remains trusted for derived
+  data it holds: these checks stop a compromised control plane or a
+  careless custodian, and only both compromised together could fake a
+  lineage owner's consent. Decided: an export defaults to the result's own
+  class, a derived result keeps its parents' owners, and a result may be
+  recorded after its window while its export is blocked. Standard
+  projects are unchanged. Migration 0011.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
   INV-236 (the control plane can only deny; broker state cannot be
   rolled back), INV-223 (auditors), INV-229 (cross-organization
-  views) and INV-221 (over-release); 162 invariants.
+  views), INV-221 (over-release), INV-227 (release lineage, control-plane
+  part) and INV-245 (derived results); 164 invariants.
 
 ## 0.3.0-rc.4 — 2026-09-29
 

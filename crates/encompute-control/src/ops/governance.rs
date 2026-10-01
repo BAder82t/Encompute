@@ -38,8 +38,8 @@ use serde_json::{json, Value};
 
 use encompute_ir::{Code, Error, Result};
 use encompute_trust::authz::{
-    governance_key_id, ApprovalEvidence, AuthorizationV2, GovernanceKey, GovernanceKeyStatus,
-    Signed, SignedAuthorizationV2,
+    governance_key_id, ApprovalEvidence, AuthorizationV2, GovernanceKey, GovernanceKeyAttestation,
+    GovernanceKeyStatus, Signed, SignedAuthorizationV2, CONTROL_STATEMENT_VERSION,
 };
 use encompute_verification::governance::{Purpose, ReleaseClass, PURPOSE_VERSION};
 use encompute_verification::service::now;
@@ -95,7 +95,7 @@ fn active_key(t: &mut postgres::Transaction<'_>, org: &str) -> Result<(String, S
 /// Verifies `check` (a signature check under `org`'s active key), naming
 /// a refusal by a revoked or unapproved key of `org` ENC2708, and any other
 /// ENC2701.
-fn under_active_key(
+pub(crate) fn under_active_key(
     t: &mut postgres::Transaction<'_>,
     org: &str,
     presented: &str,
@@ -327,6 +327,78 @@ impl Control {
                 })
                 .collect(),
         ))
+    }
+
+    /// The control plane's signed attestation of `org`'s governance key, from
+    /// its record of approved keys: the active key, or the key `key_id`
+    /// names (active or revoked; a proposed key is never attested). A
+    /// custodian's key broker pins a lineage owner's key only from it, and
+    /// unpins it on a revoked one. To members of `org` and of organizations
+    /// that take part in a project with it (anyone else gets not found).
+    pub fn governance_key_attestation(
+        &self,
+        ctx: &Ctx,
+        org: &str,
+        key_id: Option<&str>,
+    ) -> Result<Value> {
+        let mut c = self.db.conn()?;
+        if !ctx.principal.member_of(org) {
+            let mine: Vec<String> = ctx
+                .principal
+                .organization
+                .iter()
+                .cloned()
+                .chain(ctx.principal.roles.iter().map(|(o, _)| o.clone()))
+                .collect();
+            let shared = c
+                .query_opt(
+                    "SELECT 1 FROM project_members a JOIN project_members b ON b.project_id = a.project_id
+                      WHERE a.organization_id = $1 AND a.status = 'active'
+                        AND b.organization_id = ANY($2) AND b.status = 'active' LIMIT 1",
+                    &[&org, &mine],
+                )
+                .map_err(db_err)?;
+            if shared.is_none() {
+                return Err(not_found("organization", org));
+            }
+        }
+        let row = c
+            .query_opt(
+                &format!(
+                    "SELECT key_id, public_key, status, {} FROM governance_keys
+                      WHERE organization_id = $1 AND status <> 'proposed'
+                        AND (key_id = $2 OR ($2::text IS NULL AND status = 'active'))",
+                    epoch("revoked_at")
+                ),
+                &[&org, &key_id],
+            )
+            .map_err(db_err)?
+            .ok_or_else(|| match key_id {
+                Some(k) => not_found("governance key", k),
+                None => gov(
+                    Code::GovernanceKeyRevoked,
+                    format!("{org} has no active governance key"),
+                ),
+            })?;
+        let status: String = row.get(2);
+        let (status, revoked_at) = match status.as_str() {
+            "active" => (GovernanceKeyStatus::Active, None),
+            _ => (
+                GovernanceKeyStatus::Revoked,
+                Some(row.get::<_, Option<i64>>(3).unwrap_or_default().max(0) as u64),
+            ),
+        };
+        let a = GovernanceKeyAttestation {
+            version: CONTROL_STATEMENT_VERSION,
+            organization: org.to_owned(),
+            key_id: row.get(0),
+            public_key: row.get(1),
+            status,
+            revoked_at,
+            issued_at: now(),
+        }
+        .sign(&self.signer)?;
+        Ok(serde_json::to_value(a).expect("serializable"))
     }
 
     // --- purposes ----------------------------------------------------------------
@@ -664,19 +736,33 @@ impl Control {
                     format!("{o} is not a recipient the purpose allows"),
                 ));
             }
+            // The party's own version, or a derived result of its data (an
+            // owner in its lineage authorizes each use of it too).
             let asset = t
                 .query_opt(
-                    "SELECT id, status, release_class, ir_policy IS NOT NULL
-                       FROM assets WHERE version_id = $1 AND organization_id = $2",
-                    &[&b.asset_version_id, &b.party],
+                    "SELECT id, status, release_class, ir_policy IS NOT NULL, organization_id
+                       FROM assets WHERE version_id = $1",
+                    &[&b.asset_version_id],
                 )
-                .map_err(db_err)?
-                .ok_or_else(|| {
-                    gov(
+                .map_err(db_err)?;
+            let asset = match asset {
+                Some(a)
+                    if a.get::<_, String>(4) == b.party
+                        || crate::ops::derived::lineage_owners(t, &a.get::<_, String>(0))?
+                            .contains(&b.party) =>
+                {
+                    a
+                }
+                _ => {
+                    return Err(gov(
                         Code::GovernanceAssetVersionMismatch,
-                        format!("{} registered no such dataset version", b.party),
-                    )
-                })?;
+                        format!(
+                            "{} registered no such dataset version, and owns no data it is derived from",
+                            b.party
+                        ),
+                    ))
+                }
+            };
             let (asset_id, asset_status): (String, String) = (asset.get(0), asset.get(1));
             // A governed source version carries its owner's registered
             // policy and release class: without them nothing bounds what a

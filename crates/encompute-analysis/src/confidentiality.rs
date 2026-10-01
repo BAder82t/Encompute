@@ -976,12 +976,76 @@ fn check_form(
 /// its owner registered. Purposes are ENC1903, forms ENC1907, anything
 /// else ENC1904.
 pub fn refines(declared: &AssetPolicy, registered: &AssetPolicy, purpose: &str) -> Result<()> {
-    let weaker = |what: String| {
-        err(
-            Code::Declassification,
-            format!("the program declares a weaker policy than its owner registered: {what}"),
-        )
-    };
+    within_policy(
+        declared,
+        registered,
+        Some(purpose),
+        "the program declares a weaker policy than its owner registered",
+    )
+}
+
+/// Whether `declared`, a derived result's onward policy, is no wider than
+/// `ceiling`, the join of its parents' registered policies
+/// ([`join_registered`]): the same owners, a release no weaker, readers,
+/// purposes, forms and derivations within the ceiling's, the same privacy
+/// budget. Purposes are ENC1903, forms ENC1907, anything else ENC1904.
+pub fn no_wider(declared: &AssetPolicy, ceiling: &AssetPolicy) -> Result<()> {
+    within_policy(
+        declared,
+        ceiling,
+        None,
+        "the derived result's policy is wider than its parents'",
+    )
+}
+
+/// The join of the policies the owners of a result's parents registered:
+/// every owner, the weakest release none of them exceeds, the readers,
+/// purposes and derivations all of them allow, the forms all of them
+/// admit. Never wider than any parent's. Parents under different privacy
+/// budgets have no join (ENC1904): a result of them is not recorded.
+pub fn join_registered(policies: &[AssetPolicy]) -> Result<AssetPolicy> {
+    let (first, rest) = policies
+        .split_first()
+        .ok_or_else(|| err(Code::Declassification, "a derived result has parents"))?;
+    let mut out = first.clone();
+    for p in rest {
+        if p.privacy != out.privacy {
+            return Err(err(
+                Code::Declassification,
+                "the parents carry different privacy budgets: their result has no joined policy",
+            ));
+        }
+        out.owners = out.owners.union(&p.owners).cloned().collect();
+        out.readers = out.readers.intersection(&p.readers).cloned().collect();
+        out.purposes = out.purposes.intersection(&p.purposes).cloned().collect();
+        out.release = out.release.min(p.release);
+        out.derive = out
+            .derive
+            .iter()
+            .filter_map(|(k, a)| {
+                p.derive.get(k).map(|b| {
+                    (
+                        *k,
+                        DerivePermission {
+                            release: a.release.min(b.release),
+                            to: a.to.intersection(&b.to).cloned().collect(),
+                        },
+                    )
+                })
+            })
+            .collect();
+        out.forms = meet_forms(&out.forms, &p.forms);
+    }
+    Ok(out)
+}
+
+fn within_policy(
+    declared: &AssetPolicy,
+    registered: &AssetPolicy,
+    purpose: Option<&str>,
+    what: &str,
+) -> Result<()> {
+    let weaker = |m: String| err(Code::Declassification, format!("{what}: {m}"));
     if declared.owners != registered.owners {
         return Err(weaker(format!(
             "owners {} instead of {}",
@@ -1002,20 +1066,32 @@ pub fn refines(declared: &AssetPolicy, registered: &AssetPolicy, purpose: &str) 
             set(&registered.readers)
         )));
     }
-    if !registered.purposes.contains(purpose)
-        || declared
-            .purposes
-            .iter()
-            .any(|p| p != purpose || !registered.purposes.contains(p))
-    {
+    let purposes_ok = match purpose {
+        Some(purpose) => {
+            registered.purposes.contains(purpose)
+                && declared
+                    .purposes
+                    .iter()
+                    .all(|p| p == purpose && registered.purposes.contains(p))
+        }
+        None => declared.purposes.is_subset(&registered.purposes),
+    };
+    if !purposes_ok {
         return Err(err(
             Code::PurposeViolation,
-            format!(
-                "the program declares purposes {} for an asset its owner registered for {}; \
-                 it may declare only {purpose:?}, and only if the owner registered it",
-                set(&declared.purposes),
-                set(&registered.purposes)
-            ),
+            match purpose {
+                Some(purpose) => format!(
+                    "the program declares purposes {} for an asset its owner registered for {}; \
+                     it may declare only {purpose:?}, and only if the owner registered it",
+                    set(&declared.purposes),
+                    set(&registered.purposes)
+                ),
+                None => format!(
+                    "{what}: purposes {} are not among {}",
+                    set(&declared.purposes),
+                    set(&registered.purposes)
+                ),
+            },
         ));
     }
     if !forms_within(&declared.forms, &registered.forms) {

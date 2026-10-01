@@ -100,9 +100,14 @@ pub struct ReleaseTicket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
     /// For a key release, the scheduled evaluator's receipt key (hex
-    /// Ed25519, as the workload binding names it); for a decryption or
-    /// export, the recipient's.
+    /// Ed25519, as the workload binding names it); for an export, the
+    /// recipient's export key (hex X25519) as the custodian's signed
+    /// release record names it: the key is sealed to it.
     pub workload_or_recipient: String,
+    /// For an export, the recipient organization (and only then). Skipped
+    /// when absent, so key-release tickets are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
     /// The binding's placement digest, when it declares placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_digest: Option<String>,
@@ -198,7 +203,9 @@ impl ReleaseTicket {
     /// The ticket agrees with itself: well-formed IDs, a carried spec and
     /// binding that are the ones its IDs name, and a body (project,
     /// purpose, policy, placement, asset version and organization) that
-    /// agrees with them.
+    /// agrees with them. A key-release ticket's version is a source of its
+    /// organization in the binding; an export ticket names its recipient
+    /// (its version is the derived result's).
     pub fn check_consistent(&self) -> Result<()> {
         check_hex32("ticket ID", &self.ticket_id)?;
         check_label("organization", &self.organization)?;
@@ -252,12 +259,25 @@ impl ReleaseTicket {
         if self.binding.placement_digest != self.placement_digest {
             return Err(refuse("the ticket's placement is not its binding's"));
         }
-        if !self.binding.inputs.values().any(|i| {
-            i.asset_version_id == self.asset_version_id && i.organization == self.organization
-        }) {
-            return Err(refuse(
-                "the ticket's asset version is not a source of its organization in the binding",
-            ));
+        match (self.kind, &self.recipient) {
+            // An export is of a derived result, held by its custodian: the
+            // version is not one of the job's sources, and the ticket names
+            // the one recipient it is for.
+            (TicketKind::Export, Some(r)) => check_label("recipient", r)?,
+            (TicketKind::Export, None) => {
+                return Err(refuse("an export ticket names its recipient"))
+            }
+            (_, Some(_)) => return Err(refuse("only an export ticket names a recipient")),
+            (_, None) => {
+                if !self.binding.inputs.values().any(|i| {
+                    i.asset_version_id == self.asset_version_id
+                        && i.organization == self.organization
+                }) {
+                    return Err(refuse(
+                        "the ticket's asset version is not a source of its organization in the binding",
+                    ));
+                }
+            }
         }
         Ok(())
     }

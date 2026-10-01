@@ -295,6 +295,7 @@ impl World {
             execution_spec_id: self.spec.id().hex(),
             policy_id: self.spec.policy_id.clone(),
             workload_or_recipient: self.evaluator_key(),
+            recipient: None,
             placement_digest: self.binding.placement_digest.clone(),
             execution_spec: self.spec.clone(),
             binding: self.binding.clone(),

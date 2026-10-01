@@ -91,6 +91,7 @@ fn ticket() -> ReleaseTicket {
         execution_spec_id: s.id().hex(),
         policy_id: s.policy_id.clone(),
         workload_or_recipient: h('7'),
+        recipient: None,
         placement_digest: None,
         execution_spec: s,
         binding: b,
@@ -155,6 +156,9 @@ fn ticket_every_field_changes_signature() {
         ("workload_or_recipient", &|t| {
             t.workload_or_recipient = h('2')
         }),
+        ("recipient", &|t| {
+            t.recipient = Some("benefits-agency".into())
+        }),
         ("placement_digest", &|t| t.placement_digest = Some(h('2'))),
         ("execution_spec", &|t| {
             t.execution_spec.backend_version = "1.5.2".into()
@@ -171,8 +175,10 @@ fn ticket_every_field_changes_signature() {
     ];
     let v = serde_json::to_value(&t).unwrap();
     let mut keys: BTreeSet<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-    // Absent (not serialized) when the binding declares no placement.
+    // Absent (not serialized) when the binding declares no placement, and
+    // on a key-release ticket, which names no recipient.
     keys.insert("placement_digest");
+    keys.insert("recipient");
     let covered: BTreeSet<&str> = changes.iter().map(|(k, _)| *k).collect();
     assert_eq!(keys, covered, "the sweep must change every field");
     for (field, change) in changes {
@@ -295,4 +301,36 @@ fn a_ticket_id_is_random() {
     let b = ReleaseTicket::new_ticket_id().unwrap();
     assert_eq!(a.len(), 64);
     assert_ne!(a, b);
+}
+
+/// An export ticket is of a derived result: its version need not be a
+/// source in the binding, and it names exactly one recipient; a
+/// key-release ticket names none.
+#[test]
+fn export_ticket_names_its_recipient() {
+    let key = control().public_key_hex();
+    let mut t = ticket();
+    t.kind = TicketKind::Export;
+    t.asset_version_id = h('8');
+    assert!(
+        t.check_consistent().is_err(),
+        "an export without a recipient"
+    );
+    t.recipient = Some("benefits-agency".into());
+    let t = t.sign(&control()).unwrap();
+    t.verify(&key, NOW).unwrap();
+    // A key-release ticket for a version outside the binding, or naming a
+    // recipient, is refused.
+    let mut k = ticket();
+    k.asset_version_id = h('8');
+    assert_eq!(
+        k.check_consistent().unwrap_err().code,
+        Code::GovernanceReleaseTicket
+    );
+    let mut k = ticket();
+    k.recipient = Some("benefits-agency".into());
+    assert_eq!(
+        k.check_consistent().unwrap_err().code,
+        Code::GovernanceReleaseTicket
+    );
 }

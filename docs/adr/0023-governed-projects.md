@@ -291,8 +291,8 @@ As built (release classes and forms):
 - Bounded categories rest on the integer range analysis, which is tested
   on every input of adversarial and random programs to never
   under-approximate.
-- Not yet: classes crossing derived assets and exports (the next step),
-  and the purpose's `min_aggregate_parties` against aggregation minimums.
+- Classes cross derived results and exports (section 9, as built). Not
+  yet: the purpose's `min_aggregate_parties` against aggregation minimums.
 
 ### 7. Four-eyes (D5)
 
@@ -404,6 +404,93 @@ As built (per-job four eyes):
   Lineage shows the later revocation and never claims erasure.
 - Export is a new, ticketed action: every ancestor's authorization must be
   active and the class must allow the recipient.
+
+As built (derived results and exports):
+
+- `POST /v1/jobs/{id}/derived-assets`, once the job succeeded, by a person
+  (never a service account or an auditor) of an organization the output
+  names as a recipient; that organization is the custodian (the owners'
+  default), and the result is a dataset version of its own, its key at a
+  broker it registered. Its parents are the job's source versions, and
+  nothing else is accepted.
+- Never wider: its release class is within the output's, every parent's
+  registered class and every authorization's ceiling in its lineage; its
+  onward policy is within the parents' registered policies joined (every
+  owner kept, the weakest release none exceeds, the readers, purposes,
+  forms and derivations all allow, the same privacy budget). Refusals are
+  ENC2709.
+- The evidence is a `SignedReleaseRecord` in the trust crate, signed with
+  the custodian's governance key and verified under its active key: a
+  salted output commitment, the class, the parents, the authorizations
+  the job ran under, the onward policy's digest, and the recipients with
+  the export key of each. Every field must be the job's (ENC2704), and
+  every recipient must be named by every authorization in the lineage.
+  The job, output, custodian and record are frozen (schema version 11).
+- Revoking a source marks each derived result downstream
+  `source_revoked_at` (set once) and fails their jobs that have not
+  started; the answer lists them and says `"erased": false`. The mark is
+  not the authority: every governed use, derivation, release ticket and
+  export walks the ancestors, whose revocation the state anchor holds.
+  Only the starting assets are share-locked, the ancestors read, so the
+  lock order stays that of revocation (ancestor, then descendants).
+- K-7 decided: a job that started inside its window may finish, but
+  nothing it released is exported after any authorization in the lineage
+  ends (ENC2705).
+- `POST /v1/assets/{id}/exports`, by a person of the custodian, issues a
+  single-use export ticket for one recipient (issuing is shared with
+  release tickets), with one append-only export row per ticket (a UNIQUE
+  ticket ID). An owner's `max_releases` also bounds the exports of what
+  was released under its authorization (ENC2714). The custodian's broker
+  redeems it (see the sovereign keys record).
+- Consent carries through derivation: a governed job reading a derived
+  result runs only under an authorization of its custodian and of every
+  organization owning data anywhere up its lineage (such an owner may
+  authorize the derived version); the custodian's alone never suffices
+  (ENC2701), checked at submission, scheduling, start and ticket issue,
+  and again by the custodian's key broker, which verifies every lineage
+  owner's authorization under that owner's governance key (see the
+  sovereign keys record). Lineage owners therefore share their governance
+  public key with the custodians' brokers.
+- Limits carry through derivation: every job reading a result derived
+  under an authorization, however many hops down, counts against its
+  `max_executions` (at submission, scheduling and start), and every
+  export of such a result against its `max_releases` (ENC2714). A key
+  broker counts the releases and exports it makes itself, against the
+  custodian's and every lineage owner's authorization.
+- A derived result is visible beyond its custodian only to the recipients
+  its signed record names, the owners of the data it derives from, and the
+  project's auditor organizations.
+- The control plane co-signs the custodian's release record once it has
+  checked it against the result's real ancestry (every lineage owner
+  named, under its active governance key): a `DerivedReleaseCosignature`
+  over the custodian, the asset, the broker and key, the derived version,
+  the record's ID and the lineage owners, signed with the control plane's
+  key under its own domain (`encompute.derived-release-cosignature.v1`),
+  returned at registration and frozen with the record. The custodian's
+  broker binds the result's key only with it, so a record that leaves a
+  lineage owner out is never bound (ENC2704).
+- Lineage owners' governance keys reach custodians' brokers only through
+  the control plane's attestation (`GET
+  /v1/organizations/{id}/governance-key-attestation`, signed under
+  `encompute.governance-key-attestation.v1` from the approved-keys
+  record), never as a bare key the custodian types in.
+- Revocations are forwarded: once an original owner's revoked
+  authorization is anchored, `authorization.revoked` (deny-only, through
+  the same outbox and anchor-gated delivery) goes to the broker of every
+  custodian holding a result derived, every hop down, from a job that ran
+  under it, as well as to the owner's own brokers.
+- The custodian is trusted for the derived data it holds. The broker
+  checks defend against a compromised control plane and a careless
+  custodian, not a malicious one: the custodian holds the key material and
+  runs the broker. Since the control plane now attests lineage owners'
+  keys and co-signs records, a compromised control plane and a malicious
+  custodian together could fake a lineage owner's consent; neither alone
+  can.
+- Decided (2026-10-01): the default export class is the result's own
+  class; a derived result's policy keeps its parents' owners (ownership
+  never moves to the custodian); recording a result after its
+  authorizations' window has ended is allowed, while its export is
+  blocked.
 
 ### 10. Shared population DP cap (D8)
 
@@ -539,8 +626,8 @@ ENC2709 are in).
 
 These are recorded in the milestone plan and are not decided here:
 
-- **K-7:** a job running when its window ends finishes; whether its export
-  is then blocked (recommended) or the job aborts.
+- **K-7** (decided 2026-09-30): a job running when its window ends
+  finishes, and its export is then blocked (built, section 9).
 - **G-2:** whether every member must co-sign project checkpoints, and
   whether owner revocation heads are required in every bundle
   (recommended: yes to both).

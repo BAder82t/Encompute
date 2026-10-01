@@ -878,3 +878,110 @@ fn probing_limits_are_required_and_ids_unchanged_without_output_cap() {
 
 const GOLDEN_AUTHORIZATION_ID: &str =
     "1a4935897fbce4c6ec4ee0a550521cf2a2a956d6374ecd362a4315fb1678a28c";
+
+/// A custodian's release record binds every field: its ID and signature
+/// change with each, only the custodian's governance key verifies it, and
+/// unknown fields are refused.
+#[test]
+fn release_record_binds_every_field() {
+    use encompute_trust::authz::{ReleaseRecord, SignedReleaseRecord};
+    let record = ReleaseRecord {
+        version: 1,
+        party: "benefits-agency".into(),
+        project: "prj_1".into(),
+        purpose_id: h('1'),
+        job_id: "job_1".into(),
+        governance_id: h('2'),
+        output: "eligible".into(),
+        output_commitment: h('3'),
+        derived_version_id: h('4'),
+        release_class: ReleaseClass::BooleanOnly,
+        parents: BTreeSet::from([h('5')]),
+        authorization_ids: BTreeSet::from([h('6')]),
+        onward_policy_id: h('7'),
+        recipients: BTreeMap::from([("benefits-agency".into(), h('8'))]),
+        lineage_owners: BTreeMap::from([("tax-agency".into(), h('a'))]),
+        issued_at: 1_900_000_000,
+    };
+    let s = record.clone().sign(&key(3)).unwrap();
+    s.verify(&pk(&key(3))).unwrap();
+    assert!(
+        s.verify(&pk(&key(4))).is_err(),
+        "another organization's key"
+    );
+    type RecordEdit = Box<dyn Fn(&mut ReleaseRecord)>;
+    let edits: Vec<(&str, RecordEdit)> = vec![
+        ("party", Box::new(|r| r.party = "tax-agency".into())),
+        ("project", Box::new(|r| r.project = "prj_2".into())),
+        ("purpose_id", Box::new(|r| r.purpose_id = h('9'))),
+        ("job_id", Box::new(|r| r.job_id = "job_2".into())),
+        ("governance_id", Box::new(|r| r.governance_id = h('9'))),
+        ("output", Box::new(|r| r.output = "other".into())),
+        (
+            "output_commitment",
+            Box::new(|r| r.output_commitment = h('9')),
+        ),
+        (
+            "derived_version_id",
+            Box::new(|r| r.derived_version_id = h('9')),
+        ),
+        (
+            "release_class",
+            Box::new(|r| r.release_class = ReleaseClass::AuthorizedAgencyOnly),
+        ),
+        (
+            "parents",
+            Box::new(|r| {
+                r.parents.insert(h('9'));
+            }),
+        ),
+        (
+            "authorization_ids",
+            Box::new(|r| {
+                r.authorization_ids.insert(h('9'));
+            }),
+        ),
+        (
+            "onward_policy_id",
+            Box::new(|r| r.onward_policy_id = h('9')),
+        ),
+        (
+            "recipients",
+            Box::new(|r| {
+                r.recipients.insert("tax-agency".into(), h('9'));
+            }),
+        ),
+        (
+            "lineage_owners",
+            Box::new(|r| {
+                r.lineage_owners.insert("other-co".into(), h('b'));
+            }),
+        ),
+        ("issued_at", Box::new(|r| r.issued_at += 1)),
+    ];
+    let v = serde_json::to_value(&record).unwrap();
+    let mut keys: BTreeSet<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    keys.remove("version");
+    assert_eq!(
+        keys,
+        edits.iter().map(|(k, _)| *k).collect::<BTreeSet<_>>(),
+        "the sweep changes every field"
+    );
+    for (field, edit) in &edits {
+        let mut forged: SignedReleaseRecord = s.clone();
+        edit(&mut forged.body);
+        assert_ne!(forged.id(), s.id(), "{field}");
+        assert!(forged.verify(&pk(&key(3))).is_err(), "{field}");
+    }
+    let mut extra = serde_json::to_value(&s).unwrap();
+    extra["body"]["erased"] = true.into();
+    assert!(serde_json::from_value::<SignedReleaseRecord>(extra).is_err());
+    // The custodian is never its own lineage owner.
+    let mut own = record.clone();
+    own.lineage_owners.insert("benefits-agency".into(), h('b'));
+    assert!(own.sign(&key(3)).unwrap().verify(&pk(&key(3))).is_err());
+    // A record without parents or authorizations is not well formed.
+    let mut bare = record;
+    bare.parents.clear();
+    assert!(bare.sign(&key(3)).unwrap().verify(&pk(&key(3))).is_err());
+}
