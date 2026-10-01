@@ -3,8 +3,8 @@
 Status: **Accepted** (2026-09-29) for the placement model, constraint
 composition, enforcement points, operator separation and the minimization
 objective, as design. The items under "Open decisions" are **Proposed** and
-not decided. Implementation starts after 0.3.0 ships; nothing here is part
-of 0.3.
+not decided. Placement and operator separation are built on the development
+branch (see "As built" below); nothing here is part of 0.3.
 
 ## Context
 
@@ -302,6 +302,94 @@ decided here:
 - **Minimization by rewriting programs.** Rejected: the planner would be
   changing what the owners authorized. It chooses among mechanisms for the
   authorized program only.
+
+## As built (residency and operators, phase 6)
+
+Recorded 2026-10-01. Where this differs from the design above, this
+section is what was built.
+
+- **Types live in the verification crate.** `Location`, `LocationEvidence`,
+  `LocationPattern`, `PlacementConstraints`, `Scope` (the `applies_to`
+  values), `GrantPlacement`, `EvaluatorPin` and the versioned locations
+  table are in `crates/encompute-verification/src/placement.rs`, not in the
+  planner: the key broker, the control plane, the CLI and the planner all
+  need them, and the broker cannot depend on the planner. The planner
+  re-exports them (`encompute_planner::locations` is the table). The
+  planner has `EvaluatorOffer`, `PlacementContext`, `Roles`, the
+  `Placement` and `OperatorSeparation` requirements, the admissible set
+  (`crates/encompute-planner/src/placement.rs`) and
+  `Objective::Minimize`. `TeeOffer` gained no location, so a TEE offer can
+  never satisfy a placement constraint in a plan (it is refused, not
+  assumed); `PlanningContext.placement` is absent outside governed
+  projects, so standard plans and PlanIds are unchanged.
+- **The table.** Version 1 lists Google Cloud, AWS and Azure regions and
+  organizations' own premises by country (`onprem`), with ISO 3166
+  country codes as jurisdictions. It is compiled in, reviewed in the
+  repository (K-8: whoever changes it changes a reviewed file), and its
+  digest is recorded in every governed plan; a plan made with another
+  version no longer validates. An unknown provider, region or zone is
+  refused when a constraint or location is declared, never ignored.
+- **Which constraints are carried where.** The plan carries only the
+  project's constraints (every member holds them). An owner's own
+  constraints ride in the owner-signed authorization
+  (`limits.placement`, part of the AuthorizationId, so a looser copy is
+  another authorization) and are applied where the job is bound, at
+  scheduling, at start and by the owner's broker; they never appear in a
+  plan or another organization's view. `AssetPolicy.placement` in the IR
+  and `Purpose.placement` were not built: a purpose is accepted by every
+  owner already, and the owner's authorization is the per-asset,
+  per-purpose place for the rule.
+- **Project constraints** (`POST` and `GET /v1/projects/{id}/placement`,
+  migration 0018). A member's security admin tightens at once; any other
+  change loosens and takes effect when every member organization has sent
+  exactly the same constraints from the same version. A job's binding
+  names the digest of the version it was bound under
+  (`placement_digest`), and everything that judges it afterwards reads
+  that version together with the current one, so a later loosening never
+  widens a bound job and a later tightening applies at once.
+- **Evidence** (migration 0017). The operator of an evaluator is the
+  organization of its service account; an organization may hold evaluator
+  accounts of its own (O-1). An evaluator reports its location when it
+  registers (self-declared, with the jurisdiction taken from the table);
+  `POST /v1/evaluators/{id}/location-declarations` by a person who is a
+  security admin of the operator makes it operator-declared, valid for up
+  to 366 days. A changed location loses the evidence; lapsed evidence
+  counts as none. K-3: in production the floor for any location rule is
+  operator-declared. Attested evidence for evaluators is the broker's:
+  the Confidential Space token's `submods.gce.zone` becomes
+  `VerifiedWorkload.location` and the key broker checks it per release.
+  The control plane does not yet take attestation from an evaluator, so an
+  evaluator's own evidence level reaches at most operator-declared there.
+- **Enforcement.** `create_plan` records the admissible set (a governed
+  job is never planned at a party: it runs on an evaluator).
+  `submit_governed` refuses a job nothing admits (ENC2710, or ENC2725 when
+  operator separation is all that refused). `schedule_job` places only on
+  an admitted evaluator and records its operator, location and evidence in
+  the grant; a job nothing admits waits and says why
+  (`placement_waiting`). `revalidate_governed` and release tickets check
+  at start and at the ticket that the evaluator is still admitted and is
+  still the machine the grant recorded. The broker's check 7 judges the
+  zone the attestation names against the project's constraints (the
+  document the signed ticket carries, whose digest the binding names) and
+  the owner's; no document, no zone or an unknown zone refuses (ENC2710).
+  A broker cannot see an operator or an evaluator ID: those fields are
+  enforced by the control plane that issues the ticket.
+- **Client check.** `jobs run --placement FILE --evaluator-pins FILE`
+  refuses to send anything unless the evaluator the client pinned (by
+  receipt key, with operator, location and evidence) is inside the
+  client's own constraints, and unless the control plane's record agrees
+  with the pin (ENC2726). The Python and native SDKs do not carry this
+  check yet.
+- **Minimization.** `Objective::Minimize` orders candidates by the release
+  rank of the program's outputs, then by how many principals learn
+  plaintext, then by latency. The "bits released" step of the design is
+  not distinguished yet (it is equal for every candidate of one
+  program), and the output-wider-than-class refusal remains the
+  governed submission's ENC2709 check.
+- **Not built:** operator-owned SecAgg coordinators (the coordinator check
+  exists in the planner, but the control plane names no coordinator), the
+  `Purpose.placement` source, and the governance report's "Decryption
+  control" row (the report is a later phase).
 
 ## Relevant source modules
 

@@ -447,9 +447,57 @@ these limits:
   auditor stays read-only in governed projects.
 - **Auditor organizations read no privacy ledgers yet.** A ledger is its
   asset owner's until privacy scopes give a project its own ledger.
-- **Declared placement is refused.** A governed broker releases no key
-  for an execution that declares placement until attested placement can
-  be checked.
+- **Residency (placement) is only as good as its evidence.** A location
+  an evaluator reports about itself is self-declared and never satisfies
+  a production deployment; one a person who is a security admin of its
+  operator declares is attributable, not proven (an operator can declare
+  falsely or move the machine afterwards, and the declaration lapses after
+  at most 366 days); only an attested zone is checked cryptographically,
+  and today the control plane obtains none from an evaluator: the attested
+  zone is the key broker's, taken from the Confidential Space token each
+  time a workload asks for a key. Grants and job views record each
+  location's evidence level, and a plan's text labels it "attested" or
+  "declared".
+- **A key broker judges the zone only.** It cannot see an operator or an
+  evaluator ID, so a constraint that names only those is enforced by the
+  control plane that issues the ticket, not by the broker; a compromised
+  control plane could therefore send a ticket to an evaluator of an
+  operator the owner excluded (never to a zone the owner excluded).
+- **The locations table is compiled in and reviewed in the repository.**
+  Version 1 covers Google Cloud, AWS and Azure regions and an
+  organization's own premises by country. An unknown provider, region or
+  zone is refused, never ignored; adding one is a code change, and a new
+  table version makes every governed plan made with the old one invalid
+  (plan again). Plans made before placement existed must also be made
+  again.
+- **Region is not jurisdiction.** A region says where a machine is, not
+  whose law reaches it; the legal assessment of a location stays with the
+  owner, which is why constraints also name allowed operators.
+- **Placement covers the machines Encompute schedules.** A governed job
+  runs on an evaluator, never at a party. A TEE offer carries no attested
+  location in a plan, so it never satisfies a constraint (the control
+  plane plans no TEE yet). Plaintext at an institution's own premises,
+  network routing, copies made outside Encompute and lawful access by the
+  state that hosts a machine are not controlled. Ciphertexts copied to a
+  prohibited place stay FHE-protected, which a stricter owner may still
+  not accept.
+- **The client's own placement check is in the CLI.** `jobs run
+  --placement` refuses before sending anything; the Python and native SDKs
+  do not carry it yet.
+- **An evaluator operator separate from the owners can still cheat by
+  one bit.** Operator separation keeps the machines' operator from being a
+  source owner or a decryptor; a malicious operator could return one bit
+  of an input attribute in place of the expected Boolean. The output-width
+  check and `max_releases` bound this; they do not prevent it. Verified
+  execution would close it and is out of scope.
+- **Loosening a project's constraints needs every member to propose the
+  same thing.** One member refusing, or gone, blocks it by design; a
+  member removed from the project stops counting. Tightening is
+  immediate and cannot be undone by one member.
+- **`Objective::Minimize` orders by release rank, principals who learn
+  plaintext and latency.** The bits a release carries are not told apart
+  yet, and the planner does not itself refuse an output wider than a
+  source's class: a governed submission does (ENC2709).
 - **A compromised control plane can still deny and delay.** It cannot
   release a key without an owner-signed authorization installed at the
   owner's broker, but it can withhold tickets and delay revocation
