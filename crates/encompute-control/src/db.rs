@@ -81,6 +81,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "evaluator_placement",
         include_str!("../migrations/0017_evaluator_placement.sql"),
     ),
+    (
+        18,
+        "project_placement",
+        include_str!("../migrations/0018_project_placement.sql"),
+    ),
 ];
 
 /// Serializes migrations across control-plane replicas.

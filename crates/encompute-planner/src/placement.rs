@@ -27,9 +27,20 @@ pub struct Admission {
     pub admitted: Vec<AdmittedEvaluator>,
     /// `(evaluator, reason)`.
     pub excluded: Vec<(String, String)>,
+    /// The excluded evaluators refused for operator separation.
+    pub separation: BTreeSet<String>,
 }
 
 impl Admission {
+    /// Nothing is admitted, and every evaluator that exists was refused
+    /// for operator separation (the operators are all source owners or
+    /// decryptors): the refusal is about who operates, not where.
+    pub fn only_separation_refused(&self) -> bool {
+        self.admitted.is_empty()
+            && !self.excluded.is_empty()
+            && self.separation.len() == self.excluded.len()
+    }
+
     pub fn ids(&self) -> BTreeSet<&str> {
         self.admitted.iter().map(|a| a.id.as_str()).collect()
     }
@@ -82,24 +93,52 @@ pub fn evaluator_unusable(
     extra: &[PlacementSource],
     decryptors: &BTreeSet<String>,
 ) -> Option<String> {
+    judge(offer, backend, pc, extra, decryptors).map(|u| u.why)
+}
+
+/// Why an evaluator is unusable, and whether operator separation is the
+/// reason.
+pub struct Unusable {
+    pub why: String,
+    pub separation: bool,
+}
+
+/// [`evaluator_unusable`] with the kind of reason.
+pub fn judge(
+    offer: &EvaluatorOffer,
+    backend: Option<&str>,
+    pc: &PlacementContext,
+    extra: &[PlacementSource],
+    decryptors: &BTreeSet<String>,
+) -> Option<Unusable> {
+    let no = |why: String| Unusable {
+        why,
+        separation: false,
+    };
     if let Some(b) = backend {
         if !offer.backends.iter().any(|x| x == b) {
-            return Some(format!("it does not offer the {b} backend"));
+            return Some(no(format!("it does not offer the {b} backend")));
         }
     }
     // Operator separation: whoever runs the evaluator is neither a source
     // owner nor a decryptor.
     if pc.roles.source_owners.contains(&offer.operator) {
-        return Some(format!(
-            "its operator {} owns a source of the job (operator separation)",
-            offer.operator
-        ));
+        return Some(Unusable {
+            why: format!(
+                "its operator {} owns a source of the job (operator separation)",
+                offer.operator
+            ),
+            separation: true,
+        });
     }
     if pc.roles.decryptors.contains(&offer.operator) || decryptors.contains(&offer.operator) {
-        return Some(format!(
-            "its operator {} holds a decryption key for the output (operator separation)",
-            offer.operator
-        ));
+        return Some(Unusable {
+            why: format!(
+                "its operator {} holds a decryption key for the output (operator separation)",
+                offer.operator
+            ),
+            separation: true,
+        });
     }
     let mut sources: Vec<PlacementSource> = pc.constraints.clone();
     sources.extend(extra.iter().cloned());
@@ -123,12 +162,11 @@ pub fn evaluator_unusable(
     if bad.is_empty() {
         return None;
     }
-    Some(
-        bad.iter()
-            .map(|(o, why)| describe_refusal(o, why, offer.location.as_ref()))
-            .collect::<Vec<_>>()
-            .join("; "),
-    )
+    Some(no(bad
+        .iter()
+        .map(|(o, why)| describe_refusal(o, why, offer.location.as_ref()))
+        .collect::<Vec<_>>()
+        .join("; ")))
 }
 
 /// The evaluators of `ctx` admissible for `backend` (any when `None`),
@@ -147,8 +185,13 @@ pub fn admission(
     offers.sort();
     offers.dedup();
     for o in offers {
-        match evaluator_unusable(o, backend, pc, extra, decryptors) {
-            Some(why) => out.excluded.push((o.id.clone(), why)),
+        match judge(o, backend, pc, extra, decryptors) {
+            Some(u) => {
+                if u.separation {
+                    out.separation.insert(o.id.clone());
+                }
+                out.excluded.push((o.id.clone(), u.why));
+            }
             None => out.admitted.push(AdmittedEvaluator {
                 id: o.id.clone(),
                 operator: o.operator.clone(),

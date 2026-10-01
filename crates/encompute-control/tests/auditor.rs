@@ -519,6 +519,13 @@ impl W {
                 format!("/v1/projects/{p}/members/remove"),
                 Some(json!({"organization": OTHER})),
             ),
+            "/v1/projects/{}/placement" => (
+                format!("/v1/projects/{p}/placement"),
+                Some(
+                    json!({"constraints": {"allowed_regions": [{"jurisdiction": "DE"}]},
+                            "base_version": 0}),
+                ),
+            ),
             "/v1/organizations/{}/governance-keys" => (
                 format!("/v1/organizations/{BEN}/governance-keys"),
                 Some(json!({"public_key": pk(&key(14))})),
@@ -711,6 +718,7 @@ impl W {
                 )]
             }
             "/v1/projects/{}/purposes" => vec![format!("/v1/projects/{p}/purposes")],
+            "/v1/projects/{}/placement" => vec![format!("/v1/projects/{p}/placement")],
             "/v1/projects/{}/audit" => vec![
                 format!("/v1/projects/{p}/audit"),
                 format!("/v1/projects/{p}/audit?after=1&limit=2"),

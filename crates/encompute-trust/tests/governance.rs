@@ -56,6 +56,7 @@ fn body() -> AuthorizationV2 {
             max_subjects_per_job: Some(1000),
             max_evaluations_per_subject: Some(1),
             max_outputs_per_job: None,
+            placement: None,
         },
         per_job_four_eyes: false,
         valid_from: 1_000,
@@ -984,4 +985,43 @@ fn release_record_binds_every_field() {
     let mut bare = record;
     bare.parents.clear();
     assert!(bare.sign(&key(3)).unwrap().verify(&pk(&key(3))).is_err());
+}
+
+/// An owner's own placement constraints ride in the authorization's limits:
+/// absent, they leave the AuthorizationId alone; present, they are part of
+/// what the owner signs; and an invalid one is no authorization.
+#[test]
+fn an_owners_placement_is_signed_and_checked() {
+    use encompute_verification::placement::{LocationPattern, PlacementConstraints};
+    let plain = body();
+    let text =
+        String::from_utf8(encompute_verification::canonical::canonical_json(&plain).unwrap())
+            .unwrap();
+    assert!(!text.contains("placement"), "{text}");
+    assert_eq!(plain.id(), GOLDEN_AUTHORIZATION_ID);
+    let mut placed = body();
+    placed.limits.placement = Some(PlacementConstraints {
+        allowed_regions: Some([LocationPattern::jurisdiction("DE")].into()),
+        ..PlacementConstraints::default()
+    });
+    assert_ne!(placed.id(), plain.id());
+    placed.check_probing_limits().unwrap();
+    // Another constraint is another authorization.
+    let mut other = placed.clone();
+    other.limits.placement = Some(PlacementConstraints {
+        allowed_regions: Some([LocationPattern::jurisdiction("FR")].into()),
+        ..PlacementConstraints::default()
+    });
+    assert_ne!(other.id(), placed.id());
+    // It survives a round trip, and an invalid one (an unknown region) is
+    // refused wherever limits are checked.
+    let back: AuthorizationV2 =
+        serde_json::from_str(&serde_json::to_string(&placed).unwrap()).unwrap();
+    assert_eq!(back.id(), placed.id());
+    let mut bad = body();
+    bad.limits.placement = Some(PlacementConstraints {
+        allowed_regions: Some([LocationPattern::region("gcp", "europe-west99")].into()),
+        ..PlacementConstraints::default()
+    });
+    assert!(bad.check_probing_limits().is_err());
 }

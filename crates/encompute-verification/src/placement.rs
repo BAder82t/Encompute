@@ -176,6 +176,48 @@ impl Location {
     }
 }
 
+/// Where a job was placed, as its grant records it: the evaluator's
+/// operator and location with the evidence the location rested on when the
+/// control plane scheduled it. Shared-safe: the operator and the location
+/// of an evaluator are facts about the infrastructure, not any
+/// organization's private metadata. The scheduler records it, the start
+/// check compares it with the evaluator's evidence then, and reports label
+/// it "attested" or "declared".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantPlacement {
+    pub operator: String,
+    /// Absent when no constraint asked for a location and the evaluator
+    /// had none on record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    pub evidence: LocationEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_digest: Option<String>,
+}
+
+impl GrantPlacement {
+    /// Consistent: a known location (when given), a digest of 32 bytes.
+    pub fn check(&self) -> Result<()> {
+        if self.operator.is_empty() || self.operator.len() > 200 {
+            return Err(refuse("the grant's placement names no operator"));
+        }
+        if let Some(l) = &self.location {
+            l.check()?;
+        }
+        if let Some(d) = &self.evidence_digest {
+            if d.len() != 64
+                || !d
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(refuse("the grant's evidence digest is not 32 bytes of hex"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A set of locations: each field present must match; an absent field
 /// matches anything. At least one field is present.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

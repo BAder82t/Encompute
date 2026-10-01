@@ -426,6 +426,10 @@ impl Control {
                 )
             })?;
             g.check(&project)?;
+            // No key is released to an evaluator the job's placement does
+            // not admit now, or that is no longer the machine the grant
+            // recorded (ENC2710, ENC2725).
+            self.check_job_placement(t, id, &g.binding, Some(ctx.actor()), g.placement.as_ref())?;
             let at = now();
             if at >= grant.expires_at {
                 return Err(conflict("the job's grant expired"));

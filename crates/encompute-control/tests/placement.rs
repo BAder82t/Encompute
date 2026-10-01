@@ -491,3 +491,72 @@ fn an_operators_evaluator_never_runs_a_standard_job() {
     // backends: with only the operator's evaluator able to run
     // `openfhe-exact`, a standard plan could not be made.
 }
+
+#[test]
+fn standard_projects_behave_as_before() {
+    let Some(w) = world() else { return };
+    // An operator's evaluator with a location exists; it changes nothing
+    // for a standard project.
+    org_evaluator(
+        &w.t,
+        &w.b_admin,
+        "modelco",
+        "ev-modelco",
+        Some(gcp("europe-west3")),
+    );
+    let p = w.t.ok(
+        &w.b_dev,
+        "POST",
+        "/v1/plans",
+        Some(json!({"project": w.project, "program": EXACT})),
+    );
+    let plan = p["id"].as_str().unwrap();
+    // The stored plan carries none of the placement vocabulary, so its
+    // bytes and PlanId are those of a plan made without it.
+    let doc: Value =
+        w.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one("SELECT document FROM plans WHERE id = $1", &[&plan])
+            .unwrap()
+            .get(0);
+    let text = doc.to_string();
+    for new in [
+        "locations_digest",
+        "constraints_digest",
+        "operator_separation",
+        "\"evaluators\"",
+        "\"admissible\"",
+    ] {
+        assert!(!text.contains(new), "{new} in a standard plan: {text}");
+    }
+    let (s, v) = w.job(plan, &[], "k-standard");
+    assert_eq!(s, 201, "{v}");
+    let id = v["id"].as_str().unwrap();
+    let view = w.t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{id}"), None);
+    assert_eq!(view["evaluator"], "evaluator-1");
+    assert_eq!(view["grant"]["version"], 1);
+    assert!(
+        view["grant"].get("governance").is_none_or(|g| g.is_null()),
+        "{view}"
+    );
+    for new in ["placement", "placement_waiting"] {
+        assert!(view.get(new).is_none(), "{new} in a standard job: {view}");
+    }
+    // The project-placement routes are for governed projects.
+    let (s, v) = w.t.call(
+        &w.b_sec,
+        "GET",
+        &format!("/v1/projects/{}/placement", w.project),
+        None,
+    );
+    assert!(s >= 400, "{s} {v}");
+    let (s, v) = w.t.call(
+        &w.b_sec,
+        "POST",
+        &format!("/v1/projects/{}/placement", w.project),
+        Some(json!({"constraints": {}, "base_version": 0})),
+    );
+    assert_eq!(code(&v), "ENC2724", "{s} {v}");
+}

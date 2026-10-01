@@ -403,6 +403,7 @@ fn grant_governance() -> GrantGovernance {
         binding: b,
         authorization_set_id: h('9'),
         not_after: 1_800,
+        placement: None,
     }
 }
 
@@ -732,4 +733,40 @@ fn class_within_order_matches_owner_decision() {
             );
         }
     }
+}
+
+#[test]
+fn a_grant_records_where_the_job_was_placed() {
+    use encompute_verification::placement::{GrantPlacement, Location, LocationEvidence};
+    let control = ServiceSigner::from_seed("control-plane", &[5; 32]).unwrap();
+    let pk = control.public_key_hex();
+    let p = h('a');
+    // Without it, the grant's bytes are as before.
+    let plain = grant(&control, Some(grant_governance()));
+    assert!(!serde_json::to_string(&plain).unwrap().contains("operator"));
+    let mut gg = grant_governance();
+    gg.placement = Some(GrantPlacement {
+        operator: "platform".into(),
+        location: Some(Location::resolve("gcp", "europe-west3", None).unwrap()),
+        evidence: LocationEvidence::OperatorDeclared,
+        evidence_digest: Some(h('c')),
+    });
+    let placed = grant(&control, Some(gg.clone()));
+    placed.verify(&pk, "evaluator-1", &p, 1_200).unwrap();
+    assert_ne!(placed.signature, plain.signature, "the record is signed");
+    assert_eq!(JobGrant::from_header(&placed.to_header()).unwrap(), placed);
+    // A forged jurisdiction or a malformed digest is no grant.
+    let mut forged = gg.clone();
+    forged
+        .placement
+        .as_mut()
+        .unwrap()
+        .location
+        .as_mut()
+        .unwrap()
+        .jurisdiction = "US".into();
+    assert!(forged.check(&forged.binding.project.clone()).is_err());
+    let mut short = gg;
+    short.placement.as_mut().unwrap().evidence_digest = Some("abc".into());
+    assert!(short.check(&short.binding.project.clone()).is_err());
 }

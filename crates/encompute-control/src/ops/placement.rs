@@ -15,13 +15,22 @@
 //!   governance log of its operator and of every governed project that
 //!   plans on or runs on it.
 
+use std::collections::BTreeSet;
+
 use postgres::{GenericClient, Transaction};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use encompute_ir::{Code, Error, Result};
-use encompute_planner::{EvaluatorOffer, Location, LocationEvidence};
+use encompute_planner::placement::Admission;
+use encompute_planner::{
+    AdmittedEvaluator, EvaluatorOffer, Location, LocationEvidence, Origin, PlacementConstraints,
+    PlacementSource, PlanningContext, Roles,
+};
+use encompute_trust::authz::SignedAuthorizationV2;
 use encompute_trust::govlog::Partition;
+use encompute_verification::governance::GovernanceBinding;
+use encompute_verification::placement::GrantPlacement;
 use encompute_verification::service::now;
 
 use crate::audit::{self, Outcome};
@@ -397,5 +406,527 @@ impl Control {
             }))
         })?;
         Ok(out)
+    }
+}
+
+// --- project constraints -------------------------------------------------------------
+
+/// The governance-log kind of a change to a project's placement.
+pub const PLACEMENT_CHANGED: &str = "placement.changed";
+
+fn change_err(m: impl Into<String>) -> Error {
+    Error::new(Code::GovernancePlacementChange, m)
+}
+
+/// A project's placement constraints as of one version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectPlacement {
+    pub version: i32,
+    pub constraints: PlacementConstraints,
+    pub digest: String,
+}
+
+/// `POST /v1/projects/{id}/placement`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetProjectPlacement {
+    pub constraints: PlacementConstraints,
+    /// The version the caller read (0 when the project has none): a change
+    /// based on anything else is refused, so two members never overwrite
+    /// each other unseen.
+    pub base_version: i32,
+}
+
+/// The project's current constraints; `None` when it has never had any.
+pub fn project_placement(
+    c: &mut impl GenericClient,
+    project: &str,
+) -> Result<Option<ProjectPlacement>> {
+    c.query_opt(
+        "SELECT version, constraints, digest FROM project_placements
+          WHERE project_id = $1 ORDER BY version DESC LIMIT 1",
+        &[&project],
+    )
+    .map_err(db_err)?
+    .map(|r| {
+        Ok(ProjectPlacement {
+            version: r.get(0),
+            constraints: serde_json::from_value(r.get(1))
+                .map_err(|e| db_err(format!("stored project placement: {e}")))?,
+            digest: r.get(2),
+        })
+    })
+    .transpose()
+}
+
+/// The version of the project's constraints with `digest`: what a job's
+/// binding names. `None` when the project never had it.
+pub fn project_placement_by_digest(
+    c: &mut impl GenericClient,
+    project: &str,
+    digest: &str,
+) -> Result<Option<PlacementConstraints>> {
+    c.query_opt(
+        "SELECT constraints FROM project_placements
+          WHERE project_id = $1 AND digest = $2 ORDER BY version DESC LIMIT 1",
+        &[&project, &digest],
+    )
+    .map_err(db_err)?
+    .map(|r| {
+        serde_json::from_value(r.get(0))
+            .map_err(|e| db_err(format!("stored project placement: {e}")))
+    })
+    .transpose()
+}
+
+impl Control {
+    /// `GET /v1/projects/{id}/placement`: the project's constraints, shared
+    /// by every member and auditor, with the change proposals waiting for
+    /// the rest of the members.
+    pub fn project_placement_view(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        let mut c = self.db.conn()?;
+        let p = super::tenancy::project_reader(&mut *c, &ctx.principal, id)?;
+        let current = project_placement(&mut *c, id)?;
+        let pending: Vec<Value> = c
+            .query(
+                "SELECT digest, constraints, array_agg(organization ORDER BY organization)
+                   FROM project_placement_proposals
+                  WHERE project_id = $1
+                    AND based_on = $2
+                  GROUP BY digest, constraints ORDER BY digest",
+                &[&id, &current.as_ref().map_or(0, |c| c.version)],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| {
+                let by: Vec<String> = r.get(2);
+                let waiting: Vec<&String> = p.members.iter().filter(|m| !by.contains(m)).collect();
+                json!({"digest": r.get::<_, String>(0), "constraints": r.get::<_, Value>(1),
+                       "proposed_by": by, "waiting_for": waiting})
+            })
+            .collect();
+        Ok(json!({
+            "project": id,
+            "version": current.as_ref().map_or(0, |c| c.version),
+            "constraints": current.as_ref().map(|c| &c.constraints),
+            "digest": current.as_ref().map(|c| &c.digest),
+            "pending_loosening": pending,
+            "locations_table": encompute_planner::locations::digest(),
+        }))
+    }
+
+    /// `POST /v1/projects/{id}/placement`: a person who is a security admin
+    /// of a member organization changes the project's constraints.
+    ///
+    /// - **Tightening** (the new constraints admit nothing the current ones
+    ///   refuse) takes effect at once, for any member.
+    /// - Anything else **loosens** (it admits something the current ones
+    ///   refuse): it takes effect when every member organization has
+    ///   proposed exactly the same constraints, from the same version.
+    ///
+    /// Either change is audited in every member's trail and recorded in the
+    /// project's governance log. An existing job keeps being judged by the
+    /// version it was bound under as well as the current one.
+    pub fn set_project_placement(
+        &self,
+        ctx: &Ctx,
+        id: &str,
+        r: SetProjectPlacement,
+    ) -> Result<Value> {
+        self.tx_anchored(|t| {
+            let p = crate::authz::project_visible(t, &ctx.principal, id)?;
+            crate::authz::deny_auditor(&ctx.principal, &p)?;
+            if !p.governed() {
+                return Err(change_err(
+                    "placement constraints belong to governed projects",
+                ));
+            }
+            let orgs = crate::authz::project_role_orgs(&ctx.principal, &p, &[Role::SecurityAdmin]);
+            let Some(org) = orgs.first().cloned() else {
+                return Err(crate::authz::forbidden(
+                    "changing a project's placement needs security_admin in a member organization",
+                ));
+            };
+            require_human(
+                &ctx.principal,
+                &org,
+                &[Role::SecurityAdmin],
+                "changing a project's placement",
+            )?;
+            r.constraints
+                .check()
+                .map_err(|e| change_err(e.message))?;
+            // One change at a time per project.
+            t.query_one("SELECT 1 FROM projects WHERE id = $1 FOR UPDATE", &[&id])
+                .map_err(db_err)?;
+            let current = project_placement(t, id)?;
+            let n = current.as_ref().map_or(0, |c| c.version);
+            let cur = current
+                .as_ref()
+                .map(|c| c.constraints.clone())
+                .unwrap_or_default();
+            if r.base_version != n {
+                return Err(change_err(format!(
+                    "the change is based on version {}, the project is at version {n}: read it again",
+                    r.base_version
+                )));
+            }
+            if r.constraints == cur {
+                return Ok(json!({"status": "unchanged", "version": n}));
+            }
+            let digest = r.constraints.digest();
+            let tightening = r.constraints.tightens(&cur);
+            let proposal = |t: &mut Transaction<'_>| -> Result<Vec<String>> {
+                t.execute(
+                    "INSERT INTO project_placement_proposals
+                         (project_id, based_on, digest, constraints, organization, proposed_by)
+                     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                    &[
+                        &id,
+                        &n,
+                        &digest,
+                        &serde_json::to_value(&r.constraints).expect("serializable"),
+                        &org,
+                        &ctx.actor(),
+                    ],
+                )
+                .map_err(db_err)?;
+                Ok(t.query(
+                    "SELECT organization FROM project_placement_proposals
+                      WHERE project_id = $1 AND based_on = $2 AND digest = $3
+                      ORDER BY organization",
+                    &[&id, &n, &digest],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|x| x.get(0))
+                .filter(|o: &String| p.members.contains(o))
+                .collect())
+            };
+            let kind = if tightening {
+                "tighten"
+            } else {
+                // Loosening: this organization's proposal, and the change
+                // once every member has made it.
+                let by = proposal(t)?;
+                let waiting: Vec<String> = p
+                    .members
+                    .iter()
+                    .filter(|m| !by.contains(m))
+                    .cloned()
+                    .collect();
+                audit::append(
+                    t,
+                    ctx.draft(
+                        "project.placement_proposed",
+                        "project",
+                        id,
+                        Outcome::Succeeded,
+                    )
+                    .org(&org)
+                    .project(id)
+                    .r#ref("digest", digest.clone())
+                    .r#ref("based_on", n.to_string()),
+                )?;
+                if !waiting.is_empty() {
+                    return Ok(json!({"status": "pending", "version": n, "digest": digest,
+                                     "proposed_by": by, "waiting_for": waiting}));
+                }
+                "loosen"
+            };
+            let version = n + 1;
+            t.execute(
+                "INSERT INTO project_placements (project_id, version, constraints, digest, kind, set_by, set_by_org)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &id,
+                    &version,
+                    &serde_json::to_value(&r.constraints).expect("serializable"),
+                    &digest,
+                    &kind,
+                    &ctx.actor(),
+                    &org,
+                ],
+            )
+            .map_err(db_err)?;
+            t.execute(
+                "DELETE FROM project_placement_proposals WHERE project_id = $1",
+                &[&id],
+            )
+            .map_err(db_err)?;
+            // Every member sees it, in its own trail and in the project's
+            // log.
+            for m in &p.members {
+                audit::append(
+                    t,
+                    ctx.draft("project.placement_changed", "project", id, Outcome::Succeeded)
+                        .org(m)
+                        .project(id)
+                        .r#ref("version", version.to_string())
+                        .r#ref("digest", digest.clone())
+                        .r#ref("change", kind),
+                )?;
+            }
+            govlog::append(
+                t,
+                govlog::Draft::new(Partition::Project(id.to_owned()), PLACEMENT_CHANGED, id)
+                    .org(&org)
+                    .r#ref("version", version.to_string())
+                    .r#ref("digest", digest.clone())
+                    .r#ref("change", kind),
+            )?;
+            Ok(json!({"status": "applied", "version": version, "digest": digest, "change": kind}))
+        })
+    }
+}
+
+// --- governed jobs --------------------------------------------------------------------
+
+/// A refusal that nothing can run the job where its constraints and the
+/// separation of operators allow: operator separation when that is all
+/// that refused, residency otherwise.
+pub fn placement_refused(a: &Admission) -> Error {
+    let code = if a.only_separation_refused() {
+        Code::GovernanceOperatorSeparation
+    } else {
+        Code::GovernanceResidency
+    };
+    Error::new(code, format!("no admissible evaluator: {}", a.why_none()))
+}
+
+/// The owner constraints of `authorizations` (rows of the signed
+/// authorizations a job runs under), each from its organization.
+pub fn owner_sources(
+    c: &mut impl GenericClient,
+    rows: &[&str],
+) -> Result<(Vec<PlacementSource>, BTreeSet<String>)> {
+    let mut out = vec![];
+    let mut parties = BTreeSet::new();
+    for r in c
+        .query(
+            "SELECT signed FROM authorizations WHERE id = ANY($1) ORDER BY id",
+            &[&rows],
+        )
+        .map_err(db_err)?
+    {
+        let Some(v) = r.get::<_, Option<Value>>(0) else {
+            continue;
+        };
+        let signed: SignedAuthorizationV2 =
+            serde_json::from_value(v).map_err(|e| db_err(format!("stored authorization: {e}")))?;
+        parties.insert(signed.body.party.clone());
+        if let Some(c) = signed.body.limits.placement.clone() {
+            out.push(PlacementSource {
+                origin: Origin::Organization(signed.body.party.clone()),
+                constraints: c,
+            });
+        }
+    }
+    Ok((out, parties))
+}
+
+/// What a governed job's placement is judged against.
+pub struct JobPlacement<'a> {
+    pub project: &'a str,
+    pub plan: &'a str,
+    /// The job's binding: its project-constraints digest, its inputs'
+    /// owners and its outputs' recipients.
+    pub binding: &'a GovernanceBinding,
+    /// The encrypted backend the plan's ciphertext steps need.
+    pub backend: &'a str,
+    /// The owners' own constraints (from their authorizations).
+    pub owners: Vec<PlacementSource>,
+    /// Every organization whose authorization the job runs under, with
+    /// or without constraints: they own sources (lineage owners of a
+    /// derived source included), so none of them operates the evaluator.
+    pub parties: BTreeSet<String>,
+}
+
+impl Control {
+    /// The evaluators the job's placement admits **now**, with every other
+    /// evaluator's reason, from the database in the caller's transaction:
+    /// the plan's own context (its project constraints and roles), the
+    /// project's constraints as the binding names them and as they are now
+    /// (a later loosening never widens a bound job), the owners' own
+    /// constraints, the roles named by the binding, the evaluators and
+    /// their evidence as registered now. A plan without a placement
+    /// context, or a binding that names project constraints the project
+    /// never had, admits nothing.
+    pub fn job_admission(
+        &self,
+        t: &mut impl GenericClient,
+        j: &JobPlacement<'_>,
+    ) -> Result<Admission> {
+        let doc: Value = t
+            .query_opt("SELECT document FROM plans WHERE id = $1", &[&j.plan])
+            .map_err(db_err)?
+            .ok_or_else(|| not_found("plan", j.plan))?
+            .get(0);
+        let mut ctx: PlanningContext = serde_json::from_value(doc["plan"]["context"].clone())
+            .map_err(|e| db_err(format!("stored plan context: {e}")))?;
+        let Some(pc) = ctx.placement.as_mut() else {
+            return Err(Error::new(
+                Code::GovernanceResidency,
+                "the job's plan was made without placement: a governed job's plan names where it \
+                 may run",
+            ));
+        };
+        // The project's constraints: the version the job was bound under
+        // and the current one. Never fewer than either.
+        pc.constraints.clear();
+        let current = project_placement(t, j.project)?;
+        let mut digests = BTreeSet::new();
+        if let Some(d) = &j.binding.placement_digest {
+            let Some(bound) = project_placement_by_digest(t, j.project, d)? else {
+                return Err(Error::new(
+                    Code::GovernanceResidency,
+                    "the job's binding names project constraints the project never had",
+                ));
+            };
+            digests.insert(d.clone());
+            pc.constraints.push(PlacementSource {
+                origin: Origin::Project(j.project.to_owned()),
+                constraints: bound,
+            });
+        }
+        if let Some(c) = current {
+            if digests.insert(c.digest.clone()) {
+                pc.constraints.push(PlacementSource {
+                    origin: Origin::Project(j.project.to_owned()),
+                    constraints: c.constraints,
+                });
+            }
+        }
+        pc.production = self.env.is_production();
+        pc.locations_digest = encompute_planner::locations::digest();
+        pc.roles = Roles {
+            source_owners: j
+                .binding
+                .inputs
+                .values()
+                .map(|i| i.organization.clone())
+                .chain(j.parties.iter().cloned())
+                .collect(),
+            decryptors: j
+                .binding
+                .outputs
+                .values()
+                .flat_map(|o| o.recipients.iter().cloned())
+                .collect(),
+            coordinator: None,
+        };
+        ctx.infrastructure.evaluators = evaluator_offers(t)?;
+        Ok(encompute_planner::placement::admission(
+            &ctx,
+            Some(j.backend),
+            &j.owners,
+            &BTreeSet::new(),
+        ))
+    }
+}
+
+/// How a grant records a placement: the admitted evaluator's operator,
+/// location and evidence.
+pub fn grant_placement(a: &AdmittedEvaluator) -> GrantPlacement {
+    GrantPlacement {
+        operator: a.operator.clone(),
+        location: a.location.clone(),
+        evidence: a.evidence,
+        evidence_digest: a.evidence_digest.clone(),
+    }
+}
+
+impl Control {
+    /// The job's placement prerequisites and, with `evaluator`, whether
+    /// that evaluator is admissible **now** and is still the machine the
+    /// grant recorded (`recorded`: its operator, location and evidence at
+    /// scheduling). The shared check behind `revalidate_governed` at
+    /// scheduling and start, and behind release tickets:
+    ///
+    /// - the plan names where it may run, and the binding's project
+    ///   constraints exist (ENC2710);
+    /// - with an evaluator: it is admitted by every constraint as the
+    ///   registry has it now (ENC2710, or ENC2725 when it is operator
+    ///   separation), and when the grant recorded its placement, the
+    ///   operator, location, evidence level and evidence digest are the
+    ///   same (ENC2710): an evaluator that moved, lost its evidence, or
+    ///   was re-registered after scheduling does not run the job.
+    pub(crate) fn check_job_placement(
+        &self,
+        t: &mut Transaction<'_>,
+        job: &str,
+        binding: &GovernanceBinding,
+        evaluator: Option<&str>,
+        recorded: Option<&GrantPlacement>,
+    ) -> Result<()> {
+        let adm = self.admission_for_job(t, job, binding)?;
+        let Some(ev) = evaluator else { return Ok(()) };
+        let Some(now_admitted) = adm.admitted.iter().find(|a| a.id == ev) else {
+            let why = adm.excluded.iter().find(|(id, _)| id == ev).map_or(
+                "it is not a registered, active evaluator".to_owned(),
+                |(_, w)| w.clone(),
+            );
+            let code = if adm.separation.contains(ev) {
+                Code::GovernanceOperatorSeparation
+            } else {
+                Code::GovernanceResidency
+            };
+            return Err(Error::new(
+                code,
+                format!("evaluator {ev} is not admissible for this job now: {why}"),
+            ));
+        };
+        if let Some(rec) = recorded {
+            if *rec != grant_placement(now_admitted) {
+                return Err(Error::new(
+                    Code::GovernanceResidency,
+                    format!(
+                        "evaluator {ev} is not the machine the job was scheduled on: its \
+                         operator, location or evidence changed since"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The evaluators governed job `job` may run on **now**: every
+    /// constraint, the owners' authorizations it runs under, and the
+    /// registry as it is (see [`Control::job_admission`]).
+    pub(crate) fn admission_for_job(
+        &self,
+        t: &mut impl GenericClient,
+        job: &str,
+        binding: &GovernanceBinding,
+    ) -> Result<Admission> {
+        let r = t
+            .query_one(
+                "SELECT project_id, plan_id, backend FROM jobs WHERE id = $1",
+                &[&job],
+            )
+            .map_err(db_err)?;
+        let (project, plan, backend): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+        let rows: Vec<String> = t
+            .query(
+                "SELECT authorization_row FROM job_authorizations WHERE job_id = $1 ORDER BY authorization_row",
+                &[&job],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|x| x.get(0))
+            .collect();
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let (owners, parties) = owner_sources(t, &rows)?;
+        self.job_admission(
+            t,
+            &JobPlacement {
+                project: &project,
+                plan: &plan,
+                binding,
+                backend: &backend,
+                owners,
+                parties,
+            },
+        )
     }
 }

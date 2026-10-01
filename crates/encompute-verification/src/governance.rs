@@ -536,6 +536,11 @@ pub struct GrantGovernance {
     /// `min(authorizations' valid_until, purpose valid_until, ...)`: the
     /// grant is dead at this second (strict).
     pub not_after: u64,
+    /// Where the job was placed: its evaluator's operator, location and
+    /// evidence at scheduling. Absent, and not serialized, in grants made
+    /// before placement existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::placement::GrantPlacement>,
 }
 
 impl GrantGovernance {
@@ -558,6 +563,9 @@ impl GrantGovernance {
                 Code::GovernancePurposeMismatch,
                 "the grant's binding is for another project",
             ));
+        }
+        if let Some(p) = &self.placement {
+            p.check()?;
         }
         Ok(())
     }

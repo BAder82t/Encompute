@@ -380,6 +380,12 @@ fn check_placement(plan: &ConfidentialExecutionPlan, p: &mut Vec<String>) {
         }
     }
     for s in &plan.steps {
+        if matches!(s.placement, Placement::Party(_)) && s.kind == StepKind::Evaluate {
+            p.push(format!(
+                "{}: a governed job runs on an evaluator, not at a party",
+                s.id
+            ));
+        }
         if matches!(s.placement, Placement::Tee(_)) {
             p.push(format!(
                 "{}: a TEE offer carries no attested location, so it cannot satisfy placement",

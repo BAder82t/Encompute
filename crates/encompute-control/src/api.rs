@@ -33,6 +33,7 @@
 //! | POST, GET | `/v1/evaluators` | |
 //! | POST | `/v1/evaluators/{id}/status` | |
 //! | POST | `/v1/evaluators/{id}/location-declarations` | a person who is a security admin of the evaluator's operator declares where it runs |
+//! | GET, POST | `/v1/projects/{id}/placement` | governed projects: the project's placement constraints (members and auditors read them); a member's security admin tightens them at once, and loosening needs every member |
 //! | GET | `/v1/privacy/{asset}`, `/v1/privacy/{asset}/ledger` | |
 //! | POST | `/v1/privacy/{asset}/events` | |
 //! | POST | `/v1/privacy/{asset}/spenders` | owners authorize a SecAgg service |
@@ -135,12 +136,14 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceReleaseTicket
         | Code::GovernanceCustody
         | Code::GovernanceAuditorSeparation
-        | Code::GovernanceLocationEvidence => 403,
+        | Code::GovernanceLocationEvidence
+        | Code::GovernanceOperatorSeparation => 403,
         Code::NotFound => 404,
         Code::Conflict
         | Code::PrivacyBudgetExceeded
         | Code::GovernanceRevocationHead
-        | Code::GovernanceCheckpointWitness => 409,
+        | Code::GovernanceCheckpointWitness
+        | Code::GovernancePlacementChange => 409,
         Code::PlanningFailed | Code::PlanInvalid => 422,
         Code::Scheduling => 503,
         Code::Remote | Code::InsecureConfiguration | Code::PrivacyLedger => 500,
@@ -553,6 +556,12 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "evaluators", id, "location-declarations"]) => {
             created(control.declare_evaluator_location(ctx, id, parse(&r.body)?)?)
         }
+        ("GET", ["v1", "projects", id, "placement"]) => {
+            ok(control.project_placement_view(ctx, id)?)
+        }
+        ("POST", ["v1", "projects", id, "placement"]) => {
+            ok(control.set_project_placement(ctx, id, parse(&r.body)?)?)
+        }
 
         ("GET", ["v1", "privacy", asset]) => ok(control.privacy_view(ctx, asset)?),
         ("GET", ["v1", "privacy", asset, "ledger"]) => ok(control.privacy_export(ctx, asset)?),
@@ -712,6 +721,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/evaluators"),
     ("POST", "/v1/evaluators/{}/status"),
     ("POST", "/v1/evaluators/{}/location-declarations"),
+    ("GET", "/v1/projects/{}/placement"),
+    ("POST", "/v1/projects/{}/placement"),
     ("GET", "/v1/privacy/{}"),
     ("GET", "/v1/privacy/{}/ledger"),
     ("POST", "/v1/privacy/{}/events"),

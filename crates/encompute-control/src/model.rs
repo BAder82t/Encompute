@@ -801,4 +801,14 @@ pub struct JobView {
     /// Governed projects: the GovernanceId its execution spec carries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub governance_id: Option<String>,
+    /// Governed projects, once scheduled: where the job was placed, its
+    /// evaluator's operator and location with the evidence level at
+    /// scheduling. The same for every member (it is infrastructure, not an
+    /// organization's private metadata).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<encompute_verification::placement::GrantPlacement>,
+    /// Governed projects: why an authorized job is not scheduled yet,
+    /// when no evaluator is admissible for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement_waiting: Option<String>,
 }

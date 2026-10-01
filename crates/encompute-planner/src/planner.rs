@@ -214,7 +214,12 @@ fn options(
                 out.push(Option_ {
                     placement: Placement::Party(p.clone()),
                     mechanisms: vec![Mechanism::LocalExecution { party: p.clone() }],
-                    unavailable: None,
+                    // A governed job is executed by an evaluator the control
+                    // plane schedules: running it at a party would route
+                    // around the placement constraints (training, which
+                    // runs at the parties by design, is unaffected).
+                    unavailable: (ctx.placement.is_some() && !training)
+                        .then(|| "a governed job runs on an evaluator, not at a party".to_owned()),
                 });
             }
             let fhe_unsupported = if training {

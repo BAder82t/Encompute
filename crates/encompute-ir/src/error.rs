@@ -196,6 +196,10 @@ pub enum Code {
     GovernanceCheckpointWitness,
     /// A location declaration or registration refused: the caller is not a person who is a security admin of the evaluator's operator organization, the location is not one the locations table knows (or its jurisdiction or zone is inconsistent), an attested location is not replaced by a declaration, or location evidence is stale or too weak for the claim (ENC2723).
     GovernanceLocationEvidence,
+    /// A project's placement constraints were not changed: the constraints are invalid (an unknown region, an empty allow list), the change is not based on the current version, the project is not governed, or the change loosens them and not every member organization has proposed it yet (ENC2724).
+    GovernancePlacementChange,
+    /// Operator separation refused: every evaluator that could run the job is operated by a source owner or by an organization that holds a decryption key for the output, or a SecAgg coordinator is also a contributor (ENC2725).
+    GovernanceOperatorSeparation,
 }
 
 impl Code {
@@ -281,13 +285,15 @@ impl Code {
             Code::GovernanceRevocationHead => "ENC2717",
             Code::GovernanceCheckpointWitness => "ENC2718",
             Code::GovernanceLocationEvidence => "ENC2723",
+            Code::GovernancePlacementChange => "ENC2724",
+            Code::GovernanceOperatorSeparation => "ENC2725",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 80] = [
+    pub const ALL: [Code; 82] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -368,6 +374,8 @@ impl Code {
         Code::GovernanceRevocationHead,
         Code::GovernanceCheckpointWitness,
         Code::GovernanceLocationEvidence,
+        Code::GovernancePlacementChange,
+        Code::GovernanceOperatorSeparation,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {
