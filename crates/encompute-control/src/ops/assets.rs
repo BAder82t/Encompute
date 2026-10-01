@@ -35,6 +35,12 @@ fn lineage_entry(x: &AssetRow) -> Value {
     if let Some(t) = x.source_revoked_at {
         v["source_revoked_at"] = json!(t);
     }
+    if let Some(t) = x.expired_at {
+        v["expired_at"] = json!(t);
+    }
+    if let Some(t) = x.source_expired_at {
+        v["source_expired_at"] = json!(t);
+    }
     v
 }
 
@@ -43,6 +49,63 @@ fn lineage_entry(x: &AssetRow) -> Value {
 pub(crate) struct Revoked {
     pub failed_jobs: Vec<String>,
     pub downstream: Vec<String>,
+}
+
+/// What happened to the source of the derived results downstream.
+#[derive(Clone, Copy)]
+pub(crate) enum Downstream {
+    /// `source_revoked_at`.
+    Revoked,
+    /// `source_expired_at`.
+    Expired,
+}
+
+/// Marks every derived result downstream of asset `id` (governed only: a
+/// standard asset's children are unchanged, and every hop down) with the
+/// time its source was revoked or expired, each once, in the caller's
+/// transaction, after `id` itself was updated; returns them. A derivation
+/// racing this one holds its parents shared, so it either finished (and is
+/// found here) or sees the change. Until none is new: marking one waits for
+/// a derivation holding it, whose result the next round finds.
+pub(crate) fn mark_downstream(
+    t: &mut postgres::Transaction<'_>,
+    id: &str,
+    what: Downstream,
+) -> Result<Vec<String>> {
+    let mark = match what {
+        Downstream::Revoked => {
+            "UPDATE assets SET source_revoked_at = now()
+              WHERE id = ANY($1) AND source_revoked_at IS NULL"
+        }
+        Downstream::Expired => {
+            "UPDATE assets SET source_expired_at = now()
+              WHERE id = ANY($1) AND source_expired_at IS NULL"
+        }
+    };
+    let mut downstream: Vec<String> = vec![];
+    loop {
+        let found: Vec<String> = t
+            .query(
+                "WITH RECURSIVE d(id) AS (
+                     SELECT x.id FROM assets x WHERE x.parents ? $1 AND x.derived_from_job IS NOT NULL
+                     UNION
+                     SELECT x.id FROM assets x JOIN d ON x.parents ? d.id
+                      WHERE x.derived_from_job IS NOT NULL
+                 )
+                 SELECT id FROM d ORDER BY id",
+                &[&id],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        if found.len() == downstream.len() {
+            break;
+        }
+        t.execute(mark, &[&found]).map_err(db_err)?;
+        downstream = found;
+    }
+    Ok(downstream)
 }
 
 fn owner_roles(kind: &str) -> &'static [Role] {
@@ -135,18 +198,35 @@ pub fn asset_json(a: &AssetRow) -> Value {
         "size_bytes": a.size_bytes, "media_type": a.media_type, "storage_uri": a.storage_uri,
     });
     derived_fields(a, &mut v);
+    // The owner's retention of a version.
+    for (k, t) in [
+        ("delete_after", a.delete_after),
+        ("retention_until", a.retention_until),
+        ("evidence_retention_until", a.evidence_retention_until),
+    ] {
+        if let Some(t) = t {
+            v[k] = json!(t);
+        }
+    }
     v
 }
 
 /// A derived result's job and custodian, and when a source of it was
-/// revoked: only on assets that have them, so other views are unchanged.
+/// revoked or expired, or it expired itself: only on assets that have
+/// them, so other views are unchanged.
 fn derived_fields(a: &AssetRow, v: &mut Value) {
     if let Some(j) = &a.derived_from_job {
         v["derived_from_job"] = json!(j);
         v["custodian"] = json!(a.organization);
     }
-    if let Some(t) = a.source_revoked_at {
-        v["source_revoked_at"] = json!(t);
+    for (k, t) in [
+        ("source_revoked_at", a.source_revoked_at),
+        ("expired_at", a.expired_at),
+        ("source_expired_at", a.source_expired_at),
+    ] {
+        if let Some(t) = t {
+            v[k] = json!(t);
+        }
     }
 }
 
@@ -276,6 +356,29 @@ impl Control {
             }
             Some(d) => Some(d as i64),
         };
+        // Its retention, and its evidence's: versions only.
+        let secs = |what: &str, v: Option<u64>| -> Result<Option<i64>> {
+            match v {
+                None => Ok(None),
+                Some(_) if version.is_none() => {
+                    Err(bad(format!("only a dataset version has {what}")))
+                }
+                Some(t) if t > i64::MAX as u64 => {
+                    Err(bad(format!("{what} is Unix seconds below 2^63")))
+                }
+                Some(t) => Ok(Some(t as i64)),
+            }
+        };
+        let retention_until = secs("retention_until", r.retention_until)?;
+        let evidence_retention_until =
+            secs("evidence_retention_until", r.evidence_retention_until)?;
+        if let (Some(k), Some(d)) = (retention_until, delete_after) {
+            if k > d {
+                return Err(bad(
+                    "retention_until is after delete_after: the data cannot be both kept and deleted",
+                ));
+            }
+        }
         // A version's registered policy: typed, canonical, owned by the
         // version's organization alone, fixed for good.
         if (r.ir_policy.is_some() || r.release_class.is_some()) && version.is_none() {
@@ -384,9 +487,10 @@ impl Control {
             t.execute(
                 "INSERT INTO assets (id, organization_id, kind, name, digest, size_bytes, media_type,
                      storage_uri, policy, lineage_root, parents, key_ref, status, created_by,
-                     series, version, version_id, delete_after, ir_policy, release_class)
+                     series, version, version_id, delete_after, ir_policy, release_class,
+                     retention_until, evidence_retention_until)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'active', $13, $14, $15, $16, $17,
-                         $18, $19)",
+                         $18, $19, $20, $21)",
                 &[
                     &id,
                     &r.organization,
@@ -407,6 +511,8 @@ impl Control {
                     &delete_after,
                     &ir_policy,
                     &release_class,
+                    &retention_until,
+                    &evidence_retention_until,
                 ],
             )
             .map_err(|e| {
@@ -730,40 +836,8 @@ impl Control {
             &[&id],
         )
         .map_err(db_err)?;
-        // The derived results downstream (governed only: a standard
-        // asset's children are unchanged), each marked once. A derivation
-        // racing this one holds its parents shared, so it either finished
-        // (and is found here) or sees the revocation.
-        // Until none is new: marking one waits for a derivation holding it,
-        // whose result the next round finds.
-        let mut downstream: Vec<String> = vec![];
-        loop {
-            let found: Vec<String> = t
-                .query(
-                    "WITH RECURSIVE d(id) AS (
-                         SELECT x.id FROM assets x WHERE x.parents ? $1 AND x.derived_from_job IS NOT NULL
-                         UNION
-                         SELECT x.id FROM assets x JOIN d ON x.parents ? d.id
-                          WHERE x.derived_from_job IS NOT NULL
-                     )
-                     SELECT id FROM d ORDER BY id",
-                    &[&id],
-                )
-                .map_err(db_err)?
-                .iter()
-                .map(|r| r.get(0))
-                .collect();
-            if found.len() == downstream.len() {
-                break;
-            }
-            t.execute(
-                "UPDATE assets SET source_revoked_at = now()
-                  WHERE id = ANY($1) AND source_revoked_at IS NULL",
-                &[&found],
-            )
-            .map_err(db_err)?;
-            downstream = found;
-        }
+        // The derived results downstream, each marked source-revoked once.
+        let downstream = mark_downstream(t, id, Downstream::Revoked)?;
         // Jobs that have not started cannot start now. (Rows are locked
         // before the audit chain: every transaction takes the audit head
         // last, so no two wait on each other.)

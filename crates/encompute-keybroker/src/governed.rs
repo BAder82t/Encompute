@@ -78,17 +78,43 @@ const MAX_SEEN_TICKETS: usize = 65_536;
 /// refused rather than older ones dropped.
 pub const MAX_REVOKED_AUTHORIZATIONS: usize = 16_384;
 
+/// How long a lineage owner's governance key, pinned from the control
+/// plane's attestation, stays usable for releases and exports without a
+/// fresh attestation, by default.
+pub const DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS: u64 = 24 * 3600;
+/// The longest maximum age a broker accepts for a lineage attestation.
+pub const MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+
 /// A governed broker's runtime configuration (not part of its state).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GovernanceConfig {
     /// The control plane's service key (hex Ed25519): only tickets it
-    /// signed are accepted.
+    /// signed are accepted. It must be the key pinned in the broker's
+    /// state (the first configuration pins it).
     pub control_key: String,
     /// Whether every governed release needs a ticket. `false` is a
     /// development escape for air-gapped trials only: it is refused unless
     /// the broker is in development mode and `ENCOMPUTE_ENV=development`.
     /// The owner's authorization is required either way.
     pub require_ticket: bool,
+    /// How old (in seconds, on this broker's clock) a lineage owner's
+    /// pinned attestation may be when a release or export relies on it:
+    /// older, nothing is released under that owner's authorizations until
+    /// the key is attested again (ENC2708). Never zero, at most
+    /// [`MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS`]; every governed broker has
+    /// one.
+    pub lineage_attestation_max_age_secs: u64,
+}
+
+impl GovernanceConfig {
+    /// Tickets required, and the default maximum attestation age.
+    pub fn new(control_key: &str) -> Self {
+        Self {
+            control_key: control_key.to_owned(),
+            require_ticket: true,
+            lineage_attestation_max_age_secs: DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS,
+        }
+    }
 }
 
 /// A workload's request for one governed key.
@@ -225,6 +251,17 @@ impl KeyBroker {
                 "the control-plane key is a 32-byte Ed25519 public key in lowercase hex",
             ));
         }
+        if config.lineage_attestation_max_age_secs == 0
+            || config.lineage_attestation_max_age_secs > MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS
+        {
+            return Err(err(
+                Code::InsecureConfiguration,
+                format!(
+                    "the maximum age of a lineage owner's key attestation is between 1 second and \
+                     {MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS} seconds"
+                ),
+            ));
+        }
         if !config.require_ticket
             && (self.state.mode != BrokerMode::Development || env != Some("development"))
         {
@@ -235,6 +272,9 @@ impl KeyBroker {
                  governed release needs a ticket from the control plane",
             ));
         }
+        // The control-plane key is pinned in the state: the first
+        // configuration pins it, every later one must name it.
+        self.pin_control_key(&config.control_key)?;
         if !config.require_ticket {
             eprintln!(
                 "DEVELOPMENT ONLY: key broker {} releases governed keys without release tickets",
@@ -248,6 +288,92 @@ impl KeyBroker {
     /// The control plane this broker accepts tickets from, if configured.
     pub fn governance(&self) -> Option<&GovernanceConfig> {
         self.governance.as_ref()
+    }
+
+    /// The control-plane key pinned in this broker's state, if any.
+    pub fn pinned_control_key(&self) -> Option<&str> {
+        self.state.control_key.as_deref()
+    }
+
+    /// Pins the control plane's public key (hex Ed25519) in the broker's
+    /// state, durably once saved. Set once: the same key again changes
+    /// nothing (returns `false`), and another is refused
+    /// (ENC2605): replacing the pinned key is the owner's explicit act,
+    /// [`Self::replace_control_key`]. Returns whether it was pinned now.
+    pub fn pin_control_key(&mut self, key: &str) -> Result<bool> {
+        if !is_hex32(key) {
+            return Err(err(
+                Code::InsecureConfiguration,
+                "the control-plane key is a 32-byte Ed25519 public key in lowercase hex",
+            ));
+        }
+        match self.state.control_key.as_deref() {
+            Some(k) if k == key => Ok(false),
+            Some(k) => Err(err(
+                Code::InsecureConfiguration,
+                format!(
+                    "this broker's control-plane key is pinned already ({k}) and {key} is not it: \
+                     nothing signed under another key is accepted; replace the pinned key \
+                     explicitly (--replace-control-key) only if the control plane's key really \
+                     changed"
+                ),
+            )),
+            None => {
+                self.state.control_key = Some(key.to_owned());
+                Ok(true)
+            }
+        }
+    }
+
+    /// Replaces the pinned control-plane key (the owner's explicit act,
+    /// after the control plane's key changed): returns the key it replaced.
+    /// The replacement is recorded in the broker's state
+    /// ([`crate::BrokerState::control_key_history`], durable once saved);
+    /// the CLI also prints an audit line. Replacing the key with itself is
+    /// refused (ENC2605), as is a replacement past
+    /// [`crate::MAX_CONTROL_KEY_HISTORY`]. A governance configuration in
+    /// effect with the old key is dropped: configure the broker again with
+    /// the new one.
+    pub fn replace_control_key(&mut self, key: &str) -> Result<Option<String>> {
+        if !is_hex32(key) {
+            return Err(err(
+                Code::InsecureConfiguration,
+                "the control-plane key is a 32-byte Ed25519 public key in lowercase hex",
+            ));
+        }
+        if self.state.control_key.as_deref() == Some(key) {
+            return Err(err(
+                Code::InsecureConfiguration,
+                "this control-plane key is the one pinned already: nothing is replaced",
+            ));
+        }
+        if self.state.control_key_history.len() >= crate::MAX_CONTROL_KEY_HISTORY {
+            return Err(err(
+                Code::InsecureConfiguration,
+                format!(
+                    "this broker recorded {} control-plane key replacements, its limit; no \
+                     further replacement is made",
+                    crate::MAX_CONTROL_KEY_HISTORY
+                ),
+            ));
+        }
+        let at = self.now();
+        let previous = self.state.control_key.replace(key.to_owned());
+        self.state
+            .control_key_history
+            .push(crate::ControlKeyChange {
+                previous_key: previous.clone(),
+                new_key: key.to_owned(),
+                at,
+            });
+        if self
+            .governance
+            .as_ref()
+            .is_some_and(|g| g.control_key != key)
+        {
+            self.governance = None;
+        }
+        Ok(previous)
     }
 
     fn serving(&self) -> Result<String> {
@@ -523,9 +649,25 @@ impl KeyBroker {
         }
         let version_id = record.body.derived_version_id.clone();
         let owners = record.body.lineage_owners.clone();
+        let binding = crate::DerivedBinding {
+            asset_id: c.asset_id.clone(),
+            release_record_id: c.release_record_id.clone(),
+            cosigned_at: c.issued_at,
+        };
         let s = self.secret_mut(asset_id)?;
         match &s.asset_version_id {
-            Some(v) if *v == version_id && s.derived && s.lineage_owners == owners => Ok(()),
+            Some(v)
+                if *v == version_id
+                    && s.derived
+                    && match &s.derived_binding {
+                        // The same record (its lineage key IDs may have
+                        // been re-bound since).
+                        Some(b) => b.release_record_id == binding.release_record_id,
+                        None => s.lineage_owners == owners,
+                    } =>
+            {
+                Ok(())
+            }
             Some(v) => Err(err(
                 Code::GovernanceAssetVersionMismatch,
                 format!("{asset_id} is bound to version {v}; a bound version never changes"),
@@ -534,9 +676,106 @@ impl KeyBroker {
                 s.asset_version_id = Some(version_id);
                 s.derived = true;
                 s.lineage_owners = owners;
+                s.derived_binding = Some(binding);
                 Ok(())
             }
         }
+    }
+
+    /// Re-binds derived result `asset_id`'s key to its lineage owners'
+    /// current governance keys, after one of them rotated its key: under
+    /// the control plane's re-issued co-signature `cosignature` of the same
+    /// release record. Accepted only when it verifies under the pinned
+    /// control-plane key and, against the binding in force, is for the same
+    /// custodian, broker, key, derived version, control-plane asset and
+    /// release record, names the same lineage owners, each with exactly the
+    /// key now pinned here for it (from the control plane's attestation;
+    /// ENC2708 otherwise), and was issued later than the co-signature the
+    /// key is bound under (ENC2704 otherwise). Nothing else of the binding
+    /// changes. Returns whether a key ID changed.
+    pub fn rebind_derived_lineage(
+        &mut self,
+        asset_id: &str,
+        cosignature: &SignedDerivedReleaseCosignature,
+    ) -> Result<bool> {
+        let organization = self.serving()?;
+        let unbound = |m: String| err(Code::GovernanceAssetVersionMismatch, m);
+        let control_key = self
+            .control_key("derived release co-signature")
+            .map_err(|e| unbound(e.message))?;
+        cosignature.verify(&control_key).map_err(|e| {
+            unbound(format!(
+                "the re-issued co-signature is not signed by the pinned control plane: {}",
+                e.message
+            ))
+        })?;
+        let c = &cosignature.body;
+        let s = self
+            .state
+            .secrets
+            .get(asset_id)
+            .ok_or_else(|| err(Code::KeyRelease, format!("no key for asset {asset_id}")))?;
+        let (Some(version_id), true, Some(bound)) =
+            (&s.asset_version_id, s.derived, &s.derived_binding)
+        else {
+            return Err(unbound(format!(
+                "{asset_id} is not bound to a derived result under a co-signature: bind it first \
+                 (encompute keys bind-version --derived)"
+            )));
+        };
+        for (what, same) in [
+            ("custodian", c.organization == organization),
+            ("key broker", c.broker == self.state.broker_id),
+            ("key", c.key_ref == asset_id),
+            ("derived version", c.derived_version_id == *version_id),
+            ("derived asset", c.asset_id == bound.asset_id),
+            (
+                "release record",
+                c.release_record_id == bound.release_record_id,
+            ),
+            (
+                "lineage owners",
+                c.lineage_owners.keys().eq(s.lineage_owners.keys()),
+            ),
+        ] {
+            if !same {
+                return Err(unbound(format!(
+                    "the re-issued co-signature names another {what} than the binding in force: \
+                     only the lineage owners' key IDs are re-bound"
+                )));
+            }
+        }
+        if c.issued_at <= bound.cosigned_at {
+            return Err(unbound(format!(
+                "the co-signature was issued at {}, not after the one the key is bound under \
+                 ({}): an older or replayed one is refused",
+                c.issued_at, bound.cosigned_at
+            )));
+        }
+        for (org, key_id) in &c.lineage_owners {
+            let pinned = self
+                .state
+                .lineage_keys
+                .get(org)
+                .is_some_and(|k| k.key.key_id() == *key_id);
+            if !pinned {
+                let msg = format!(
+                    "{org}'s governance key {key_id} is not the key pinned here for it from the \
+                     control plane's attestation: pin it first (encompute keys governance-key \
+                     pin-lineage)"
+                );
+                return Err(err(Code::GovernanceKeyRevoked, msg));
+            }
+        }
+        let owners = c.lineage_owners.clone();
+        let at = c.issued_at;
+        let s = self.secret_mut(asset_id)?;
+        let changed = s.lineage_owners != owners;
+        s.lineage_owners = owners;
+        if let Some(b) = s.derived_binding.as_mut() {
+            b.cosigned_at = at;
+        }
+        Ok(changed)
     }
 
     /// Installs an owner authorization after verifying it under the pinned
@@ -1243,8 +1482,8 @@ impl KeyBroker {
         check: impl Fn(&Self, Installed<'_>) -> Result<()>,
         now: u64,
     ) -> Result<(String, bool)> {
-        match self.state.lineage_keys.get(org) {
-            Some(k) if k.key.key_id() == key_id => {}
+        let attested_at = match self.state.lineage_keys.get(org) {
+            Some(k) if k.key.key_id() == key_id => k.attested_at,
             _ => {
                 return Err(err(
                     Code::GovernanceKeyRevoked,
@@ -1254,6 +1493,25 @@ impl KeyBroker {
                 ),
                 ))
             }
+        };
+        // A pin is only as fresh as its attestation: a key revoked at the
+        // control plane is unpinned only by an attestation that says so,
+        // so an old one is not relied on.
+        let max_age = self
+            .governance
+            .as_ref()
+            .map_or(DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS, |g| {
+                g.lineage_attestation_max_age_secs
+            });
+        if now.saturating_sub(attested_at) > max_age {
+            return Err(err(
+                Code::GovernanceKeyRevoked,
+                format!(
+                    "{org}'s governance key {key_id} was last attested at {attested_at}, more than \
+                     {max_age} seconds ago: re-attest it (encompute keys governance-key \
+                     pin-lineage) before anything derived from its data is released or exported"
+                ),
+            ));
         }
         let mut refusal = None;
         for (id, x) in &self.state.authorizations {
@@ -1420,6 +1678,7 @@ impl KeyBroker {
             })?;
         let key_version = secret.key_version;
         let lineage_owners = secret.lineage_owners.clone();
+        let derived_binding = secret.derived_binding.clone();
         // 2. The custodian's release record.
         let organization = self.serving()?;
         let key = self.pinned_key()?;
@@ -1481,12 +1740,22 @@ impl KeyBroker {
                 ))
             }
         }
-        // 5. The lineage owners the key was bound to (the same the record
-        //    names): each authorized this export, under its pinned key.
-        if lineage_owners != r.lineage_owners {
+        // 5. The lineage owners the key was bound to (the organizations the
+        //    record names, under the key IDs of the binding in force, which
+        //    a re-binding after a rotation updates): each authorized this
+        //    export, under its pinned key.
+        let same_record = match &derived_binding {
+            Some(b) => {
+                b.release_record_id == record.id()
+                    && lineage_owners.keys().eq(r.lineage_owners.keys())
+            }
+            None => lineage_owners == r.lineage_owners,
+        };
+        if !same_record {
             return Err(err(
                 Code::GovernanceAssetVersionMismatch,
-                "the release record names other lineage owners than the key was bound to",
+                "the release record is not the one the key was bound to, or names other lineage \
+                 owners",
             ));
         }
         let mut lineage = vec![];
@@ -1640,8 +1909,8 @@ mod tests {
     #[test]
     fn the_ticket_escape_needs_development_everywhere() {
         let cfg = |require_ticket| GovernanceConfig {
-            control_key: "ab".repeat(32),
             require_ticket,
+            ..GovernanceConfig::new(&"ab".repeat(32))
         };
         for (mode, env, ok) in [
             (BrokerMode::Development, Some("development"), true),
@@ -1658,10 +1927,7 @@ mod tests {
             // Requiring tickets is always allowed.
             broker(mode).with_governance_in(cfg(true), env).unwrap();
         }
-        let bad = GovernanceConfig {
-            control_key: "not-a-key".into(),
-            require_ticket: true,
-        };
+        let bad = GovernanceConfig::new("not-a-key");
         assert!(broker(BrokerMode::Development)
             .with_governance_in(bad, None)
             .is_err());

@@ -629,6 +629,14 @@ impl W {
                 format!("/v1/assets/{}/exports", self.ben_asset),
                 Some(json!({"recipient": BEN})),
             ),
+            "/v1/assets/{}/release-cosignature" => (
+                format!("/v1/assets/{}/release-cosignature", self.ben_asset),
+                None,
+            ),
+            "/v1/assets/{}/retention" => (
+                format!("/v1/assets/{}/retention", self.ben_asset),
+                Some(json!({"evidence_retention_until": now() + 1_000_000})),
+            ),
             "/v1/jobs/{}/complete" => (
                 format!("/v1/jobs/{j}/complete"),
                 Some(json!({"receipt": {}, "request_commitment": "0".repeat(64),
@@ -692,6 +700,9 @@ impl W {
             }
             "/v1/assets/{}" => vec![format!("/v1/assets/{v}")],
             "/v1/assets/{}/lineage" => vec![format!("/v1/assets/{v}/lineage")],
+            "/v1/assets/{}/release-cosignature" => {
+                vec![format!("/v1/assets/{v}/release-cosignature")]
+            }
             "/v1/jobs" => vec!["/v1/jobs".into(), format!("/v1/jobs?project={p}")],
             "/v1/jobs/{}" => vec![format!("/v1/jobs/{j}")],
             "/v1/privacy/{}" => vec![format!("/v1/privacy/{v}")],

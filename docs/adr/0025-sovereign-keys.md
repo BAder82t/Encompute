@@ -263,9 +263,13 @@ above, this section is what was built.
   pin-lineage --attestation FILE` or `--url`): signed under the pinned
   control-plane key, for that organization, with the key's own ID
   (ENC2708 otherwise). A later attestation of another key replaces the pin
-  (rotation; results whose record names the old key then fail closed), an
-  earlier one never does, and an attestation that the key was revoked
-  unpins it for good. Each lineage owner installs its authorization there.
+  (rotation; results bound under the old key ID then fail closed until
+  re-bound, see below), an earlier one never does, and an attestation
+  that the key was revoked unpins it for good. A pin is relied on only
+  while its attestation is younger than the broker's maximum age (24
+  hours by default, at most 30 days, never unset); older, it is
+  re-attested before anything derived from that owner's data is released
+  or exported (ENC2708). Each lineage owner installs its authorization there.
   A key release for a job over the result, and an export, then require an
   installed authorization of every lineage owner, named by the ticket,
   verified under its pinned key and passing the same coverage, window and
@@ -273,6 +277,21 @@ above, this section is what was built.
   or different pinned key is ENC2708, a missing authorization ENC2701. The
   control plane therefore cannot substitute for any lineage owner's
   consent.
+- **Re-binding after a rotation.** The control plane re-issues its
+  co-signature with every lineage owner's active key ID at the request of
+  the custodian's security admin; the broker accepts it
+  (`rebind_derived_lineage`, `encompute keys rebind-lineage`) only signed
+  by its pinned control-plane key, for the binding in force (custodian,
+  broker, key, derived version, asset, record and lineage owners
+  unchanged), each key the one it pinned from an attestation (ENC2708),
+  and newer than the co-signature it holds (ENC2704). Only the lineage
+  key IDs change.
+- **The control-plane key is pinned.** The broker pins the control
+  plane's public key in its authenticated state the first time it is
+  configured with one; every later configuration, command and message
+  channel must name the same key (ENC2605), and replacing it is the
+  owner's explicit act (`--replace-control-key` with another key),
+  recorded in the broker's state and printed as an audit line.
 - **Revocations reach custodians.** Once an original owner's revoked
   authorization is anchored, the control plane sends
   `authorization.revoked` to the broker of every custodian holding a

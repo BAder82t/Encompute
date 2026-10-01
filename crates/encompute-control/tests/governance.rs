@@ -1295,7 +1295,7 @@ fn version_4_databases_migrate_to_standard_projects() {
                   VALUES ('a', 'o', 'dataset', 'a', 'd', '{}', 'a', '[]', 'active', 'u');",
         )
         .unwrap();
-    assert_eq!(db.migrate().unwrap(), 11);
+    assert_eq!(db.migrate().unwrap(), 12);
     let mut c = db.conn().unwrap();
     let r = c
         .query_one(

@@ -8,6 +8,7 @@ pub(crate) mod derived;
 mod governance;
 mod jobs;
 mod policies;
+mod retention;
 mod tenancy;
 
 pub(crate) use assets::withdraw_grants;

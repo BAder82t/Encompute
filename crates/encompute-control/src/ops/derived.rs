@@ -36,8 +36,8 @@ use encompute_analysis::confidentiality::{join_registered, no_wider};
 use encompute_ir::confidentiality::AssetPolicy;
 use encompute_ir::{Code, Error, Result};
 use encompute_trust::authz::{
-    DerivedReleaseCosignature, SignedAuthorizationV2, SignedReleaseRecord,
-    CONTROL_STATEMENT_VERSION,
+    DerivedReleaseCosignature, SignedAuthorizationV2, SignedDerivedReleaseCosignature,
+    SignedReleaseRecord, CONTROL_STATEMENT_VERSION,
 };
 use encompute_verification::canonical::canonical_json;
 use encompute_verification::governance::{
@@ -303,7 +303,8 @@ pub(crate) fn check_executions(
 impl Control {
     /// Walks `assets` and every ancestor, and refuses when one is revoked,
     /// in the database or in the state anchor (ENC2706), marked
-    /// source-revoked (ENC2706), expired or past its deletion date at `at`
+    /// source-revoked (ENC2706), expired (in the database or in the state
+    /// anchor), marked source-expired or past its deletion date at `at`
     /// (ENC2705), or not on record. The check a governed use, derivation,
     /// key-release ticket and export make: revocation blocks new use
     /// downstream without relying on the mark.
@@ -343,7 +344,8 @@ impl Control {
                 .query(
                     &format!(
                         "SELECT id, organization_id, status, expired_at IS NOT NULL, delete_after,
-                                source_revoked_at IS NOT NULL, parents, derived_from_job
+                                source_revoked_at IS NOT NULL, parents, derived_from_job,
+                                source_expired_at IS NOT NULL
                            FROM assets WHERE id = ANY($1) ORDER BY id {}",
                         if out.is_empty() { "FOR SHARE" } else { "" }
                     ),
@@ -374,6 +376,12 @@ impl Control {
                     return Err(gov(
                         Code::GovernanceAuthorizationRevoked,
                         format!("a source of {which} was revoked: it is not used, derived from or exported again"),
+                    ));
+                }
+                if r.get::<_, bool>(8) {
+                    return Err(gov(
+                        Code::GovernanceAuthorizationExpired,
+                        format!("a source of {which} expired (its deletion date passed): it is not used, derived from or exported again"),
                     ));
                 }
                 if r.get::<_, bool>(3)
@@ -906,6 +914,171 @@ impl Control {
             })?;
             Ok(json!({"id": export, "asset": id, "recipient": r.recipient,
                       "release_class": class.as_str(), "ticket": ticket}))
+        })
+    }
+
+    /// The control plane's co-signature of derived result `id`'s release
+    /// record in force (the latest re-issue, else the one made at
+    /// registration), with the one made at registration: to the people of
+    /// its custodian who operate its broker (security admins and data
+    /// owners; its other members are refused, as for a re-issue), never
+    /// anyone else (not found).
+    pub fn release_cosignature(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        let mut c = self.db.conn()?;
+        let a = asset_row(&mut *c, id)?.ok_or_else(|| not_found("asset", id))?;
+        if a.derived_from_job.is_none() || !ctx.principal.member_of(&a.organization) {
+            return Err(not_found("asset", id));
+        }
+        require_human(
+            &ctx.principal,
+            &a.organization,
+            &[Role::SecurityAdmin, Role::DataOwner],
+            "reading a derived result's co-signature",
+        )?;
+        let registered: Value = c
+            .query_one(
+                "SELECT release_cosignature FROM assets WHERE id = $1",
+                &[&id],
+            )
+            .map_err(db_err)?
+            .get(0);
+        let reissued = c
+            .query(
+                "SELECT cosignature FROM derived_cosignatures WHERE asset_id = $1 ORDER BY issued_at",
+                &[&id],
+            )
+            .map_err(db_err)?;
+        let current = reissued
+            .last()
+            .map(|r| r.get::<_, Value>(0))
+            .unwrap_or_else(|| registered.clone());
+        Ok(json!({"asset": id, "custodian": a.organization,
+                  "release_cosignature": current, "registered_cosignature": registered,
+                  "reissued": reissued.len()}))
+    }
+
+    /// A person who is a security admin of derived result `id`'s custodian
+    /// has the control plane re-issue its co-signature of the custodian's
+    /// release record after a lineage owner rotated its governance key: the
+    /// same custodian, asset, broker, key, derived version and record, the
+    /// same lineage owners, each under its active governance key now
+    /// (ENC2708 when one has none), and a later issue time. The custodian's
+    /// broker then re-binds the key ([`encompute_keybroker`]'s
+    /// `rebind_derived_lineage`), so a result bound under a rotated key is
+    /// not stranded. Recorded append-only and audited for the custodian and
+    /// every lineage owner. Refused (409) when the co-signature in force
+    /// already names every owner's active key.
+    pub fn reissue_release_cosignature(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        let at = now();
+        self.db.tx(|t| {
+            let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
+            if !ctx.principal.member_of(&a.organization) {
+                return Err(not_found("asset", id));
+            }
+            deny_auditor_in(t, &ctx.principal, &a.organization)?;
+            if a.derived_from_job.is_none() {
+                return Err(not_found("derived asset", id));
+            }
+            require_human(
+                &ctx.principal,
+                &a.organization,
+                &[Role::SecurityAdmin],
+                "re-issuing a derived result's co-signature",
+            )?;
+            // Nothing is re-bound to a result that is no longer used.
+            if a.expired_at.is_some() || a.source_expired_at.is_some() {
+                return Err(gov(
+                    Code::GovernanceAuthorizationExpired,
+                    format!(
+                        "{id} {}: its co-signature is not re-issued",
+                        if a.expired_at.is_some() {
+                            "expired (its deletion date passed)"
+                        } else {
+                            "derives from a source that expired"
+                        }
+                    ),
+                ));
+            }
+            // One re-issue at a time per result.
+            let registered: Value = t
+                .query_one(
+                    "SELECT release_cosignature FROM assets WHERE id = $1 FOR UPDATE",
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .get(0);
+            let current: Value = t
+                .query_opt(
+                    "SELECT cosignature FROM derived_cosignatures WHERE asset_id = $1
+                      ORDER BY issued_at DESC LIMIT 1",
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .map(|r| r.get(0))
+                .unwrap_or(registered);
+            let current: SignedDerivedReleaseCosignature = serde_json::from_value(current)
+                .map_err(|e| db_err(format!("stored co-signature: {e}")))?;
+            let mut owners = BTreeMap::new();
+            for o in current.body.lineage_owners.keys() {
+                let k: String = t
+                    .query_opt(
+                        "SELECT key_id FROM governance_keys WHERE organization_id = $1 AND status = 'active'",
+                        &[o],
+                    )
+                    .map_err(db_err)?
+                    .ok_or_else(|| {
+                        gov(
+                            Code::GovernanceKeyRevoked,
+                            format!(
+                                "{o}, whose data this result derives from, has no active governance key: nothing is re-bound to it"
+                            ),
+                        )
+                    })?
+                    .get(0);
+                owners.insert(o.clone(), k);
+            }
+            if owners == current.body.lineage_owners {
+                return Err(conflict(
+                    "the co-signature in force already names every lineage owner's active governance key",
+                ));
+            }
+            let issued_at = at.max(current.body.issued_at + 1);
+            let reissued = DerivedReleaseCosignature {
+                lineage_owners: owners.clone(),
+                issued_at,
+                ..current.body.clone()
+            }
+            .sign(&self.signer)?;
+            let reissued = serde_json::to_value(&reissued).expect("serializable");
+            t.execute(
+                "INSERT INTO derived_cosignatures (id, asset_id, cosignature, issued_at, issued_by)
+                 VALUES ($1, $2, $3, $4, $5)",
+                &[
+                    &new_id("dcs"),
+                    &id,
+                    &reissued,
+                    &i64::try_from(issued_at).unwrap_or(i64::MAX),
+                    &ctx.actor(),
+                ],
+            )
+            .map_err(db_err)?;
+            let mut orgs: BTreeSet<&str> = owners.keys().map(String::as_str).collect();
+            orgs.insert(&a.organization);
+            for org in orgs {
+                let mut d = ctx
+                    .draft("asset.release_cosignature_reissued", "asset", id, Outcome::Succeeded)
+                    .org(org)
+                    .r#ref("custodian", a.organization.clone())
+                    .r#ref("issued_at", issued_at.to_string());
+                for (o, k) in &owners {
+                    if current.body.lineage_owners.get(o) != Some(k) {
+                        d = d.r#ref(&format!("lineage_key:{o}"), k.clone());
+                    }
+                }
+                audit::append(t, d)?;
+            }
+            Ok(json!({"asset": id, "custodian": a.organization,
+                      "release_cosignature": reissued}))
         })
     }
 

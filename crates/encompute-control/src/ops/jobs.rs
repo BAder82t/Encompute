@@ -2928,11 +2928,29 @@ impl Control {
                 .iter()
                 .map(|r| r.get(0))
                 .collect();
-            let note = if revoked.is_empty() {
+            let mut note = if revoked.is_empty() {
                 "no source asset is revoked".to_owned()
             } else {
                 format!("revoked since: {}", revoked.join(", "))
             };
+            // A source past its deletion date since is noted, never failed:
+            // the evidence of a job that ran before it stays valid after
+            // the data is deleted.
+            let expired: Vec<String> = c
+                .query(
+                    "SELECT id FROM assets WHERE id = ANY($1) AND expired_at IS NOT NULL",
+                    &[&derived],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            if !expired.is_empty() {
+                note.push_str(&format!(
+                    "; expired since (deletion date passed): {}",
+                    expired.join(", ")
+                ));
+            }
             checks.push(json!({"check": "source assets",
                 "status": if revoked.is_empty() { "VERIFIED" } else { "REVOKED" },
                 "sources": derived,

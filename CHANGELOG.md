@@ -195,11 +195,65 @@ Work toward confidential cross-agency computation
   class, a derived result keeps its parents' owners, and a result may be
   recorded after its window while its export is blocked. Standard
   projects are unchanged. Migration 0011.
+- **Derived results after a key rotation.** The custodian's members
+  re-fetch the control plane's co-signature of a derived result's record
+  (`GET /v1/assets/{id}/release-cosignature`; anyone else gets not found).
+  When a lineage owner rotates its governance key, a result bound under
+  the old key ID is no longer released or exported (ENC2708) until a
+  security admin of the custodian has the co-signature re-issued with
+  every lineage owner's active key ID (`POST
+  /v1/assets/{id}/release-cosignature`: the record, version, key and
+  broker unchanged, a later issue time; audited for the custodian and
+  every lineage owner; ENC2708 when an owner has no active key) and the
+  custodian's broker re-binds the key (`encompute keys rebind-lineage
+  ASSET --cosignature FILE`). The broker accepts the re-issue only signed
+  by its pinned control plane, for the binding in force, changing nothing
+  but the lineage owners' key IDs, each the key it pinned from the
+  control plane's attestation, and newer than the co-signature it holds
+  (ENC2704 otherwise). Only the custodian's security admins and data
+  owners read the co-signature, and none is re-issued for an expired or
+  source-expired result (ENC2705). Migration 0012.
+- **Fresh lineage attestations.** A custodian's broker relies on a lineage
+  owner's pinned key only while the control plane's attestation of it is
+  younger than a maximum age (24 hours by default, `keys serve
+  --lineage-attestation-max-age SECS`, at most 30 days; every governed
+  broker has one): older, nothing derived from that owner's data is
+  released or exported until the key is attested again (ENC2708,
+  "re-attest").
+- **The control-plane key is pinned in broker state.** The first
+  configuration with a control-plane key (`--control-key` or
+  `ENCOMPUTE_CONTROL_PUBLIC_KEY`) pins it in the broker's MAC-protected
+  state; every later command or `keys serve` must name the same key
+  (ENC2605 otherwise), revocation messages included. Replacing it needs
+  `--replace-control-key` with another key, recorded in the broker's
+  state (`control_key_history`) and printed as an audit line
+  (`AUDIT key_broker.control_key.replaced`).
+- **Retention (phase 3).** A dataset version may carry `retention_until`
+  (until when its owner keeps it; fixed, never after `delete_after`) and
+  `evidence_retention_until` (until when its evidence is kept; only ever
+  extended), besides `delete_after` (fixed at registration, only ever
+  brought forward). The owner's security admins and data owners change
+  them through `POST /v1/assets/{id}/retention`, audited; pushing a
+  deletion date back, bringing it before `retention_until`, or shortening
+  evidence retention is refused (409), and the database refuses it too.
+  Once `delete_after` passes, the background task expires the version:
+  it is marked expired, every derived result downstream is marked
+  `source_expired_at` (set once), their jobs that have not started fail,
+  the expiry is anchored, and only then is the key broker told
+  (`asset.expired`). A job that started before the deletion date may
+  finish, but nothing derived from an expired version is used, derived
+  from or exported again (ENC2705); every check walks the ancestors, whose
+  expiry the anchor holds, and a restored database that undid an expiry
+  does not start. Receipts, audit events, anchors and release records stay
+  verifiable after the data is deleted, and the trust report notes the
+  expiry without failing. Deleting the data itself is the owner's
+  storage's job. Migration 0012.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
   INV-236 (the control plane can only deny; broker state cannot be
   rolled back), INV-223 (auditors), INV-229 (cross-organization
   views), INV-221 (over-release), INV-227 (release lineage, control-plane
-  part) and INV-245 (derived results); 164 invariants.
+  part), INV-245 (derived results) and INV-246 (retention); 165
+  invariants.
 
 ## 0.3.0-rc.4 — 2026-09-29
 

@@ -397,13 +397,25 @@ pub struct AssetRow {
     /// When a source of it was revoked (Unix seconds): never erased,
     /// never used again.
     pub source_revoked_at: Option<i64>,
+    /// A dataset version's retention (Unix seconds): its deletion date,
+    /// until when its owner keeps it, and until when its evidence is kept.
+    pub delete_after: Option<i64>,
+    pub retention_until: Option<i64>,
+    pub evidence_retention_until: Option<i64>,
+    /// When it expired (its deletion date passed; Unix seconds).
+    pub expired_at: Option<i64>,
+    /// When a source of it expired (Unix seconds): never used again.
+    pub source_expired_at: Option<i64>,
 }
 
 pub fn asset_row(c: &mut impl GenericClient, id: &str) -> Result<Option<AssetRow>> {
     Ok(c.query_opt(
         "SELECT id, organization_id, kind, name, digest, status, lineage_root, parents, key_ref,
                     policy, size_bytes, media_type, storage_uri, derived_from_job,
-                    floor(extract(epoch FROM source_revoked_at))::bigint
+                    floor(extract(epoch FROM source_revoked_at))::bigint,
+                    delete_after, retention_until, evidence_retention_until,
+                    floor(extract(epoch FROM expired_at))::bigint,
+                    floor(extract(epoch FROM source_expired_at))::bigint
              FROM assets WHERE id = $1",
         &[&id],
     )
@@ -424,6 +436,11 @@ pub fn asset_row(c: &mut impl GenericClient, id: &str) -> Result<Option<AssetRow
         storage_uri: r.get(12),
         derived_from_job: r.get(13),
         source_revoked_at: r.get(14),
+        delete_after: r.get(15),
+        retention_until: r.get(16),
+        evidence_retention_until: r.get(17),
+        expired_at: r.get(18),
+        source_expired_at: r.get(19),
     }))
 }
 

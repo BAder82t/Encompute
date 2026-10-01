@@ -721,6 +721,32 @@ fn governed_broker_commands() {
         );
         let out = ok(&strs(&pin("attestation.json", Some(&ck))), &[]);
         assert!(out.contains("pinned"), "{out}");
+        // That pinned the control-plane key in the broker's state: another
+        // key is refused, whatever it signed.
+        let rk = rogue.public_key_hex();
+        let err = refused(
+            &strs(&pin("forged-attestation.json", Some(&rk))),
+            &[],
+            "ENC2605",
+        );
+        assert!(err.contains("--replace-control-key"), "{err}");
+        // Only the owner's explicit replacement changes it, recorded as an
+        // audit line.
+        let mut replace = pin("forged-attestation.json", Some(&rk));
+        replace.push("--replace-control-key".into());
+        let (c, out, err) = encompute(&strs(&replace), &[]);
+        assert_eq!(c, 0, "{out}{err}");
+        assert!(
+            err.contains("AUDIT key_broker.control_key.replaced")
+                && err.contains(&format!("previous={ck}"))
+                && err.contains(&format!("new={rk}")),
+            "{err}"
+        );
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&b).unwrap()).unwrap();
+        assert_eq!(state["control_key"], rk.as_str());
+        // The original key is now the other one.
+        refused(&strs(&pin("attestation.json", Some(&ck))), &[], "ENC2605");
     }
     refused(&strs(&install("forged.json")), &[], "ENC2708");
     let out = ok(&strs(&install("signed.json")), &[]);

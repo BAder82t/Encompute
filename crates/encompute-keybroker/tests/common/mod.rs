@@ -195,10 +195,7 @@ pub fn bare_broker(clock: &Arc<AtomicU64>, spec: &ExecutionSpec) -> KeyBroker {
 }
 
 pub fn governance() -> GovernanceConfig {
-    GovernanceConfig {
-        control_key: control().public_key_hex(),
-        require_ticket: true,
-    }
+    GovernanceConfig::new(&control().public_key_hex())
 }
 
 /// A governed broker: the version bound, the owner's governance key

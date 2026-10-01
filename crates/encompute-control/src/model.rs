@@ -607,6 +607,16 @@ pub struct RegisterAsset {
     /// outlives it.
     #[serde(default)]
     pub delete_after: Option<u64>,
+    /// Until when the owner keeps a dataset version (Unix seconds;
+    /// versions only, fixed): never after `delete_after`, which can then
+    /// never be brought forward past it.
+    #[serde(default)]
+    pub retention_until: Option<u64>,
+    /// Until when the evidence about a dataset version (receipts, audit,
+    /// anchors, release records) is kept (Unix seconds; versions only): it
+    /// may later be extended, never shortened.
+    #[serde(default)]
+    pub evidence_retention_until: Option<u64>,
     /// A dataset version's registered confidentiality policy (the IR
     /// asset policy, in its JSON form; versions only, never changed): a
     /// governed job's program declares a policy at least as strict for it.
@@ -616,6 +626,18 @@ pub struct RegisterAsset {
     /// changed): every output of a governed job reading it is within it.
     #[serde(default)]
     pub release_class: Option<encompute_verification::governance::ReleaseClass>,
+}
+
+/// An owner's change of a dataset version's retention: its deletion date
+/// brought forward (never pushed back), its evidence retention extended
+/// (never shortened). At least one.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRetention {
+    #[serde(default)]
+    pub delete_after: Option<u64>,
+    #[serde(default)]
+    pub evidence_retention_until: Option<u64>,
 }
 
 /// Where an asset's key lives. Only references: the key broker holds the

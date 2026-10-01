@@ -386,8 +386,32 @@ these limits:
   owner's revocation reaches a custodian's broker from the control plane
   once anchored (deny-only), or directly as a signed revocation; the
   control plane stops issuing tickets at once. A rotated lineage owner's
-  key is pinned again from a newer attestation; results whose record
-  names the old key are then neither released nor exported.
+  key is pinned again from a newer attestation; results bound under the
+  old key ID are then neither released nor exported until the custodian
+  has the control plane's co-signature re-issued
+  (`POST /v1/assets/{id}/release-cosignature`) and re-binds the key
+  (`encompute keys rebind-lineage`). A pinned lineage key is relied on
+  only while its attestation is younger than the broker's maximum age
+  (24 hours by default): a key revoked at the control plane stays usable
+  at a custodian's broker for up to that long unless the revocation is
+  attested there sooner, and a broker whose owner does not re-attest stops
+  releasing derived results after it.
+- **Retention blocks use; it does not delete data.** Once a dataset
+  version's `delete_after` passes, Encompute expires it, blocks every
+  further use of it and of what was derived from it, tells its key broker,
+  and records all of it; deleting the data itself (and its key material,
+  where the owner's KMS keeps it) is the owner's storage's job, and
+  Encompute never claims it happened. Results released or exported
+  before the deletion date stay where they are. Expiry runs in the
+  background every few seconds, so a version may be expired a little
+  after its deletion date; every check also compares the deletion date
+  itself, so nothing uses it in between. `evidence_retention_until` is
+  recorded and only ever extended, but nothing purges evidence yet: the
+  control plane keeps all of it.
+- **Replacing the control-plane key at a broker is the owner's word.**
+  `--replace-control-key` accepts whatever other key the operator types,
+  recorded in the broker's state and printed as an audit line; the broker
+  cannot check that the control plane's key really changed.
 - **The custodian is trusted for derived data it holds.** The custodian
   runs the broker that holds a derived result's key. Its lineage checks
   defend against a compromised control plane and a careless custodian,

@@ -203,6 +203,9 @@ Built on the development branch, not released:
   management system. The owner can revoke at its broker even when the
   control plane is down.
 
+- **Phase 3, purpose, program and source enforcement (complete).**
+  Everything below.
+
 Jobs in governed projects run under their owners' authorizations: each
 source's owner must have authorized the job's purpose, program and
 releases, and validity is checked again at scheduling and start, strictly,
@@ -223,10 +226,29 @@ record sees the same shared view of it: never where another institution's
 data is stored or which key protects it, and approvers only as
 pseudonyms.
 
-Not yet built: release classes, placement and operator rules (a broker
-refuses any execution that declares placement until placement can be
-attested), record linkage, the governance report and evidence bundle. The
-limits of what exists are in [known limitations](../KNOWN_LIMITATIONS.md).
+Each output is released in a class the owners allowed (boolean,
+aggregate, differentially private aggregate, derived artifact) and in a
+form the compiler can show it takes. A released result can be recorded as
+a derived dataset held by its recipient, which signs what it may be used
+for; using or exporting it needs the consent of every institution whose
+data it comes from, enforced again by the recipient's own key broker, and
+a revocation upstream blocks it without claiming to recall anything. An
+institution that rotates its governance key does not strand what was
+derived from its data: the recipient has the binding re-issued under the
+new key.
+
+Each dataset version carries its owner's retention: a deletion date,
+fixed at registration and only ever brought forward, until when the data
+is kept, and until when the evidence about it is kept (only ever
+extended). Once the deletion date passes nothing uses the version or
+anything derived from it again, its key broker is told, and the evidence
+stays verifiable. Deleting the data itself is the institution's own
+storage's job.
+
+Not yet built: placement and operator rules (a broker refuses any
+execution that declares placement until placement can be attested),
+record linkage, the governance report and evidence bundle. The limits of
+what exists are in [known limitations](../KNOWN_LIMITATIONS.md).
 
 ## Design records
 

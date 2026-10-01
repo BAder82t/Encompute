@@ -1216,8 +1216,9 @@ impl Control {
         let _ = self.db.tx(|t| audit::append(t, draft.clone()).map(|_| ()));
     }
 
-    /// Periodic work: scheduling, message delivery, evaluator health,
-    /// nonce cleanup, audit checkpoints. Runs until the process exits.
+    /// Periodic work: scheduling, retention (expiring versions past their
+    /// deletion date), message delivery, evaluator health, nonce cleanup,
+    /// audit checkpoints. Runs until the process exits.
     pub fn run_background(self: &std::sync::Arc<Self>) {
         let me = self.clone();
         std::thread::spawn(move || loop {
@@ -1237,6 +1238,7 @@ impl Control {
         };
         report("health", self.expire_evaluators());
         report("schedule", self.schedule_pending());
+        report("retention", self.expire_assets().map(|_| ()));
         report("anchor", self.sync_anchor());
         report("outbox", self.deliver_outbox());
         report(

@@ -1083,9 +1083,18 @@ fn revocation_before_start_fails_job_2706() {
         .unwrap();
     refused(g.start(&id(&j3)), "ENC2706");
     assert_eq!(g.state(&id(&j3)), "failed");
-    // An expired source likewise (ENC2705).
+    // A source expired behind the job's back likewise (ENC2705); an
+    // expiry through the control plane fails the job at once.
     let (v4, _, _, j4) = g.job("2026-q4", |_| {});
-    g.t.control.expire_asset("retention", &v4.asset).unwrap();
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE assets SET expired_at = now() WHERE id = $1",
+            &[&v4.asset],
+        )
+        .unwrap();
     refused(g.start(&id(&j4)), "ENC2705");
     // A revoked governance key is found at start (ENC2708): the job fails
     // and is anchored as ended.
@@ -1432,9 +1441,26 @@ fn start_refuses_a_revoked_or_expired_source() {
         )
         .unwrap();
     start_refused(&g, &job, "ENC2706");
+    // An expiry fails the jobs that have not started at once (anchored as
+    // ended), and a start is refused.
     let (v, _, job) = queued(&g, "2026-q2");
     g.t.control.expire_asset("retention", &v.asset).unwrap();
-    start_refused(&g, &job, "ENC2705");
+    assert_eq!(g.state(&job), "failed");
+    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    let refs: Value =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT refs FROM audit_events WHERE action = 'job.failed' AND resource_id = $1",
+                &[&job],
+            )
+            .unwrap()
+            .get(0);
+    assert_eq!(refs["expired_asset"], v.asset.as_str(), "{refs}");
+    let (s, _) = g.start(&job);
+    assert!(s >= 400);
 }
 
 #[test]
@@ -3569,10 +3595,7 @@ fn custodian_broker(
         Box::new(DevelopmentFileStore),
     )
     .unwrap()
-    .with_governance(GovernanceConfig {
-        control_key: g.t.control.signer.public_key_hex(),
-        require_ticket: true,
-    })
+    .with_governance(GovernanceConfig::new(&g.t.control.signer.public_key_hex()))
     .unwrap();
     b.set_organization(BEN).unwrap();
     // (An exported key needs no attestation; the policy only guards a
@@ -4355,4 +4378,863 @@ fn lineage_revocation_forwarded_to_custodian_brokers() {
         })
         .unwrap_err();
     assert_eq!(e.code.as_str(), "ENC2706", "{e}");
+}
+
+// --- a derived result's co-signature: re-fetched, and re-issued after a rotation ----
+
+/// The custodian's members re-fetch the control plane's co-signature of a
+/// derived result (the one stored at registration while nothing was
+/// re-issued); nobody else learns it exists (not found), not even an owner
+/// of its data, and a source version has none.
+#[test]
+fn release_cosignature_refetched_by_custodian_only() {
+    let Some(g) = world() else { return };
+    let rel = succeeded(&g, "2026-q1", |_| {});
+    let c = custodian(&g);
+    let xk = encompute_attestation::ExportRecipient::generate().public_key_hex();
+    let policy = onward();
+    let rec = record(&g, &rel, "2026-q1", &policy, &xk);
+    let (s, v) = register_derived(
+        &g,
+        &g.ben_dev,
+        &rel.job,
+        derived_body("2026-q1", &policy, "boolean-only", rec, &c.key),
+    );
+    assert_eq!(s, 201, "{v}");
+    let d = id(&v);
+    let url = format!("/v1/assets/{d}/release-cosignature");
+    for who in [&c.sec, &c.owner] {
+        let r = g.t.ok(who, "GET", &url, None);
+        assert_eq!(r["release_cosignature"], v["release_cosignature"], "{r}");
+        assert_eq!(r["registered_cosignature"], v["release_cosignature"], "{r}");
+        assert_eq!(r["reissued"], 0, "{r}");
+    }
+    let cs: encompute_trust::authz::SignedDerivedReleaseCosignature =
+        serde_json::from_value(g.t.ok(&c.sec, "GET", &url, None)["release_cosignature"].clone())
+            .unwrap();
+    cs.verify(&g.t.control.signer.public_key_hex()).unwrap();
+    // Other people of the custodian: refused like the re-issue (403).
+    let auditor = user(
+        &g.t,
+        &As::User("b-admin".into()),
+        BEN,
+        "b-auditor",
+        &["auditor"],
+    );
+    for who in [&g.ben_dev, &auditor] {
+        refused_status(g.t.call(who, "GET", &url, None), 403);
+    }
+    // A lineage owner, another member, the evaluator: not found.
+    for who in [
+        &g.tax_owner,
+        &g.tax_sec1,
+        &g.other_dev,
+        &g.evaluator.service,
+    ] {
+        refused_status(g.t.call(who, "GET", &url, None), 404);
+    }
+    // A source version has no co-signature.
+    refused_status(
+        g.t.call(
+            &g.tax_owner,
+            "GET",
+            &format!("/v1/assets/{}/release-cosignature", rel.v.asset),
+            None,
+        ),
+        404,
+    );
+}
+
+/// Tax rotates its governance key: its active key is revoked and `new`
+/// approved. Returns the new key's ID.
+fn rotate_tax_key(g: &G, new: &SigningKey) -> String {
+    let keys = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    let active = keys
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["status"] == "active")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/organizations/{TAX}/governance-keys/{active}/revoke"),
+        None,
+    );
+    let v = g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        Some(json!({"public_key": pk(new), "kms_key_ref": "vault:transit/governance-2"})),
+    );
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/organizations/{TAX}/governance-keys/{}/approve", id(&v)),
+        None,
+    );
+    encompute_trust::authz::governance_key_id(&pk(new))
+}
+
+/// After a lineage owner rotates its governance key, a security admin of
+/// the custodian has the control plane re-issue its co-signature with the
+/// owner's current key ID (the record, version, key and broker unchanged,
+/// a later issue time), audited for the custodian and the owner; the
+/// custodian's broker, which pinned the new key from the control plane's
+/// attestation, re-binds the result's key with it. Nobody else re-issues
+/// it, and nothing is re-issued while every key is current (409) or an
+/// owner has no active key (ENC2708).
+#[test]
+fn rotation_rebind_reissues_cosignature() {
+    let Some(g) = world() else { return };
+    let (rel, c, d, _) = derived(&g, "2026-q1", |_| {});
+    let url = format!("/v1/assets/{d}/release-cosignature");
+    let registered: encompute_trust::authz::SignedDerivedReleaseCosignature =
+        serde_json::from_value(g.t.ok(&c.sec, "GET", &url, None)["release_cosignature"].clone())
+            .unwrap();
+    // Nothing rotated: nothing to re-issue.
+    refused_status(g.t.call(&c.sec, "POST", &url, None), 409);
+    // Revoked, not yet replaced: no active key to re-bind to.
+    let keys = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    let rotated = key(17);
+    let new_id = {
+        let _ = keys;
+        rotate_tax_key(&g, &rotated)
+    };
+    // Only the custodian's security admin, a person.
+    refused_status(g.t.call(&g.ben_dev, "POST", &url, None), 403);
+    refused_status(g.t.call(&c.owner, "POST", &url, None), 403);
+    refused_status(g.t.call(&g.tax_sec1, "POST", &url, None), 404);
+    let r = g.t.ok(&c.sec, "POST", &url, None);
+    let reissued: encompute_trust::authz::SignedDerivedReleaseCosignature =
+        serde_json::from_value(r["release_cosignature"].clone()).unwrap();
+    reissued
+        .verify(&g.t.control.signer.public_key_hex())
+        .unwrap();
+    assert_eq!(reissued.body.lineage_owners[TAX], new_id);
+    assert!(reissued.body.issued_at > registered.body.issued_at);
+    for (what, same) in [
+        (
+            "custodian",
+            reissued.body.organization == registered.body.organization,
+        ),
+        ("asset", reissued.body.asset_id == registered.body.asset_id),
+        ("broker", reissued.body.broker == registered.body.broker),
+        ("key", reissued.body.key_ref == registered.body.key_ref),
+        (
+            "version",
+            reissued.body.derived_version_id == registered.body.derived_version_id,
+        ),
+        (
+            "record",
+            reissued.body.release_record_id == registered.body.release_record_id,
+        ),
+    ] {
+        assert!(same, "{what} changed");
+    }
+    // The re-fetch returns it now; the registration's stays as it was.
+    let f = g.t.ok(&c.sec, "GET", &url, None);
+    assert_eq!(f["release_cosignature"], r["release_cosignature"]);
+    assert_eq!(
+        f["registered_cosignature"],
+        serde_json::to_value(&registered).unwrap()
+    );
+    assert_eq!(f["reissued"], 1);
+    refused_status(g.t.call(&c.sec, "POST", &url, None), 409);
+    // Append-only.
+    let mut db = g.t.control.db.conn().unwrap();
+    for sql in [
+        "UPDATE derived_cosignatures SET issued_at = 0",
+        "DELETE FROM derived_cosignatures",
+    ] {
+        let e = db.execute(sql, &[]).unwrap_err();
+        assert!(format!("{e:?}").contains("append-only"), "{sql}: {e:?}");
+    }
+    // Audited for the custodian and the lineage owner.
+    for org in [BEN, TAX] {
+        let n: i64 = db
+            .query_one(
+                "SELECT count(*) FROM audit_events WHERE action = 'asset.release_cosignature_reissued'
+                  AND resource_id = $1 AND organization_id = $2",
+                &[&d, &org],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 1, "{org}");
+    }
+    // The custodian's broker: bound under the old key ID, it pins tax's
+    // new key from the control plane's attestation and re-binds.
+    let spec = g.grant(&rel.job).spec_id;
+    let (mut b, _) = custodian_broker(&g, &c, &d, &spec);
+    assert_eq!(
+        b.state().secrets["result-2026-q1"].lineage_owners[TAX],
+        registered.body.lineage_owners[TAX]
+    );
+    assert!(b
+        .rebind_derived_lineage("result-2026-q1", &reissued)
+        .unwrap());
+    assert_eq!(
+        b.state().secrets["result-2026-q1"].lineage_owners[TAX],
+        new_id
+    );
+    // The registration's co-signature, older, re-binds nothing back.
+    assert_eq!(
+        b.rebind_derived_lineage("result-2026-q1", &registered)
+            .unwrap_err()
+            .code
+            .as_str(),
+        "ENC2704"
+    );
+    // An owner left without an active key: nothing is re-issued.
+    let keys = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    let active = keys
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["status"] == "active")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/organizations/{TAX}/governance-keys/{active}/revoke"),
+        None,
+    );
+    refused(g.t.call(&c.sec, "POST", &url, None), "ENC2708");
+}
+
+// --- retention ----------------------------------------------------------------------
+
+fn retention(g: &G, who: &As, asset: &str, body: Value) -> (u16, Value) {
+    g.t.call(
+        who,
+        "POST",
+        &format!("/v1/assets/{asset}/retention"),
+        Some(body),
+    )
+}
+
+fn db_message(e: &postgres::Error) -> String {
+    e.as_db_error()
+        .map(|d| d.message().to_owned())
+        .unwrap_or_else(|| e.to_string())
+}
+
+/// A version past its deletion date is used by no job (ENC2705), before
+/// the background expiry and after it; once expired, its owner sees when.
+#[test]
+fn version_past_delete_after_is_not_used_2705() {
+    let Some(g) = world() else { return };
+    let delete_after = now() + 3;
+    let v = g.version("2026-q1", json!({"delete_after": delete_after}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    after(delete_after);
+    refused(
+        g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k1"),
+        "ENC2705",
+    );
+    // The background expiry marks it, anchored.
+    assert_eq!(g.t.control.expire_assets().unwrap(), vec![v.asset.clone()]);
+    assert!(g
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .expired_assets
+        .contains(&v.asset));
+    refused(
+        g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k2"),
+        "ENC2705",
+    );
+    let a = g.t.ok(
+        &g.tax_owner,
+        "GET",
+        &format!("/v1/assets/{}", v.asset),
+        None,
+    );
+    assert!(a["expired_at"].as_i64().is_some(), "{a}");
+    assert_eq!(a["delete_after"], json!(delete_after), "{a}");
+    // Nothing more to expire.
+    assert!(g.t.control.expire_assets().unwrap().is_empty());
+}
+
+/// Once its owner brings a source's deletion date to now, the source
+/// expires: a queued job over it fails (anchored as ended) and never
+/// starts, and nothing derived from it is derived from again or exported
+/// (ENC2705).
+#[test]
+fn expired_source_blocks_start_and_export() {
+    let Some(g) = world() else { return };
+    let (v, _, job) = queued(&g, "2026-q1");
+    let (s, r) = retention(&g, &g.tax_owner, &v.asset, json!({"delete_after": now()}));
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(r["expires_now"], true, "{r}");
+    assert_eq!(g.state(&job), "failed");
+    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    let (s, _) = g.start(&job);
+    assert!(s >= 400);
+    // A derived result of another version.
+    let (rel, c, d, _) = derived(&g, "2026-q2", |_| {});
+    let (s, _) = export(&g, &g.ben_dev, &d, json!({"recipient": BEN}));
+    assert_eq!(s, 201);
+    let (s, r) = retention(
+        &g,
+        &g.tax_owner,
+        &rel.v.asset,
+        json!({"delete_after": now()}),
+    );
+    assert_eq!(s, 200, "{r}");
+    refused(
+        export(&g, &g.ben_dev, &d, json!({"recipient": BEN})),
+        "ENC2705",
+    );
+    let xk = encompute_attestation::ExportRecipient::generate().public_key_hex();
+    let policy = onward();
+    let rec = record(&g, &rel, "again", &policy, &xk);
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &rel.job,
+            derived_body("again", &policy, "boolean-only", rec, &c.key),
+        ),
+        "ENC2705",
+    );
+}
+
+/// A job that started before its source's deletion date may finish (as a
+/// job running when its window ends does), but nothing it released is
+/// recorded as a derived result after the source expired (ENC2705).
+#[test]
+fn job_started_before_expiry_finishes_but_nothing_is_derived() {
+    let Some(g) = world() else { return };
+    let (v, a, program, j) = g.job("2026-q1", |_| {});
+    let job = id(&j);
+    let grant = g.grant(&job);
+    let gov = grant.governance.clone().unwrap();
+    g.t.ok(
+        &g.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{job}/start"),
+        None,
+    );
+    let (s, r) = retention(&g, &g.tax_owner, &v.asset, json!({"delete_after": now()}));
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(g.state(&job), "running", "a running job is not failed");
+    let spec = base_spec(&program).governed(&gov.binding);
+    let receipt = g.receipt(&program, &spec, Some(grant.digest()));
+    let msg = serde_json::to_value(
+        encompute_control::transport::seal(
+            &g.evaluator.signer,
+            "job.completed",
+            "control-plane",
+            encompute_control::transport::Scope {
+                job: Some(job.clone()),
+                ..Default::default()
+            },
+            &json!({"receipt": receipt}),
+            300,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    g.t.ok(&g.evaluator.service, "POST", "/v1/messages", Some(msg));
+    let (s, done) = g.complete(&job, &receipt);
+    assert_eq!(
+        (s, done["state"].as_str()),
+        (200, Some("succeeded")),
+        "{done}"
+    );
+    let c = custodian(&g);
+    let rel = Released {
+        v,
+        a,
+        job: job.clone(),
+        governance_id: gov.governance_id,
+    };
+    let xk = encompute_attestation::ExportRecipient::generate().public_key_hex();
+    let policy = onward();
+    let rec = record(&g, &rel, "2026-q1", &policy, &xk);
+    refused(
+        register_derived(
+            &g,
+            &g.ben_dev,
+            &job,
+            derived_body("2026-q1", &policy, "boolean-only", rec, &c.key),
+        ),
+        "ENC2705",
+    );
+}
+
+/// A source's expiry reaches every derived result downstream like a
+/// revocation: each is marked source-expired (set once; the custodian's
+/// trail records it), their queued jobs fail, and none is used again
+/// (ENC2705), even when a restored database lost the mark: the walk up the
+/// lineage decides.
+#[test]
+fn expiry_cascades_to_derived_assets() {
+    let Some(g) = world() else { return };
+    let (rel, c, d, _) = derived(&g, "2026-q1", |_| {});
+    let d1 = derived_version_of(&d, "2026-q1");
+    let p2 = program(&[&d1.asset], PURPOSE, BEN);
+    custodian_authorizes(&g, &c, &d1, &p2);
+    g.authorize(g.body(&d1, &p2));
+    let (s, j) = submit_over(&g, &d1, &p2, "k-d2");
+    assert_eq!(s, 201, "{j}");
+    assert_eq!(j["state"], "queued", "{j}");
+    let (s, r) = retention(
+        &g,
+        &g.tax_owner,
+        &rel.v.asset,
+        json!({"delete_after": now()}),
+    );
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(g.state(&id(&j)), "failed");
+    let v = g.t.ok(&g.ben_dev, "GET", &format!("/v1/assets/{d}"), None);
+    assert!(v["source_expired_at"].as_i64().is_some(), "{v}");
+    assert_eq!(v["status"], "active", "{v}");
+    let mut db = g.t.control.db.conn().unwrap();
+    let n: i64 = db
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'asset.source_expired'
+              AND resource_id = $1 AND organization_id = $2",
+            &[&d, &BEN],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
+    refused(submit_over(&g, &d1, &p2, "k-d2b"), "ENC2705");
+    // Set once.
+    let e = db
+        .execute(
+            "UPDATE assets SET source_expired_at = NULL WHERE id = $1",
+            &[&d],
+        )
+        .unwrap_err();
+    assert!(db_message(&e).contains("source expiry is final"), "{e}");
+    // An attacker clears the marks: the expired ancestor still refuses.
+    attacker(
+        &g.t.env0.url,
+        &["assets"],
+        &format!("UPDATE assets SET source_expired_at = NULL WHERE id = '{d}'"),
+    );
+    refused(submit_over(&g, &d1, &p2, "k-d2c"), "ENC2705");
+    refused(
+        export(&g, &g.ben_dev, &d, json!({"recipient": BEN})),
+        "ENC2705",
+    );
+}
+
+/// The evidence outlives the source: after the source version expired
+/// (its data deleted by its owner's storage), the job's trust report is
+/// still satisfied (noting the expiry), the custodian's release record and
+/// the control plane's co-signature still verify, the audit chain still
+/// checkpoints, the export stays on record and the state still matches
+/// its anchor.
+#[test]
+fn evidence_verifies_after_source_deletion() {
+    let Some(g) = world() else { return };
+    let (rel, c, d, _) = derived(&g, "2026-q1", |_| {});
+    let (s, v) = export(&g, &g.ben_dev, &d, json!({"recipient": BEN}));
+    assert_eq!(s, 201, "{v}");
+    let (s, r) = retention(
+        &g,
+        &g.tax_owner,
+        &rel.v.asset,
+        json!({"delete_after": now()}),
+    );
+    assert_eq!(s, 200, "{r}");
+    assert!(g
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .expired_assets
+        .contains(&rel.v.asset));
+    let tr =
+        g.t.ok(&g.ben_dev, "GET", &format!("/v1/trust/{}", rel.job), None);
+    assert_eq!(tr["verdict"], "SATISFIED", "{tr}");
+    assert!(tr.to_string().contains("expired since"), "{tr}");
+    let mut db = g.t.control.db.conn().unwrap();
+    let row = db
+        .query_one(
+            "SELECT release_record, release_cosignature FROM assets WHERE id = $1",
+            &[&d],
+        )
+        .unwrap();
+    let record: encompute_trust::authz::SignedReleaseRecord =
+        serde_json::from_value(row.get(0)).unwrap();
+    record.verify(&pk(&c.key)).unwrap();
+    let cs: encompute_trust::authz::SignedDerivedReleaseCosignature =
+        serde_json::from_value(row.get(1)).unwrap();
+    cs.verify(&g.t.control.signer.public_key_hex()).unwrap();
+    let n: i64 = db
+        .query_one("SELECT count(*) FROM exports WHERE asset_id = $1", &[&d])
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
+    g.t.control.checkpoint_audit().unwrap();
+    g.t.control.verify_state(true).unwrap();
+}
+
+/// Evidence retention is only extended: the owner's route refuses to
+/// shorten it (409) and extends it, audited; the database refuses to
+/// shorten or clear it whoever asks; only a person who is a security admin
+/// or data owner of the version's organization changes it.
+#[test]
+fn evidence_retention_cannot_be_shortened() {
+    let Some(g) = world() else { return };
+    let until = now() + 100_000;
+    let v = g.version(
+        "2026-q1",
+        json!({"evidence_retention_until": until, "delete_after": now() + 5000}),
+    );
+    let a = g.t.ok(
+        &g.tax_owner,
+        "GET",
+        &format!("/v1/assets/{}", v.asset),
+        None,
+    );
+    assert_eq!(a["evidence_retention_until"], json!(until), "{a}");
+    refused_status(
+        retention(
+            &g,
+            &g.tax_owner,
+            &v.asset,
+            json!({"evidence_retention_until": until - 1}),
+        ),
+        409,
+    );
+    let (s, r) = retention(
+        &g,
+        &g.tax_sec1,
+        &v.asset,
+        json!({"evidence_retention_until": until + 50_000}),
+    );
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(r["evidence_retention_until"], json!(until + 50_000));
+    // Only the owner's security admins and data owners, people.
+    refused_status(
+        retention(
+            &g,
+            &g.tax_dev,
+            &v.asset,
+            json!({"evidence_retention_until": until + 60_000}),
+        ),
+        403,
+    );
+    refused_status(
+        retention(
+            &g,
+            &g.ben_dev,
+            &v.asset,
+            json!({"evidence_retention_until": until + 60_000}),
+        ),
+        404,
+    );
+    let mut db = g.t.control.db.conn().unwrap();
+    for sql in [
+        "UPDATE assets SET evidence_retention_until = evidence_retention_until - 1 WHERE id = $1",
+        "UPDATE assets SET evidence_retention_until = NULL WHERE id = $1",
+    ] {
+        let e = db.execute(sql, &[&v.asset]).unwrap_err();
+        assert!(db_message(&e).contains("only extended"), "{sql}: {e}");
+    }
+    let n: i64 = db
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'asset.retention_changed'
+              AND resource_id = $1 AND organization_id = $2",
+            &[&v.asset, &TAX],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
+}
+
+/// A deletion date is fixed at registration and only ever brought forward
+/// by the owner: never pushed back or cleared (route 409; the database
+/// refuses too), never before the version's `retention_until` (route 409,
+/// database constraint), whose own value never changes; a version is not
+/// registered to be kept past its deletion date.
+#[test]
+fn delete_after_can_only_be_shortened() {
+    let Some(g) = world() else { return };
+    let (keep, delete) = (now() + 3000, now() + 5000);
+    let v = g.version(
+        "2026-q1",
+        json!({"delete_after": delete, "retention_until": keep}),
+    );
+    refused_status(
+        retention(
+            &g,
+            &g.tax_owner,
+            &v.asset,
+            json!({"delete_after": delete + 1}),
+        ),
+        409,
+    );
+    refused_status(
+        retention(
+            &g,
+            &g.tax_owner,
+            &v.asset,
+            json!({"delete_after": keep - 1}),
+        ),
+        409,
+    );
+    let (s, r) = retention(
+        &g,
+        &g.tax_owner,
+        &v.asset,
+        json!({"delete_after": delete - 1000}),
+    );
+    assert_eq!(s, 200, "{r}");
+    let a = g.t.ok(
+        &g.tax_owner,
+        "GET",
+        &format!("/v1/assets/{}", v.asset),
+        None,
+    );
+    assert_eq!(a["delete_after"], json!(delete - 1000), "{a}");
+    assert_eq!(a["retention_until"], json!(keep), "{a}");
+    let mut db = g.t.control.db.conn().unwrap();
+    let refs: Value = db
+        .query_one(
+            "SELECT refs FROM audit_events WHERE action = 'asset.retention_changed' AND resource_id = $1",
+            &[&v.asset],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(refs["delete_after"], (delete - 1000).to_string(), "{refs}");
+    assert_eq!(refs["previous_delete_after"], delete.to_string(), "{refs}");
+    for (sql, msg) in [
+        (
+            "UPDATE assets SET delete_after = delete_after + 1 WHERE id = $1",
+            "only brought forward",
+        ),
+        (
+            "UPDATE assets SET delete_after = NULL WHERE id = $1",
+            "only brought forward",
+        ),
+        (
+            "UPDATE assets SET retention_until = retention_until + 1 WHERE id = $1",
+            "fixed at registration",
+        ),
+        (
+            "UPDATE assets SET delete_after = retention_until - 1 WHERE id = $1",
+            "assets_retention_before_deletion",
+        ),
+    ] {
+        let e = db.execute(sql, &[&v.asset]).unwrap_err();
+        assert!(
+            db_message(&e).contains(msg) || format!("{e:?}").contains(msg),
+            "{sql}: {e:?}"
+        );
+    }
+    // A version without a deletion date gets one only brought forward from
+    // never; a non-version has no retention.
+    let w = g.version("2026-q2", json!({}));
+    let (s, r) = retention(
+        &g,
+        &g.tax_owner,
+        &w.asset,
+        json!({"delete_after": now() + 9000}),
+    );
+    assert_eq!(s, 200, "{r}");
+    refused_status(
+        retention(
+            &g,
+            &g.tax_owner,
+            &w.asset,
+            json!({"delete_after": now() + 9001}),
+        ),
+        409,
+    );
+    // Kept past its deletion date: not registered.
+    let mut b = json!({"organization": TAX, "kind": "dataset", "name": "income@2026-q3",
+                       "series": "income", "version": "2026-q3",
+                       "digest": "c".repeat(64), "project": g.project,
+                       "delete_after": now() + 100, "retention_until": now() + 200,
+                       "key_ref": {"broker": "tax-broker", "provider": "openbao-transit",
+                                   "key_ref": "income-2026-q3", "key_version": 1}});
+    if let (Value::Object(b), Value::Object(r)) = (&mut b, registered(TAX)) {
+        b.extend(r);
+    }
+    refused_status(g.t.call(&g.tax_owner, "POST", "/v1/assets", Some(b)), 400);
+}
+
+/// A database restored to before an expiry (the expiry and the deletion
+/// date undone) does not make the version usable again: the state anchor
+/// holds the expiry, so the control plane refuses to start on it, and
+/// every use walks it (ENC2705).
+#[test]
+fn restore_undoing_expiry_refuses_start() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({"delete_after": now() + 5000}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    let (s, r) = retention(&g, &g.tax_owner, &v.asset, json!({"delete_after": now()}));
+    assert_eq!(s, 200, "{r}");
+    assert!(g
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .expired_assets
+        .contains(&v.asset));
+    // The restore: the expiry and the brought-forward date undone.
+    attacker(
+        &g.t.env0.url,
+        &["assets"],
+        &format!(
+            "UPDATE assets SET expired_at = NULL, delete_after = {} WHERE id = '{}'",
+            now() + 5000,
+            v.asset
+        ),
+    );
+    let e = g.t.control.verify_state(true).unwrap_err();
+    assert!(
+        e.message.contains("EXPIRY") || e.message.contains("expir"),
+        "{e}"
+    );
+    refused(
+        g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k1"),
+        "ENC2705",
+    );
+}
+
+/// The background task expires a version once its deletion date passes:
+/// the expiry is recorded in the database first, sent to no broker until
+/// it is anchored, and then sent to the version's key broker
+/// (`asset.expired`, for its organization), audited with its reason.
+#[test]
+fn background_expiry_sends_asset_expired_after_anchor() {
+    let Some(g) = world() else { return };
+    let delete_after = now() + 2;
+    let v = g.version("2026-q1", json!({"delete_after": delete_after}));
+    after(delete_after);
+    g.t.transport.drain();
+    // Expired in the database, not anchored: nothing is sent.
+    assert_eq!(
+        g.t.control.expire_due(now()).unwrap(),
+        vec![v.asset.clone()]
+    );
+    g.t.control.deliver_outbox().unwrap();
+    assert!(
+        !g.t.transport
+            .drain()
+            .iter()
+            .any(|(_, m)| m.kind == "asset.expired"),
+        "sent before it was anchored"
+    );
+    assert!(!g
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .expired_assets
+        .contains(&v.asset));
+    // The background tick anchors it, then sends it.
+    g.t.control.tick();
+    assert!(g
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .expired_assets
+        .contains(&v.asset));
+    let sent = g.t.transport.drain();
+    let (_, m) = sent
+        .iter()
+        .find(|(u, m)| u == "http://tax-broker.internal:8760" && m.kind == "asset.expired")
+        .unwrap_or_else(|| panic!("{sent:?}"));
+    assert_eq!(m.organization.as_deref(), Some(TAX));
+    assert_eq!(m.payload["key_ref"], "income-2026-q1");
+    // A second version, only the background task.
+    let delete_after = now() + 2;
+    let w = g.version("2026-q2", json!({"delete_after": delete_after}));
+    after(delete_after);
+    g.t.control.tick();
+    assert!(g
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .expired_assets
+        .contains(&w.asset));
+    let refs: Value =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT refs FROM audit_events WHERE action = 'asset.expired' AND resource_id = $1",
+                &[&w.asset],
+            )
+            .unwrap()
+            .get(0);
+    assert_eq!(refs["reason"], "delete_after", "{refs}");
+}
+
+/// No co-signature of an expired or source-expired derived result is
+/// re-issued (ENC2705): nothing is re-bound to it.
+#[test]
+fn reissue_refused_for_expired_derived_result_2705() {
+    let count = |g: &G| -> i64 {
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one("SELECT count(*) FROM derived_cosignatures", &[])
+            .unwrap()
+            .get(0)
+    };
+    // Its source expires: the result is source-expired.
+    {
+        let Some(g) = world() else { return };
+        let (rel, c, d, _) = derived(&g, "2026-q1", |_| {});
+        rotate_tax_key(&g, &key(17));
+        let (s, r) = retention(
+            &g,
+            &g.tax_owner,
+            &rel.v.asset,
+            json!({"delete_after": now()}),
+        );
+        assert_eq!(s, 200, "{r}");
+        let url = format!("/v1/assets/{d}/release-cosignature");
+        refused(g.t.call(&c.sec, "POST", &url, None), "ENC2705");
+        assert_eq!(count(&g), 0);
+    }
+    // The result itself expires (its own deletion date passed).
+    let Some(g) = world() else { return };
+    let (_, c, d, _) = derived(&g, "2026-q1", |_| {});
+    rotate_tax_key(&g, &key(17));
+    let (s, r) = retention(&g, &c.sec, &d, json!({"delete_after": now()}));
+    assert_eq!(s, 200, "{r}");
+    let url = format!("/v1/assets/{d}/release-cosignature");
+    refused(g.t.call(&c.sec, "POST", &url, None), "ENC2705");
+    assert_eq!(count(&g), 0);
 }

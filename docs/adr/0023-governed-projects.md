@@ -2,7 +2,11 @@
 
 Status: **Accepted** (2026-09-29) as design. Implementation starts after
 0.3.0 ships; nothing in this record is part of 0.3. The items under
-"Still open" are not decided.
+"Still open" are not decided. Built on the development branch so far:
+phases 1 and 2, and phase 3 (purpose, program and source enforcement:
+governed jobs, per-job four eyes, auditors and views, release classes,
+derived results and exports, retention), complete as of 2026-10-01; the
+"As built" notes record where the build refines this design.
 
 ## Context
 
@@ -491,6 +495,54 @@ As built (derived results and exports):
   never moves to the custodian); recording a result after its
   authorizations' window has ended is allowed, while its export is
   blocked.
+- The co-signature is re-fetched by the custodian's members only
+  (`GET /v1/assets/{id}/release-cosignature`; anyone else gets not found).
+  A lineage owner's key rotation would otherwise strand a result bound
+  under the old key ID, so a security admin of the custodian has the
+  control plane re-issue the co-signature (`POST` on the same path) with
+  every lineage owner's active key ID: the record, version, parents, key
+  and broker unchanged, a later issue time, stored append-only beside the
+  frozen original and audited for the custodian and every lineage owner.
+  The custodian's broker re-binds the key only with a re-issue signed by
+  its pinned control-plane key, for the binding in force, changing only
+  the lineage owners' key IDs, each the key it pinned from the control
+  plane's attestation, and newer than the co-signature it holds.
+- A custodian's broker relies on a lineage owner's pinned key only while
+  the attestation it was pinned from is younger than a maximum age (24
+  hours by default, configurable, at most 30 days, never unset): a key
+  revoked at the control plane is otherwise unpinned only when a revoked
+  attestation reaches the broker. The control-plane key the broker checks
+  everything against is pinned in its authenticated state the first time
+  it is configured, and replacing it is the owner's explicit, logged act.
+
+As built (retention, phase 3):
+
+- A dataset version carries three retention times, owner-declared at
+  registration: `delete_after` (no use from then on; fixed, only ever
+  brought forward by the owner, decided 2026-09-30), `retention_until`
+  (until when the owner keeps the data; fixed, never after
+  `delete_after`, which then cannot be brought forward past it) and
+  `evidence_retention_until` (only ever extended). The owner's security
+  admins and data owners change them through
+  `POST /v1/assets/{id}/retention`, audited; the database refuses the
+  same changes (schema version 12).
+- Expiry runs in the control plane's background task: a version past
+  its `delete_after` is marked expired, every derived result downstream
+  is marked `source_expired_at` (set once), their jobs that have not
+  started fail, the expiry is anchored, and only then is
+  `asset.expired` sent to the key broker. Expiry blocks new use as
+  revocation does (ENC2705 rather than ENC2706): every use, derivation,
+  ticket and export walks the ancestors, whose expiry the anchor holds,
+  so a restored database that undid it changes nothing and does not
+  start.
+- Consistent with K-7, a job that started before the deletion date may
+  finish; nothing it released is recorded or exported once its source
+  expired.
+- Evidence outlives the data: receipts, audit events, anchors, release
+  records and the trust report (which notes the expiry and does not fail
+  on it) stay verifiable after the source is deleted. Deleting the data
+  is the owner's storage's job; Encompute blocks use and records the
+  expiry, and never claims the deletion. Nothing purges evidence yet.
 
 ### 10. Shared population DP cap (D8)
 

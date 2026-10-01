@@ -1136,7 +1136,9 @@ fn asset_expiry_is_anchored_before_the_broker_hears_of_it() {
     let Some(c) = world() else { return };
     let r = c.ready();
     let far = now() + 3600;
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", far, far);
+    // Running (a job not yet started fails at the expiry): it may finish,
+    // but gets no ticket for its expired source.
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", far, far);
     c.t.transport.drain();
     assert!(c.t.control.expire_asset("retention", &r.asset).unwrap());
     assert!(!c.t.control.expire_asset("retention", &r.asset).unwrap());

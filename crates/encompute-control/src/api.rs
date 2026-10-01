@@ -53,6 +53,9 @@
 //! | POST | `/v1/jobs/{id}/release-ticket` | governed projects: the scheduled evaluator asks for a key-release ticket |
 //! | POST | `/v1/jobs/{id}/derived-assets` | governed projects: a person of a recipient records a succeeded job's result as a derived asset |
 //! | POST | `/v1/assets/{id}/exports` | governed projects: the custodian of a derived result asks for an export ticket to one recipient |
+//! | GET | `/v1/assets/{id}/release-cosignature` | governed projects: the control plane's co-signature of a derived result's release record in force, to its custodian's members |
+//! | POST | `/v1/assets/{id}/release-cosignature` | governed projects: a security admin of the custodian has it re-issued with the lineage owners' current governance keys (after a rotation) |
+//! | POST | `/v1/assets/{id}/retention` | a dataset version's owner brings its deletion date forward or extends its evidence retention |
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -425,6 +428,15 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "assets", id, "exports"]) => {
             created(control.export_asset(ctx, id, parse(&r.body)?)?)
         }
+        ("GET", ["v1", "assets", id, "release-cosignature"]) => {
+            ok(control.release_cosignature(ctx, id)?)
+        }
+        ("POST", ["v1", "assets", id, "release-cosignature"]) => {
+            created(control.reissue_release_cosignature(ctx, id)?)
+        }
+        ("POST", ["v1", "assets", id, "retention"]) => {
+            ok(control.update_retention(ctx, id, parse(&r.body)?)?)
+        }
 
         ("POST", ["v1", "plans"]) => created(control.create_plan(ctx, parse(&r.body)?)?),
 
@@ -600,6 +612,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/assets/{}/approvals/withdraw"),
     ("POST", "/v1/assets/{}/revoke"),
     ("POST", "/v1/assets/{}/exports"),
+    ("GET", "/v1/assets/{}/release-cosignature"),
+    ("POST", "/v1/assets/{}/release-cosignature"),
+    ("POST", "/v1/assets/{}/retention"),
     ("POST", "/v1/plans"),
     ("POST", "/v1/jobs"),
     ("GET", "/v1/jobs"),

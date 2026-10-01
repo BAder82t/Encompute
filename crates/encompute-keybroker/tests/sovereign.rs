@@ -545,8 +545,8 @@ fn declared_placement_refused() {
 #[test]
 fn dev_escape_refused_in_production() {
     let no_ticket = GovernanceConfig {
-        control_key: control().public_key_hex(),
         require_ticket: false,
+        ..GovernanceConfig::new(&control().public_key_hex())
     };
     // Only this test reads or sets ENCOMPUTE_ENV in this binary.
     std::env::remove_var("ENCOMPUTE_ENV");
@@ -1818,4 +1818,347 @@ fn bind_with_record_omitting_owner_refused() {
         Code::GovernanceAssetVersionMismatch
     );
     assert!(b.state().secrets[RESULT].asset_version_id.is_none());
+}
+
+// --- a lineage owner's key rotation, attestation age, the pinned control key ----
+
+/// The lineage owner's rotated key and its signing key.
+fn rotated_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[25; 32])
+}
+
+fn rotated_pk() -> String {
+    encompute_verification::hex(&rotated_key().verifying_key().to_bytes())
+}
+
+/// The lineage owner's authorization of the parent version, signed with
+/// its rotated key.
+fn rotated_authorization() -> encompute_trust::authz::SignedAuthorizationV2 {
+    let mut a = authorization();
+    a.party = LINEAGE.into();
+    a.nonce = "cd".repeat(16);
+    a.sign(&rotated_key()).unwrap()
+}
+
+/// The control plane's co-signature of derived_world's record as bound
+/// (key `ASSET`), edited by `edit`.
+fn recosigned(
+    w: &World,
+    edit: impl FnOnce(&mut encompute_trust::authz::DerivedReleaseCosignature),
+) -> encompute_trust::authz::SignedDerivedReleaseCosignature {
+    let s = &w.broker.state().secrets[ASSET];
+    let b = s.derived_binding.clone().unwrap();
+    let mut c = encompute_trust::authz::DerivedReleaseCosignature {
+        version: 1,
+        organization: ORG.into(),
+        asset_id: b.asset_id,
+        broker: BROKER.into(),
+        key_ref: ASSET.into(),
+        derived_version_id: s.asset_version_id.clone().unwrap(),
+        release_record_id: b.release_record_id,
+        lineage_owners: std::collections::BTreeMap::from([(
+            LINEAGE.into(),
+            encompute_trust::authz::governance_key_id(&rotated_pk()),
+        )]),
+        issued_at: T0 + 20,
+    };
+    edit(&mut c);
+    c.sign(&control()).unwrap()
+}
+
+/// A lineage owner's key rotation strands the derived result bound under
+/// the old key ID (ENC2708), even with the owner's new authorization
+/// installed under its newly attested key, until the custodian's broker
+/// accepts the control plane's re-issued co-signature naming the new key;
+/// then it is released again, and the re-binding survives a restart.
+#[test]
+fn rotation_strands_until_rebound() {
+    let (mut w, lineage) = derived_world(true, true, |_| {});
+    release_derived(&mut w, &lineage).unwrap();
+    // The lineage owner rotates: the control plane attests the new key,
+    // and the owner signs a new authorization with it.
+    w.set_now(T0 + 10);
+    assert!(w
+        .broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&rotated_pk(), T0 + 10))
+        .unwrap());
+    let renewed = rotated_authorization();
+    w.broker.install_authorization(&renewed).unwrap();
+    assert_eq!(
+        code(release_derived(&mut w, &renewed.id())),
+        Code::GovernanceKeyRevoked
+    );
+    // The control plane re-issues the co-signature with the new key ID.
+    assert!(w
+        .broker
+        .rebind_derived_lineage(ASSET, &recosigned(&w, |_| {}))
+        .unwrap());
+    let s = &w.broker.state().secrets[ASSET];
+    assert_eq!(
+        s.lineage_owners[LINEAGE],
+        encompute_trust::authz::governance_key_id(&rotated_pk())
+    );
+    assert_eq!(s.derived_binding.as_ref().unwrap().cosigned_at, T0 + 20);
+    release_derived(&mut w, &renewed.id()).unwrap();
+    // The same co-signature again is not newer: refused, nothing changes.
+    assert_eq!(
+        code(
+            w.broker
+                .rebind_derived_lineage(ASSET, &recosigned(&w, |_| {}))
+        ),
+        Code::GovernanceAssetVersionMismatch
+    );
+    // Persisted with the state.
+    let dir = tmp("lineage-rebind");
+    let path = dir.join("broker.json");
+    w.broker.save(&path).unwrap();
+    let b = KeyBroker::load(&path, verifier(), Box::new(DevelopmentFileStore)).unwrap();
+    assert_eq!(
+        b.state().secrets[ASSET].lineage_owners[LINEAGE],
+        encompute_trust::authz::governance_key_id(&rotated_pk())
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A re-issued co-signature naming a key the custodian's broker has not
+/// pinned from the control plane's attestation (ENC2708), signed by anyone
+/// but the pinned control plane, or not newer than the binding in force
+/// (ENC2704), re-binds nothing.
+#[test]
+fn rebind_with_unattested_key_refused() {
+    let (mut w, _) = derived_world(true, true, |_| {});
+    let before = w.broker.state().secrets[ASSET].lineage_owners.clone();
+    // The rotated key was never attested here.
+    assert_eq!(
+        code(
+            w.broker
+                .rebind_derived_lineage(ASSET, &recosigned(&w, |_| {}))
+        ),
+        Code::GovernanceKeyRevoked
+    );
+    w.broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&rotated_pk(), T0 + 10))
+        .unwrap();
+    // Another signer, or a stripped signature.
+    let rogue =
+        encompute_verification::ServiceSigner::from_seed("control-plane", &[77; 32]).unwrap();
+    let mut forged = recosigned(&w, |_| {}).body;
+    forged.issued_at = T0 + 30;
+    let forged = encompute_trust::authz::DerivedReleaseCosignature::sign(forged, &rogue).unwrap();
+    let mut stripped = recosigned(&w, |_| {});
+    stripped.signature = "00".repeat(64);
+    // Not newer than the co-signature the key is bound under.
+    let stale = recosigned(&w, |c| c.issued_at = T0);
+    for (what, c) in [
+        ("another signer", forged),
+        ("stripped", stripped),
+        ("stale", stale),
+    ] {
+        assert_eq!(
+            code(w.broker.rebind_derived_lineage(ASSET, &c)),
+            Code::GovernanceAssetVersionMismatch,
+            "{what}"
+        );
+    }
+    assert_eq!(w.broker.state().secrets[ASSET].lineage_owners, before);
+    // An unbound or source key is never re-bound.
+    assert_eq!(
+        code(
+            w.broker
+                .rebind_derived_lineage("no-such-key", &recosigned(&w, |_| {}))
+        ),
+        Code::KeyRelease
+    );
+}
+
+/// A re-binding changes only the lineage owners' key IDs: a co-signature
+/// of another record, version, asset, key or broker, or one that adds or
+/// drops a lineage owner, is refused (ENC2704) and the binding stays.
+#[test]
+fn rebind_cannot_change_record_or_owners() {
+    let (mut w, _) = derived_world(true, true, |_| {});
+    w.broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&rotated_pk(), T0 + 10))
+        .unwrap();
+    // A second organization the broker pinned too, to add.
+    let extra = attestation_by(&control(), "extra-agency", &lineage_pk(), None, T0 + 10);
+    w.broker
+        .pin_lineage_governance_key("extra-agency", &extra)
+        .unwrap();
+    let before = w.broker.state().secrets[ASSET].clone();
+    let cases: Vec<(
+        &str,
+        encompute_trust::authz::SignedDerivedReleaseCosignature,
+    )> = vec![
+        (
+            "another record",
+            recosigned(&w, |c| c.release_record_id = h('9')),
+        ),
+        (
+            "another version",
+            recosigned(&w, |c| c.derived_version_id = h('8')),
+        ),
+        (
+            "another asset",
+            recosigned(&w, |c| c.asset_id = "ast_other".into()),
+        ),
+        ("another key", recosigned(&w, |c| c.key_ref = RESULT.into())),
+        (
+            "another broker",
+            recosigned(&w, |c| c.broker = "another-broker".into()),
+        ),
+        (
+            "another custodian",
+            recosigned(&w, |c| c.organization = "other-agency".into()),
+        ),
+        (
+            "an owner dropped",
+            recosigned(&w, |c| c.lineage_owners.clear()),
+        ),
+        (
+            "an owner added",
+            recosigned(&w, |c| {
+                c.lineage_owners.insert(
+                    "extra-agency".into(),
+                    encompute_trust::authz::governance_key_id(&lineage_pk()),
+                );
+            }),
+        ),
+    ];
+    for (what, c) in cases {
+        assert_eq!(
+            code(w.broker.rebind_derived_lineage(ASSET, &c)),
+            Code::GovernanceAssetVersionMismatch,
+            "{what}"
+        );
+        let s = &w.broker.state().secrets[ASSET];
+        assert_eq!(s.lineage_owners, before.lineage_owners, "{what}");
+        assert_eq!(s.derived_binding, before.derived_binding, "{what}");
+        assert_eq!(s.asset_version_id, before.asset_version_id, "{what}");
+    }
+}
+
+/// A lineage owner's pinned key is relied on only while its attestation is
+/// fresh: once older than the configured maximum age (24 hours unless
+/// configured shorter), nothing derived from its data is released until
+/// the control plane attests the key again (ENC2708, "re-attest"). Every
+/// governed broker has a maximum age: zero or more than 30 days is
+/// refused.
+#[test]
+fn stale_lineage_attestation_needs_reattest() {
+    assert_eq!(
+        governance().lineage_attestation_max_age_secs,
+        24 * 3600,
+        "the default"
+    );
+    let (mut w, lineage) = derived_world(true, true, |_| {});
+    w.broker = w
+        .broker
+        .with_governance(GovernanceConfig {
+            lineage_attestation_max_age_secs: 60,
+            ..governance()
+        })
+        .unwrap();
+    release_derived(&mut w, &lineage).unwrap();
+    w.set_now(T0 + 61);
+    let e = {
+        let s = w.session();
+        let handle = w.attest(&s);
+        let req = w.request(&handle, Some(derived_ticket(&w, &lineage)));
+        w.release(&req).unwrap_err()
+    };
+    assert_eq!(e.code, Code::GovernanceKeyRevoked, "{e}");
+    assert!(e.message.contains("re-attest"), "{e}");
+    // Attested again: released.
+    w.broker
+        .pin_lineage_governance_key(LINEAGE, &attested(&lineage_pk(), T0 + 61))
+        .unwrap();
+    release_derived(&mut w, &lineage).unwrap();
+    for bad in [
+        0,
+        encompute_keybroker::MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS + 1,
+    ] {
+        let clock = Arc::new(AtomicU64::new(T0));
+        let r = bare_broker(&clock, &w.spec).with_governance(GovernanceConfig {
+            lineage_attestation_max_age_secs: bad,
+            ..governance()
+        });
+        assert_eq!(
+            r.err().map(|e| e.code),
+            Some(Code::InsecureConfiguration),
+            "{bad}"
+        );
+    }
+}
+
+/// The control-plane key is pinned in the broker's state the first time
+/// the broker is configured with it, durably: a later configuration with
+/// another key is refused (ENC2605), and only the owner's explicit
+/// replacement changes it, after which the old key's tickets are refused.
+#[test]
+fn control_key_pinned_in_broker_state() {
+    let dir = tmp("control-key");
+    let path = dir.join("broker.json");
+    let clock = Arc::new(AtomicU64::new(T0));
+    let spec = spec_for(&binding());
+    let b = bare_broker(&clock, &spec);
+    assert_eq!(b.pinned_control_key(), None);
+    let b = b.with_governance(governance()).unwrap();
+    assert_eq!(
+        b.pinned_control_key(),
+        Some(control().public_key_hex().as_str())
+    );
+    b.save(&path).unwrap();
+    let other =
+        encompute_verification::ServiceSigner::from_seed("control-plane", &[78; 32]).unwrap();
+    let load = || KeyBroker::load(&path, verifier(), Box::new(DevelopmentFileStore)).unwrap();
+    // The same key again is fine; another is refused.
+    load().with_governance(governance()).unwrap();
+    let e = load()
+        .with_governance(GovernanceConfig::new(&other.public_key_hex()))
+        .err()
+        .unwrap();
+    assert_eq!(e.code, Code::InsecureConfiguration, "{e}");
+    assert!(e.message.contains("--replace-control-key"), "{e}");
+    let mut b = load();
+    assert_eq!(
+        code(b.pin_control_key(&other.public_key_hex())),
+        Code::InsecureConfiguration
+    );
+    // Replacing the pinned key with itself is refused, and records nothing.
+    assert_eq!(
+        code(b.replace_control_key(&control().public_key_hex())),
+        Code::InsecureConfiguration
+    );
+    assert!(b.state().control_key_history.is_empty());
+    // The owner's explicit replacement, recorded in the state itself.
+    let previous = b.replace_control_key(&other.public_key_hex()).unwrap();
+    assert_eq!(previous, Some(control().public_key_hex()));
+    let h = &b.state().control_key_history;
+    assert_eq!(h.len(), 1);
+    assert_eq!(
+        h[0].previous_key.as_deref(),
+        Some(control().public_key_hex().as_str())
+    );
+    assert_eq!(h[0].new_key, other.public_key_hex());
+    // On the broker's clock (this broker was loaded with the real one).
+    assert!(h[0].at.abs_diff(encompute_verification::service::now()) < 60);
+    b.save(&path).unwrap();
+    // Durable: persisted under the state's MAC.
+    assert_eq!(
+        load().state().control_key_history,
+        b.state().control_key_history
+    );
+    let b = load()
+        .with_governance(GovernanceConfig::new(&other.public_key_hex()))
+        .unwrap();
+    assert_eq!(
+        b.pinned_control_key(),
+        Some(other.public_key_hex().as_str())
+    );
+    assert_eq!(
+        load().with_governance(governance()).err().map(|e| e.code),
+        Some(Code::InsecureConfiguration)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }

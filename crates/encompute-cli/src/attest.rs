@@ -639,6 +639,22 @@ pub enum BrokerCmd {
         #[command(flatten)]
         file: BrokerFile,
     },
+    /// Governed projects: after a lineage owner rotated its governance key,
+    /// re-bind a derived result's key to the owners' current keys, under
+    /// the control plane's re-issued co-signature (from POST
+    /// /v1/assets/{id}/release-cosignature). Only the lineage owners' key
+    /// IDs change, each to the key pinned here from the control plane's
+    /// attestation (pin-lineage first).
+    RebindLineage {
+        asset: String,
+        /// The re-issued co-signature (JSON: `release_cosignature`).
+        #[arg(long, value_name = "COSIGNATURE")]
+        cosignature: PathBuf,
+        #[command(flatten)]
+        control: ControlKeyArg,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
     /// Governed projects: install or revoke the owner's authorizations at
     /// this broker.
     Authorization {
@@ -668,6 +684,16 @@ pub enum BrokerCmd {
         /// release ticket. The owner's authorization is still required.
         #[arg(long)]
         no_require_ticket: bool,
+        /// Replace the control-plane key pinned in the broker's state with
+        /// --control-key (only after the control plane's key really
+        /// changed). Printed as an audit line.
+        #[arg(long, requires = "control_key")]
+        replace_control_key: bool,
+        /// How old, in seconds, a lineage owner's key attestation may be
+        /// when a release or export of a derived result relies on it;
+        /// older, re-attest it (pin-lineage) first.
+        #[arg(long, default_value_t = encompute_runtime::keybroker::DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS)]
+        lineage_attestation_max_age: u64,
         #[command(flatten)]
         trust: TrustArgs,
         #[command(flatten)]
@@ -680,14 +706,36 @@ pub enum BrokerCmd {
 #[derive(Args)]
 pub struct ControlKeyArg {
     /// The control plane's public key (64 hex characters). Defaults to
-    /// ENCOMPUTE_CONTROL_PUBLIC_KEY.
+    /// ENCOMPUTE_CONTROL_PUBLIC_KEY. The first use pins it in the broker's
+    /// state; later uses must name the same key.
     #[arg(long = "control-key")]
     control_key: Option<String>,
+    /// Replace the control-plane key pinned in the broker's state with
+    /// this one (only after the control plane's key really changed). The
+    /// replacement is printed as an audit line.
+    #[arg(long)]
+    replace_control_key: bool,
+}
+
+/// Replaces `b`'s pinned control-plane key with `key` (the owner's
+/// explicit act), printing the audit line that records it.
+fn replace_control_key(b: &mut KeyBroker, key: &str) -> Result<()> {
+    let previous = b.replace_control_key(key)?;
+    eprintln!(
+        "AUDIT key_broker.control_key.replaced broker={} organization={} previous={} new={key} at={}",
+        b.id(),
+        b.organization().unwrap_or("-"),
+        previous.as_deref().unwrap_or("-"),
+        encompute_verification::service::now()
+    );
+    Ok(())
 }
 
 impl ControlKeyArg {
-    /// `b`, accepting statements signed by the control plane's key.
-    fn configure(&self, b: KeyBroker) -> Result<KeyBroker> {
+    /// `b`, accepting statements signed by the control plane's key: the
+    /// key pinned in its state (pinned now if none is), or, with
+    /// --replace-control-key, this one replacing it.
+    fn configure(&self, mut b: KeyBroker) -> Result<KeyBroker> {
         let key = self
             .control_key
             .clone()
@@ -699,10 +747,10 @@ impl ControlKeyArg {
                      --control-key, or ENCOMPUTE_CONTROL_PUBLIC_KEY",
                 )
             })?;
-        b.with_governance(GovernanceConfig {
-            control_key: key,
-            require_ticket: true,
-        })
+        if self.replace_control_key {
+            replace_control_key(&mut b, &key)?;
+        }
+        b.with_governance(GovernanceConfig::new(&key))
     }
 }
 
@@ -1107,6 +1155,28 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        BrokerCmd::RebindLineage {
+            asset,
+            cosignature,
+            control,
+            file,
+        } => {
+            let c: encompute_runtime::trust::authz::SignedDerivedReleaseCosignature =
+                read_json(&cosignature, "the control plane's co-signature")?;
+            let mut b = control.configure(open_broker(&file, None)?)?;
+            let changed = b.rebind_derived_lineage(&asset, &c)?;
+            b.save(&file.broker)?;
+            println!(
+                "{asset}: {} (co-signed by the control plane at {})",
+                if changed {
+                    "re-bound to its lineage owners' current governance keys"
+                } else {
+                    "already bound to its lineage owners' current governance keys"
+                },
+                c.body.issued_at
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         BrokerCmd::Authorization {
             cmd:
                 AuthorizationCmd::Install {
@@ -1179,16 +1249,22 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             requests_per_minute,
             control_key,
             no_require_ticket,
+            replace_control_key: replace,
+            lineage_attestation_max_age,
             trust,
             file,
         } => {
             let mut b = open_broker(&file, Some(&trust))?;
             let control_key =
                 control_key.or_else(|| std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY").ok());
+            if let (true, Some(k)) = (replace, &control_key) {
+                replace_control_key(&mut b, k)?;
+            }
             b = match control_key {
                 Some(k) => b.with_governance(GovernanceConfig {
-                    control_key: k,
                     require_ticket: !no_require_ticket,
+                    lineage_attestation_max_age_secs: lineage_attestation_max_age,
+                    ..GovernanceConfig::new(&k)
                 })?,
                 None if no_require_ticket => {
                     return Err(Error::new(
@@ -1204,6 +1280,17 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             b.save(&file.broker)?;
             let control = match std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY") {
                 Ok(key) => {
+                    // Revocations are accepted only from the pinned control
+                    // plane.
+                    if b.pinned_control_key().is_some_and(|k| k != key) {
+                        return Err(Error::new(
+                            Code::InsecureConfiguration,
+                            "ENCOMPUTE_CONTROL_PUBLIC_KEY is not the control-plane key pinned in \
+                             the broker's state: pass it with --control-key \
+                             --replace-control-key if the control plane's key really changed",
+                        ));
+                    }
+                    b.pin_control_key(&key)?;
                     // A broker serves one organization; revocations name it.
                     let org = file.organization.as_deref().ok_or_else(|| {
                         Error::new(

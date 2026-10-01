@@ -53,6 +53,7 @@ pub use generation::{
 };
 pub use governed::{
     GovernanceConfig, GovernedExportRequest, GovernedGrant, GovernedReleaseRequest, PendingRelease,
+    DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS, MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS,
     MAX_REVOKED_AUTHORIZATIONS,
 };
 pub use root::{
@@ -178,10 +179,47 @@ pub struct ProtectedSecret {
     /// this key. Skipped when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lineage_owners: BTreeMap<String, String>,
+    /// For a derived result: the control plane's co-signature the key is
+    /// bound under (its asset, record and issue time), so a later
+    /// re-issue for rotated lineage keys can be checked against it
+    /// ([`KeyBroker::rebind_derived_lineage`]). Skipped when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_binding: Option<DerivedBinding>,
     /// The asset expired (its owner's retention ended): never released
     /// again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub expired: bool,
+}
+
+/// What a derived result's key is bound under: the control plane's
+/// co-signature of the custodian's release record, as last accepted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DerivedBinding {
+    /// The derived asset's ID at the control plane.
+    pub asset_id: String,
+    /// The custodian's release record the key is bound to (its ID).
+    pub release_record_id: String,
+    /// The co-signature's issue time: only a later re-issue replaces it.
+    pub cosigned_at: u64,
+}
+
+/// Replacements of the control-plane key recorded at once; past this
+/// many, a further replacement is refused rather than an older record
+/// dropped.
+pub const MAX_CONTROL_KEY_HISTORY: usize = 256;
+
+/// One replacement of a broker's pinned control-plane key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlKeyChange {
+    /// The key replaced (hex Ed25519), if one was pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_key: Option<String>,
+    /// The key pinned instead.
+    pub new_key: String,
+    /// When, on the broker's clock (Unix seconds).
+    pub at: u64,
 }
 
 /// A lineage owner's governance key pinned at a custodian's broker, from
@@ -232,6 +270,18 @@ pub struct BrokerState {
     /// and only through a governed release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governance_key: Option<GovernanceKey>,
+    /// The control plane's public key (hex Ed25519), pinned the first time
+    /// the broker is configured with it: every later configuration must
+    /// name the same key, and replacing it is an explicit, logged act of
+    /// the owner ([`KeyBroker::replace_control_key`]). Skipped when
+    /// absent, so existing state is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_key: Option<String>,
+    /// Every replacement of the pinned control-plane key, oldest first
+    /// (at most [`MAX_CONTROL_KEY_HISTORY`]): the durable record of the
+    /// owner's explicit act. Skipped when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_key_history: Vec<ControlKeyChange>,
     /// Governance keys of other organizations whose data this
     /// organization's derived results come from (lineage owners), each
     /// pinned from the control plane's attestation of it: only
@@ -499,6 +549,8 @@ impl KeyBroker {
                 organization: None,
                 grant_signing_key: None,
                 governance_key: None,
+                control_key: None,
+                control_key_history: Vec::new(),
                 lineage_keys: BTreeMap::new(),
                 revoked_lineage_keys: BTreeMap::new(),
                 authorizations: BTreeMap::new(),
@@ -862,6 +914,7 @@ impl KeyBroker {
                 asset_version_id: None,
                 derived: false,
                 lineage_owners: BTreeMap::new(),
+                derived_binding: None,
                 expired: false,
             },
         );

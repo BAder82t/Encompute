@@ -801,25 +801,12 @@ impl Control {
         Ok(brokers.len())
     }
 
-    /// Marks asset `id` expired (its owner's retention ended): from now on
-    /// its key is never released again. The expiry is anchored, then the
-    /// asset's key broker is told (`asset.expired`). Returns whether it
-    /// was newly expired.
-    ///
-    /// TODO(P3 retention): retention calls this when an asset's
-    /// `delete_after` passes; no route expires an asset before then.
-    pub fn expire_asset(&self, actor: &str, id: &str) -> Result<bool> {
-        let newly = self.db.tx(|t| {
-            let a = crate::authz::asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
-            self.expire_in(t, actor, "retention", &a, None)
-        })?;
-        self.sync_anchor()?;
-        let _ = self.deliver_outbox();
-        Ok(newly)
-    }
-
-    /// Expires `a` in the caller's transaction and queues its broker's
-    /// `asset.expired`. `reason` annotates the audit event (recovery).
+    /// Marks `a` expired in the caller's transaction (from now on its key
+    /// is never released again), audits it and queues its broker's
+    /// `asset.expired`, delivered once the expiry is anchored. `reason`
+    /// annotates the audit event (retention, recovery). Returns whether it
+    /// was newly expired. Retention ([`Control::retire_in`]) also marks and
+    /// fails what depends on it.
     pub(crate) fn expire_in(
         &self,
         t: &mut postgres::Transaction<'_>,

@@ -65,6 +65,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "derived_assets",
         include_str!("../migrations/0011_derived_assets.sql"),
     ),
+    (
+        12,
+        "retention",
+        include_str!("../migrations/0012_retention.sql"),
+    ),
 ];
 
 /// Serializes migrations across control-plane replicas.
