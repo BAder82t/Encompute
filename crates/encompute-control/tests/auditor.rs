@@ -1426,7 +1426,7 @@ fn pseudonym_is_keyed() {
         .all(|u| !before.contains(&other.pseudonym(&w.project, u))));
     // Stable across a restart (the key comes from the stable signing key).
     let W { t, .. } = w;
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     assert_eq!(shown(&t), before);
 }
 

@@ -67,7 +67,7 @@ pub struct Signed<T> {
 pub type SignedAuthorization = Signed<Authorization>;
 pub type SignedRevocation = Signed<Revocation>;
 
-fn sign<T: Serialize>(domain: &str, body: T, key: &SigningKey) -> Result<Signed<T>> {
+pub(crate) fn sign<T: Serialize>(domain: &str, body: T, key: &SigningKey) -> Result<Signed<T>> {
     let digest = tagged(domain, &canonical_json(&body)?);
     Ok(Signed {
         public_key: hex(&key.verifying_key().to_bytes()),
@@ -76,7 +76,7 @@ fn sign<T: Serialize>(domain: &str, body: T, key: &SigningKey) -> Result<Signed<
     })
 }
 
-fn verify<T: Serialize>(domain: &str, s: &Signed<T>, expected_key: &str) -> Result<()> {
+pub(crate) fn verify<T: Serialize>(domain: &str, s: &Signed<T>, expected_key: &str) -> Result<()> {
     if s.public_key != expected_key {
         return Err(err("signed by a key that is not the party's"));
     }
@@ -206,7 +206,7 @@ pub fn job_approval_statement(job: &str, spec_id: &str, authorization_set_id: &s
     )
 }
 
-fn check_hex32(what: &str, s: &str) -> Result<()> {
+pub(crate) fn check_hex32(what: &str, s: &str) -> Result<()> {
     if is_hex32(s) {
         Ok(())
     } else {
@@ -214,7 +214,7 @@ fn check_hex32(what: &str, s: &str) -> Result<()> {
     }
 }
 
-fn check_label(what: &str, s: &str) -> Result<()> {
+pub(crate) fn check_label(what: &str, s: &str) -> Result<()> {
     if s.is_empty() || s.len() > 200 || s.chars().any(|c| c.is_control()) {
         return Err(err(format!("{what} must be 1-200 printable characters")));
     }
@@ -888,7 +888,7 @@ pub struct ControlSigned<T> {
 }
 
 impl<T: Serialize> ControlSigned<T> {
-    fn sign_as(domain: &str, body: T, signer: &ServiceSigner) -> Result<Self> {
+    pub(crate) fn sign_as(domain: &str, body: T, signer: &ServiceSigner) -> Result<Self> {
         Ok(Self {
             signature: signer.sign(domain, &body)?,
             issuer: signer.id().to_owned(),
@@ -899,7 +899,7 @@ impl<T: Serialize> ControlSigned<T> {
 
     /// Signed under `domain` by `control_key` (hex): the control-plane key
     /// the caller pinned, never the statement's own key alone.
-    fn verify_as(&self, domain: &str, control_key: &str) -> Result<()> {
+    pub(crate) fn verify_as(&self, domain: &str, control_key: &str) -> Result<()> {
         if self.issuer_public_key != control_key {
             return Err(err("not signed by the pinned control-plane key"));
         }

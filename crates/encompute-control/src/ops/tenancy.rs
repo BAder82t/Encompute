@@ -13,6 +13,7 @@ use crate::authz::{
 };
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
+use crate::govlog;
 use crate::model::{
     bad, check_name, check_slug, new_id, AddProjectMember, CreateOrganization, CreateProject,
     CreateServiceAccount, CreateUser, Custody, GovernanceMode, Participation, RemoveMembership,
@@ -450,16 +451,34 @@ impl Control {
             // Platform services are stored without an organization, the
             // platform's automation accounts with `platform`: both are the
             // platform's to disable.
-            let n = t
-                .execute(
-                    "UPDATE service_accounts SET status = 'disabled'
+            let row = t
+                .query_opt(
+                    "SELECT status, organization_id FROM service_accounts
                      WHERE id = $1 AND kind <> 'control'
-                       AND (organization_id = $2 OR ($2 = $3 AND organization_id IS NULL))",
+                       AND (organization_id = $2 OR ($2 = $3 AND organization_id IS NULL))
+                     FOR UPDATE",
                     &[&id, &org, &PLATFORM_ORG],
                 )
                 .map_err(db_err)?;
-            if n == 0 {
+            let Some(row) = row else {
                 return Err(not_found("service account", id));
+            };
+            t.execute(
+                "UPDATE service_accounts SET status = 'disabled' WHERE id = $1",
+                &[&id],
+            )
+            .map_err(db_err)?;
+            let (was, owner): (String, Option<String>) = (row.get(0), row.get(1));
+            if was != "disabled" {
+                let mut d = govlog::Draft::new(
+                    govlog::for_org(owner.as_deref()),
+                    govlog::kind::SERVICE_ACCOUNT_DISABLED,
+                    id,
+                );
+                if let Some(o) = &owner {
+                    d = d.org(o);
+                }
+                govlog::append(t, d)?;
             }
             audit::append(
                 t,
@@ -490,14 +509,23 @@ impl Control {
             "disabling a user",
         )?;
         let out = self.db.tx(|t| {
-            let n = t
-                .execute(
-                    "UPDATE users SET status = 'disabled' WHERE id = $1 AND organization_id = $2",
+            let row = t
+                .query_opt(
+                    "SELECT status FROM users WHERE id = $1 AND organization_id = $2 FOR UPDATE",
                     &[&id, &org],
                 )
                 .map_err(db_err)?;
-            if n == 0 {
+            let Some(row) = row else {
                 return Err(not_found("user", id));
+            };
+            t.execute("UPDATE users SET status = 'disabled' WHERE id = $1", &[&id])
+                .map_err(db_err)?;
+            if row.get::<_, String>(0) != "disabled" {
+                govlog::append(
+                    t,
+                    govlog::Draft::new(govlog::for_org(Some(org)), govlog::kind::USER_DISABLED, id)
+                        .org(org),
+                )?;
             }
             audit::append(
                 t,
@@ -540,12 +568,21 @@ impl Control {
             }
             removed.sort();
             for (role, id) in &removed {
-                t.execute(
-                    "INSERT INTO removed_roles (id, principal_id, organization_id, role, removed_by)
-                     VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-                    &[id, &r.principal, &org, role, &ctx.actor()],
-                )
-                .map_err(db_err)?;
+                let n = t
+                    .execute(
+                        "INSERT INTO removed_roles (id, principal_id, organization_id, role, removed_by)
+                         VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                        &[id, &r.principal, &org, role, &ctx.actor()],
+                    )
+                    .map_err(db_err)?;
+                if n == 1 {
+                    govlog::append(
+                        t,
+                        govlog::Draft::new(govlog::for_org(Some(org)), govlog::kind::ROLE_REMOVED, id)
+                            .org(org)
+                            .r#ref("role", role.clone()),
+                    )?;
+                }
             }
             let roles: Vec<String> = removed.iter().map(|(role, _)| role.clone()).collect();
             let ids: Vec<&str> = removed.iter().map(|(_, id)| id.as_str()).collect();
@@ -1079,12 +1116,22 @@ impl Control {
                 .map_err(db_err)?
                 .ok_or_else(|| not_found("project member", &r.organization))?
                 .get::<_, String>(0);
-            t.execute(
-                "INSERT INTO removed_memberships (id, project_id, organization_id, removed_by)
-                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                &[&removed, &project, &r.organization, &ctx.actor()],
-            )
-            .map_err(db_err)?;
+            let n = t
+                .execute(
+                    "INSERT INTO removed_memberships (id, project_id, organization_id, removed_by)
+                     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                    &[&removed, &project, &r.organization, &ctx.actor()],
+                )
+                .map_err(db_err)?;
+            if n == 1 {
+                let partition = govlog::for_project(t, project, Some(&p.organization))?;
+                govlog::append(
+                    t,
+                    govlog::Draft::new(partition, govlog::kind::MEMBERSHIP_REMOVED, &removed)
+                        .org(&r.organization)
+                        .r#ref("project", project),
+                )?;
+            }
             // Its grants in the project end, and so do the approvals of its
             // own assets there: recorded as withdrawn (and anchored), so a
             // restored database cannot share them again.

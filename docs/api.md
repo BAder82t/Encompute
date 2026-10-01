@@ -288,6 +288,6 @@ state (`control_key_history`: previous key, new key, time) and printed as
 an audit line (`AUDIT key_broker.control_key.replaced`). A custodian's broker relies on a
 lineage owner's key pinned from the control plane's attestation only while
 the attestation is younger than `--lineage-attestation-max-age` (24 hours
-by default, at most 30 days): older, re-attest it (`pin-lineage`) before
+by default, at most 7 days): older, re-attest it (`pin-lineage`) before
 anything derived from that owner's data is released or exported
 (ENC2708).

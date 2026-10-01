@@ -16,6 +16,7 @@ use crate::audit::{self, AuditDraft, Outcome};
 use crate::authn::{Authenticator, Principal};
 use crate::config::{AnchorConfig, Config, Env, MetricsAccess};
 use crate::db::{db_err, Db};
+use crate::govlog;
 use crate::log::LogLine;
 use crate::metrics::Metrics;
 use crate::transport::{HttpTransport, MessageTransport};
@@ -753,6 +754,17 @@ impl Control {
                     .map_err(db_err)?;
                 for r in rows {
                     let (id, org): (String, Option<String>) = (r.get(0), r.get(1));
+                    let kind = if table == "users" {
+                        govlog::kind::USER_DISABLED
+                    } else {
+                        govlog::kind::SERVICE_ACCOUNT_DISABLED
+                    };
+                    let mut g = govlog::Draft::new(govlog::for_org(org.as_deref()), kind, &id)
+                        .r#ref("reason", "anchored_reapplied");
+                    if let Some(o) = &org {
+                        g = g.org(o);
+                    }
+                    govlog::append(t, g)?;
                     let mut d = AuditDraft::new(operator, "recovery", action, rtype, &id, Outcome::Succeeded)
                         .r#ref("reason", "anchored_disable_reapplied");
                     if let Some(o) = &org {
@@ -788,6 +800,18 @@ impl Control {
                             &[&id, &why],
                         )
                         .map_err(db_err)?;
+                        let project: String = t
+                            .query_one("SELECT project_id FROM jobs WHERE id = $1", &[&id])
+                            .map_err(db_err)?
+                            .get(0);
+                        let partition = govlog::for_project(t, &project, Some(&org))?;
+                        govlog::append(
+                            t,
+                            govlog::Draft::new(partition, govlog::kind::JOB_FAILED, &id)
+                                .org(&org)
+                                .r#ref("project", project.as_str())
+                                .r#ref("reason", "anchored_reapplied"),
+                        )?;
                     } else {
                         self.transition_in(t, operator, "recovery", &id, crate::model::JobState::Failed, Some(why))?;
                     }
@@ -856,12 +880,23 @@ impl Control {
                     .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
                     .collect();
                 for (id, project, member, owner) in held {
-                    t.execute(
-                        "INSERT INTO removed_memberships (id, project_id, organization_id, removed_by)
-                         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                        &[&id, &project, &member, &operator],
-                    )
-                    .map_err(db_err)?;
+                    let n = t
+                        .execute(
+                            "INSERT INTO removed_memberships (id, project_id, organization_id, removed_by)
+                             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                            &[&id, &project, &member, &operator],
+                        )
+                        .map_err(db_err)?;
+                    if n == 1 {
+                        let partition = govlog::for_project(t, &project, Some(&owner))?;
+                        govlog::append(
+                            t,
+                            govlog::Draft::new(partition, govlog::kind::MEMBERSHIP_REMOVED, &id)
+                                .org(&member)
+                                .r#ref("project", project.as_str())
+                                .r#ref("reason", "anchored_reapplied"),
+                        )?;
+                    }
                     audit::append(
                         t,
                         AuditDraft::new(operator, "recovery", "project.member_removed", "project", &project, Outcome::Succeeded)
@@ -893,12 +928,22 @@ impl Control {
                     .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
                     .collect();
                 for (id, principal, org, role) in held {
-                    t.execute(
-                        "INSERT INTO removed_roles (id, principal_id, organization_id, role, removed_by)
-                         VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-                        &[&id, &principal, &org, &role, &operator],
-                    )
-                    .map_err(db_err)?;
+                    let n = t
+                        .execute(
+                            "INSERT INTO removed_roles (id, principal_id, organization_id, role, removed_by)
+                             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                            &[&id, &principal, &org, &role, &operator],
+                        )
+                        .map_err(db_err)?;
+                    if n == 1 {
+                        govlog::append(
+                            t,
+                            govlog::Draft::new(govlog::for_org(Some(&org)), govlog::kind::ROLE_REMOVED, &id)
+                                .org(&org)
+                                .r#ref("role", role.as_str())
+                                .r#ref("reason", "anchored_reapplied"),
+                        )?;
+                    }
                     audit::append(
                         t,
                         AuditDraft::new(operator, "recovery", "membership.removed", "principal", &principal, Outcome::Succeeded)
@@ -937,6 +982,23 @@ impl Control {
                         &[&id, &operator, &at],
                     )
                     .map_err(db_err)?;
+                    let partition = govlog::for_project(t, &project, Some(&org))?;
+                    let authorization_id: Option<String> = t
+                        .query_one(
+                            "SELECT authorization_id FROM authorizations WHERE id = $1",
+                            &[&id],
+                        )
+                        .map_err(db_err)?
+                        .get(0);
+                    let mut g =
+                        govlog::Draft::new(partition, govlog::kind::AUTHORIZATION_REVOKED, &id)
+                            .org(&org)
+                            .r#ref("project", project.as_str())
+                            .r#ref("reason", "anchored_reapplied");
+                    if let Some(a) = &authorization_id {
+                        g = g.r#ref("authorization_id", a.as_str());
+                    }
+                    govlog::append(t, g)?;
                     audit::append(
                         t,
                         AuditDraft::new(

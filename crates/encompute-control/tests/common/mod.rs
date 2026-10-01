@@ -212,7 +212,8 @@ pub fn run_recovery(env0: &Env0) -> Vec<String> {
     let db = Db::connect(&env0.url).unwrap();
     let signer = ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
     let store = Box::new(DirAnchor::new(env0.anchor_dir.clone()).unwrap());
-    let rc = Control::for_recovery(&recovery_config(env0), db, signer, store).unwrap();
+    let rc = Control::for_recovery(&recovery_config(env0), db, signer, store)
+        .unwrap_or_else(|e| panic!("the control plane failed to open for recovery: {e}"));
     rc.recover("operator-1").unwrap()
 }
 
@@ -253,6 +254,13 @@ impl encompute_control::transport::MessageTransport for SharedTransport {
 }
 
 impl Env0 {
+    /// [`Self::start`], panicking with the reason when the control plane
+    /// refuses to start.
+    pub fn started(&self) -> T {
+        self.start()
+            .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"))
+    }
+
     pub fn start(&self) -> encompute_ir::Result<T> {
         let db = Db::connect(&self.url)?;
         db.migrate()?;
@@ -297,7 +305,7 @@ pub fn setup() -> Option<T> {
         oidc: vec![],
         env: Env::Development,
     };
-    Some(env0.start().unwrap())
+    Some(env0.started())
 }
 
 /// Who calls.
@@ -314,6 +322,13 @@ pub fn token(subject: &str) -> String {
 }
 
 impl T {
+    /// [`Self::restart`], panicking with the reason when the control plane
+    /// refuses to start again.
+    pub fn restarted(self) -> T {
+        self.restart()
+            .unwrap_or_else(|e| panic!("the control plane failed to restart: {e}"))
+    }
+
     pub fn restart(self) -> encompute_ir::Result<T> {
         let env0 = self.env0;
         drop(self.control);

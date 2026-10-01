@@ -726,9 +726,13 @@ impl Control {
         reason: Option<&str>,
     ) -> Result<()> {
         let r = t
-            .query_one("SELECT state FROM jobs WHERE id = $1 FOR UPDATE", &[&job])
+            .query_one(
+                "SELECT state, project_id, organization_id FROM jobs WHERE id = $1 FOR UPDATE",
+                &[&job],
+            )
             .map_err(db_err)?;
         let from = JobState::parse(r.get(0))?;
+        let (project, org): (String, String) = (r.get(1), r.get(2));
         if !from.can_go_to(to) {
             return Err(conflict(format!(
                 "job {job} cannot go from {} to {}",
@@ -754,6 +758,21 @@ impl Control {
             &[&job, &to.as_str(), &(if to == JobState::Failed { reason } else { None })],
         )
         .map_err(db_err)?;
+        // An ended job never runs again: recorded in the governance log.
+        let ended = match to {
+            JobState::Failed => Some(crate::govlog::kind::JOB_FAILED),
+            JobState::Cancelled => Some(crate::govlog::kind::JOB_CANCELLED),
+            _ => None,
+        };
+        if let Some(kind) = ended {
+            let partition = crate::govlog::for_project(t, &project, Some(&org))?;
+            crate::govlog::append(
+                t,
+                crate::govlog::Draft::new(partition, kind, job)
+                    .org(&org)
+                    .r#ref("project", project.as_str()),
+            )?;
+        }
         self.metrics.inc("encompute_jobs_total", to.as_str());
         Ok(())
     }

@@ -55,7 +55,7 @@ fn the_anchor_size_is_measured_on_every_write_and_exported() {
     // And after a restart, as loaded.
     let env0 = w.t.env0;
     drop(w.t.control);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     assert_eq!(anchor_bytes_metric(&t.control.metrics.render()), grown);
 }
 
@@ -202,7 +202,7 @@ fn recovery_recreates_a_frozen_ledger_whose_row_was_lost() {
         .unwrap();
     assert!(env0.start().is_err());
     run_recovery(&env0);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     assert!(t.control.anchor.snapshot().frozen.contains(&d));
     assert_eq!(spend(&t, "frozen-1").0, 409);
     let env0 = t.env0;

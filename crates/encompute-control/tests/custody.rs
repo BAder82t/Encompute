@@ -1180,7 +1180,7 @@ fn restore_dropping_revoked_authorization_refuses_start() {
     drop(t.control);
     let backup = format!("{}_authz", url.rsplit('/').next().unwrap());
     backup_database(&url, &backup);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     t.ok(
         &tax_sec1,
         "POST",
@@ -1209,7 +1209,7 @@ fn restore_dropping_revoked_authorization_refuses_start() {
             .any(|n| n.contains(&r.authorization_row) && n.contains("revocation re-applied")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     let v = t.ok(
         &tax_sec1,
         "GET",
@@ -1227,7 +1227,7 @@ fn restore_dropping_revoked_authorization_refuses_start() {
         "{sent:?}"
     );
     // A second restart is clean.
-    t.restart().unwrap();
+    t.restarted();
 }
 
 /// A database-level attacker deletes a revoked authorization's row
@@ -1313,7 +1313,7 @@ fn deleting_a_revoked_authorization_row_refuses_start() {
             .any(|n| n.contains(&r.authorization_row) && n.contains("lost")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     drop(t.control);
     // The same signed document, active again under a new row.
     {

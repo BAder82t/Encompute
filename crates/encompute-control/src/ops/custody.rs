@@ -824,6 +824,12 @@ impl Control {
         if n == 0 {
             return Ok(false);
         }
+        crate::govlog::append_asset_event(
+            t,
+            crate::govlog::kind::ASSET_EXPIRED,
+            &a.id,
+            &a.organization,
+        )?;
         let draft = |action| {
             AuditDraft::new(
                 actor,

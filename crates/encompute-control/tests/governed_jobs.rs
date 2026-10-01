@@ -5238,3 +5238,100 @@ fn reissue_refused_for_expired_derived_result_2705() {
     refused(g.t.call(&c.sec, "POST", &url, None), "ENC2705");
     assert_eq!(count(&g), 0);
 }
+
+// --- source revocation and expiry in the governance log ----------------------
+
+/// A source whose result was derived in the main project, a second
+/// governed project that ran a job over the derived result (reached only
+/// through lineage), and an unrelated governed project: (source asset,
+/// lineage project, unrelated project).
+fn lineage_projects(g: &G) -> (String, String, String) {
+    let (rel, _, d, _) = derived(g, "2026-q1", |_| {});
+    let mk = |name: &str| -> String {
+        id(&g.t.ok(
+            &g.tax_admin,
+            "POST",
+            "/v1/projects",
+            Some(
+                json!({"organization": TAX, "name": name, "governance": "governed",
+                        "organizations": [BEN]}),
+            ),
+        ))
+    };
+    let (p2, p3) = (mk("lineage-reuse"), mk("unrelated"));
+    // A finished job of the second project over the derived result.
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .batch_execute(&format!(
+            "INSERT INTO plans (id, organization_id, project_id, program_id, spec_id, program, document, created_by)
+                  VALUES ('pl_reuse', '{TAX}', '{p2}', 'x', 'y', '', '{{}}', 'u');
+             INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, purpose, source_assets,
+                               requested_output, scheme, backend, profile, state, initiated_by, idempotency_key, request_digest)
+                  VALUES ('job_reuse', '{TAX}', '{p2}', 'pl_reuse', 'y', 'x', 'p', '[\"{d}\"]', 'out', 'exact',
+                          'openfhe-exact', 'P', 'succeeded', 'u', 'k-reuse', 'd');"
+        ))
+        .unwrap();
+    (rel.v.asset.clone(), p2, p3)
+}
+
+/// The partitions holding a `kind` event about `subject`.
+fn partitions_of(g: &G, kind: &str, subject: &str) -> BTreeSet<String> {
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .query(
+            "SELECT partition FROM governance_events WHERE kind = $1 AND subject_id = $2",
+            &[&kind, &subject],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect()
+}
+
+/// Revoking a source is recorded for its owner and in the log of every
+/// governed project that uses it: where an authorization names it, and
+/// where a result derived from it was used. An unrelated project's log
+/// gets nothing.
+#[test]
+fn source_revocation_appears_in_every_using_projects_log() {
+    let Some(g) = world() else { return };
+    let (source, p2, p3) = lineage_projects(&g);
+    g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/assets/{source}/revoke"),
+        None,
+    );
+    let got = partitions_of(&g, "asset.revoked", &source);
+    let want: BTreeSet<String> = [
+        format!("o:{TAX}"),
+        format!("p:{}", g.project),
+        format!("p:{p2}"),
+    ]
+    .into();
+    assert_eq!(got, want);
+    assert!(!got.contains(&format!("p:{p3}")));
+    encompute_control::govlog::verify_chain(&mut *g.t.control.db.conn().unwrap()).unwrap();
+}
+
+/// Likewise for a source's expiry.
+#[test]
+fn source_expiry_appears_likewise() {
+    let Some(g) = world() else { return };
+    let (source, p2, p3) = lineage_projects(&g);
+    assert!(g.t.control.expire_asset("operator-1", &source).unwrap());
+    let got = partitions_of(&g, "asset.expired", &source);
+    let want: BTreeSet<String> = [
+        format!("o:{TAX}"),
+        format!("p:{}", g.project),
+        format!("p:{p2}"),
+    ]
+    .into();
+    assert_eq!(got, want);
+    assert!(!got.contains(&format!("p:{p3}")));
+    encompute_control::govlog::verify_chain(&mut *g.t.control.db.conn().unwrap()).unwrap();
+}

@@ -306,7 +306,7 @@ fn production_metrics_need_the_metrics_token() {
         None,
         5,
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
     assert_eq!(get(&c, None), 401, "production default: closed");
     c.metrics_access = MetricsAccess::Token(zeroize::Zeroizing::new("scrape-secret".into()));
     assert_eq!(get(&c, None), 401);

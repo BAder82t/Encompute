@@ -691,7 +691,8 @@ pub enum BrokerCmd {
         replace_control_key: bool,
         /// How old, in seconds, a lineage owner's key attestation may be
         /// when a release or export of a derived result relies on it;
-        /// older, re-attest it (pin-lineage) first.
+        /// older, re-attest it (pin-lineage) first. 24 hours by default,
+        /// at most 7 days (604800).
         #[arg(long, default_value_t = encompute_runtime::keybroker::DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS)]
         lineage_attestation_max_age: u64,
         #[command(flatten)]

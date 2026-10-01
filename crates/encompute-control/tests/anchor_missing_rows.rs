@@ -35,7 +35,7 @@ fn deleted_then_recovered(t: T, f: impl FnOnce(&str), expect: &str, id: &str) ->
         notes.iter().any(|n| n.contains(id) && n.contains("lost")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     assert!(t
         .control
         .anchor
@@ -69,7 +69,7 @@ fn deleting_a_revoked_asset_row_refuses_start() {
         &asset,
     );
     // A second restart is clean.
-    t.restart().unwrap();
+    t.restarted();
 }
 
 #[test]

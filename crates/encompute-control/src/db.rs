@@ -70,6 +70,11 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "retention",
         include_str!("../migrations/0012_retention.sql"),
     ),
+    (
+        13,
+        "governance_log",
+        include_str!("../migrations/0013_governance_log.sql"),
+    ),
 ];
 
 /// Serializes migrations across control-plane replicas.

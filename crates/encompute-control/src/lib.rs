@@ -18,6 +18,7 @@ pub mod authz;
 pub mod config;
 pub mod control;
 pub mod db;
+pub mod govlog;
 pub mod log;
 pub mod metrics;
 pub mod model;

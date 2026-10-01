@@ -855,7 +855,7 @@ fn oidc_tokens_and_production_refusals() {
         oidc,
         env: Env::Development,
     };
-    let t = env0.start().unwrap();
+    let t = env0.started();
     t.control
         .bootstrap(issuer, "alice", Some("alice@hospital-a.example"))
         .unwrap();

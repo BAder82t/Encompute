@@ -509,7 +509,7 @@ As built (derived results and exports):
   plane's attestation, and newer than the co-signature it holds.
 - A custodian's broker relies on a lineage owner's pinned key only while
   the attestation it was pinned from is younger than a maximum age (24
-  hours by default, configurable, at most 30 days, never unset): a key
+  hours by default, configurable, at most 7 days, never unset): a key
   revoked at the control plane is otherwise unpinned only when a revoked
   attestation reaches the broker. The control-plane key the broker checks
   everything against is pinned in its authenticated state the first time
@@ -606,6 +606,44 @@ As built (auditors and views):
   inclusion proofs and never another organization's.
 - Each owner signs revocation heads, so an exported bundle cannot silently
   omit a revocation.
+
+As built (event log, recorded alongside the anchor; schema version 13):
+
+- Every transition the state anchor records appends exactly one event in
+  the same transaction: an asset revoked or expired, a service account or
+  user disabled, a job cancelled or failed, an approval withdrawn or a
+  grant ended, a project membership or organization role removed, an owner
+  authorization issued or revoked, and, newly recorded, a purpose retired
+  and a governance key revoked. A key revocation goes to its organization
+  and to every governed project the organization takes part in; an
+  asset's revocation or expiry to its owner and to every governed project
+  that uses it (an authorization names it, or a job read it or a result
+  derived from it, or derived such a result there). A
+  repeated request that changes nothing records nothing; recovery's
+  re-applications record the transition again.
+- Partitions: a governed project's transitions go to `p:<project>`;
+  everything of a standard project, and an organization's own transitions
+  (its people, roles, assets and keys), go to `o:<organization>`; platform
+  accounts to `platform`. Standard projects behave as before.
+- An event holds identifiers only: its kind, subject, organization, time
+  and a few related IDs (project, authorization and key fingerprints).
+  Never an actor, a storage location, a key reference, a stated reason
+  or other free text.
+- All events form one hash chain; each partition is an RFC 6962 Merkle
+  tree whose complete subtrees are stored, so roots and inclusion and
+  consistency proofs read O(log n) rows. The formats (events, signed
+  partition checkpoints, members' witness signatures, owners' revocation
+  heads and equivocation evidence) are in `encompute-trust` (`govlog.rs`),
+  implemented there from RFC 6962 and RFC 9162 and checked against the
+  published test vectors and an independent reference construction. The
+  database refuses to update, delete or truncate any of it.
+- Lock order: the log's head is taken immediately before the audit head,
+  which stays last; the audit append and the audit checkpoint take it
+  first, so the two are always locked in that order. The database's
+  refusals do not stop a database superuser (as with the audit chain).
+- For now nothing reads the log to decide: the anchor still carries the
+  sets of IDs. Anchoring the log's head in their place, the project audit
+  route with proofs, witnessing and revocation heads follow.
 
 ### 13. Error codes (D13)
 

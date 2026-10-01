@@ -124,7 +124,7 @@ fn restart_keeps_spending_and_restoring_an_older_backup_is_refused() {
     } = w;
     let url = t.env0.url.clone();
     // Restart: the spending is still there.
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     let view = |t: &T| t.ok(&a_auditor, "GET", &format!("/v1/privacy/{d}"), None);
     assert_eq!(view(&t)["spent"]["epsilon"].as_f64().unwrap(), after3);
     // Back up now, spend more, then restore the older backup.
@@ -132,7 +132,7 @@ fn restart_keeps_spending_and_restoring_an_older_backup_is_refused() {
     drop(t.control);
     let backup = format!("{}_backup", url.rsplit('/').next().unwrap());
     backup_database(&url, &backup);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     t.ok(
         &a_owner,
         "POST",
@@ -161,7 +161,7 @@ fn restart_keeps_spending_and_restoring_an_older_backup_is_refused() {
         notes.iter().any(|n| n.contains(&d) && n.contains("frozen")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     let v = view(&t);
     assert!(v["frozen"].as_str().unwrap().contains("rolled back"), "{v}");
     let (s, v) = t.call(
@@ -479,7 +479,7 @@ fn restoring_an_older_backup_cannot_unrevoke_an_asset() {
     drop(t.control);
     let backup = format!("{}_backup", url.rsplit('/').next().unwrap());
     backup_database(&url, &backup);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     let out = t.ok(
         &b_owner,
         "POST",
@@ -508,7 +508,7 @@ fn restoring_an_older_backup_cannot_unrevoke_an_asset() {
             .any(|n| n.contains(&model_b) && n.contains("re-applied")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     let a = t.ok(&b_owner, "GET", &format!("/v1/assets/{model_b}"), None);
     assert_eq!(a["status"], "revoked");
     let v = t.ok(&b_dev, "GET", &format!("/v1/jobs/{job}"), None);
@@ -552,7 +552,7 @@ fn restoring_an_older_backup_cannot_unrevoke_an_asset() {
     drop(c);
     let env0 = t.env0;
     drop(t.control);
-    env0.start().unwrap();
+    env0.started();
 }
 
 /// Review finding SA-1 (ENC-SF-2026-048, related hardening): a reservation is charged only

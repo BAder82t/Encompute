@@ -454,7 +454,7 @@ fn restart_preserves_jobs_and_never_replays() {
         evaluator: ev,
         ..
     } = w;
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     let get = |id: &str| {
         t.ok(&b_dev, "GET", &format!("/v1/jobs/{id}"), None)["state"]
             .as_str()
@@ -604,7 +604,7 @@ fn production_plans_are_checked_against_the_control_planes_floor() {
         None,
         5,
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
     prod.verify_stored_plan(&program, &good).unwrap();
     let refused = |f: &dyn Fn(&mut encompute_planner::ConfidentialExecutionPlan), why: &str| {
         let mut bad = good.clone();

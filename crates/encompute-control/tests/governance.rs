@@ -1295,7 +1295,7 @@ fn version_4_databases_migrate_to_standard_projects() {
                   VALUES ('a', 'o', 'dataset', 'a', 'd', '{}', 'a', '[]', 'active', 'u');",
         )
         .unwrap();
-    assert_eq!(db.migrate().unwrap(), 12);
+    assert_eq!(db.migrate().unwrap(), 13);
     let mut c = db.conn().unwrap();
     let r = c
         .query_one(
@@ -1309,5 +1309,853 @@ fn version_4_databases_migrate_to_standard_projects() {
     c.execute("UPDATE assets SET status = 'revoked' WHERE id = 'a'", &[])
         .unwrap();
     c.execute("UPDATE assets SET status = 'active' WHERE id = 'a'", &[])
+        .unwrap();
+}
+
+// --- the governance event log ------------------------------------------------
+
+/// The governance log's events, in order: (partition, kind, subject, body).
+fn glog(t: &T) -> Vec<(String, String, String, Value)> {
+    t.control
+        .db
+        .conn()
+        .unwrap()
+        .query(
+            "SELECT partition, kind, subject_id, body FROM governance_events ORDER BY gseq",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+        .collect()
+}
+
+/// The events appended since `before` (a length of [`glog`]).
+fn glog_since(t: &T, before: usize) -> Vec<(String, String, String, Value)> {
+    glog(t).split_off(before)
+}
+
+/// Asserts one step appended exactly the one event described.
+fn one_event(t: &T, before: usize, partition: &str, kind: &str, subject: &str) {
+    let new = glog_since(t, before);
+    assert_eq!(new.len(), 1, "{kind}: {new:?}");
+    let (p, k, s, _) = &new[0];
+    assert_eq!(
+        (p.as_str(), k.as_str(), s.as_str()),
+        (partition, kind, subject)
+    );
+}
+
+/// The log is intact, and for every set the state anchor holds, the
+/// database's negative rows and the log's events of that kind name the
+/// same IDs: the log records every transition the anchor does.
+fn log_matches_database(t: &T) {
+    use encompute_control::govlog::{self, kind};
+    let mut c = t.control.db.conn().unwrap();
+    govlog::verify_chain(&mut *c).unwrap();
+    let ids = |c: &mut postgres::Client, sql: &str| -> std::collections::BTreeSet<String> {
+        c.query(sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
+    };
+    for (kinds, sql) in [
+        (
+            vec![kind::ASSET_REVOKED],
+            "SELECT id FROM assets WHERE status = 'revoked'",
+        ),
+        (
+            vec![kind::ASSET_EXPIRED],
+            "SELECT id FROM assets WHERE expired_at IS NOT NULL",
+        ),
+        (
+            vec![kind::SERVICE_ACCOUNT_DISABLED],
+            "SELECT id FROM service_accounts WHERE status = 'disabled'",
+        ),
+        (
+            vec![kind::USER_DISABLED],
+            "SELECT id FROM users WHERE status = 'disabled'",
+        ),
+        (
+            vec![kind::JOB_FAILED, kind::JOB_CANCELLED],
+            "SELECT id FROM jobs WHERE state IN ('failed', 'cancelled')",
+        ),
+        (
+            vec![kind::GRANT_WITHDRAWN],
+            "SELECT id FROM withdrawn_grants",
+        ),
+        (
+            vec![kind::MEMBERSHIP_REMOVED],
+            "SELECT id FROM removed_memberships",
+        ),
+        (vec![kind::ROLE_REMOVED], "SELECT id FROM removed_roles"),
+        (
+            vec![kind::AUTHORIZATION_REVOKED],
+            "SELECT id FROM authorizations WHERE status = 'revoked'",
+        ),
+        (
+            vec![kind::PURPOSE_RETIRED],
+            "SELECT id FROM purposes WHERE status = 'retired'",
+        ),
+        (
+            vec![kind::GOVERNANCE_KEY_REVOKED],
+            "SELECT id FROM governance_keys WHERE status = 'revoked'",
+        ),
+    ] {
+        let want = ids(&mut c, sql);
+        let mut got = std::collections::BTreeSet::new();
+        for k in &kinds {
+            got.extend(govlog::negative_ids(&mut *c, k).unwrap());
+        }
+        assert_eq!(got, want, "{kinds:?}");
+    }
+}
+
+/// Every transition the state anchor records writes exactly one event to
+/// the governance log, in the same transaction, in the governed project's
+/// partition or the organization's; a governance-key revocation writes one
+/// for the organization and one for each governed project it takes part
+/// in. Transitions that are not security-negative (a key's or purpose's
+/// approval, an acceptance, a version) write none.
+#[test]
+fn every_governance_transition_writes_exactly_one_event() {
+    use encompute_control::govlog::kind;
+    let Some(g) = gov_world() else { return };
+    let t = &g.t;
+    let p = format!("p:{}", g.project);
+    let o = format!("o:{TAX}");
+    let k = key(1);
+    let (purpose, version) = g.ready(&k);
+    assert!(glog(t).is_empty(), "{:?}", glog(t));
+
+    let n = glog(t).len();
+    let (auth, _) = g.activated(&purpose, &version, &k);
+    one_event(t, n, &p, kind::AUTHORIZATION_ISSUED, &auth);
+
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{auth}/revoke"),
+        Some(json!({"reason": "superseded"})),
+    );
+    one_event(t, n, &p, kind::AUTHORIZATION_REVOKED, &auth);
+    // Revoking it again changes nothing, and logs nothing.
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{auth}/revoke"),
+        Some(json!({"reason": "superseded"})),
+    );
+    assert_eq!(glog(t).len(), n);
+
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/purposes/{purpose}/retire"),
+        None,
+    );
+    one_event(t, n, &p, kind::PURPOSE_RETIRED, &purpose);
+
+    let who = t.ok(&g.tax_dev, "GET", "/v1/whoami", None);
+    let dev = who["id"].as_str().unwrap().to_owned();
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/users/{dev}/disable"),
+        None,
+    );
+    one_event(t, n, &o, kind::USER_DISABLED, &dev);
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/users/{dev}/disable"),
+        None,
+    );
+    assert_eq!(
+        glog(t).len(),
+        n,
+        "disabling a disabled user is no transition"
+    );
+
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/service-accounts/tax-robot/disable"),
+        None,
+    );
+    one_event(t, n, &o, kind::SERVICE_ACCOUNT_DISABLED, "tax-robot");
+
+    let who = t.ok(&g.tax_owner2, "GET", "/v1/whoami", None);
+    let owner2 = who["id"].as_str().unwrap().to_owned();
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/memberships/remove"),
+        Some(json!({"principal": owner2, "role": "data_owner"})),
+    );
+    let role: String = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT id FROM removed_roles WHERE principal_id = $1",
+            &[&owner2],
+        )
+        .unwrap()
+        .get(0);
+    one_event(t, n, &o, kind::ROLE_REMOVED, &role);
+
+    let asset = |name: &str, digest: char| -> String {
+        t.ok(
+            &g.tax_owner,
+            "POST",
+            "/v1/assets",
+            Some(json!({"organization": TAX, "kind": "dataset", "name": format!("income@{name}"),
+                        "series": "income", "version": name, "digest": digest.to_string().repeat(64),
+                        "ir_policy": registered(TAX)["ir_policy"], "release_class": "boolean-only"})),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let revoked = asset("2026-q1", 'e');
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/assets/{revoked}/revoke"),
+        None,
+    );
+    one_event(t, n, &o, kind::ASSET_REVOKED, &revoked);
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/assets/{revoked}/revoke"),
+        None,
+    );
+    assert_eq!(glog(t).len(), n);
+
+    let expired = asset("2026-q2", 'f');
+    let n = glog(t).len();
+    assert!(t.control.expire_asset("operator-1", &expired).unwrap());
+    one_event(t, n, &o, kind::ASSET_EXPIRED, &expired);
+    assert!(!t.control.expire_asset("operator-1", &expired).unwrap());
+    assert_eq!(glog(t).len(), n + 1);
+
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/projects/{}/members/remove", g.project),
+        Some(json!({"organization": BEN})),
+    );
+    let membership: String = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT id FROM removed_memberships WHERE organization_id = $1",
+            &[&BEN],
+        )
+        .unwrap()
+        .get(0);
+    one_event(t, n, &p, kind::MEMBERSHIP_REMOVED, &membership);
+    assert_eq!(glog(t).last().unwrap().3["org"], BEN);
+
+    let keys = t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    let key_row = keys[0]["id"].as_str().unwrap().to_owned();
+    let n = glog(t).len();
+    t.ok(
+        &g.tax_sec2,
+        "POST",
+        &format!("/v1/organizations/{TAX}/governance-keys/{key_row}/revoke"),
+        None,
+    );
+    let new = glog_since(t, n);
+    let got: Vec<(&str, &str, &str)> = new
+        .iter()
+        .map(|(p, k, s, _)| (p.as_str(), k.as_str(), s.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (o.as_str(), kind::GOVERNANCE_KEY_REVOKED, key_row.as_str()),
+            (p.as_str(), kind::GOVERNANCE_KEY_REVOKED, key_row.as_str()),
+        ]
+    );
+    log_matches_database(t);
+}
+
+/// Retiring a purpose is recorded in its governed project's partition,
+/// once, with the purpose and its proposing organization.
+#[test]
+fn purpose_retirement_is_logged() {
+    use encompute_control::govlog::kind;
+    let Some(g) = gov_world() else { return };
+    let purpose = g.active_purpose("benefits-eligibility");
+    assert!(glog(&g.t).is_empty());
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/purposes/{purpose}/retire"),
+        None,
+    );
+    one_event(
+        &g.t,
+        0,
+        &format!("p:{}", g.project),
+        kind::PURPOSE_RETIRED,
+        &purpose,
+    );
+    let body = &glog(&g.t)[0].3;
+    assert_eq!(body["org"], TAX, "{body}");
+    assert_eq!(body["refs"]["project"], g.project.as_str(), "{body}");
+    // Retired once: retiring again records nothing.
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/purposes/{purpose}/retire"),
+        None,
+    );
+    assert_eq!(glog(&g.t).len(), 1);
+    log_matches_database(&g.t);
+}
+
+/// A governance-key revocation reaches the log of every governed project
+/// its organization takes part in (as owner or member), and its own; a
+/// standard project it takes part in gets nothing.
+#[test]
+fn governance_key_revocation_appends_to_every_project() {
+    use encompute_control::govlog::kind;
+    let Some(g) = gov_world() else { return };
+    let t = &g.t;
+    // A second governed project tax owns, one benefits owns that tax
+    // joined, and a standard project of tax's.
+    let p2 = t.ok(
+        &g.tax_admin,
+        "POST",
+        "/v1/projects",
+        Some(
+            json!({"organization": TAX, "name": "second", "governance": "governed",
+                    "organizations": [BEN]}),
+        ),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let p3 = t.ok(
+        &g.ben_admin,
+        "POST",
+        "/v1/projects",
+        Some(
+            json!({"organization": BEN, "name": "benefits-own", "governance": "governed",
+                    "organizations": [TAX]}),
+        ),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/projects/{p3}/members"),
+        Some(json!({"organization": TAX})),
+    );
+    let standard = t.ok(
+        &g.tax_admin,
+        "POST",
+        "/v1/projects",
+        Some(json!({"organization": TAX, "name": "plain"})),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let k = key(1);
+    let key_row = g.register_key(TAX, &g.tax_admin, &g.tax_sec1, &k);
+    assert!(glog(t).is_empty());
+    t.ok(
+        &g.tax_sec2,
+        "POST",
+        &format!("/v1/organizations/{TAX}/governance-keys/{key_row}/revoke"),
+        None,
+    );
+    let events = glog(t);
+    let partitions: std::collections::BTreeSet<String> =
+        events.iter().map(|(p, _, _, _)| p.clone()).collect();
+    let want: std::collections::BTreeSet<String> = [
+        format!("o:{TAX}"),
+        format!("p:{}", g.project),
+        format!("p:{p2}"),
+        format!("p:{p3}"),
+    ]
+    .into();
+    assert_eq!(partitions, want);
+    assert_eq!(events.len(), 4, "one per partition: {events:?}");
+    assert!(!partitions.contains(&format!("p:{standard}")));
+    let key_id = encompute_trust::authz::governance_key_id(&pk(&k));
+    for (_, kd, s, body) in &events {
+        assert_eq!(kd, kind::GOVERNANCE_KEY_REVOKED);
+        assert_eq!(s, &key_row);
+        assert_eq!(body["org"], TAX);
+        assert_eq!(body["refs"]["key_id"], key_id.as_str(), "{body}");
+    }
+    // Benefits' key is another organization's: none of tax's partitions
+    // learn of its revocation, and tax's own partition gets nothing.
+    let bk = key(2);
+    let ben_row = g.register_key(BEN, &g.ben_sec1, &g.ben_sec2, &bk);
+    t.ok(
+        &g.ben_sec1,
+        "POST",
+        &format!("/v1/organizations/{BEN}/governance-keys/{ben_row}/revoke"),
+        None,
+    );
+    let ben: Vec<String> = glog_since(t, 4).into_iter().map(|e| e.0).collect();
+    assert!(ben.contains(&format!("o:{BEN}")), "{ben:?}");
+    assert!(!ben.contains(&format!("o:{TAX}")), "{ben:?}");
+    log_matches_database(t);
+}
+
+/// A transaction that rolls back leaves no event, no tree node and the
+/// head where it was.
+#[test]
+fn a_rolled_back_transaction_writes_no_event() {
+    use encompute_control::govlog::{self, kind, Draft};
+    use encompute_trust::govlog::Partition;
+    let Some(g) = gov_world() else { return };
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/purposes/{}/retire", g.active_purpose("x")),
+        None,
+    );
+    let head = |c: &mut postgres::Client| -> (i64, String, i64) {
+        let r = c
+            .query_one(
+                "SELECT gseq, hash, (SELECT count(*) FROM governance_tree_nodes) FROM governance_head",
+                &[],
+            )
+            .unwrap();
+        (r.get(0), r.get(1), r.get(2))
+    };
+    let mut c = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    let before = head(&mut c);
+    let n = glog(&g.t).len();
+    {
+        let mut tx = c.transaction().unwrap();
+        govlog::append(
+            &mut tx,
+            Draft::new(Partition::Platform, kind::USER_DISABLED, "usr_rolled_back"),
+        )
+        .unwrap();
+        tx.rollback().unwrap();
+    }
+    assert_eq!(head(&mut c), before);
+    assert_eq!(glog(&g.t).len(), n);
+    // An API call that fails part-way records nothing either: a purpose
+    // retired by someone who may not.
+    let purpose = g.active_purpose("y");
+    let (s, _) = g.t.call(
+        &g.robot,
+        "POST",
+        &format!("/v1/purposes/{purpose}/retire"),
+        None,
+    );
+    assert!(s >= 400);
+    assert_eq!(glog(&g.t).len(), n);
+    log_matches_database(&g.t);
+}
+
+/// The log is append-only in the database: no event, node, checkpoint,
+/// witness or revocation head is updated, deleted or truncated, and the
+/// head only moves forward one event at a time.
+#[test]
+fn governance_log_rows_refuse_update_and_delete() {
+    let Some(g) = gov_world() else { return };
+    let purpose = g.active_purpose("benefits-eligibility");
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/purposes/{purpose}/retire"),
+        None,
+    );
+    {
+        let mut c = g.t.control.db.conn().unwrap();
+        let mut tx = c.transaction().unwrap();
+        encompute_control::govlog::checkpoint_partition(
+            &mut tx,
+            &g.t.control.signer,
+            &format!("p:{}", g.project),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let mut c = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    c.batch_execute(&format!(
+        "INSERT INTO checkpoint_witnesses (partition, size, organization_id, signed)
+              VALUES ('p:{0}', 1, '{TAX}', '{{}}');
+         INSERT INTO revocation_heads (organization_id, project_id, seq, root, at, signed)
+              VALUES ('{TAX}', '{0}', 1, 'r', 1, '{{}}');",
+        g.project
+    ))
+    .unwrap();
+    for sql in [
+        "UPDATE governance_events SET kind = 'asset.revoked'",
+        "DELETE FROM governance_events",
+        "TRUNCATE governance_events",
+        "UPDATE governance_tree_nodes SET hash = 'x'",
+        "DELETE FROM governance_tree_nodes",
+        "UPDATE governance_checkpoints SET root = 'x'",
+        "DELETE FROM governance_checkpoints",
+        "UPDATE checkpoint_witnesses SET signed = '{}'",
+        "DELETE FROM checkpoint_witnesses",
+        "UPDATE revocation_heads SET root = 'x'",
+        "DELETE FROM revocation_heads",
+        "DELETE FROM governance_head",
+        "TRUNCATE governance_head",
+        "UPDATE governance_head SET gseq = gseq - 1",
+        "UPDATE governance_head SET gseq = gseq + 2",
+    ] {
+        let e = c.batch_execute(sql).expect_err(sql);
+        let m = db_msg(&e);
+        assert!(
+            m.contains("append-only") || m.contains("forward"),
+            "{sql}: {m}"
+        );
+    }
+    log_matches_database(&g.t);
+}
+
+/// Leaves carry only what every member may see: no storage location, key
+/// reference, asset or purpose text, revocation reason, or person's
+/// identifier, whichever transitions wrote them (a canary scan).
+#[test]
+fn leaves_are_shared_safe() {
+    let Some(g) = gov_world() else { return };
+    let t = &g.t;
+    let k = key(1);
+    g.register_key(TAX, &g.tax_admin, &g.tax_sec1, &k);
+    let v = t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/projects/{}/purposes", g.project),
+        Some(json!({"organization": TAX, "name": "benefits-eligibility",
+                    "description": "canary-purpose-text-5e1c",
+                    "modes": ["aggregate"], "allowed_release_classes": ["boolean-only"],
+                    "recipients": [BEN], "valid_from": now() - 60, "valid_until": now() + 3600})),
+    );
+    let purpose = v["id"].as_str().unwrap().to_owned();
+    t.ok(
+        &g.tax_sec2,
+        "POST",
+        &format!("/v1/purposes/{purpose}/approve"),
+        None,
+    );
+    let (s, v) = g.accept(&g.tax_sec2, TAX, &purpose, &k);
+    assert_eq!(s, 200, "{v}");
+    let v = t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": TAX, "kind": "dataset", "name": "canary-series-0b9d@2026-q3",
+                    "series": "canary-series-0b9d", "version": "2026-q3", "digest": "c".repeat(64),
+                    "storage_uri": "s3://canary-storage-7f3a/income",
+                    "ir_policy": registered(TAX)["ir_policy"], "release_class": "boolean-only"}),
+        ),
+    );
+    let (asset, version) = (
+        v["id"].as_str().unwrap().to_owned(),
+        v["version_id"].as_str().unwrap().to_owned(),
+    );
+    let (auth, _) = g.activated(&purpose, &version, &k);
+    t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{auth}/revoke"),
+        Some(json!({"reason": "canary-reason-c4d2"})),
+    );
+    t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/purposes/{purpose}/retire"),
+        None,
+    );
+    t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/assets/{asset}/revoke"),
+        None,
+    );
+    t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/projects/{}/members/remove", g.project),
+        Some(json!({"organization": BEN})),
+    );
+    let keys = t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    let key_row = keys[0]["id"].as_str().unwrap().to_owned();
+    t.ok(
+        &g.tax_sec2,
+        "POST",
+        &format!("/v1/organizations/{TAX}/governance-keys/{key_row}/revoke"),
+        None,
+    );
+    let events = glog(t);
+    assert!(events.len() >= 6, "{events:?}");
+    let people: Vec<String> = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query("SELECT id FROM users UNION SELECT subject FROM users", &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let fields = [
+        "at",
+        "kind",
+        "org",
+        "partition",
+        "pseq",
+        "refs",
+        "subject",
+        "v",
+    ];
+    let refs = [
+        "asset",
+        "authorization_id",
+        "covered_organization",
+        "governance_key",
+        "key_id",
+        "project",
+        "reason",
+        "revocation_id",
+        "role",
+        "withdrawn",
+    ];
+    for (p, _, _, body) in &events {
+        let text = body.to_string();
+        for canary in ["canary", "s3://", "vault:", "transit", "superseded"] {
+            assert!(!text.contains(canary), "{canary} in {text}");
+        }
+        for person in &people {
+            assert!(
+                !text.contains(&format!("\"{person}\"")),
+                "{person} in {text}"
+            );
+        }
+        for k in body.as_object().unwrap().keys() {
+            assert!(fields.contains(&k.as_str()), "field {k} in {text}");
+        }
+        for k in body["refs"].as_object().into_iter().flatten().map(|x| x.0) {
+            assert!(refs.contains(&k.as_str()), "reference {k} in {text}");
+        }
+        assert!(p.starts_with("p:") || p.starts_with("o:") || p == "platform");
+    }
+    log_matches_database(t);
+}
+
+/// Checkpoints and proofs come straight from the stored log: every event
+/// of a project proves inclusion in its signed checkpoint, a later
+/// checkpoint is consistent with an earlier one, and an event edited in
+/// the database (with its triggers off) breaks the chain.
+#[test]
+fn checkpoints_and_proofs_from_the_database() {
+    use encompute_control::govlog;
+    let Some(g) = gov_world() else { return };
+    let t = &g.t;
+    let part = format!("p:{}", g.project);
+    let ck = t.control.signer.public_key_hex();
+    let checkpoint = || {
+        let mut c = t.control.db.conn().unwrap();
+        let mut tx = c.transaction().unwrap();
+        let cp = govlog::checkpoint_partition(&mut tx, &t.control.signer, &part).unwrap();
+        tx.commit().unwrap();
+        cp
+    };
+    for name in ["a", "b", "c"] {
+        let p = g.active_purpose(name);
+        t.ok(
+            &g.tax_sec1,
+            "POST",
+            &format!("/v1/purposes/{p}/retire"),
+            None,
+        );
+    }
+    let cp1 = checkpoint();
+    cp1.verify(&ck).unwrap();
+    assert_eq!(cp1.body.size, 3);
+    assert_eq!(checkpoint(), cp1, "the same size is the same checkpoint");
+    for name in ["d", "e", "f", "g"] {
+        let p = g.active_purpose(name);
+        t.ok(
+            &g.tax_sec1,
+            "POST",
+            &format!("/v1/purposes/{p}/retire"),
+            None,
+        );
+    }
+    let cp2 = checkpoint();
+    assert_eq!(cp2.body.size, 7);
+    let mut c = t.control.db.conn().unwrap();
+    for (i, e) in govlog::events(&mut *c, &part, 0, 100)
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let proof = govlog::prove(&mut *c, &part, i as u64 + 1, 7).unwrap();
+        cp2.includes(e, &proof).unwrap();
+        if i < 3 {
+            let proof = govlog::prove(&mut *c, &part, i as u64 + 1, 3).unwrap();
+            cp1.includes(e, &proof).unwrap();
+        }
+    }
+    let cons = govlog::prove_consistency(&mut *c, &part, 3, 7).unwrap();
+    assert_eq!(cons.first_root, cp1.body.root);
+    assert_eq!(cons.second_root, cp2.body.root);
+    cons.verify().unwrap();
+    govlog::verify_chain(&mut *c).unwrap();
+    drop(c);
+    attacker(
+        &t.env0.url,
+        &["governance_events"],
+        "UPDATE governance_events SET body = jsonb_set(body, '{subject}', '\"purpose-x\"') WHERE gseq = 2",
+    );
+    let mut c = t.control.db.conn().unwrap();
+    let e = govlog::verify_chain(&mut *c).unwrap_err();
+    assert!(e.message.contains("governance event 2"), "{e}");
+}
+
+/// A standard project writes nothing to a project partition: its jobs,
+/// approvals, memberships, assets and people go to their organization's
+/// partition (the platform's for platform accounts), and everything it
+/// answers is as before.
+#[test]
+fn standard_projects_log_only_to_organizations() {
+    let Some(w) = world() else { return };
+    let t = &w.t;
+    let project = w.project.clone();
+    for (who, asset) in [(&w.a_owner, &w.dataset_a), (&w.b_owner, &w.model_b)] {
+        t.ok(
+            who,
+            "POST",
+            &format!("/v1/assets/{asset}/approvals"),
+            Some(json!({"project": project, "purpose": "medical-training"})),
+        );
+    }
+    let plan = w.plan(&exact_own(&w.model_b));
+    let (_, j) = w.job(&plan, &[&w.model_b], "to-cancel");
+    let job = j["id"].as_str().unwrap().to_owned();
+    let v = t.ok(&w.b_dev, "POST", &format!("/v1/jobs/{job}/cancel"), None);
+    assert_eq!(v["state"], "cancelled", "{v}");
+    t.ok(
+        &w.a_owner,
+        "POST",
+        &format!("/v1/assets/{}/approvals/withdraw", w.dataset_a),
+        Some(json!({"project": project, "purpose": "medical-training"})),
+    );
+    t.ok(
+        &w.b_admin,
+        "POST",
+        &format!("/v1/projects/{project}/members/remove"),
+        Some(json!({"organization": "hospital-a"})),
+    );
+    let who = t.ok(&w.c_dev, "GET", "/v1/whoami", None);
+    let c_dev = who["id"].as_str().unwrap().to_owned();
+    t.ok(
+        &w.c_admin,
+        "POST",
+        &format!("/v1/organizations/other-co/users/{c_dev}/disable"),
+        None,
+    );
+    let sa = ServiceSigner::from_seed("secagg-9", &[39; 32]).unwrap();
+    t.ok(
+        &w.platform,
+        "POST",
+        "/v1/organizations/platform/service-accounts",
+        Some(json!({"id": "secagg-9", "kind": "secagg", "public_key": sa.public_key_hex()})),
+    );
+    t.ok(
+        &w.platform,
+        "POST",
+        "/v1/organizations/platform/service-accounts/secagg-9/disable",
+        None,
+    );
+    let v = t.ok(
+        &w.a_owner,
+        "POST",
+        &format!("/v1/assets/{}/revoke", w.dataset_a),
+        None,
+    );
+    assert_eq!(v["status"], "revoked", "{v}");
+    let events = glog(t);
+    let partitions: std::collections::BTreeSet<&str> =
+        events.iter().map(|(p, _, _, _)| p.as_str()).collect();
+    assert!(
+        partitions.iter().all(|p| !p.starts_with("p:")),
+        "{partitions:?}"
+    );
+    for p in ["o:modelco", "o:hospital-a", "o:other-co", "platform"] {
+        assert!(partitions.contains(p), "{p}: {partitions:?}");
+    }
+    let kinds: std::collections::BTreeSet<&str> =
+        events.iter().map(|(_, k, _, _)| k.as_str()).collect();
+    for k in [
+        "job.cancelled",
+        "grant.withdrawn",
+        "membership.removed",
+        "user.disabled",
+        "service_account.disabled",
+        "asset.revoked",
+    ] {
+        assert!(kinds.contains(k), "{k}: {kinds:?}");
+    }
+    log_matches_database(t);
+}
+
+/// Lock order: signing an audit checkpoint takes the governance log's head
+/// before the audit head, like every audit append, so it waits while
+/// another transaction holds the governance head.
+#[test]
+fn audit_checkpoint_takes_the_governance_head_first() {
+    let Some(g) = gov_world() else { return };
+    let mut holder = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    let mut held = holder.transaction().unwrap();
+    encompute_control::govlog::lock_head(&mut held).unwrap();
+    let mut c = postgres::Client::connect(&g.t.env0.url, postgres::NoTls).unwrap();
+    let mut tx = c.transaction().unwrap();
+    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+        .unwrap();
+    let (seq, root) = encompute_control::audit::verify_chain(&mut tx).unwrap();
+    let e =
+        encompute_control::audit::checkpoint_extending(&mut tx, &g.t.control.signer, seq, &root)
+            .expect_err("signed while the governance head was held");
+    assert!(e.message.contains("lock"), "{e}");
+    drop(tx);
+    held.rollback().unwrap();
+    let mut tx = c.transaction().unwrap();
+    encompute_control::audit::checkpoint_extending(&mut tx, &g.t.control.signer, seq, &root)
         .unwrap();
 }

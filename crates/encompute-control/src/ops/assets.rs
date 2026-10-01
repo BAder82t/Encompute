@@ -158,35 +158,90 @@ pub(crate) fn withdraw_grants(
         )
         .map_err(db_err)?;
     for r in &g {
-        t.execute(
-            "INSERT INTO withdrawn_grants (id, kind, asset_id, project_id, purpose, organization_id, withdrawn_by)
-             VALUES ($1, 'grant', $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-            &[
+        let n = t
+            .execute(
+                "INSERT INTO withdrawn_grants (id, kind, asset_id, project_id, purpose, organization_id, withdrawn_by)
+                 VALUES ($1, 'grant', $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                &[
+                    &r.get::<_, String>(0),
+                    &r.get::<_, String>(1),
+                    &r.get::<_, String>(2),
+                    &r.get::<_, String>(3),
+                    &r.get::<_, String>(4),
+                    &actor,
+                ],
+            )
+            .map_err(db_err)?;
+        if n == 1 {
+            log_withdrawal(
+                t,
                 &r.get::<_, String>(0),
+                "grant",
                 &r.get::<_, String>(1),
                 &r.get::<_, String>(2),
-                &r.get::<_, String>(3),
-                &r.get::<_, String>(4),
-                &actor,
-            ],
-        )
-        .map_err(db_err)?;
+                Some(&r.get::<_, String>(4)),
+            )?;
+        }
     }
     for r in &a {
-        t.execute(
-            "INSERT INTO withdrawn_grants (id, kind, asset_id, project_id, purpose, withdrawn_by)
-             VALUES ($1, 'approval', $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-            &[
+        let n = t
+            .execute(
+                "INSERT INTO withdrawn_grants (id, kind, asset_id, project_id, purpose, withdrawn_by)
+                 VALUES ($1, 'approval', $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                &[
+                    &r.get::<_, String>(0),
+                    &r.get::<_, String>(1),
+                    &r.get::<_, String>(2),
+                    &r.get::<_, String>(3),
+                    &actor,
+                ],
+            )
+            .map_err(db_err)?;
+        if n == 1 {
+            log_withdrawal(
+                t,
                 &r.get::<_, String>(0),
+                "approval",
                 &r.get::<_, String>(1),
                 &r.get::<_, String>(2),
-                &r.get::<_, String>(3),
-                &actor,
-            ],
-        )
-        .map_err(db_err)?;
+                None,
+            )?;
+        }
     }
     Ok(a.len() as u64)
+}
+
+/// Records a withdrawn approval or ended grant in the governance log: in
+/// the project's partition when it is governed, the asset owner's
+/// otherwise.
+fn log_withdrawal(
+    t: &mut postgres::Transaction<'_>,
+    id: &str,
+    what: &str,
+    asset: &str,
+    project: &str,
+    covered: Option<&str>,
+) -> Result<()> {
+    let owner: Option<String> = t
+        .query_opt(
+            "SELECT organization_id FROM assets WHERE id = $1",
+            &[&asset],
+        )
+        .map_err(db_err)?
+        .map(|r| r.get(0));
+    let partition = crate::govlog::for_project(t, project, owner.as_deref())?;
+    let mut d = crate::govlog::Draft::new(partition, crate::govlog::kind::GRANT_WITHDRAWN, id)
+        .r#ref("withdrawn", what)
+        .r#ref("asset", asset)
+        .r#ref("project", project);
+    if let Some(o) = &owner {
+        d = d.org(o);
+    }
+    if let Some(c) = covered {
+        d = d.r#ref("covered_organization", c);
+    }
+    crate::govlog::append(t, d)?;
+    Ok(())
 }
 
 /// An asset as its owner's members see it.
@@ -831,11 +886,23 @@ impl Control {
         reason: Option<&str>,
     ) -> Result<Revoked> {
         let id = a.id.as_str();
-        t.execute(
-            "UPDATE assets SET status = 'revoked', revoked_at = now() WHERE id = $1",
-            &[&id],
-        )
-        .map_err(db_err)?;
+        // Only the transaction that revokes it records the transition (a
+        // concurrent one waits for the row and changes nothing).
+        let n = t
+            .execute(
+                "UPDATE assets SET status = 'revoked', revoked_at = now()
+                  WHERE id = $1 AND status <> 'revoked'",
+                &[&id],
+            )
+            .map_err(db_err)?;
+        if n == 1 {
+            crate::govlog::append_asset_event(
+                t,
+                crate::govlog::kind::ASSET_REVOKED,
+                id,
+                &a.organization,
+            )?;
+        }
         // The derived results downstream, each marked source-revoked once.
         let downstream = mark_downstream(t, id, Downstream::Revoked)?;
         // Jobs that have not started cannot start now. (Rows are locked

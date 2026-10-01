@@ -83,7 +83,7 @@ pub const MAX_REVOKED_AUTHORIZATIONS: usize = 16_384;
 /// fresh attestation, by default.
 pub const DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS: u64 = 24 * 3600;
 /// The longest maximum age a broker accepts for a lineage attestation.
-pub const MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+pub const MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
 
 /// A governed broker's runtime configuration (not part of its state).
 #[derive(Clone, Debug, PartialEq, Eq)]

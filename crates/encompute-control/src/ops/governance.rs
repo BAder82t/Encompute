@@ -29,8 +29,9 @@
 //! submission, scheduling, start and ticket issue with [`usable_at`], and a
 //! revocation fails the jobs under it that have not started.
 //!
-//! Not yet (later phases): anchoring of purpose retirements and
-//! governance-key revocations against database rollback.
+//! Purpose retirements and governance-key revocations are recorded in the
+//! governance event log (`govlog.rs`) in the same transaction; the log is
+//! not yet anchored against database rollback (a later step).
 
 use std::collections::BTreeMap;
 
@@ -282,6 +283,9 @@ impl Control {
                     &[&id, &ctx.actor(), &secs(now())],
                 )
                 .map_err(db_err)?;
+                // Logged for the organization and for every governed
+                // project it takes part in.
+                crate::govlog::append_key_revocation(t, org, id, &key_id)?;
                 audit::append(
                     t,
                     ctx.draft("governance_key.revoked", "governance_key", id, Outcome::Succeeded)
@@ -611,6 +615,13 @@ impl Control {
                     &[&id, &ctx.actor(), &secs(now())],
                 )
                 .map_err(db_err)?;
+                let partition = crate::govlog::for_project(t, &project, Some(&org))?;
+                crate::govlog::append(
+                    t,
+                    crate::govlog::Draft::new(partition, crate::govlog::kind::PURPOSE_RETIRED, id)
+                        .org(&org)
+                        .r#ref("project", project.as_str()),
+                )?;
                 audit::append(
                     t,
                     ctx.draft("purpose.retired", "purpose", id, Outcome::Succeeded)
@@ -1082,6 +1093,15 @@ impl Control {
                 ],
             )
             .map_err(db_err)?;
+            let partition = crate::govlog::for_project(t, &row.project, Some(&row.org))?;
+            crate::govlog::append(
+                t,
+                crate::govlog::Draft::new(partition, crate::govlog::kind::AUTHORIZATION_ISSUED, id)
+                    .org(&row.org)
+                    .r#ref("project", row.project.as_str())
+                    .r#ref("authorization_id", authorization_id.as_str())
+                    .r#ref("governance_key", key_id.as_str()),
+            )?;
             audit::append(
                 t,
                 ctx.draft(
@@ -1157,19 +1177,40 @@ impl Control {
                 }
                 under_active_key(t, &row.org, &rev.public_key, |k| rev.verify(k))?;
             }
-            t.execute(
-                "UPDATE authorizations SET status = 'revoked', revoked_by = $2,
-                        revoked_at = to_timestamp($4::bigint), revocation = $3 WHERE id = $1",
-                &[
-                    &id,
-                    &ctx.actor(),
-                    &r.revocation
-                        .as_ref()
-                        .map(|x| serde_json::to_value(x).expect("serializable")),
-                    &secs(now()),
-                ],
+            let n = t
+                .execute(
+                    "UPDATE authorizations SET status = 'revoked', revoked_by = $2,
+                            revoked_at = to_timestamp($4::bigint), revocation = $3
+                      WHERE id = $1 AND status <> 'revoked'",
+                    &[
+                        &id,
+                        &ctx.actor(),
+                        &r.revocation
+                            .as_ref()
+                            .map(|x| serde_json::to_value(x).expect("serializable")),
+                        &secs(now()),
+                    ],
+                )
+                .map_err(db_err)?;
+            if n == 0 {
+                // Revoked concurrently: that transaction recorded it.
+                return Ok(json!({"id": id, "status": "revoked", "failed_jobs": []}));
+            }
+            let partition = crate::govlog::for_project(t, &row.project, Some(&row.org))?;
+            let mut g = crate::govlog::Draft::new(
+                partition,
+                crate::govlog::kind::AUTHORIZATION_REVOKED,
+                id,
             )
-            .map_err(db_err)?;
+            .org(&row.org)
+            .r#ref("project", row.project.as_str());
+            if let Some(a) = &authorization_id {
+                g = g.r#ref("authorization_id", a.as_str());
+            }
+            if let Some(rev) = &r.revocation {
+                g = g.r#ref("revocation_id", rev.id()?);
+            }
+            crate::govlog::append(t, g)?;
             // Jobs that run under it and have not started cannot start now
             // (rows locked before the audit chain, which every transaction
             // takes last). One that runs already may finish: revocation

@@ -267,7 +267,7 @@ above, this section is what was built.
   re-bound, see below), an earlier one never does, and an attestation
   that the key was revoked unpins it for good. A pin is relied on only
   while its attestation is younger than the broker's maximum age (24
-  hours by default, at most 30 days, never unset); older, it is
+  hours by default, at most 7 days, never unset); older, it is
   re-attested before anything derived from that owner's data is released
   or exported (ENC2708). Each lineage owner installs its authorization there.
   A key release for a job over the result, and an export, then require an

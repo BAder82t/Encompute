@@ -2042,7 +2042,7 @@ fn rebind_cannot_change_record_or_owners() {
 /// fresh: once older than the configured maximum age (24 hours unless
 /// configured shorter), nothing derived from its data is released until
 /// the control plane attests the key again (ENC2708, "re-attest"). Every
-/// governed broker has a maximum age: zero or more than 30 days is
+/// governed broker has a maximum age: zero or more than 7 days is
 /// refused.
 #[test]
 fn stale_lineage_attestation_needs_reattest() {
@@ -2088,6 +2088,38 @@ fn stale_lineage_attestation_needs_reattest() {
             Some(Code::InsecureConfiguration),
             "{bad}"
         );
+    }
+}
+
+/// The longest maximum age a governed broker accepts for a lineage
+/// attestation is 7 days: exactly 7 days is accepted, one second more (and
+/// the former 30-day limit) is refused (ENC2605), and the default stays 24
+/// hours.
+#[test]
+fn lineage_attestation_max_age_is_at_most_seven_days() {
+    assert_eq!(
+        encompute_keybroker::MAX_LINEAGE_ATTESTATION_MAX_AGE_SECS,
+        7 * 24 * 3600
+    );
+    assert_eq!(
+        encompute_keybroker::DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS,
+        24 * 3600
+    );
+    let spec = derived_world(true, true, |_| {}).0.spec;
+    let with = |secs: u64| {
+        let clock = Arc::new(AtomicU64::new(T0));
+        bare_broker(&clock, &spec)
+            .with_governance(GovernanceConfig {
+                lineage_attestation_max_age_secs: secs,
+                ..governance()
+            })
+            .map(|_| ())
+            .map_err(|e| e.code)
+    };
+    assert_eq!(with(24 * 3600), Ok(()));
+    assert_eq!(with(7 * 24 * 3600), Ok(()));
+    for bad in [7 * 24 * 3600 + 1, 30 * 24 * 3600] {
+        assert_eq!(with(bad), Err(Code::InsecureConfiguration), "{bad}");
     }
 }
 

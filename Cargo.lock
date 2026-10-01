@@ -1128,6 +1128,7 @@ dependencies = [
  "encompute-secagg",
  "encompute-training",
  "encompute-verification",
+ "proptest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

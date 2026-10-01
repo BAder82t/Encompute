@@ -164,11 +164,17 @@ fn from_system_time(t: SystemTime) -> i64 {
 
 /// Appends `draft` to the chain inside the caller's transaction. The chain
 /// head row is locked, so concurrent appends serialize.
+///
+/// Lock order: the audit head is the last lock every transaction takes.
+/// The governance log's head comes immediately before it, so it is locked
+/// here first: a transaction recording a governance event and an audit
+/// event, in either order, takes the two heads in the same order.
 pub fn append(t: &mut impl GenericClient, draft: AuditDraft) -> Result<AuditEvent> {
     for (k, v) in &draft.refs {
         check_ref_value(k, v)?;
     }
     check_ref_value("resource_id", &draft.resource_id)?;
+    crate::govlog::lock_head(t)?;
     let head = t
         .query_one("SELECT seq, hash FROM audit_head WHERE id FOR UPDATE", &[])
         .map_err(db_err)?;
@@ -394,6 +400,9 @@ pub fn checkpoint_extending(
     anchored_seq: i64,
     anchored_root: &str,
 ) -> Result<AuditCheckpoint> {
+    // Lock order (see `append`): the governance log's head first, then the
+    // audit head, last.
+    crate::govlog::lock_head(c)?;
     c.query_one("SELECT seq FROM audit_head WHERE id FOR UPDATE", &[])
         .map_err(db_err)?;
     let (seq, root) = verify_from(c, anchored_seq, anchored_root)?;

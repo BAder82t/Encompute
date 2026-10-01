@@ -4,6 +4,7 @@
 //! evidence for each, and one trust report over all of it.
 
 pub mod authz;
+pub mod govlog;
 pub mod graph;
 mod ingest;
 pub mod lineage;
