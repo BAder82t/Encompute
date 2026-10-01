@@ -124,6 +124,8 @@ fn evidence_levels_are_ordered() {
     }
 }
 
+const URL: &str = "https://ev.example";
+
 fn pin(
     key: &str,
     operator: &str,
@@ -132,6 +134,7 @@ fn pin(
 ) -> EvaluatorPin {
     EvaluatorPin {
         receipt_key: key.into(),
+        url: URL.into(),
         operator: operator.into(),
         location: region.map(|(p, r)| Location::resolve(p, r, None).unwrap()),
         evidence: ev,
@@ -152,12 +155,19 @@ fn a_client_judges_what_it_pinned_by_its_own_constraints() {
         Some(("gcp", "europe-west3")),
         LocationEvidence::OperatorDeclared,
     );
-    check_pinned_placement(&de, &key, std::slice::from_ref(&good), None).unwrap();
+    check_pinned_placement(&de, &key, URL, std::slice::from_ref(&good), None).unwrap();
     // The key matches in any case.
-    check_pinned_placement(&de, &key.to_uppercase(), std::slice::from_ref(&good), None).unwrap();
+    check_pinned_placement(
+        &de,
+        &key.to_uppercase(),
+        URL,
+        std::slice::from_ref(&good),
+        None,
+    )
+    .unwrap();
     let refused =
         |c: &PlacementConstraints, pins: &[EvaluatorPin], rec: Option<&GrantPlacement>| {
-            let e = check_pinned_placement(c, &key, pins, rec).unwrap_err();
+            let e = check_pinned_placement(c, &key, URL, pins, rec).unwrap_err();
             assert_eq!(e.code, Code::GovernanceClientPlacement, "{e}");
             e.message
         };
@@ -201,8 +211,9 @@ fn a_client_judges_what_it_pinned_by_its_own_constraints() {
         location: good.location.clone(),
         evidence: LocationEvidence::OperatorDeclared,
         evidence_digest: None,
+        endpoint_digest: None,
     };
-    check_pinned_placement(&de, &key, std::slice::from_ref(&good), Some(&said)).unwrap();
+    check_pinned_placement(&de, &key, URL, std::slice::from_ref(&good), Some(&said)).unwrap();
     for lie in [
         GrantPlacement {
             operator: "opco".into(),
@@ -223,6 +234,17 @@ fn a_client_judges_what_it_pinned_by_its_own_constraints() {
     ] {
         assert!(refused(&de, std::slice::from_ref(&good), Some(&lie)).contains("record"));
     }
+    // The control plane names another URL than the pinned one: nothing is
+    // sent there.
+    let e = check_pinned_placement(
+        &de,
+        &key,
+        "https://evil.example",
+        std::slice::from_ref(&good),
+        None,
+    )
+    .unwrap_err();
+    assert!(e.message.contains("URL you pinned"), "{e}");
     // Invalid constraints are refused, and constraints about other scopes
     // say nothing about ciphertexts.
     let typo = PlacementConstraints {
@@ -232,5 +254,24 @@ fn a_client_judges_what_it_pinned_by_its_own_constraints() {
     refused(&typo, std::slice::from_ref(&good), None);
     let mut keys_only = de.clone();
     keys_only.applies_to = [Scope::Keys].into();
-    check_pinned_placement(&keys_only, &key, &[], None).unwrap();
+    check_pinned_placement(&keys_only, &key, URL, &[], None).unwrap();
+}
+
+#[test]
+fn constraint_documents_are_bounded() {
+    let many: std::collections::BTreeSet<LocationPattern> = locations::TABLE
+        .iter()
+        .map(|(p, r, _)| LocationPattern::region(p, r))
+        .collect();
+    assert!(many.len() > 64);
+    let big = PlacementConstraints {
+        allowed_regions: Some(many),
+        ..PlacementConstraints::default()
+    };
+    assert!(big.check().is_err());
+    let names = PlacementConstraints {
+        allowed_operators: Some((0..300).map(|i| format!("org-{i}")).collect()),
+        ..PlacementConstraints::default()
+    };
+    assert!(names.check().is_err());
 }

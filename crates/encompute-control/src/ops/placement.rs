@@ -43,6 +43,8 @@ use crate::model::{bad, new_id, Role, PLATFORM_ORG};
 
 /// How long a declaration holds when it names no period.
 pub const DECLARATION_DEFAULT_DAYS: u32 = 90;
+/// The most declarations per evaluator per hour.
+pub const MAX_DECLARATIONS_PER_HOUR: i64 = 30;
 /// The longest a declaration holds.
 pub const DECLARATION_MAX_DAYS: u32 = 366;
 
@@ -168,7 +170,8 @@ pub fn evaluator_offers(c: &mut impl GenericClient) -> Result<Vec<EvaluatorOffer
         .query(
             "SELECT e.id, s.organization_id, e.backends, e.profiles, e.location,
                     e.location_evidence, e.location_evidence_digest,
-                    (e.location_valid_until IS NULL OR e.location_valid_until > now())
+                    (e.location_valid_until IS NULL OR e.location_valid_until > now()),
+                    e.url, e.receipt_key
                FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
               WHERE s.status = 'active'
               ORDER BY e.id",
@@ -200,12 +203,84 @@ pub fn evaluator_offers(c: &mut impl GenericClient) -> Result<Vec<EvaluatorOffer
             location,
             evidence,
             evidence_digest: digest,
+            endpoint_digest: Some(endpoint_digest(
+                &r.get::<_, String>(8),
+                &r.get::<_, String>(9),
+            )),
         });
     }
     Ok(out)
 }
 
+/// Digest of where an evaluator is reached and the key it signs with: the
+/// endpoint a location's evidence vouches for.
+pub fn endpoint_digest(url: &str, receipt_key: &str) -> String {
+    encompute_verification::service::sha256_hex(format!("{url}\0{receipt_key}").as_bytes())
+}
+
+/// The digest of evaluator `id`'s current endpoint (URL and receipt key).
+pub fn endpoint_of(c: &mut impl GenericClient, id: &str) -> Result<Option<String>> {
+    Ok(c.query_opt(
+        "SELECT url, receipt_key FROM evaluators WHERE id = $1",
+        &[&id],
+    )
+    .map_err(db_err)?
+    .map(|r| endpoint_digest(&r.get::<_, String>(0), &r.get::<_, String>(1))))
+}
+
 impl Control {
+    /// An evaluator registered again at another URL or with another receipt
+    /// key (`before` is its endpoint digest from before): the evidence for
+    /// its location vouched for the old endpoint, so it is lost (back to
+    /// self-declared), audited and logged like a changed location.
+    pub(crate) fn endpoint_changed(
+        &self,
+        t: &mut Transaction<'_>,
+        ctx: &Ctx,
+        evaluator: &str,
+        operator: &str,
+        before: Option<String>,
+    ) -> Result<()> {
+        let Some(before) = before else { return Ok(()) };
+        if endpoint_of(t, evaluator)?.as_deref() == Some(before.as_str()) {
+            return Ok(());
+        }
+        let n = t
+            .execute(
+                "UPDATE evaluators SET location_evidence = 'self_declared',
+                        location_evidence_digest = NULL, location_valid_until = NULL,
+                        location_updated_at = now()
+                  WHERE id = $1 AND location_evidence <> 'self_declared'",
+                &[&evaluator],
+            )
+            .map_err(db_err)?;
+        if n > 0 {
+            audit::append(
+                t,
+                ctx.draft(
+                    "evaluator.location_changed",
+                    "evaluator",
+                    evaluator,
+                    Outcome::Succeeded,
+                )
+                .org(operator)
+                .r#ref("reason", "endpoint_changed")
+                .r#ref("evidence", LocationEvidence::SelfDeclared.as_str()),
+            )?;
+            append_evaluator_event(
+                t,
+                kind::EVALUATOR_LOCATION_CHANGED,
+                evaluator,
+                operator,
+                &[(
+                    "evidence",
+                    LocationEvidence::SelfDeclared.as_str().to_owned(),
+                )],
+            )?;
+        }
+        Ok(())
+    }
+
     /// What an evaluator reports about its location when it registers, in
     /// the caller's transaction (the row exists already or is inserted by
     /// the caller after this returns the values to store). Returns the
@@ -350,7 +425,28 @@ impl Control {
                      attested evidence",
                 ));
             }
-            let digest = location.evidence_digest(LocationEvidence::OperatorDeclared, ctx.actor());
+            // Bounded: an evaluator's record is not a place to write history
+            // without end (each declaration is a log event in every project
+            // that uses it).
+            let recent: i64 = t
+                .query_one(
+                    "SELECT count(*) FROM evaluator_location_declarations
+                      WHERE evaluator_id = $1 AND declared_at > now() - interval '1 hour'",
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .get(0);
+            if recent >= MAX_DECLARATIONS_PER_HOUR {
+                return Err(evidence_err(format!(
+                    "at most {MAX_DECLARATIONS_PER_HOUR} location declarations an hour for one \
+                     evaluator: declare again later"
+                )));
+            }
+            let endpoint = endpoint_of(t, id)?.unwrap_or_default();
+            let digest = location.evidence_digest(
+                LocationEvidence::OperatorDeclared,
+                &format!("{}\0{endpoint}", ctx.actor()),
+            );
             let location_json = serde_json::to_value(&location).expect("serializable");
             t.execute(
                 "INSERT INTO evaluator_location_declarations
@@ -534,6 +630,11 @@ impl Control {
         r: SetProjectPlacement,
     ) -> Result<Value> {
         self.tx_anchored(|t| {
+            // Lock the project's row before reading its member list (the
+            // join of a member takes the same lock first), so the members a
+            // loosening needs are the members there are when it applies.
+            t.query_opt("SELECT 1 FROM projects WHERE id = $1 FOR UPDATE", &[&id])
+                .map_err(db_err)?;
             let p = crate::authz::project_visible(t, &ctx.principal, id)?;
             crate::authz::deny_auditor(&ctx.principal, &p)?;
             if !p.governed() {
@@ -556,9 +657,6 @@ impl Control {
             r.constraints
                 .check()
                 .map_err(|e| change_err(e.message))?;
-            // One change at a time per project.
-            t.query_one("SELECT 1 FROM projects WHERE id = $1 FOR UPDATE", &[&id])
-                .map_err(db_err)?;
             let current = project_placement(t, id)?;
             let n = current.as_ref().map_or(0, |c| c.version);
             let cur = current
@@ -699,9 +797,10 @@ pub fn placement_refused(a: &Admission) -> Error {
 pub fn owner_sources(
     c: &mut impl GenericClient,
     rows: &[&str],
-) -> Result<(Vec<PlacementSource>, BTreeSet<String>)> {
+) -> Result<(Vec<PlacementSource>, BTreeSet<String>, Vec<String>)> {
     let mut out = vec![];
     let mut parties = BTreeSet::new();
+    let mut pins = vec![];
     for r in c
         .query(
             "SELECT signed FROM authorizations WHERE id = ANY($1) ORDER BY id",
@@ -715,6 +814,7 @@ pub fn owner_sources(
         let signed: SignedAuthorizationV2 =
             serde_json::from_value(v).map_err(|e| db_err(format!("stored authorization: {e}")))?;
         parties.insert(signed.body.party.clone());
+        pins.extend(signed.body.limits.project_placement_digest.clone());
         if let Some(c) = signed.body.limits.placement.clone() {
             out.push(PlacementSource {
                 origin: Origin::Organization(signed.body.party.clone()),
@@ -722,7 +822,7 @@ pub fn owner_sources(
             });
         }
     }
-    Ok((out, parties))
+    Ok((out, parties, pins))
 }
 
 /// What a governed job's placement is judged against.
@@ -740,6 +840,9 @@ pub struct JobPlacement<'a> {
     /// or without constraints: they own sources (lineage owners of a
     /// derived source included), so none of them operates the evaluator.
     pub parties: BTreeSet<String>,
+    /// The project-constraint digests the owners pinned in their
+    /// authorizations: the binding must name exactly these.
+    pub pins: Vec<String>,
 }
 
 impl Control {
@@ -797,6 +900,19 @@ impl Control {
                 });
             }
         }
+        if j.pins
+            .iter()
+            .any(|p| j.binding.placement_digest.as_deref() != Some(p.as_str()))
+        {
+            return Err(Error::new(
+                Code::GovernanceResidency,
+                "an owner's authorization pins project placement constraints the job is not \
+                 bound to",
+            ));
+        }
+        let participants: BTreeSet<String> = crate::authz::project_row(t, j.project)?
+            .map(|p| p.members.into_iter().collect())
+            .unwrap_or_default();
         pc.production = self.env.is_production();
         pc.locations_digest = encompute_planner::locations::digest();
         pc.roles = Roles {
@@ -814,6 +930,7 @@ impl Control {
                 .flat_map(|o| o.recipients.iter().cloned())
                 .collect(),
             coordinator: None,
+            participants,
         };
         ctx.infrastructure.evaluators = evaluator_offers(t)?;
         Ok(encompute_planner::placement::admission(
@@ -833,6 +950,7 @@ pub fn grant_placement(a: &AdmittedEvaluator) -> GrantPlacement {
         location: a.location.clone(),
         evidence: a.evidence,
         evidence_digest: a.evidence_digest.clone(),
+        endpoint_digest: a.endpoint_digest.clone(),
     }
 }
 
@@ -916,7 +1034,7 @@ impl Control {
             .map(|x| x.get(0))
             .collect();
         let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-        let (owners, parties) = owner_sources(t, &rows)?;
+        let (owners, parties, pins) = owner_sources(t, &rows)?;
         self.job_admission(
             t,
             &JobPlacement {
@@ -926,6 +1044,7 @@ impl Control {
                 backend: &backend,
                 owners,
                 parties,
+                pins,
             },
         )
     }

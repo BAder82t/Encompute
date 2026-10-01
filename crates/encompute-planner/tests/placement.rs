@@ -33,6 +33,7 @@ fn offer(id: &str, operator: &str, l: Option<Location>, ev: LocationEvidence) ->
         location: l,
         evidence: ev,
         evidence_digest: Some("a".repeat(64)),
+        endpoint_digest: Some("b".repeat(64)),
     }
 }
 
@@ -795,4 +796,124 @@ fn the_report_labels_attested_and_declared() {
         "{text}"
     );
     assert!(text.contains("(declared)"), "{text}");
+}
+
+fn with_participants(mut ctx: PlanningContext, who: &[&str]) -> PlanningContext {
+    ctx.placement.as_mut().unwrap().roles.participants =
+        who.iter().map(|s| s.to_string()).collect();
+    ctx
+}
+
+#[test]
+fn unrelated_tenant_evaluator_never_admitted_by_default() {
+    let offers = vec![
+        offer(
+            "ev-platform",
+            "platform",
+            None,
+            LocationEvidence::SelfDeclared,
+        ),
+        offer(
+            "ev-stranger",
+            "stranger",
+            None,
+            LocationEvidence::SelfDeclared,
+        ),
+    ];
+    // No constraint at all: the stranger's evaluator is still not admitted.
+    let ctx = context(vec![], offers, false);
+    let a = admission(&ctx, None, &[], &BTreeSet::new());
+    assert_eq!(ids(&a), ["ev-platform"]);
+    // ...and its existence is not told to the project.
+    let why = a.why_none();
+    assert!(
+        !why.contains("ev-stranger") && !why.contains("stranger"),
+        "{why}"
+    );
+    let only = context(
+        vec![],
+        vec![offer(
+            "ev-stranger",
+            "stranger",
+            None,
+            LocationEvidence::SelfDeclared,
+        )],
+        false,
+    );
+    let a = admission(&only, None, &[], &BTreeSet::new());
+    assert!(a.admitted.is_empty());
+    let why = a.why_none();
+    assert!(
+        !why.contains("ev-stranger") && why.contains("outside the project"),
+        "{why}"
+    );
+    let e = plan_or_fail(&parse(PROGRAM).unwrap(), &only).unwrap_err();
+    assert!(!e.message.contains("ev-stranger"), "{}", e.message);
+}
+
+#[test]
+fn participant_operator_admitted() {
+    let ctx = with_participants(
+        context(
+            vec![],
+            vec![offer(
+                "ev-member",
+                "member",
+                None,
+                LocationEvidence::SelfDeclared,
+            )],
+            false,
+        ),
+        &["member"],
+    );
+    assert_eq!(
+        ids(&admission(&ctx, None, &[], &BTreeSet::new())),
+        ["ev-member"]
+    );
+    // A participant that owns a source is still refused by separation.
+    let mut ctx = ctx;
+    ctx.placement.as_mut().unwrap().roles.source_owners = ["member".to_owned()].into();
+    assert!(admission(&ctx, None, &[], &BTreeSet::new())
+        .admitted
+        .is_empty());
+}
+
+#[test]
+fn named_operator_admitted() {
+    let by_operator = PlacementConstraints {
+        allowed_operators: Some(["guest".to_owned()].into()),
+        ..PlacementConstraints::default()
+    };
+    let offers = vec![
+        offer("ev-guest", "guest", None, LocationEvidence::SelfDeclared),
+        offer("ev-other", "other", None, LocationEvidence::SelfDeclared),
+    ];
+    let ctx = context(vec![project(by_operator)], offers.clone(), false);
+    assert_eq!(
+        ids(&admission(&ctx, None, &[], &BTreeSet::new())),
+        ["ev-guest"]
+    );
+    // Named by evaluator ID, in an owner's own constraints.
+    let by_id = PlacementConstraints {
+        allowed_evaluators: Some(["ev-other".to_owned()].into()),
+        ..PlacementConstraints::default()
+    };
+    let ctx = context(vec![], offers, false);
+    let a = admission(&ctx, None, &[owner("tax", by_id)], &BTreeSet::new());
+    assert_eq!(ids(&a), ["ev-other"]);
+}
+
+#[test]
+fn platform_evaluator_unchanged() {
+    let ctx = context(
+        vec![],
+        vec![offer(
+            "ev-p",
+            "platform",
+            None,
+            LocationEvidence::SelfDeclared,
+        )],
+        false,
+    );
+    assert_eq!(ids(&admission(&ctx, None, &[], &BTreeSet::new())), ["ev-p"]);
 }

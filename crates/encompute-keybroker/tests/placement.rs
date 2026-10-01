@@ -176,3 +176,35 @@ fn releases_without_constraints_are_unchanged() {
     w.zone = Some(("gcp".into(), "mars-west1-a".into()));
     w.release_fresh().unwrap();
 }
+
+#[test]
+fn control_plane_cannot_drop_project_constraints_when_the_owner_pinned_them() {
+    let project = allow("DE");
+    let mut a = authorization();
+    a.limits.project_placement_digest = Some(project.digest());
+    // A binding that names no project constraints at all (the control
+    // plane dropped them): refused, though the zone is in the US.
+    let mut w = world_with(binding(), a.clone());
+    w.zone = Some(("gcp".into(), "us-central1-a".into()));
+    assert_eq!(code(w.release_fresh()), Code::GovernanceResidency);
+    // A binding that names looser constraints than the owner pinned.
+    let loose = PlacementConstraints::default();
+    let mut b = binding();
+    b.placement_digest = Some(loose.digest());
+    let mut w = world_with(b, a.clone());
+    w.placement = Some(loose);
+    w.zone = Some(("gcp".into(), "us-central1-a".into()));
+    assert_eq!(code(w.release_fresh()), Code::GovernanceResidency);
+    // Bound to exactly what the owner pinned, from a German zone: released.
+    let mut b = binding();
+    b.placement_digest = Some(project.digest());
+    let mut w = world_with(b, a);
+    w.placement = Some(project);
+    w.zone = Some(("gcp".into(), "europe-west3-a".into()));
+    w.release_fresh().unwrap();
+    // Without a pin the digest is the control plane's own choice: nothing
+    // to compare (the project's constraints are enforced by it alone).
+    let mut w = world();
+    w.zone = Some(("gcp".into(), "us-central1-a".into()));
+    w.release_fresh().unwrap();
+}

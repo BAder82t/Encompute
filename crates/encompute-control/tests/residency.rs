@@ -1451,3 +1451,224 @@ fn a_release_ticket_without_project_constraints_carries_none() {
         "{t:?}"
     );
 }
+
+#[test]
+fn a_member_joining_and_a_loosening_are_ordered() {
+    let Some(g) = world() else { return };
+    assert_eq!(g.constrain(&g.tax_sec1, allow_regions(&["DE"])).0, 200);
+    let widen = json!({});
+    // tax and benefits propose; other-co has not: pending.
+    assert_eq!(
+        g.constrain(&g.tax_sec1, widen.clone()).1["status"],
+        "pending"
+    );
+    assert_eq!(
+        g.constrain(&g.ben_sec, widen.clone()).1["status"],
+        "pending"
+    );
+    // While another session holds the project's row (a join in progress),
+    // the loosening waits for it rather than counting a stale member list.
+    let mut c = g.t.control.db.conn().unwrap();
+    let mut tx = c.transaction().unwrap();
+    tx.query_one(
+        "SELECT 1 FROM projects WHERE id = $1 FOR UPDATE",
+        &[&g.project],
+    )
+    .unwrap();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let h = s.spawn(|| {
+            let r = g.constrain(&g.other_sec, widen.clone());
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            r
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            !done.load(std::sync::atomic::Ordering::SeqCst),
+            "it did not wait for the lock"
+        );
+        tx.commit().unwrap();
+        let (st, v) = h.join().unwrap();
+        assert_eq!((st, v["status"].as_str()), (200, Some("applied")), "{v}");
+    });
+}
+
+/// An organization outside the project, with an evaluator of its own.
+fn stranger(g: &G) -> Evaluator {
+    g.t.ok(
+        &g.platform,
+        "POST",
+        "/v1/organizations",
+        Some(json!({"id": "stranger-co", "display_name": "stranger",
+                    "admin": {"issuer": DEV_ISSUER, "subject": "s-admin"}})),
+    );
+    let admin = As::User("s-admin".into());
+    g.org_evaluator(&admin, "stranger-co", "aaa-stranger", None, None)
+}
+
+#[test]
+fn unrelated_tenant_evaluator_never_admitted_by_default() {
+    let Some(g) = world() else { return };
+    let s = stranger(&g);
+    // With the platform's evaluator available, the job runs there (the
+    // stranger's sorts first and is idle), and the stranger's evaluator
+    // is in nothing the project can read.
+    let (_, _, _, j) = g.job("2026-q1", |_| {});
+    let job = id(&j);
+    let view = g.view(&job);
+    assert_eq!(view["evaluator"], "evaluator-1", "{view}");
+    let plan_doc: Value =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT document FROM plans ORDER BY created_at DESC LIMIT 1",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+    for text in [
+        plan_doc.to_string(),
+        view.to_string(),
+        g.t.ok(&g.other_dev, "GET", &format!("/v1/jobs/{job}"), None)
+            .to_string(),
+    ] {
+        assert!(
+            !text.contains("aaa-stranger") && !text.contains("stranger-co"),
+            "{text}"
+        );
+    }
+    // With the platform's evaluator gone, nothing is admissible: the refusal
+    // does not name the stranger either.
+    g.t.ok(
+        &g.platform,
+        "POST",
+        "/v1/organizations/platform/service-accounts/evaluator-1/disable",
+        None,
+    );
+    let v = g.version("2026-q2", json!({}));
+    let prog = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &prog));
+    let (st, p) = g.t.call(
+        &g.ben_dev,
+        "POST",
+        "/v1/plans",
+        Some(json!({"project": g.project, "program": prog})),
+    );
+    assert_eq!(st, 422, "{p}");
+    assert!(!p.to_string().contains("aaa-stranger"), "{p}");
+    let _ = s;
+}
+
+#[test]
+fn participant_operator_admitted() {
+    let Some(g) = world() else { return };
+    g.t.ok(
+        &g.platform,
+        "POST",
+        "/v1/organizations/platform/service-accounts/evaluator-1/disable",
+        None,
+    );
+    g.org_evaluator(&g.other_admin, OTHER, "ev-other", None, None);
+    let (_, _, _, j) = g.job("2026-q1", |_| {});
+    assert_eq!(g.view(&id(&j))["evaluator"], "ev-other");
+}
+
+#[test]
+fn named_operator_admitted() {
+    let Some(g) = world() else { return };
+    g.t.ok(
+        &g.platform,
+        "POST",
+        "/v1/organizations/platform/service-accounts/evaluator-1/disable",
+        None,
+    );
+    stranger(&g);
+    assert_eq!(
+        g.constrain(&g.tax_sec1, json!({"allowed_operators": ["stranger-co"]}))
+            .0,
+        200
+    );
+    let (_, _, _, j) = g.job("2026-q1", |_| {});
+    let v = g.view(&id(&j));
+    assert_eq!(v["evaluator"], "aaa-stranger", "{v}");
+    assert_eq!(v["placement"]["operator"], "stranger-co");
+}
+
+#[test]
+fn moved_or_rekeyed_evaluator_loses_evidence_and_fails_the_job() {
+    let Some(g) = world() else { return };
+    quiet_platform_default(&g);
+    let e = g.platform_evaluator("ev-de", Some("europe-west3"), true);
+    let (_, _, job) = queued(&g, "2026-q1");
+    assert_eq!(g.view(&job)["placement"]["evidence"], "operator_declared");
+    // The same ID re-registered at another host: the declaration vouched
+    // for the old endpoint.
+    let body = json!({"id": "ev-de", "url": "http://elsewhere.internal:8750",
+        "receipt_key": e.receipt.identity().public_key_hex(),
+        "backends": ["openfhe", "openfhe-exact"], "profiles": PROFILES,
+        "openfhe_version": "1.5.1", "capacity": 4});
+    assert_eq!(
+        g.t.call(&e.service, "POST", "/v1/evaluators", Some(body)).0,
+        201
+    );
+    let l = g.t.ok(&g.platform, "GET", "/v1/evaluators", None);
+    let l = l
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "ev-de")
+        .unwrap()
+        .clone();
+    assert_eq!(l["location_evidence"], "self_declared", "{l}");
+    start_refused_by(&g, &e.service, &job, "ENC2710");
+    // Another receipt key at the same URL: the same.
+    g.drain("ev-de");
+    let e2 = g.platform_evaluator("ev-de2", Some("europe-west3"), true);
+    let (_, _, job2) = queued(&g, "2026-q2");
+    assert_eq!(g.view(&job2)["evaluator"], "ev-de2");
+    let other_key = encompute_verification::EvaluatorSigner::from_seed(&[77; 32]);
+    let body = json!({"id": "ev-de2", "url": "http://ev-de2.internal:8750",
+        "receipt_key": other_key.identity().public_key_hex(),
+        "backends": ["openfhe", "openfhe-exact"], "profiles": PROFILES,
+        "openfhe_version": "1.5.1", "capacity": 4});
+    assert_eq!(
+        g.t.call(&e2.service, "POST", "/v1/evaluators", Some(body))
+            .0,
+        201
+    );
+    start_refused_by(&g, &e2.service, &job2, "ENC2710");
+}
+
+#[test]
+fn an_owner_can_pin_the_project_constraints_its_jobs_are_bound_to() {
+    let Some(g) = world() else { return };
+    g.platform_evaluator("ev-de", Some("europe-west3"), true);
+    assert_eq!(g.constrain(&g.tax_sec1, allow_regions(&["DE"])).0, 200);
+    let digest = g.placement().1["digest"].as_str().unwrap().to_owned();
+    // Pinned to what the project has: bound and scheduled.
+    let (_, _, _, j) = g.job("2026-q1", |a| {
+        a.limits.project_placement_digest = Some(digest.clone())
+    });
+    assert_eq!(g.view(&id(&j))["state"], "queued");
+    // The project's constraints change; the owner's pin no longer matches
+    // what a new job would be bound to: refused, never bound under others.
+    assert_eq!(
+        g.constrain(
+            &g.tax_sec1,
+            json!({"allowed_regions": [{"jurisdiction": "DE"}],
+        "prohibited_locations": [{"provider": "aws"}]})
+        )
+        .0,
+        200
+    );
+    let v = g.version("2026-q2", json!({}));
+    let prog = program(&[&v.asset], PURPOSE, BEN);
+    let mut body = g.body(&v, &prog);
+    body.limits.project_placement_digest = Some(digest);
+    g.authorize(body);
+    let plan = g.plan(&g.ben_dev, &prog);
+    let (s, r) = g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k-pin");
+    assert_eq!(code(&r), "ENC2710", "{s} {r}");
+}

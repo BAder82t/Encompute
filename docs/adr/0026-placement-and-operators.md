@@ -153,7 +153,8 @@ or data could leave:
 5. **Client-side pin check.** The client's pin set (INV-184) gains the
    operator, location and evidence level per pinned evaluator. An agency's
    client refuses to send its asset's ciphertexts to an evaluator outside
-   its own asset's constraints, whatever the control plane says. The
+   its own asset's constraints, judged by what it pinned rather than what the
+   control plane answers (as built: key, URL, operator, location, evidence). The
    client needs only its own constraints to do this.
 6. **Broker.** The key broker admits a session only if its attested
    placement satisfies the constraints for that asset (ADR-025, check 7).
@@ -406,3 +407,19 @@ Planned changes touch:
   `VerifiedWorkload.location`)
 - `crates/encompute-keybroker` (placement check)
 - the CLI and SDK pin sets (operator, location, evidence per pin)
+
+### Review fixes (residency and operators)
+
+- **Deny by default.** An operator-owned evaluator is admissible only if
+  its operator is a member of the project or a constraint names the
+  operator or the evaluator; the platform's own evaluators are the
+  exception. Other tenants' evaluators are not put in a plan or named in a
+  refusal.
+- **Endpoint evidence.** Location evidence covers the evaluator's URL and
+  receipt key; registering again with either changed drops the evidence,
+  and the grant records the endpoint, which start compares.
+- **Owner-pinned project constraints.** `limits.project_placement_digest`
+  in the signed authorization; the broker requires the binding to name it.
+- **Not built:** an operator-signed evaluator binding verified by brokers
+  and clients (operator separation therefore assumes an honest control
+  plane), and placement on export tickets.

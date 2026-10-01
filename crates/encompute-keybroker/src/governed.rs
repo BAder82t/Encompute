@@ -1096,6 +1096,7 @@ impl KeyBroker {
             binding.placement_digest.as_deref(),
             req.ticket.as_ref().and_then(|t| t.placement.as_ref()),
             a.limits.placement.as_ref(),
+            a.limits.project_placement_digest.as_deref(),
         )?;
         // 8. The ticket.
         match (&req.ticket, &self.governance) {
@@ -1902,7 +1903,10 @@ impl KeyBroker {
 
 /// Check 7: the workload's attested location against the project's
 /// constraints (`digest` is the binding's; `document` the ticket's) and the
-/// owner's own. `Attested` is the evidence level of everything here, so
+/// owner's own. When the owner's authorization pins the project's digest
+/// (`limits.project_placement_digest`) the binding must name it, so a control
+/// plane cannot drop the project's constraints; otherwise they are enforced
+/// by the control plane alone. `Attested` is the evidence level of everything here, so
 /// `min_evidence` is always met; operators and evaluator IDs are not
 /// something a broker can see, and are enforced by the control plane that
 /// issues the ticket. Refused (ENC2710):
@@ -1915,9 +1919,22 @@ fn check_attested_placement(
     digest: Option<&str>,
     document: Option<&encompute_verification::placement::PlacementConstraints>,
     owner: Option<&encompute_verification::placement::PlacementConstraints>,
+    owner_pin: Option<&str>,
 ) -> Result<()> {
     use encompute_verification::placement::{LocationEvidence, Scope};
     let residency = |m: String| err(Code::GovernanceResidency, m);
+    // The project's constraints the owner signed for: the binding must name
+    // exactly that digest. Without a pin the digest is the control plane's
+    // own choice, and the project's constraints are enforced by it alone.
+    if let Some(pin) = owner_pin {
+        if digest != Some(pin) {
+            return Err(residency(
+                "the owner's authorization pins the project placement constraints, and the \
+                 execution is not bound to them: no key is released"
+                    .into(),
+            ));
+        }
+    }
     let project =
         match (digest, document) {
             (None, _) => None,

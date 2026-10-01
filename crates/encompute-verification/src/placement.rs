@@ -38,6 +38,12 @@ use crate::hash::{hex, tagged};
 
 pub const PLACEMENT_VERSION: u32 = 1;
 
+/// The most patterns in one list, and operators or evaluators named, in one
+/// constraint document (it travels in tickets and is judged on every
+/// release).
+pub const MAX_PATTERNS: usize = 64;
+pub const MAX_NAMES: usize = 256;
+
 const PLACEMENT: &str = "encompute.placement.v1";
 const LOCATIONS: &str = "encompute.locations-table.v1";
 const EVIDENCE: &str = "encompute.location-evidence.v1";
@@ -52,8 +58,10 @@ fn refuse(m: impl Into<String>) -> Error {
 pub enum LocationEvidence {
     /// The service says so itself. Never satisfies production.
     SelfDeclared,
-    /// Signed by a human `security_admin` of the operator organization,
-    /// audited and recorded in the governance log.
+    /// Declared through an authenticated session of a person who is a
+    /// `security_admin` of the operator organization (never a service
+    /// account), audited and recorded in the governance log. Attributable,
+    /// not cryptographically signed.
     OperatorDeclared,
     /// Taken from a verified TEE attestation (the cloud's own zone claim).
     Attested,
@@ -194,6 +202,10 @@ pub struct GrantPlacement {
     pub evidence: LocationEvidence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_digest: Option<String>,
+    /// Digest of the evaluator's URL and receipt key when it was
+    /// scheduled: it runs the job only while it is still that endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_digest: Option<String>,
 }
 
 impl GrantPlacement {
@@ -205,7 +217,10 @@ impl GrantPlacement {
         if let Some(l) = &self.location {
             l.check()?;
         }
-        if let Some(d) = &self.evidence_digest {
+        for d in [&self.evidence_digest, &self.endpoint_digest]
+            .into_iter()
+            .flatten()
+        {
             if d.len() != 64
                 || !d
                     .bytes()
@@ -227,6 +242,9 @@ impl GrantPlacement {
 pub struct EvaluatorPin {
     /// The evaluator's receipt key (hex Ed25519).
     pub receipt_key: String,
+    /// Where the client sends to: the control plane's answer must be this
+    /// URL, never another.
+    pub url: String,
     pub operator: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
@@ -236,7 +254,9 @@ pub struct EvaluatorPin {
 /// The client-side placement check (ENC2726): before any ciphertext is
 /// sent to the evaluator with `receipt_key`, the client's own
 /// `constraints` (for the data it sends) must admit what the client
-/// **pinned** about it, whatever the control plane says. Refused when:
+/// **pinned** about it (its key, its URL, its operator, its location): the
+/// control plane's answers are checked against the pin, never taken for it.
+/// Refused when:
 /// - the client pinned nothing about this evaluator's placement (missing
 ///   evidence is not admission) while the constraints cover ciphertexts;
 /// - the pinned operator, location or evidence is outside the constraints
@@ -246,6 +266,7 @@ pub struct EvaluatorPin {
 pub fn check_pinned_placement(
     constraints: &PlacementConstraints,
     receipt_key: &str,
+    url: &str,
     pins: &[EvaluatorPin],
     recorded: Option<&GrantPlacement>,
 ) -> Result<()> {
@@ -265,6 +286,12 @@ pub fn check_pinned_placement(
                 .into(),
         ));
     };
+    if pin.url != url {
+        return Err(refuse(format!(
+            "the control plane names {url} for this evaluator, not the URL you pinned: nothing \
+             is sent"
+        )));
+    }
     let machine = Machine {
         id: "",
         operator: &pin.operator,
@@ -549,6 +576,16 @@ impl PlacementConstraints {
     /// Well formed: patterns and names known, nothing empty that would
     /// refuse everything by accident, at least one scope.
     pub fn check(&self) -> Result<()> {
+        if self.allowed_regions.as_ref().map_or(0, |a| a.len()) > MAX_PATTERNS
+            || self.prohibited_locations.len() > MAX_PATTERNS
+            || self.allowed_operators.as_ref().map_or(0, |a| a.len()) > MAX_NAMES
+            || self.allowed_evaluators.as_ref().map_or(0, |a| a.len()) > MAX_NAMES
+        {
+            return Err(refuse(format!(
+                "placement constraints name at most {MAX_PATTERNS} patterns per list and \
+                 {MAX_NAMES} operators or evaluators"
+            )));
+        }
         if let Some(a) = &self.allowed_regions {
             if a.is_empty() {
                 return Err(refuse(

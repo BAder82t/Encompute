@@ -112,9 +112,12 @@ pub struct ReleaseTicket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_digest: Option<String>,
     /// The project's placement constraints that digest names. The broker
-    /// judges the workload's attested location against them without taking
-    /// the control plane's word for what they say: the digest is in the
-    /// binding the workload attested to, and must be this document's.
+    /// judges the workload's attested location against them; the digest is
+    /// in the binding the workload attested to, and must be this document's.
+    /// Which digest is the control plane's choice unless the owner's signed
+    /// authorization pins it (`limits.project_placement_digest`), which the
+    /// broker then requires: without that pin the project's constraints are
+    /// enforced by the control plane alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<crate::placement::PlacementConstraints>,
     pub execution_spec: ExecutionSpec,

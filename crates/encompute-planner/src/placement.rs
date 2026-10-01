@@ -29,6 +29,10 @@ pub struct Admission {
     pub excluded: Vec<(String, String)>,
     /// The excluded evaluators refused for operator separation.
     pub separation: BTreeSet<String>,
+    /// Excluded evaluators of organizations outside the project: never
+    /// listed in a reason (another tenant's infrastructure is not for the
+    /// project's members to see).
+    pub hidden: BTreeSet<String>,
 }
 
 impl Admission {
@@ -47,14 +51,23 @@ impl Admission {
 
     /// Why nothing is admitted, for a planning failure.
     pub fn why_none(&self) -> String {
-        if self.excluded.is_empty() {
-            "no evaluator is registered".to_owned()
-        } else {
-            self.excluded
-                .iter()
-                .map(|(id, why)| format!("evaluator {id}: {why}"))
-                .collect::<Vec<_>>()
-                .join("; ")
+        let shown: Vec<String> = self
+            .excluded
+            .iter()
+            .filter(|(id, _)| !self.hidden.contains(id))
+            .map(|(id, why)| format!("evaluator {id}: {why}"))
+            .collect();
+        let hidden = self.hidden.len();
+        match (shown.is_empty(), hidden) {
+            (true, 0) => "no evaluator is registered".to_owned(),
+            (true, n) => {
+                format!("{n} evaluator(s) of organizations outside the project are not admissible")
+            }
+            (false, 0) => shown.join("; "),
+            (false, n) => format!(
+                "{}; {n} evaluator(s) of organizations outside the project are not admissible",
+                shown.join("; ")
+            ),
         }
     }
 }
@@ -101,7 +114,12 @@ pub fn evaluator_unusable(
 pub struct Unusable {
     pub why: String,
     pub separation: bool,
+    /// The evaluator's operator takes no part in the project.
+    pub outsider: bool,
 }
+
+/// The operator of the platform's own evaluators.
+pub const PLATFORM_OPERATOR: &str = "platform";
 
 /// [`evaluator_unusable`] with the kind of reason.
 pub fn judge(
@@ -114,6 +132,7 @@ pub fn judge(
     let no = |why: String| Unusable {
         why,
         separation: false,
+        outsider: false,
     };
     if let Some(b) = backend {
         if !offer.backends.iter().any(|x| x == b) {
@@ -129,6 +148,7 @@ pub fn judge(
                 offer.operator
             ),
             separation: true,
+            outsider: false,
         });
     }
     if pc.roles.decryptors.contains(&offer.operator) || decryptors.contains(&offer.operator) {
@@ -138,10 +158,36 @@ pub fn judge(
                 offer.operator
             ),
             separation: true,
+            outsider: false,
         });
     }
     let mut sources: Vec<PlacementSource> = pc.constraints.clone();
     sources.extend(extra.iter().cloned());
+    // Deny by default: another tenant's evaluator is admissible only when
+    // its operator takes part in the project, or a constraint names the
+    // operator or the evaluator. The platform's own are the exception.
+    if offer.operator != PLATFORM_OPERATOR
+        && !pc.roles.participants.contains(&offer.operator)
+        && !sources.iter().any(|s| {
+            s.constraints
+                .allowed_operators
+                .as_ref()
+                .is_some_and(|o| o.contains(&offer.operator))
+                || s.constraints
+                    .allowed_evaluators
+                    .as_ref()
+                    .is_some_and(|e| e.contains(&offer.id))
+        })
+    {
+        return Some(Unusable {
+            why: format!(
+                "its operator {} takes no part in the project and no constraint names it",
+                offer.operator
+            ),
+            separation: false,
+            outsider: true,
+        });
+    }
     if pc.production {
         // Production: a self-declared location satisfies nothing. The
         // floor applies wherever a constraint cares about location.
@@ -190,6 +236,9 @@ pub fn admission(
                 if u.separation {
                     out.separation.insert(o.id.clone());
                 }
+                if u.outsider {
+                    out.hidden.insert(o.id.clone());
+                }
                 out.excluded.push((o.id.clone(), u.why));
             }
             None => out.admitted.push(AdmittedEvaluator {
@@ -198,6 +247,7 @@ pub fn admission(
                 location: o.location.clone(),
                 evidence: o.evidence,
                 evidence_digest: o.evidence_digest.clone(),
+                endpoint_digest: o.endpoint_digest.clone(),
             }),
         }
     }

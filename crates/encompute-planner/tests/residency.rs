@@ -25,6 +25,7 @@ fn offer(id: &str, operator: &str) -> EvaluatorOffer {
         location: Some(Location::resolve("onprem", "de", None).unwrap()),
         evidence: LocationEvidence::OperatorDeclared,
         evidence_digest: None,
+        endpoint_digest: None,
     }
 }
 
@@ -70,6 +71,12 @@ fn roles(owners: &[&str], decryptors: &[&str]) -> Roles {
         source_owners: owners.iter().map(|s| s.to_string()).collect(),
         decryptors: decryptors.iter().map(|s| s.to_string()).collect(),
         coordinator: None,
+        // The project's members: every operator these tests use but the
+        // platform takes part (the exception is tested in placement.rs).
+        participants: ["tax", "benefits", "registry", "reader", "opco", "other"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     }
 }
 
@@ -150,6 +157,7 @@ fn the_validator_refuses_a_plan_that_admits_a_key_holders_evaluator() {
             location: Some(Location::resolve("onprem", "de", None).unwrap()),
             evidence: LocationEvidence::OperatorDeclared,
             evidence_digest: None,
+            endpoint_digest: None,
         });
     bad.placement.as_mut().unwrap().admissible.sort();
     let e = verify_plan(&program, &bad).unwrap_err();

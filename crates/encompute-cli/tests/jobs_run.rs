@@ -314,7 +314,7 @@ fn control_plane_placed(
 }
 
 fn pin(key: &str, operator: &str, region: &str, jurisdiction: &str, evidence: &str) -> String {
-    serde_json::json!([{"receipt_key": key, "operator": operator, "evidence": evidence,
+    serde_json::json!([{"receipt_key": key, "url": "@URL@", "operator": operator, "evidence": evidence,
         "location": {"jurisdiction": jurisdiction, "provider": "gcp", "region": region}}])
     .to_string()
 }
@@ -338,7 +338,7 @@ fn placement_violation_refused_before_send() {
     let run = |pins: &str, constraints: &str, placement: Option<serde_json::Value>| {
         let (evaluator, sent) = stub(|_, _| (500, "{}".into()));
         let (control, _) = control_plane_placed(&evaluator, &key, placement);
-        let pins = write("pins.json", pins);
+        let pins = write("pins.json", &pins.replace("@URL@", &evaluator));
         let (code, err) = jobs_run(
             &s,
             &control,
@@ -356,7 +356,8 @@ fn placement_violation_refused_before_send() {
         (code, err, n)
     };
     // The evaluator the client pinned is in the United States: refused,
-    // and nothing reaches it, whatever the control plane says.
+    // and nothing reaches it: the client's own pin decides, not the control
+    // plane's answers.
     let (code, err, sent) = run(
         &pin(&key, "platform", "us-central1", "US", "operator_declared"),
         &de_only,
@@ -434,6 +435,20 @@ fn placement_violation_refused_before_send() {
     );
     assert_ne!(code, 0);
     assert!(err.contains("min_evidence"), "{err}");
+    assert_eq!(sent, 0);
+    // The control plane names another URL than the one pinned: nothing is
+    // sent there.
+    let (code, err, sent) = run(
+        &pin(&key, "platform", "europe-west3", "DE", "operator_declared")
+            .replace("@URL@", "http://evil.invalid:1"),
+        &de_only,
+        None,
+    );
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("ENC2726") && err.contains("URL you pinned"),
+        "{err}"
+    );
     assert_eq!(sent, 0);
     // Invalid constraints (an unknown region) are refused, not ignored.
     let typo = write(

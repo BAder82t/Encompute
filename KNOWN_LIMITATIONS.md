@@ -470,6 +470,30 @@ these limits:
   table version makes every governed plan made with the old one invalid
   (plan again). Plans made before placement existed must also be made
   again.
+- **Operator separation assumes an honest control plane.** An evaluator's
+  operator is the control plane's record of its service account; no
+  signature of the operator binds an evaluator, its URL and its key to it,
+  so a compromised control plane could misname one. The governance report
+  (a later phase) must say so wherever it reports operator separation.
+- **The project's constraints are the control plane's unless an owner pins
+  them.** An owner's signed authorization may pin the digest of the project
+  constraints it accepts (`limits.project_placement_digest`); its broker
+  then requires the binding to name it. Without a pin, a compromised
+  control plane could drop them for that owner's keys (never the owner's
+  own constraints, which the broker reads from the authorization).
+- **Running jobs are not re-checked.** Placement is judged at submission,
+  scheduling, start and every release ticket; a job already running is not
+  stopped when its evaluator moves or constraints tighten (its receipt
+  records where it ran). Export and derived-result tickets carry no
+  placement: an export is a release to a named recipient's key, not a
+  placement.
+- **A TEE is never usable in a governed plan**, even without a location
+  rule: a TEE offer carries no attested location, and the control plane
+  offers none today. Declared locations rest on an authenticated session
+  of a security admin of the operator, not on a signature.
+- **Upgrading in-flight governed jobs.** Jobs planned before this release
+  have no placement context and fail at their next scheduling or start
+  (ENC2710); queued jobs fail at start. Plan and submit them again.
 - **Region is not jurisdiction.** A region says where a machine is, not
   whose law reaches it; the legal assessment of a location stays with the
   owner, which is why constraints also name allowed operators.

@@ -57,6 +57,7 @@ fn body() -> AuthorizationV2 {
             max_evaluations_per_subject: Some(1),
             max_outputs_per_job: None,
             placement: None,
+            project_placement_digest: None,
         },
         per_job_four_eyes: false,
         valid_from: 1_000,

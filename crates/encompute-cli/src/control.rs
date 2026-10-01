@@ -369,7 +369,7 @@ pub enum JobsCmd {
         #[arg(long, value_name = "FILE")]
         placement: Option<PathBuf>,
         /// What you pin about evaluators' placement: a JSON list of
-        /// `{receipt_key, operator, location, evidence}` (the location as
+        /// `{receipt_key, url, operator, location, evidence}` (the location as
         /// the control plane lists it, its jurisdiction included).
         #[arg(long, value_name = "FILE")]
         evaluator_pins: Option<PathBuf>,
@@ -623,7 +623,13 @@ fn client_placement_check(
             )
         })?),
     };
-    check_pinned_placement(&constraints, receipt_key, &pins, recorded.as_ref())
+    check_pinned_placement(
+        &constraints,
+        receipt_key,
+        job["evaluator_url"].as_str().unwrap_or_default(),
+        &pins,
+        recorded.as_ref(),
+    )
 }
 
 pub fn trust_report(job: &str, json_out: bool) -> Result<bool> {

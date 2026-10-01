@@ -273,6 +273,11 @@ pub struct EvaluatorOffer {
     /// Digest of the evidence the location rests on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_digest: Option<String>,
+    /// Digest of where the evaluator is reached and the key it signs with
+    /// (its URL and receipt key): evidence for a location vouches for one
+    /// endpoint, and a job runs only on the endpoint it was scheduled on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_digest: Option<String>,
 }
 
 /// Who plays which role in a governed job, for operator separation.
@@ -288,6 +293,13 @@ pub struct Roles {
     /// The SecAgg coordinator's operator, when one is named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<String>,
+    /// The project's member organizations. An evaluator operated by any
+    /// other organization than the platform is admissible only if its
+    /// operator is one of these, or a constraint names it (deny by
+    /// default: another tenant's evaluator is never admitted just because
+    /// no rule excludes it).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub participants: BTreeSet<String>,
 }
 
 /// Placement in a governed project: the constraints every member holds
@@ -584,6 +596,8 @@ pub struct AdmittedEvaluator {
     pub evidence: LocationEvidence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_digest: Option<String>,
 }
 
 /// Where the plan's ciphertext steps may run: the admissible evaluators at

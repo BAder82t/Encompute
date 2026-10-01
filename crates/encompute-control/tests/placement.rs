@@ -560,3 +560,17 @@ fn standard_projects_behave_as_before() {
     );
     assert_eq!(code(&v), "ENC2724", "{s} {v}");
 }
+
+#[test]
+fn declarations_are_bounded_per_evaluator() {
+    let Some(w) = world() else { return };
+    org_evaluator(&w.t, &w.b_admin, "modelco", "ev-modelco", None);
+    for i in 0..30 {
+        let (s, v) = declare(&w.t, &w.b_sec, "ev-modelco", gcp("europe-west3"));
+        assert_eq!(s, 201, "{i}: {v}");
+    }
+    refused(
+        declare(&w.t, &w.b_sec, "ev-modelco", gcp("europe-west3")),
+        "ENC2723",
+    );
+}

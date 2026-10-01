@@ -33,7 +33,9 @@ Work toward confidential cross-agency computation
   check again, and an evaluator that moved fails the job. `jobs run
   --placement --evaluator-pins` lets a client refuse an evaluator outside
   its own rules; `Objective::Minimize` (`plan --prefer minimize`) prefers
-  the plan that releases least. Migrations 0017 and 0018; ENC2723 to
+  the plan that releases least. Another tenant's evaluator is admitted only
+  where its organization takes part in the project or a constraint names it;
+  an owner may pin the project's constraint digest in its authorization. Migrations 0017 and 0018; ENC2723 to
   ENC2726; INV-233 and INV-234. Standard projects are unchanged.
 - **Two-part key release (phase 2).** A governed key broker releases a key
   only with an owner-signed authorization installed at the broker and a

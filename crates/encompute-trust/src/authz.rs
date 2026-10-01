@@ -318,6 +318,14 @@ pub struct AuthorizationLimits {
     /// are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<encompute_verification::placement::PlacementConstraints>,
+    /// The digest of the project placement constraints the owner accepts
+    /// for this use. A job under this authorization is bound only to
+    /// exactly these constraints, and the owner's broker releases only if
+    /// the binding names this digest: the control plane cannot drop or
+    /// swap the project's constraints for this owner's data. Absent, the
+    /// project's constraints are enforced by the control plane only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_placement_digest: Option<String>,
 }
 
 /// Classes whose ceiling admits boolean-only releases (a boolean or a
@@ -423,6 +431,9 @@ impl AuthorizationV2 {
         }
         if let Some(p) = &self.limits.placement {
             p.check().map_err(|e| err(e.message))?;
+        }
+        if let Some(d) = &self.limits.project_placement_digest {
+            check_hex32("project placement digest", d)?;
         }
         Ok(())
     }

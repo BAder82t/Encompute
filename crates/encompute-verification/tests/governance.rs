@@ -750,6 +750,7 @@ fn a_grant_records_where_the_job_was_placed() {
         location: Some(Location::resolve("gcp", "europe-west3", None).unwrap()),
         evidence: LocationEvidence::OperatorDeclared,
         evidence_digest: Some(h('c')),
+        endpoint_digest: Some(h('e')),
     });
     let placed = grant(&control, Some(gg.clone()));
     placed.verify(&pk, "evaluator-1", &p, 1_200).unwrap();

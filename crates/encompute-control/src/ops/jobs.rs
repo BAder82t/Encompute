@@ -624,16 +624,35 @@ impl Control {
                 production: self.env.is_production(),
                 roles: Roles {
                     source_owners: custody.iter().map(|k| k.organization.clone()).collect(),
+                    participants: project.members.iter().cloned().collect(),
                     ..Roles::default()
                 },
             })
         } else {
             None
         };
-        let evaluators = if placement.is_some() {
-            super::placement::evaluator_offers(&mut *c)?
-        } else {
-            vec![]
+        // Only evaluators this project may use are put in its plan: the
+        // platform's, its members' and those a constraint names. Another
+        // tenant's infrastructure is not shown to the project.
+        let evaluators = match &placement {
+            Some(pc) => super::placement::evaluator_offers(&mut *c)?
+                .into_iter()
+                .filter(|o| {
+                    o.operator == encompute_planner::placement::PLATFORM_OPERATOR
+                        || pc.roles.participants.contains(&o.operator)
+                        || pc.constraints.iter().any(|s| {
+                            s.constraints
+                                .allowed_operators
+                                .as_ref()
+                                .is_some_and(|x| x.contains(&o.operator))
+                                || s.constraints
+                                    .allowed_evaluators
+                                    .as_ref()
+                                    .is_some_and(|x| x.contains(&o.id))
+                        })
+                })
+                .collect(),
+            None => vec![],
         };
         let pctx = PlanningContext {
             profile: Profile::Standard,
@@ -1497,6 +1516,10 @@ impl Control {
                     backend: &s.doc.backend,
                     owners,
                     parties: chosen.values().map(|(_, x)| x.body.party.clone()).collect(),
+                    pins: chosen
+                        .values()
+                        .filter_map(|(_, x)| x.body.limits.project_placement_digest.clone())
+                        .collect(),
                 },
             )
             .map_err(|e| deny("plan", &r.plan, "placement", e))?;
@@ -3229,6 +3252,7 @@ impl Control {
             return Err(bad("memory_bytes must be positive"));
         }
         let out = self.tx_anchored(|t| {
+            let endpoint_before = super::placement::endpoint_of(t, &r.id)?;
             let status: String = t.query_one(
                 "INSERT INTO evaluators (id, service_account, url, receipt_key, backends, profiles, openfhe_version, capacity, status,
                                          cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates)
@@ -3258,6 +3282,7 @@ impl Control {
             // claim, and a changed location loses any evidence.
             let operator = super::placement::operator_of(t, &r.id)?
                 .unwrap_or_else(|| PLATFORM_ORG.to_owned());
+            self.endpoint_changed(t, ctx, &r.id, &operator, endpoint_before.clone())?;
             self.register_location(t, ctx, &r.id, &operator, r.location.as_ref())?;
             // An evaluator registers when its process starts: a job it was
             // running and never reported died with the old process. It
