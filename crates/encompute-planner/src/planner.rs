@@ -63,6 +63,26 @@ pub fn tee_unusable(offer: &TeeOffer, ctx: &PlanningContext) -> Option<String> {
     None
 }
 
+/// Why no TEE can host a step under placement constraints, if the plan has
+/// any. A TEE offer carries no attested location in this build, so it can
+/// never satisfy a constraint: it is refused rather than assumed.
+fn tee_placement_unusable(ctx: &PlanningContext) -> Option<String> {
+    ctx.placement.as_ref().map(|_| {
+        "placement constraints apply and a TEE offer carries no attested location".to_owned()
+    })
+}
+
+/// Why no evaluator can run `backend`'s ciphertext steps here: capability,
+/// location, operator and evidence judged together; `None` when one can,
+/// or when the plan has no placement.
+fn evaluator_placement_unusable(ctx: &PlanningContext, backend: &str) -> Option<String> {
+    ctx.placement.as_ref()?;
+    let a = crate::placement::admission(ctx, Some(backend), &[], &Default::default());
+    a.admitted
+        .is_empty()
+        .then(|| format!("no admissible evaluator: {}", a.why_none()))
+}
+
 fn host_unusable(ctx: &PlanningContext) -> Option<String> {
     if ctx.preferences.local_only && ctx.infrastructure.host_cloud {
         return Some("ordinary hosts are in the cloud; local-only was required".into());
@@ -227,7 +247,8 @@ fn options(
                 let why = fhe_unsupported
                     .clone()
                     .or_else(|| (!built).then(|| format!("{} is not available", fhe.name())))
-                    .or_else(|| host.clone());
+                    .or_else(|| host.clone())
+                    .or_else(|| evaluator_placement_unusable(ctx, backend));
                 let facts = &ctx.facts;
                 match scheme {
                     // Every exact program BinFHE can lower to gates.
@@ -292,10 +313,13 @@ fn options(
                 }
             }
             for t in tees() {
-                let why = tee_unusable(&t, ctx).or_else(|| {
-                    (!ctx.infrastructure.key_broker)
-                        .then(|| "no key broker to release keys to the attested workload".into())
-                });
+                let why = tee_unusable(&t, ctx)
+                    .or_else(|| tee_placement_unusable(ctx))
+                    .or_else(|| {
+                        (!ctx.infrastructure.key_broker).then(|| {
+                            "no key broker to release keys to the attested workload".into()
+                        })
+                    });
                 out.push(Option_ {
                     placement: Placement::Tee(t.clone()),
                     mechanisms: attested(&t),
@@ -319,7 +343,7 @@ fn options(
             out.push(Option_ {
                 placement: Placement::Parties,
                 mechanisms: base.clone(),
-                unavailable: None,
+                unavailable: crate::placement::coordinator_conflict(ctx),
             });
             for t in tees() {
                 let mut m = base.clone();
@@ -330,6 +354,8 @@ fn options(
                     placement: Placement::Parties,
                     mechanisms: m,
                     unavailable: tee_unusable(&t, ctx)
+                        .or_else(|| tee_placement_unusable(ctx))
+                        .or_else(|| crate::placement::coordinator_conflict(ctx))
                         .map(|w| format!("an attested coordinator: {w}")),
                 });
             }
@@ -507,6 +533,19 @@ fn global_satisfaction(req: &TrustRequirement) -> Option<RequirementSatisfaction
                  is released only there, under {organization}'s authorization"
             ),
         ),
+        TrustRequirement::Placement => (
+            vec![Mechanism::PolicyEnforcement],
+            "ciphertext steps run only on evaluators the effective placement constraints admit; \
+             the plan records the admissible set, and each job is scheduled and started only \
+             where the constraints and the evaluator's evidence still admit it"
+                .into(),
+        ),
+        TrustRequirement::OperatorSeparation => (
+            vec![Mechanism::PolicyEnforcement],
+            "the evaluator's operator is neither a source owner nor a decryptor of the output, \
+             and no SecAgg coordinator contributes to its own round"
+                .into(),
+        ),
         _ => return None,
     };
     let evidence = by.iter().flat_map(Mechanism::evidence).collect();
@@ -536,7 +575,9 @@ fn touches(req: &TrustRequirement, step: &StepShape) -> bool {
         TrustRequirement::ExecutionRegion { .. } => true,
         TrustRequirement::Purpose { .. }
         | TrustRequirement::SignedEvidence
-        | TrustRequirement::KeyCustody { .. } => false,
+        | TrustRequirement::KeyCustody { .. }
+        | TrustRequirement::Placement
+        | TrustRequirement::OperatorSeparation => false,
     }
 }
 
@@ -685,7 +726,9 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
     let evidence_required: BTreeSet<EvidenceKind> =
         selected.iter().flat_map(Mechanism::evidence).collect();
     let estimated_ms = steps_out.iter().map(|s| s.estimated_ms).sum();
+    let placement = crate::placement::plan_placement(ctx, &steps_out);
     let plan = ConfidentialExecutionPlan {
+        placement,
         governance_id: None,
         version: PLAN_VERSION,
         program_id: program_id(program),
@@ -760,9 +803,10 @@ pub fn by_subject(reqs: &[TrustRequirement]) -> BTreeMap<String, Vec<&TrustRequi
             TrustRequirement::RequireAttestation { step }
             | TrustRequirement::RequireCorrectness { step } => step.clone(),
             TrustRequirement::MinimumParticipants { output, .. } => output.clone(),
-            TrustRequirement::ExecutionRegion { .. } | TrustRequirement::SignedEvidence => {
-                "everything".into()
-            }
+            TrustRequirement::ExecutionRegion { .. }
+            | TrustRequirement::SignedEvidence
+            | TrustRequirement::Placement
+            | TrustRequirement::OperatorSeparation => "everything".into(),
         };
         m.entry(k).or_default().push(r);
     }

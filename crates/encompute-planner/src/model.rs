@@ -6,6 +6,11 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+pub use encompute_verification::placement::{
+    Location, LocationEvidence, LocationPattern, Origin, PlacementConstraints, PlacementSource,
+    Refused, Scope,
+};
+
 /// Someone who might see data.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
@@ -61,6 +66,15 @@ pub enum TrustRequirement {
         organization: String,
         broker: String,
     },
+    /// Every step handling ciphertexts runs on a machine the effective
+    /// placement constraints admit: location known (to at least the
+    /// required evidence level), jurisdiction and operator allowed, no
+    /// prohibited location.
+    Placement,
+    /// The evaluator's operator is not a source owner of the job nor a
+    /// decryptor of its output, and a SecAgg coordinator is not a
+    /// contributor.
+    OperatorSeparation,
 }
 
 /// Encrypted computation scheme.
@@ -241,12 +255,71 @@ pub struct TeeOffer {
     pub region: Option<String>,
 }
 
+/// An evaluator on offer: who operates it, where it is and how that is
+/// known.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluatorOffer {
+    pub id: String,
+    /// The organization that operates it (`platform` for the platform's
+    /// own evaluators).
+    pub operator: String,
+    pub backends: Vec<String>,
+    pub profiles: Vec<String>,
+    /// Absent: the location is unknown, which no constraint admits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    pub evidence: LocationEvidence,
+    /// Digest of the evidence the location rests on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_digest: Option<String>,
+}
+
+/// Who plays which role in a governed job, for operator separation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Roles {
+    /// Organizations that own a source the job reads.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub source_owners: BTreeSet<String>,
+    /// Organizations that hold a decryption key for the job's output.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub decryptors: BTreeSet<String>,
+    /// The SecAgg coordinator's operator, when one is named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator: Option<String>,
+}
+
+/// Placement in a governed project: the constraints every member holds
+/// (the project's own; an owner's private constraints are applied where
+/// the job is bound, never carried in a plan), the table they are read
+/// against, and the roles. Absent, and not serialized, outside governed
+/// projects, so those plans and their PlanIds are unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacementContext {
+    /// Shared constraints (the project's).
+    #[serde(default)]
+    pub constraints: Vec<PlacementSource>,
+    /// Digest of the locations table the plan was made with.
+    pub locations_digest: String,
+    /// Production: a self-declared location never satisfies anything.
+    #[serde(default)]
+    pub production: bool,
+    #[serde(default)]
+    pub roles: Roles,
+}
+
 /// What infrastructure exists.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Infrastructure {
     #[serde(default)]
     pub tees: Vec<TeeOffer>,
+    /// Evaluators registered with the control plane. Consulted only when
+    /// the plan has a [`PlacementContext`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evaluators: Vec<EvaluatorOffer>,
     /// An Encompute key broker the owners run (attested key release).
     #[serde(default)]
     pub key_broker: bool,
@@ -423,6 +496,10 @@ pub struct PlanningContext {
     /// custody, so those plans and their PlanIds are unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custody: Vec<SourceCustody>,
+    /// Residency and operators (governed projects). Absent, and not
+    /// serialized, elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementContext>,
 }
 
 /// A source asset in sovereign custody: its owner organization and the key
@@ -484,6 +561,35 @@ pub struct RequirementSatisfaction {
     pub evidence: Vec<EvidenceKind>,
 }
 
+/// An evaluator the plan admits, with the evidence its location rested on
+/// when the plan was made.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedEvaluator {
+    pub id: String,
+    pub operator: String,
+    /// Absent when no constraint asked for a location and the evaluator
+    /// has none on record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    pub evidence: LocationEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_digest: Option<String>,
+}
+
+/// Where the plan's ciphertext steps may run: the admissible evaluators at
+/// planning time, under the shared constraints. Bound into the PlanId. The
+/// scheduler picks only evaluators that are admissible when it picks, so
+/// this records the decision rather than replacing it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanPlacement {
+    /// Digest of the shared constraints the set was computed under.
+    pub constraints_digest: String,
+    pub locations_digest: String,
+    pub admissible: Vec<AdmittedEvaluator>,
+}
+
 /// What should happen, and why it satisfies every requirement.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -498,6 +604,9 @@ pub struct ConfidentialExecutionPlan {
     /// PlanId); absent, and not serialized, for standard plans.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governance_id: Option<String>,
+    /// Where the ciphertext steps may run (governed projects only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlanPlacement>,
     pub context: PlanningContext,
     pub requirements: Vec<TrustRequirement>,
     pub steps: Vec<ExecutionStep>,

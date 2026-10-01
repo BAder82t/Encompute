@@ -1,0 +1,208 @@
+//! Placement in the planner: which evaluators the effective constraints
+//! admit, and why the others are refused.
+//!
+//! Capability, location, operator and evidence are judged together
+//! ([`evaluator_unusable`]). The reasons never reveal one organization's
+//! private constraint values to another: a refusal by the project's
+//! constraints (which every member holds) names the field and the machine;
+//! a refusal by an organization's own constraints names only the
+//! organization and the field.
+
+use std::collections::BTreeSet;
+
+use encompute_verification::placement::{
+    locations, refusals, sources_digest, LocationEvidence, Machine, Origin, PlacementSource,
+    Refused, Scope,
+};
+
+use crate::model::*;
+
+/// The steps that handle only ciphertexts (an evaluator): the scope their
+/// constraints cover.
+pub const CIPHERTEXT_STEP: [Scope; 1] = [Scope::Ciphertext];
+
+/// The evaluators admissible for a plan, and each excluded one's reason.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Admission {
+    pub admitted: Vec<AdmittedEvaluator>,
+    /// `(evaluator, reason)`.
+    pub excluded: Vec<(String, String)>,
+}
+
+impl Admission {
+    pub fn ids(&self) -> BTreeSet<&str> {
+        self.admitted.iter().map(|a| a.id.as_str()).collect()
+    }
+
+    /// Why nothing is admitted, for a planning failure.
+    pub fn why_none(&self) -> String {
+        if self.excluded.is_empty() {
+            "no evaluator is registered".to_owned()
+        } else {
+            self.excluded
+                .iter()
+                .map(|(id, why)| format!("evaluator {id}: {why}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+    }
+}
+
+fn describe_refusal(origin: &Origin, why: &[Refused], location: Option<&Location>) -> String {
+    let fields: Vec<&str> = why.iter().map(Refused::field).collect();
+    match origin {
+        // Every member holds the project's constraints.
+        Origin::Project(_) => format!(
+            "the project's placement excludes it ({}{})",
+            fields.join(", "),
+            location.map_or(String::new(), |l| format!("; it is at {}", l.display()))
+        ),
+        // Another organization's values stay private: its name and the
+        // field only.
+        Origin::Organization(_) => {
+            format!("{}: {} excludes it", origin.describe(), fields.join(", "))
+        }
+    }
+}
+
+/// Why `offer` cannot run ciphertext steps of a job whose ciphertexts are
+/// also constrained by `extra` (the owners' own constraints, applied where
+/// the job is bound), or `None` when it can. `backend` is the encrypted
+/// backend the step needs, when it needs one; `decryptors` the
+/// organizations that hold a decryption key for the output.
+///
+/// Judged together, in this order: capability (backend), operator
+/// separation, then location, operator and evidence under every covering
+/// constraint (deny wins; an unknown location is inadmissible under any
+/// location rule; production never accepts a self-declared location).
+pub fn evaluator_unusable(
+    offer: &EvaluatorOffer,
+    backend: Option<&str>,
+    pc: &PlacementContext,
+    extra: &[PlacementSource],
+    decryptors: &BTreeSet<String>,
+) -> Option<String> {
+    if let Some(b) = backend {
+        if !offer.backends.iter().any(|x| x == b) {
+            return Some(format!("it does not offer the {b} backend"));
+        }
+    }
+    // Operator separation: whoever runs the evaluator is neither a source
+    // owner nor a decryptor.
+    if pc.roles.source_owners.contains(&offer.operator) {
+        return Some(format!(
+            "its operator {} owns a source of the job (operator separation)",
+            offer.operator
+        ));
+    }
+    if pc.roles.decryptors.contains(&offer.operator) || decryptors.contains(&offer.operator) {
+        return Some(format!(
+            "its operator {} holds a decryption key for the output (operator separation)",
+            offer.operator
+        ));
+    }
+    let mut sources: Vec<PlacementSource> = pc.constraints.clone();
+    sources.extend(extra.iter().cloned());
+    if pc.production {
+        // Production: a self-declared location satisfies nothing. The
+        // floor applies wherever a constraint cares about location.
+        for s in &mut sources {
+            let c = &mut s.constraints;
+            if c.allowed_regions.is_some() || !c.prohibited_locations.is_empty() {
+                c.min_evidence = c.min_evidence.max(LocationEvidence::OperatorDeclared);
+            }
+        }
+    }
+    let machine = Machine {
+        id: &offer.id,
+        operator: &offer.operator,
+        location: offer.location.as_ref(),
+        evidence: offer.evidence,
+    };
+    let bad = refusals(&sources, &CIPHERTEXT_STEP, &machine);
+    if bad.is_empty() {
+        return None;
+    }
+    Some(
+        bad.iter()
+            .map(|(o, why)| describe_refusal(o, why, offer.location.as_ref()))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+/// The evaluators of `ctx` admissible for `backend` (any when `None`),
+/// under the plan's shared constraints plus `extra`.
+pub fn admission(
+    ctx: &PlanningContext,
+    backend: Option<&str>,
+    extra: &[PlacementSource],
+    decryptors: &BTreeSet<String>,
+) -> Admission {
+    let Some(pc) = &ctx.placement else {
+        return Admission::default();
+    };
+    let mut out = Admission::default();
+    let mut offers: Vec<&EvaluatorOffer> = ctx.infrastructure.evaluators.iter().collect();
+    offers.sort();
+    offers.dedup();
+    for o in offers {
+        match evaluator_unusable(o, backend, pc, extra, decryptors) {
+            Some(why) => out.excluded.push((o.id.clone(), why)),
+            None => out.admitted.push(AdmittedEvaluator {
+                id: o.id.clone(),
+                operator: o.operator.clone(),
+                location: o.location.clone(),
+                evidence: o.evidence,
+                evidence_digest: o.evidence_digest.clone(),
+            }),
+        }
+    }
+    out.admitted.sort();
+    out
+}
+
+/// The placement a plan records: for every encrypted backend its ciphertext
+/// steps use, the evaluators admitted for all of them. `None` outside
+/// governed projects.
+pub fn plan_placement(ctx: &PlanningContext, steps: &[ExecutionStep]) -> Option<PlanPlacement> {
+    let pc = ctx.placement.as_ref()?;
+    let backends: BTreeSet<&str> = steps
+        .iter()
+        .filter(|s| s.placement == Placement::UntrustedHost)
+        .flat_map(|s| s.mechanisms.iter())
+        .filter_map(|m| match m {
+            Mechanism::Fhe { backend, .. } => Some(backend.as_str()),
+            _ => None,
+        })
+        .collect();
+    let none = BTreeSet::new();
+    let mut admitted: Option<Vec<AdmittedEvaluator>> = None;
+    for b in backends {
+        let a = admission(ctx, Some(b), &[], &none).admitted;
+        admitted = Some(match admitted {
+            None => a,
+            Some(prev) => prev.into_iter().filter(|x| a.contains(x)).collect(),
+        });
+    }
+    Some(PlanPlacement {
+        constraints_digest: sources_digest(&pc.constraints),
+        locations_digest: pc.locations_digest.clone(),
+        admissible: admitted.unwrap_or_default(),
+    })
+}
+
+/// The current locations table's digest (what a new plan records).
+pub fn locations_digest() -> String {
+    locations::digest()
+}
+
+/// Whether `ctx`'s placement says a SecAgg coordinator conflicts with a
+/// contributor: the coordinator's operator owns a source.
+pub fn coordinator_conflict(ctx: &PlanningContext) -> Option<String> {
+    let pc = ctx.placement.as_ref()?;
+    let c = pc.roles.coordinator.as_ref()?;
+    pc.roles.source_owners.contains(c).then(|| {
+        format!("the SecAgg coordinator {c} also contributes to the round (operator separation)")
+    })
+}

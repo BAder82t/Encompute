@@ -604,6 +604,7 @@ impl Control {
             profile: Profile::Standard,
             catalog: self.catalog(&mut *c)?,
             infrastructure: Infrastructure {
+                evaluators: vec![],
                 tees: vec![],
                 key_broker,
                 host_cloud: true,
@@ -613,6 +614,7 @@ impl Control {
             facts: facts(&program)?,
             training: None,
             custody,
+            placement: None,
         };
         drop(c);
         let plan = match plan_or_fail(&program, &pctx) {

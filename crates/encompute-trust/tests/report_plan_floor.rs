@@ -51,6 +51,7 @@ fn context(profile: Profile) -> PlanningContext {
         facts: facts(true),
         training: None,
         custody: Vec::new(),
+        placement: None,
     }
 }
 
