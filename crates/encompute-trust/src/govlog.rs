@@ -60,6 +60,13 @@ pub const CHECKPOINT_WITNESS: &str = "encompute.checkpoint-witness.v1";
 /// Domain of an owner's signed revocation head.
 pub const REVOCATION_HEAD: &str = "encompute.revocation-head.v1";
 
+/// Domain of a revocation leaf (inside the RFC 6962 leaf hash).
+pub const REVOCATION_LEAF: &str = "encompute.revocation-leaf.v1";
+/// The root of an owner's head over no revocation at all.
+pub const REVOCATION_EMPTY: &str = "encompute.revocation-empty.v1";
+/// The longest revocation leaf.
+pub const MAX_LEAF: usize = 320;
+
 /// The platform partition (events of no project and no organization).
 pub const PLATFORM: &str = "platform";
 
@@ -89,6 +96,18 @@ pub mod kind {
     pub const AUTHORIZATION_REVOKED: &str = "authorization.revoked";
     pub const PURPOSE_RETIRED: &str = "purpose.retired";
     pub const GOVERNANCE_KEY_REVOKED: &str = "governance_key.revoked";
+    /// An owner's signed revocation head was accepted (not a deny event:
+    /// it states what is already in the log).
+    pub const REVOCATION_HEAD_SIGNED: &str = "revocation_head.signed";
+
+    /// The transitions an owner's revocation head covers.
+    pub const REVOCATIONS: &[&str] = &[
+        AUTHORIZATION_REVOKED,
+        ASSET_REVOKED,
+        ASSET_EXPIRED,
+        PURPOSE_RETIRED,
+        GOVERNANCE_KEY_REVOKED,
+    ];
 
     /// Every kind above.
     pub const ALL: &[&str] = &[
@@ -106,6 +125,7 @@ pub mod kind {
         AUTHORIZATION_REVOKED,
         PURPOSE_RETIRED,
         GOVERNANCE_KEY_REVOKED,
+        REVOCATION_HEAD_SIGNED,
     ];
 }
 
@@ -785,6 +805,423 @@ impl SignedRevocationHead {
         self.body.check()?;
         crate::authz::verify(REVOCATION_HEAD, self, governance_key)
     }
+}
+
+/// The leaf of a revocation: its kind and the ID of what it revoked.
+pub fn revocation_leaf(kind: &str, id: &str) -> Result<String> {
+    check_kind(kind)?;
+    check_id("revocation", id)?;
+    let leaf = format!("{kind}:{id}");
+    if leaf.len() > MAX_LEAF {
+        return Err(err("a revocation leaf is at most 320 bytes"));
+    }
+    Ok(leaf)
+}
+
+/// The revocations an organization made in a project, from the project's
+/// events (all of one partition), as sorted, distinct leaves. An
+/// authorization revoked is named by its signed document's ID (the one a
+/// bundle carries; the row's when it has none), and its signed revocation,
+/// when it has one, is a leaf of its own. Both the control plane (to
+/// state the root a head must carry) and a reader (to check a head) fold
+/// the same way.
+pub fn revocation_leaves(events: &[GovEvent], org: &str) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for e in events {
+        if e.org.as_deref() != Some(org) || !kind::REVOCATIONS.contains(&e.kind.as_str()) {
+            continue;
+        }
+        let id = match (e.kind.as_str(), e.refs.get("authorization_id")) {
+            (kind::AUTHORIZATION_REVOKED, Some(a)) => a,
+            _ => &e.subject,
+        };
+        if let Ok(l) = revocation_leaf(&e.kind, id) {
+            out.insert(l);
+        }
+        if let Some(r) = e.refs.get("revocation_id") {
+            if let Ok(l) = revocation_leaf("revocation.signed", r) {
+                out.insert(l);
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The root a head carries over `leaves` (any order, repeats ignored): an
+/// RFC 6962 tree over the sorted leaves, each hashed under
+/// [`REVOCATION_LEAF`]; the empty set has a root of its own.
+pub fn revocation_root(leaves: &[String]) -> Result<Hash> {
+    let mut sorted: Vec<&String> = leaves.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+    for l in &sorted {
+        let ok = !l.is_empty()
+            && l.len() <= MAX_LEAF
+            && l.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.:/@+".contains(&b));
+        if !ok {
+            return Err(err(format!("malformed revocation leaf {l:?}")));
+        }
+    }
+    if sorted.is_empty() {
+        return Ok(sha256(&[REVOCATION_EMPTY.as_bytes()]));
+    }
+    let hashes: Vec<Hash> = sorted
+        .iter()
+        .map(|l| rfc6962_leaf(&[REVOCATION_LEAF.as_bytes(), &[0], l.as_bytes()].concat()))
+        .collect();
+    Ok(root(&hashes))
+}
+
+/// What an organization's events say about its revocations in a project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevocationState {
+    /// Its revocations (see [`revocation_leaves`]).
+    pub leaves: Vec<String>,
+    /// The latest head accepted: (number, root, position of its event).
+    pub last_head: Option<(u64, String, u64)>,
+    /// When the oldest revocation recorded after the latest head's event
+    /// was recorded: a head accepted covers every revocation before its
+    /// event, so the owner owes a head since then. `None` when the latest
+    /// head is up to date.
+    pub pending_since: Option<u64>,
+}
+
+/// An organization's revocation state from the project's events. Nothing
+/// is recorded for a head that is owed: it is the revocations that came
+/// after the latest head's event.
+pub fn revocation_state(events: &[GovEvent], org: &str) -> RevocationState {
+    let mut last_head: Option<(u64, String, u64)> = None;
+    for e in events {
+        if e.org.as_deref() == Some(org) && e.kind == kind::REVOCATION_HEAD_SIGNED {
+            if let (Some(seq), Some(root)) = (
+                e.refs.get("seq").and_then(|s| s.parse().ok()),
+                e.refs.get("root"),
+            ) {
+                last_head = Some((seq, root.clone(), e.pseq));
+            }
+        }
+    }
+    let after = last_head.as_ref().map_or(0, |h| h.2);
+    let pending_since = events
+        .iter()
+        .filter(|e| {
+            e.org.as_deref() == Some(org)
+                && kind::REVOCATIONS.contains(&e.kind.as_str())
+                && e.pseq > after
+        })
+        .map(|e| e.at)
+        .min();
+    RevocationState {
+        leaves: revocation_leaves(events, org),
+        last_head,
+        pending_since,
+    }
+}
+
+impl RevocationHead {
+    /// Whether the head's root is the root over exactly `leaves`: a bundle
+    /// that omits a revocation the head lists (or lists one it does not)
+    /// fails.
+    pub fn covers(&self, leaves: &[String]) -> bool {
+        revocation_root(leaves).is_ok_and(|r| hash_hex(&r) == self.root)
+    }
+}
+
+/// The latest head of `organization` in `project` dated at or after
+/// `grant_at` (a head older than the grant says nothing of revocations
+/// since), if any.
+pub fn latest_at_or_after<'a>(
+    heads: &'a [SignedRevocationHead],
+    organization: &str,
+    project: &str,
+    grant_at: u64,
+) -> Option<&'a SignedRevocationHead> {
+    heads
+        .iter()
+        .filter(|h| {
+            h.body.organization == organization
+                && h.body.project == project
+                && h.body.at >= grant_at
+        })
+        .max_by_key(|h| h.body.seq)
+}
+
+/// The organization's governance key a head is checked under.
+#[derive(Clone, Copy, Debug)]
+pub struct HeadKey<'a> {
+    /// The key (hex) the head must verify under.
+    pub public_key: &'a str,
+    /// When the key was revoked, if it was: a head dated from then on is
+    /// not accepted.
+    pub revoked_at: Option<u64>,
+}
+
+/// What a head says about a bundle's revocations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeadVerdict {
+    /// The head is dated at or after `as_of`, verifies under the
+    /// organization's key (not revoked by log position) and its root is
+    /// exactly the bundle's revocations. Covered means: as of the head.
+    Covered,
+    /// The head's root is not the root over the bundle's revocations: one
+    /// is omitted (or added).
+    OmittedRevocation,
+    /// No head dated at or after `as_of` (or none in the log, or the
+    /// latest one withheld, or one owed, or one under an older key): nothing
+    /// was checked. This is never a pass.
+    HeadTooOld,
+    /// The head was signed under a key revoked before its event was
+    /// recorded (by log position, or by its date in the log-free check).
+    HeadUnderRevokedKey,
+    /// The head does not verify under the organization's key, or is not the
+    /// one the log records.
+    BadSignature,
+    /// The organization signed two heads with one number and different
+    /// roots: evidence anyone holding its public key can check.
+    OwnerEquivocation,
+}
+
+impl HeadVerdict {
+    pub fn is_covered(self) -> bool {
+        self == HeadVerdict::Covered
+    }
+
+    /// Not a pass and not a failure either: no head to check against.
+    pub fn is_unchecked(self) -> bool {
+        self == HeadVerdict::HeadTooOld
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HeadVerdict::Covered => "COVERED",
+            HeadVerdict::OmittedRevocation => "OMITTED_REVOCATION",
+            HeadVerdict::HeadTooOld => "UNCHECKED",
+            HeadVerdict::HeadUnderRevokedKey => "HEAD_UNDER_REVOKED_KEY",
+            HeadVerdict::BadSignature => "BAD_SIGNATURE",
+            HeadVerdict::OwnerEquivocation => "OWNER_EQUIVOCATION",
+        }
+    }
+}
+
+/// Checks `head` (the latest, from [`latest_at_or_after`]; `None` when
+/// there is none dated at or after `as_of`) against the revocations
+/// `leaves` a bundle carries for that organization and project. `as_of` is
+/// the time of the run, release or decision the bundle is for: a head
+/// dated earlier says nothing of revocations since, so it is UNCHECKED.
+/// The head's date is the signer's own: this check, without the log, trusts
+/// it. [`check_revocation_heads`] judges by the log instead and is the one
+/// to use whenever the project's proven events are at hand.
+pub fn check_revocation_head(
+    head: Option<&SignedRevocationHead>,
+    as_of: u64,
+    leaves: &[String],
+    key: HeadKey<'_>,
+) -> HeadVerdict {
+    let Some(h) = head else {
+        return HeadVerdict::HeadTooOld;
+    };
+    if h.body.at < as_of {
+        return HeadVerdict::HeadTooOld;
+    }
+    if h.public_key != key.public_key || h.verify(key.public_key).is_err() {
+        return HeadVerdict::BadSignature;
+    }
+    if key.revoked_at.is_some_and(|r| h.body.at >= r) {
+        return HeadVerdict::HeadUnderRevokedKey;
+    }
+    if h.body.covers(leaves) {
+        HeadVerdict::Covered
+    } else {
+        HeadVerdict::OmittedRevocation
+    }
+}
+
+/// Two heads one organization signed with the same number and different
+/// roots: it told two readers different histories. Self-proving to anyone
+/// holding the organization's public key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadEquivocation {
+    pub a: SignedRevocationHead,
+    pub b: SignedRevocationHead,
+}
+
+impl HeadEquivocation {
+    /// `Ok` when both heads verify under `org_key` (hex), are of one
+    /// organization, project and number, and have different roots.
+    pub fn verify(&self, org_key: &str) -> Result<()> {
+        self.a.verify(org_key)?;
+        self.b.verify(org_key)?;
+        let (a, b) = (&self.a.body, &self.b.body);
+        if a.organization != b.organization || a.project != b.project || a.seq != b.seq {
+            return Err(err(
+                "the heads are of different organizations, projects or numbers",
+            ));
+        }
+        if a.root == b.root {
+            return Err(err("the heads have one root: no equivocation"));
+        }
+        Ok(())
+    }
+}
+
+/// The finding of [`check_revocation_heads`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadCheck {
+    pub verdict: HeadVerdict,
+    /// The number of the latest head the log records, if any.
+    pub head_seq: Option<u64>,
+    /// When the oldest revocation after that head was recorded (a head is
+    /// owed since then).
+    pub pending_since: Option<u64>,
+    /// Set with [`HeadVerdict::OwnerEquivocation`].
+    pub equivocation: Option<HeadEquivocation>,
+    /// Why, in words.
+    pub reason: String,
+}
+
+/// Checks an organization's revocation heads against the project's PROVEN
+/// events (every event verified against a checkpoint, in order), for a
+/// bundle of `bundle_leaves` (`None`: what the log shows) as of `as_of`.
+///
+/// A head counts only through the log: the latest `revocation_head.signed`
+/// event of the organization names the head (number and root) that must be
+/// supplied, so a bundle that serves only an older head, or none, is
+/// UNCHECKED. A head's own date is the signer's claim and decides nothing
+/// about keys: it is under a revoked key when its event was recorded after
+/// the key's revocation event. A head signed under another key than
+/// `pinned_key` (rotated, or revoked after) is UNCHECKED: the owner owes a
+/// head under its current key. Revocations recorded after the latest
+/// head's event are owed, so an honestly stale head is UNCHECKED, and
+/// OmittedRevocation only means a revocation the head covered is missing.
+pub fn check_revocation_heads(
+    events: &[GovEvent],
+    heads: &[SignedRevocationHead],
+    organization: &str,
+    project: &str,
+    as_of: u64,
+    pinned_key: &str,
+    bundle_leaves: Option<&[String]>,
+) -> HeadCheck {
+    let state = revocation_state(events, organization);
+    let done = |verdict, reason: String, eq: Option<HeadEquivocation>| HeadCheck {
+        verdict,
+        head_seq: state.last_head.as_ref().map(|h| h.0),
+        pending_since: state.pending_since,
+        equivocation: eq,
+        reason,
+    };
+    let mine: Vec<&SignedRevocationHead> = heads
+        .iter()
+        .filter(|h| h.body.organization == organization && h.body.project == project)
+        .collect();
+    for (i, a) in mine.iter().enumerate() {
+        for b in &mine[i + 1..] {
+            let proof = HeadEquivocation {
+                a: (*a).clone(),
+                b: (*b).clone(),
+            };
+            if a.body.seq == b.body.seq
+                && a.public_key == pinned_key
+                && b.public_key == pinned_key
+                && proof.verify(pinned_key).is_ok()
+            {
+                return done(
+                    HeadVerdict::OwnerEquivocation,
+                    format!("{organization} signed two heads numbered {}", a.body.seq),
+                    Some(proof),
+                );
+            }
+        }
+    }
+    let Some((seq, root, pseq)) = state.last_head.clone() else {
+        return done(
+            HeadVerdict::HeadTooOld,
+            "the log records no revocation head of this organization".into(),
+            None,
+        );
+    };
+    let Some(h) = mine.iter().find(|h| h.body.seq == seq) else {
+        return done(
+            HeadVerdict::HeadTooOld,
+            format!("the log records head {seq}, which was not supplied: only older heads (or none) were"),
+            None,
+        );
+    };
+    if h.body.root != root || h.verify(&h.public_key).is_err() {
+        return done(
+            HeadVerdict::BadSignature,
+            format!(
+                "the head supplied as number {seq} is not signed or is not the one the log records"
+            ),
+            None,
+        );
+    }
+    let kid = crate::authz::governance_key_id(&h.public_key);
+    let revoked_at_pos = events
+        .iter()
+        .find(|e| {
+            e.org.as_deref() == Some(organization)
+                && e.kind == kind::GOVERNANCE_KEY_REVOKED
+                && e.refs.get("key_id") == Some(&kid)
+        })
+        .map(|e| e.pseq);
+    if revoked_at_pos.is_some_and(|r| r < pseq) {
+        return done(
+            HeadVerdict::HeadUnderRevokedKey,
+            format!("head {seq} was recorded after its signing key was revoked"),
+            None,
+        );
+    }
+    if h.public_key != pinned_key {
+        return done(
+            HeadVerdict::HeadTooOld,
+            format!("head {seq} is under another key than the pinned one: a head is owed under the current key"),
+            None,
+        );
+    }
+    if h.body.at < as_of {
+        return done(
+            HeadVerdict::HeadTooOld,
+            format!(
+                "head {seq} is dated {} before {as_of}: it says nothing of later revocations",
+                h.body.at
+            ),
+            None,
+        );
+    }
+    if let Some(since) = state.pending_since {
+        return done(
+            HeadVerdict::HeadTooOld,
+            format!("a head is owed: revocations were recorded after head {seq} (since {since})"),
+            None,
+        );
+    }
+    let before: Vec<GovEvent> = events.iter().filter(|e| e.pseq < pseq).cloned().collect();
+    let at_head = revocation_leaves(&before, organization);
+    if !h.body.covers(&at_head) {
+        return done(
+            HeadVerdict::OmittedRevocation,
+            format!("head {seq}'s root is not the root over the revocations recorded before it"),
+            None,
+        );
+    }
+    let mut bundle: Vec<String> = bundle_leaves.map_or(state.leaves.clone(), <[String]>::to_vec);
+    bundle.sort();
+    bundle.dedup();
+    if bundle != at_head {
+        return done(
+            HeadVerdict::OmittedRevocation,
+            "the bundle's revocations are not the ones the head covers".into(),
+            None,
+        );
+    }
+    done(
+        HeadVerdict::Covered,
+        format!("head {seq} covers every revocation"),
+        None,
+    )
 }
 
 /// What a member found when it compared the control plane's latest

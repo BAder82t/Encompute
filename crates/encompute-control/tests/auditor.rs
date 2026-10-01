@@ -567,6 +567,13 @@ impl W {
                              "size": 1, "root": "0".repeat(64), "at": now()},
                     "public_key": "0".repeat(64), "signature": "0".repeat(128)})),
             ),
+            "/v1/projects/{}/revocation-heads" => (
+                format!("/v1/projects/{p}/revocation-heads"),
+                Some(json!({
+                    "body": {"version": 1, "organization": BEN, "project": p,
+                             "seq": 1, "root": "0".repeat(64), "at": now()},
+                    "public_key": "0".repeat(64), "signature": "0".repeat(128)})),
+            ),
             "/v1/organizations/{}/key-brokers" => (
                 format!("/v1/organizations/{BEN}/key-brokers"),
                 Some(json!({"id": "ben-broker", "grant_public_key": pk(&key(42)),
@@ -704,6 +711,9 @@ impl W {
                 format!("/v1/projects/{p}/audit"),
                 format!("/v1/projects/{p}/audit?after=1&limit=2"),
             ],
+            "/v1/projects/{}/revocation-heads/{}/draft" => {
+                vec![format!("/v1/projects/{p}/revocation-heads/{BEN}/draft")]
+            }
             "/v1/projects/{}/checkpoints/latest" => vec![
                 format!("/v1/projects/{p}/checkpoints/latest"),
                 format!("/v1/projects/{p}/checkpoints/latest?since=1"),

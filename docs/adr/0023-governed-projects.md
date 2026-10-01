@@ -747,7 +747,78 @@ As built (event log, schema version 13; its head anchored in place of the sets):
     index, and a caller is limited to 120 requests a minute on the three
     routes (503). `after`, `limit` and `since` that are not whole numbers
     are 400.
-- Revocation heads follow.
+- Owner revocation heads (as built, decision G-2: a bundle carries the
+  owners' signed heads dated at or after the grant):
+  - A head is `{version, organization, project, seq, root, at}` signed
+    with the organization's governance key. Its `root` is an RFC 6962
+    tree over the organization's revocations in the project, as sorted,
+    distinct leaves `<kind>:<id>` (each hashed under its own domain; the
+    empty set has a root of its own, never the digest of no bytes). The
+    leaves are folded from the project's own partition by one function the
+    control plane and every reader share: an authorization revoked (named
+    by its signed document's ID, and its signed revocation as a leaf of
+    its own), an asset of the organization revoked or expired where the
+    project used it, a purpose it retired, a governance key it revoked.
+  - `GET /v1/projects/{id}/revocation-heads/{org}/draft` states the
+    leaves, the root and the next number to the organization's security
+    admins and the project's auditors (read-only; the post route refuses an
+    auditor). `encompute governance sign --kind revocation-head` recomputes
+    the root from the leaves and refuses a draft whose root is not theirs;
+    `--verify-draft` prints what would be signed.
+  - `POST /v1/projects/{id}/revocation-heads` takes the log's head lock
+    first (the audit head stays last), then checks the signature under the
+    organization's active key (ENC2708, ENC2701), that the number is one
+    past the previous head, that the date is at most 300 seconds ahead and
+    not before the previous head, and that the root is the control
+    plane's own fold of the log (ENC2717). It stores the head and appends
+    `revocation_head.signed` (the number and root: not a deny event, no
+    forced checkpoint). The organization must be the project's owner or a
+    member; a former member and an auditor organization have no head.
+  - Atomic revoke and head. A governed revocation owes the next head. The
+    least intrusive design that keeps every existing revoke call working:
+    the authorization revocation and the purpose retirement accept an
+    optional `revocation_head` for the new set, checked after the
+    revocation's events are appended in the same transaction, so a refused
+    head (ENC2717) rolls the revocation back. Without one the revocation
+    takes effect at once (a revocation must never wait for a signature)
+    and records nothing more than its own event, so every transition
+    stays exactly one event: a head covers the revocations recorded before
+    its own event, so the head owed is the revocations after the latest
+    head's event, derived from the log by anyone (`pending_since`). An
+    asset's revocation or expiry and a governance key's reach several
+    projects and cannot carry one head for them all: each leaves a head
+    owed in every project it reached. Nothing blocks while a head is owed:
+    the draft shows `pending_since`, `overdue` after 24 hours, and a
+    bundle checked against a head that is behind is UNCHECKED. A standard
+    project has no head, and naming one in its revoke is refused.
+  - The trust crate decides what a head says of a bundle: `covers`
+    (the root over exactly the bundle's leaves), `latest_at_or_after` and a
+    verdict: covered, omitted revocation, head too old or missing
+    (UNCHECKED, never a pass), head under a key revoked by its date, bad
+    signature. `encompute governance verify-audit` with pins runs the same
+    check per organization against the verified events and exits 3 without
+    pins unless `--allow-unpinned` is given.
+  - Judged through the log, not by the signer's date (review fixes). A
+    verifier given the project's proven events (`check_revocation_heads`)
+    takes the organization's latest `revocation_head.signed` event as the
+    head that counts and requires that head to be supplied (a bundle with
+    only an older head, or none, is UNCHECKED), signed under the pinned
+    key and not recorded after its key's revocation event (a thief's head
+    signed offline is not in the log). Covered means as of the head: it
+    must be dated at or after `as_of` and nothing may be recorded after its
+    event; revocations after it are a head owed (UNCHECKED), and
+    OmittedRevocation means only that a revocation the head covered is
+    missing. A head under another key than the pinned one is a head owed
+    under the current key (UNCHECKED). Two heads of one number with
+    different roots are an owner equivocation proof (`HeadEquivocation`).
+    The control plane also refuses a head dated before the newest
+    revocation it covers or more than 60 seconds ahead, and answers a
+    refused head 409 with the current draft; the draft carries the log size
+    and `cannot_sign_reason`. An organization that left or has no active
+    key cannot clear a head it owes, and its bundles stay UNCHECKED.
+  - Not covered: a revocation the owner never made; an owner that never
+    signs a head, so its bundles stay UNCHECKED; and the time between a
+    revocation and the next head.
 
 ### 13. Error codes (D13)
 

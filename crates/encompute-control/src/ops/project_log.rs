@@ -106,7 +106,8 @@ fn checkpoint_view(
     }))
 }
 
-/// What both routes answer before the project has a checkpoint.
+/// What both routes answer before the project has a checkpoint (they add
+/// the organizations' latest signed revocation heads).
 fn no_checkpoint(id: &str) -> Value {
     json!({"project": id, "checkpoint": null, "witnesses": [], "witness_status": "unwitnessed",
            "members": [], "witnessed_by": [], "missing_witnesses": [],
@@ -125,8 +126,11 @@ impl Control {
         self.project_log_limit.hit(&ctx.principal.id)?;
         let partition = Partition::Project(id.to_owned()).to_string();
         let limit = limit.clamp(1, MAX_PAGE);
+        let heads = super::revocation_heads::latest_heads(&mut *c, id)?;
         let Some(cp) = govlog::latest_checkpoint(&mut *c, &partition)? else {
-            return Ok(no_checkpoint(id));
+            let mut out = no_checkpoint(id);
+            out["revocation_heads"] = json!(heads);
+            return Ok(out);
         };
         let size = cp.body.size;
         let page = govlog::leaves(&mut *c, &self.node_cache, &partition, after, size, limit)?;
@@ -144,6 +148,7 @@ impl Control {
         out["project"] = json!(id);
         out["events"] = json!(events);
         out["next"] = json!(next);
+        out["revocation_heads"] = json!(heads);
         Ok(out)
     }
 
@@ -160,11 +165,15 @@ impl Control {
         project_reader(&mut *c, &ctx.principal, id)?;
         self.project_log_limit.hit(&ctx.principal.id)?;
         let partition = Partition::Project(id.to_owned()).to_string();
+        let heads = super::revocation_heads::latest_heads(&mut *c, id)?;
         let Some(cp) = govlog::latest_checkpoint(&mut *c, &partition)? else {
-            return Ok(no_checkpoint(id));
+            let mut out = no_checkpoint(id);
+            out["revocation_heads"] = json!(heads);
+            return Ok(out);
         };
         let mut out = checkpoint_view(&mut *c, id, &cp)?;
         out["project"] = json!(id);
+        out["revocation_heads"] = json!(heads);
         out["consistency"] = match since {
             None => Value::Null,
             // The caller saw more than the control plane now has: no proof

@@ -516,6 +516,20 @@ pub struct RevokeAuthorization {
     /// needs it).
     #[serde(default)]
     pub revocation: Option<encompute_trust::authz::SignedRevocationV2>,
+    /// Governed projects: the owner's next signed revocation head, covering
+    /// this revocation. Accepted together with it (both or neither);
+    /// without one the revocation is recorded and the head is owed.
+    #[serde(default)]
+    pub revocation_head: Option<encompute_trust::govlog::SignedRevocationHead>,
+}
+
+/// Retiring a purpose: in a governed project, optionally with the
+/// proposer's next signed revocation head (see [`RevokeAuthorization`]).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetirePurpose {
+    #[serde(default)]
+    pub revocation_head: Option<encompute_trust::govlog::SignedRevocationHead>,
 }
 
 /// How an organization takes part in a project: as a member, or (governed

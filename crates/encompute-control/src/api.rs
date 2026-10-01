@@ -52,6 +52,8 @@
 //! | GET | `/v1/projects/{id}/audit?after=&limit=` | a governed project's shared log: events with inclusion proofs against the latest signed checkpoint, the checkpoint and its witnesses (members and auditors) |
 //! | GET | `/v1/projects/{id}/checkpoints/latest?since=` | the latest signed checkpoint, its witnesses and, from `since`, the control plane's signed consistency proof |
 //! | POST | `/v1/projects/{id}/checkpoints/{size}/witnesses` | a member organization's security admin countersigns a checkpoint with the organization's governance key |
+//! | GET | `/v1/projects/{id}/revocation-heads/{org}/draft` | the organization's revocations in the project as sorted leaves with the root its next head must carry (its security admins and the project's auditors) |
+//! | POST | `/v1/projects/{id}/revocation-heads` | an organization's security admin submits its signed revocation head |
 //! | POST, GET | `/v1/organizations/{id}/key-brokers` | an organization's own key brokers (sovereign custody); a security admin registers |
 //! | POST | `/v1/jobs/{id}/release-ticket` | governed projects: the scheduled evaluator asks for a key-release ticket |
 //! | POST | `/v1/jobs/{id}/derived-assets` | governed projects: a person of a recipient records a succeeded job's result as a derived asset |
@@ -133,7 +135,10 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceCustody
         | Code::GovernanceAuditorSeparation => 403,
         Code::NotFound => 404,
-        Code::Conflict | Code::PrivacyBudgetExceeded | Code::GovernanceCheckpointWitness => 409,
+        Code::Conflict
+        | Code::PrivacyBudgetExceeded
+        | Code::GovernanceRevocationHead
+        | Code::GovernanceCheckpointWitness => 409,
         Code::PlanningFailed | Code::PlanInvalid => 422,
         Code::Scheduling => 503,
         Code::Remote | Code::InsecureConfiguration | Code::PrivacyLedger => 500,
@@ -392,7 +397,14 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "purposes", id, "accept"]) => {
             ok(control.accept_purpose(ctx, id, parse(&r.body)?)?)
         }
-        ("POST", ["v1", "purposes", id, "retire"]) => ok(control.retire_purpose(ctx, id)?),
+        ("POST", ["v1", "purposes", id, "retire"]) => {
+            let body: crate::model::RetirePurpose = if r.body.is_empty() {
+                Default::default()
+            } else {
+                parse(&r.body)?
+            };
+            ok(control.retire_purpose_with_head(ctx, id, body.revocation_head)?)
+        }
         ("POST", ["v1", "authorizations"]) => {
             created(control.propose_authorization(ctx, parse(&r.body)?)?)
         }
@@ -419,6 +431,27 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("GET", ["v1", "projects", id, "checkpoints", "latest"]) => {
             let since = number(&query(&r.url), "since")?;
             ok(control.project_checkpoint_latest(ctx, id, since)?)
+        }
+        ("GET", ["v1", "projects", id, "revocation-heads", org, "draft"]) => {
+            ok(control.revocation_head_draft(ctx, id, org)?)
+        }
+        ("POST", ["v1", "projects", id, "revocation-heads"]) => {
+            let head: encompute_trust::govlog::SignedRevocationHead = parse(&r.body)?;
+            let org = head.body.organization.clone();
+            match control.submit_revocation_head(ctx, id, head) {
+                Ok(v) => created(v),
+                // The log moved on, or the head was not the next: the
+                // current draft is in the answer, so a retry is one call.
+                Err(e) if e.code == Code::GovernanceRevocationHead => {
+                    let mut body = json!({"code": e.code.as_str(), "message": e.message,
+                                          "retryable": true});
+                    if let Ok(d) = control.revocation_head_draft(ctx, id, &org) {
+                        body["draft"] = d;
+                    }
+                    Ok((409, body))
+                }
+                Err(e) => Err(e),
+            }
         }
         ("POST", ["v1", "projects", id, "checkpoints", size, "witnesses"]) => {
             let size: u64 = size
@@ -641,6 +674,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/authorizations/{}/revoke"),
     ("GET", "/v1/projects/{}/audit"),
     ("GET", "/v1/projects/{}/checkpoints/latest"),
+    ("GET", "/v1/projects/{}/revocation-heads/{}/draft"),
+    ("POST", "/v1/projects/{}/revocation-heads"),
     ("POST", "/v1/projects/{}/checkpoints/{}/witnesses"),
     ("POST", "/v1/organizations/{}/key-brokers"),
     ("GET", "/v1/organizations/{}/key-brokers"),

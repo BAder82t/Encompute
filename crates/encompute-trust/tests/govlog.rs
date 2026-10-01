@@ -1004,3 +1004,426 @@ fn event_references_are_capped() {
     e.refs.insert("one_more".into(), "x".into());
     assert!(e.check().is_err());
 }
+
+// --- owner revocation heads ----------------------------------------------------
+
+use encompute_trust::govlog::{
+    check_revocation_head, latest_at_or_after, revocation_leaves, revocation_root,
+    revocation_state, HeadKey, HeadVerdict, SignedRevocationHead,
+};
+
+const ORG: &str = "org_tax";
+const PROJECT: &str = "proj_a";
+
+fn rev_event(pseq: u64, kind: &str, subject: &str, org: &str, refs: &[(&str, &str)]) -> GovEvent {
+    GovEvent {
+        v: GOVLOG_VERSION,
+        partition: format!("p:{PROJECT}"),
+        pseq,
+        kind: kind.into(),
+        subject: subject.into(),
+        org: Some(org.into()),
+        at: 1_800_000_000 + pseq,
+        refs: refs
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect(),
+    }
+}
+
+/// An authorization (with its signed revocation), an asset, an expiry, a
+/// purpose and a key, all of org_tax, and one revocation of another
+/// organization.
+fn revocations() -> Vec<GovEvent> {
+    vec![
+        rev_event(
+            1,
+            kind::AUTHORIZATION_REVOKED,
+            "auth_row_1",
+            ORG,
+            &[
+                ("authorization_id", "authdoc1"),
+                ("revocation_id", "revdoc1"),
+            ],
+        ),
+        rev_event(2, kind::ASSET_REVOKED, "ast_1", ORG, &[]),
+        rev_event(3, kind::ASSET_EXPIRED, "ast_2", ORG, &[]),
+        rev_event(4, kind::PURPOSE_RETIRED, "pur_1", ORG, &[]),
+        rev_event(5, kind::GOVERNANCE_KEY_REVOKED, "gk_1", ORG, &[]),
+        rev_event(6, kind::ASSET_REVOKED, "ast_other", "org_health", &[]),
+        rev_event(7, kind::JOB_FAILED, "job_1", ORG, &[]),
+    ]
+}
+
+fn head_over(leaves: &[String], seq: u64, at: u64, key: &SigningKey) -> SignedRevocationHead {
+    RevocationHead {
+        version: GOVLOG_VERSION,
+        organization: ORG.into(),
+        project: PROJECT.into(),
+        seq,
+        root: hash_hex(&revocation_root(leaves).unwrap()),
+        at,
+    }
+    .sign(key)
+    .unwrap()
+}
+
+#[test]
+fn head_covers_every_revocation() {
+    let leaves = revocation_leaves(&revocations(), ORG);
+    // Own revocations only (never another organization's, never a job).
+    assert_eq!(
+        leaves,
+        [
+            "asset.expired:ast_2",
+            "asset.revoked:ast_1",
+            "authorization.revoked:authdoc1",
+            "governance_key.revoked:gk_1",
+            "purpose.retired:pur_1",
+            "revocation.signed:revdoc1",
+        ]
+    );
+    let k = gov_key(11);
+    let h = head_over(&leaves, 1, 1_800_000_100, &k);
+    assert!(h.body.covers(&leaves));
+    let mut shuffled = leaves.clone();
+    shuffled.reverse();
+    shuffled.push(leaves[0].clone());
+    assert!(h.body.covers(&shuffled), "order and repeats do not matter");
+    let v = check_revocation_head(
+        Some(&h),
+        1_800_000_000,
+        &leaves,
+        HeadKey {
+            public_key: &pk(&k),
+            revoked_at: None,
+        },
+    );
+    assert_eq!(v, HeadVerdict::Covered);
+    // The empty set has its own root, never the digest of no bytes.
+    let empty = revocation_root(&[]).unwrap();
+    assert_ne!(hex(&empty), hex(&Sha256::digest([])));
+    assert_ne!(empty, revocation_root(&leaves).unwrap());
+    // Malformed leaves are refused.
+    assert!(revocation_root(&["has space".to_string()]).is_err());
+}
+
+#[test]
+fn bundle_omitting_a_revocation_fails() {
+    let leaves = revocation_leaves(&revocations(), ORG);
+    let k = gov_key(11);
+    let h = head_over(&leaves, 1, 1_800_000_100, &k);
+    let key = HeadKey {
+        public_key: &pk(&k),
+        revoked_at: None,
+    };
+    for i in 0..leaves.len() {
+        let mut omitted = leaves.clone();
+        omitted.remove(i);
+        assert!(!h.body.covers(&omitted), "omitting {}", leaves[i]);
+        assert_eq!(
+            check_revocation_head(Some(&h), 0, &omitted, key),
+            HeadVerdict::OmittedRevocation
+        );
+    }
+    // Nor does padding with a revocation the head never listed.
+    let mut more = leaves.clone();
+    more.push("asset.revoked:ast_9".into());
+    assert!(!h.body.covers(&more));
+}
+
+#[test]
+fn head_older_than_the_grant_is_unchecked() {
+    let leaves = revocation_leaves(&revocations(), ORG);
+    let k = gov_key(11);
+    let old = head_over(&leaves, 1, 1_800_000_100, &k);
+    let key = HeadKey {
+        public_key: &pk(&k),
+        revoked_at: None,
+    };
+    let heads = [old.clone()];
+    assert!(latest_at_or_after(&heads, ORG, PROJECT, 1_800_000_101).is_none());
+    let v = check_revocation_head(
+        latest_at_or_after(&heads, ORG, PROJECT, 1_800_000_101),
+        1_800_000_101,
+        &leaves,
+        key,
+    );
+    assert_eq!(v, HeadVerdict::HeadTooOld);
+    assert!(v.is_unchecked() && !v.is_covered());
+    assert_eq!(v.label(), "UNCHECKED");
+    // A head handed over directly is still too old.
+    assert_eq!(
+        check_revocation_head(Some(&old), 1_800_000_101, &leaves, key),
+        HeadVerdict::HeadTooOld
+    );
+    // No head at all is never a pass.
+    assert_eq!(
+        check_revocation_head(None, 0, &leaves, key),
+        HeadVerdict::HeadTooOld
+    );
+    // The latest head at or after the grant, of the right organization
+    // and project.
+    let newer = head_over(&leaves, 2, 1_800_000_200, &k);
+    let heads = [old, newer.clone()];
+    assert_eq!(
+        latest_at_or_after(&heads, ORG, PROJECT, 1_800_000_100).map(|h| h.body.seq),
+        Some(2)
+    );
+    assert!(latest_at_or_after(&heads, "org_health", PROJECT, 0).is_none());
+    assert!(latest_at_or_after(&heads, ORG, "proj_b", 0).is_none());
+    assert_eq!(
+        check_revocation_head(Some(&newer), 1_800_000_150, &leaves, key),
+        HeadVerdict::Covered
+    );
+}
+
+#[test]
+fn head_under_a_revoked_key_or_the_wrong_key_is_not_covered() {
+    let leaves = revocation_leaves(&revocations(), ORG);
+    let (k, other) = (gov_key(11), gov_key(12));
+    let h = head_over(&leaves, 1, 1_800_000_100, &k);
+    let kp = pk(&k);
+    let at = |revoked_at| HeadKey {
+        public_key: &kp,
+        revoked_at,
+    };
+    // Signed before its key was revoked: still the history it was.
+    assert_eq!(
+        check_revocation_head(Some(&h), 0, &leaves, at(Some(1_800_000_101))),
+        HeadVerdict::Covered
+    );
+    // Dated at or after the revocation of its key: refused.
+    assert_eq!(
+        check_revocation_head(Some(&h), 0, &leaves, at(Some(1_800_000_100))),
+        HeadVerdict::HeadUnderRevokedKey
+    );
+    // Not the organization's key.
+    let v = check_revocation_head(
+        Some(&h),
+        0,
+        &leaves,
+        HeadKey {
+            public_key: &pk(&other),
+            revoked_at: None,
+        },
+    );
+    assert_eq!(v, HeadVerdict::BadSignature);
+    // An edited body.
+    let mut forged = h.clone();
+    forged.body.seq = 9;
+    assert_eq!(
+        check_revocation_head(Some(&forged), 0, &leaves, at(None)),
+        HeadVerdict::BadSignature
+    );
+}
+
+#[test]
+fn state_follows_heads_and_revocations_after_them() {
+    let mut ev = revocations();
+    let n = ev.len() as u64;
+    let st = revocation_state(&ev, ORG);
+    assert_eq!(st.leaves.len(), 6);
+    assert!(st.last_head.is_none());
+    // No head yet: owed since the first revocation of the organization.
+    assert_eq!(st.pending_since, Some(1_800_000_001));
+    // Another organization's head does not clear it.
+    ev.push(rev_event(
+        n + 1,
+        kind::REVOCATION_HEAD_SIGNED,
+        "org_health",
+        "org_health",
+        &[("seq", "1"), ("root", &"ab".repeat(32))],
+    ));
+    assert_eq!(
+        revocation_state(&ev, ORG).pending_since,
+        Some(1_800_000_001)
+    );
+    let root_hex = hash_hex(&revocation_root(&revocation_leaves(&ev, ORG)).unwrap());
+    ev.push(rev_event(
+        n + 2,
+        kind::REVOCATION_HEAD_SIGNED,
+        ORG,
+        ORG,
+        &[("seq", "1"), ("root", &root_hex)],
+    ));
+    let st = revocation_state(&ev, ORG);
+    assert_eq!(st.last_head, Some((1, root_hex, n + 2)));
+    assert_eq!(
+        st.pending_since, None,
+        "the head came after every revocation"
+    );
+    // A revocation after the head: a head is owed since it was recorded.
+    ev.push(rev_event(n + 3, kind::ASSET_REVOKED, "ast_5", ORG, &[]));
+    ev.push(rev_event(n + 4, kind::ASSET_REVOKED, "ast_6", ORG, &[]));
+    assert_eq!(
+        revocation_state(&ev, ORG).pending_since,
+        Some(1_800_000_000 + n + 3)
+    );
+    // The head events are ordinary, well-formed events.
+    for e in &ev {
+        e.check().unwrap();
+    }
+}
+
+// --- heads judged through the log -------------------------------------------------
+
+use encompute_trust::authz::governance_key_id;
+use encompute_trust::govlog::{check_revocation_heads, HeadEquivocation};
+
+/// The head event of `h` at position `pseq`.
+fn head_event(pseq: u64, h: &SignedRevocationHead) -> GovEvent {
+    rev_event(
+        pseq,
+        kind::REVOCATION_HEAD_SIGNED,
+        ORG,
+        ORG,
+        &[("seq", &h.body.seq.to_string()), ("root", &h.body.root)],
+    )
+}
+
+/// Two revocations, then head 1 over them (dated well after).
+fn logged() -> (Vec<GovEvent>, SignedRevocationHead, SigningKey) {
+    let k = gov_key(21);
+    let mut ev = vec![
+        rev_event(1, kind::ASSET_REVOKED, "ast_1", ORG, &[]),
+        rev_event(2, kind::PURPOSE_RETIRED, "pur_1", ORG, &[]),
+    ];
+    let h = head_over(&revocation_leaves(&ev, ORG), 1, 1_800_000_100, &k);
+    ev.push(head_event(3, &h));
+    (ev, h, k)
+}
+
+#[test]
+fn stale_head_before_a_later_revocation_is_unchecked() {
+    let (mut ev, h, k) = logged();
+    let pin = pk(&k);
+    let check = |ev: &[GovEvent], heads: &[SignedRevocationHead], as_of| {
+        check_revocation_heads(ev, heads, ORG, PROJECT, as_of, &pin, None)
+    };
+    assert_eq!(
+        check(&ev, std::slice::from_ref(&h), 1_800_000_000).verdict,
+        HeadVerdict::Covered
+    );
+    // As of a time after the head: it says nothing of what came since.
+    let c = check(&ev, std::slice::from_ref(&h), 1_800_000_101);
+    assert_eq!(c.verdict, HeadVerdict::HeadTooOld, "{}", c.reason);
+    // A revocation after the head (an honest builder presenting the head
+    // before it): a head is owed, UNCHECKED, and not an omission.
+    ev.push(rev_event(4, kind::ASSET_REVOKED, "ast_2", ORG, &[]));
+    let c = check(&ev, std::slice::from_ref(&h), 1_800_000_000);
+    assert_eq!(c.verdict, HeadVerdict::HeadTooOld, "{}", c.reason);
+    assert_eq!(c.pending_since, Some(1_800_000_004));
+    // The bundle's own list: a bundle that leaves out a leaf the head
+    // covered is an omission, even while a head is owed elsewhere.
+    let (ev, h, k) = logged();
+    let pin = pk(&k);
+    let c = check_revocation_heads(
+        &ev,
+        &[h],
+        ORG,
+        PROJECT,
+        0,
+        &pin,
+        Some(&["asset.revoked:ast_1".to_string()]),
+    );
+    assert_eq!(c.verdict, HeadVerdict::OmittedRevocation, "{}", c.reason);
+}
+
+#[test]
+fn bundle_serving_only_an_old_head_detected_when_log_events_supplied() {
+    let (mut ev, h1, k) = logged();
+    let pin = pk(&k);
+    let all = revocation_leaves(&ev, ORG);
+    let h2 = head_over(&all, 2, 1_800_000_200, &k);
+    ev.push(head_event(4, &h2));
+    // Both supplied: the latest counts.
+    let c = check_revocation_heads(&ev, &[h1.clone(), h2.clone()], ORG, PROJECT, 0, &pin, None);
+    assert_eq!(c.verdict, HeadVerdict::Covered, "{}", c.reason);
+    assert_eq!(c.head_seq, Some(2));
+    // Only the old head, which alone would pass: the log names head 2.
+    let c = check_revocation_heads(&ev, &[h1], ORG, PROJECT, 0, &pin, None);
+    assert_eq!(c.verdict, HeadVerdict::HeadTooOld, "{}", c.reason);
+    assert!(c.reason.contains("not supplied"), "{}", c.reason);
+    // None at all.
+    let c = check_revocation_heads(&ev, &[], ORG, PROJECT, 0, &pin, None);
+    assert_eq!(c.verdict, HeadVerdict::HeadTooOld);
+    // A head the log does not record is not a head: no event, UNCHECKED.
+    let (ev, _, k) = logged();
+    let offline = head_over(&revocation_leaves(&ev, ORG), 2, 1_800_000_300, &k);
+    let c = check_revocation_heads(&ev[..2], &[offline], ORG, PROJECT, 0, &pk(&k), None);
+    assert_eq!(c.verdict, HeadVerdict::HeadTooOld, "{}", c.reason);
+}
+
+#[test]
+fn head_signed_offline_under_revoked_key_refused_by_log_position() {
+    let (mut ev, _h, old) = logged();
+    // The key is revoked after head 1; a thief signs head 2 offline, dated
+    // before the revocation, and the control plane never records it.
+    let kid = governance_key_id(&pk(&old));
+    ev.push(rev_event(
+        4,
+        kind::GOVERNANCE_KEY_REVOKED,
+        "gk_old",
+        ORG,
+        &[("key_id", &kid)],
+    ));
+    let leaves = revocation_leaves(&ev, ORG);
+    let offline = head_over(&leaves, 2, 1_800_000_003, &old);
+    let c = check_revocation_heads(
+        &ev,
+        std::slice::from_ref(&offline),
+        ORG,
+        PROJECT,
+        0,
+        &pk(&old),
+        None,
+    );
+    assert_ne!(c.verdict, HeadVerdict::Covered, "{}", c.reason);
+    assert_eq!(c.verdict, HeadVerdict::HeadTooOld, "{}", c.reason);
+    // Were the thief's head recorded after the revocation (a colluding
+    // control plane), it is refused by its position, whatever its date.
+    ev.push(head_event(5, &offline));
+    let c = check_revocation_heads(&ev, &[offline], ORG, PROJECT, 0, &pk(&old), None);
+    assert_eq!(c.verdict, HeadVerdict::HeadUnderRevokedKey, "{}", c.reason);
+}
+
+#[test]
+fn head_under_a_rotated_key_is_unchecked_not_bad() {
+    let (ev, h, _old) = logged();
+    let new = gov_key(22);
+    let c = check_revocation_heads(&ev, &[h], ORG, PROJECT, 0, &pk(&new), None);
+    assert_eq!(c.verdict, HeadVerdict::HeadTooOld, "{}", c.reason);
+    assert!(c.reason.contains("current key"), "{}", c.reason);
+}
+
+#[test]
+fn same_seq_different_roots_is_equivocation() {
+    let (ev, h, k) = logged();
+    let other = head_over(&["asset.revoked:ast_1".to_string()], 1, 1_800_000_100, &k);
+    let c = check_revocation_heads(
+        &ev,
+        &[h.clone(), other.clone()],
+        ORG,
+        PROJECT,
+        0,
+        &pk(&k),
+        None,
+    );
+    assert_eq!(c.verdict, HeadVerdict::OwnerEquivocation);
+    let proof = c.equivocation.unwrap();
+    proof.verify(&pk(&k)).unwrap();
+    assert!(
+        proof.verify(&pk(&gov_key(99))).is_err(),
+        "only under the owner's key"
+    );
+    // One root twice, or two numbers, is no evidence.
+    assert!(HeadEquivocation {
+        a: h.clone(),
+        b: h.clone()
+    }
+    .verify(&pk(&k))
+    .is_err());
+    let next = head_over(&revocation_leaves(&ev, ORG), 2, 1_800_000_100, &k);
+    assert!(HeadEquivocation { a: h, b: next }.verify(&pk(&k)).is_err());
+}

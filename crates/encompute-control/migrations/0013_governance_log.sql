@@ -65,6 +65,13 @@ CREATE INDEX governance_events_kind ON governance_events (kind, subject_id);
 -- them) without reading the whole partition.
 CREATE INDEX governance_events_membership ON governance_events (partition, pseq)
     WHERE kind IN ('membership.added', 'membership.removed');
+-- An organization's revocations in a project and the revocation head
+-- events about them (an owner's head covers its own revocations, which the
+-- control plane folds without reading the whole partition).
+CREATE INDEX governance_events_revocations ON governance_events (partition, org_id, pseq)
+    WHERE kind IN ('authorization.revoked', 'asset.revoked', 'asset.expired',
+                   'purpose.retired', 'governance_key.revoked',
+                   'revocation_head.signed');
 -- A revoked authorization's signed document ID (startup and run-time
 -- checks look it up).
 CREATE INDEX governance_events_authorization ON governance_events ((body #>> '{refs,authorization_id}'))

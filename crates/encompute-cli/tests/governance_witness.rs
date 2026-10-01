@@ -72,6 +72,8 @@ struct Script {
     key: String,
     /// The witnesses it received.
     posts: Vec<Value>,
+    /// The answer of a revocation head draft.
+    draft: Option<Value>,
 }
 
 struct Fake {
@@ -117,6 +119,11 @@ impl Fake {
                         200,
                         json!({"public_key": s.key, "service": "control-plane"}),
                     )
+                } else if method == "GET" && path.ends_with("/draft") {
+                    match &s.draft {
+                        Some(d) => (200, d.clone()),
+                        None => (404, json!({"code": "ENC2603", "message": "none"})),
+                    }
                 } else if method == "GET" && path.ends_with("/audit") {
                     let q = |n: &str| {
                         query
@@ -622,6 +629,7 @@ struct Audit {
     members: Vec<String>,
     label: String,
     witnessed_by: Vec<String>,
+    heads: Vec<Value>,
 }
 
 impl Audit {
@@ -635,6 +643,7 @@ impl Audit {
             members: vec![],
             label: "unwitnessed".into(),
             witnessed_by: vec![],
+            heads: vec![],
         }
     }
 
@@ -672,6 +681,7 @@ impl Audit {
         json!({"project": PROJECT, "checkpoint": self.cp, "witnesses": self.witnesses,
                "witness_status": self.label, "members": self.members,
                "witnessed_by": self.witnessed_by, "missing_witnesses": [],
+               "revocation_heads": self.heads,
                "events": events,
                "next": if last < self.cp.body.size { json!(last) } else { Value::Null }})
     }
@@ -761,10 +771,14 @@ fn verify_audit_recomputes_the_label_and_catches_a_mislabelling_control_plane() 
     assert_eq!(v["membership_events"].as_array().unwrap().len(), 1, "{v}");
 
     // Without pins: proofs verify, the witnesses do not, and it says so.
-    let (c, out, _) = verify_audit(&fake, &[]);
+    let (c, out, err) = verify_audit(&fake, &[]);
+    assert_eq!(c, 3, "{out}");
+    assert!(err.contains("no --pins"), "{err}");
+    let (c, out, _) = verify_audit(&fake, &["--allow-unpinned"]);
     assert_eq!(c, 0, "{out}");
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["witnesses_verified"], false, "{v}");
+    assert_eq!(v["unpinned"], true, "{v}");
     assert_eq!(v["witness_status"], "unverified", "{v}");
     assert!(out.contains("witness signatures not verified"), "{out}");
 
@@ -830,7 +844,7 @@ fn verify_audit_recomputes_the_label_and_catches_a_mislabelling_control_plane() 
     ]);
     a.members = vec!["benefits-agency".into(), "tax-agency".into()];
     serve_audit(&fake, a);
-    let (c, out, _) = verify_audit(&fake, &[]);
+    let (c, out, _) = verify_audit(&fake, &["--allow-unpinned"]);
     assert_eq!(c, 0, "{out}");
     assert!(
         out.contains("guest-agency") && out.contains("never a member"),
@@ -856,6 +870,346 @@ fn verify_audit_recomputes_the_label_and_catches_a_mislabelling_control_plane() 
     assert_eq!(out.status.code(), Some(2));
 }
 
+// --- revocation heads -------------------------------------------------------------
+
+use encompute_runtime::trust::govlog::{
+    revocation_leaves, revocation_root, RevocationHead, SignedRevocationHead,
+};
+
+/// The draft a control plane serves for tax's next head.
+fn draft_of(leaves: &[&str], seq: u64) -> Value {
+    let leaves: Vec<String> = leaves.iter().map(|l| l.to_string()).collect();
+    json!({"project": PROJECT, "organization": "tax-agency", "seq": seq, "leaves": leaves,
+           "root": hash_hex(&revocation_root(&leaves).unwrap()), "at": 1_800_000_000u64,
+           "previous": null, "pending_since": null, "overdue": false, "due_secs": 86400})
+}
+
+fn sign_head(fake: &Fake, key: &Path, extra: &[&str]) -> (i32, String, String) {
+    let mut args = vec![
+        "governance",
+        "sign",
+        "--kind",
+        "revocation-head",
+        "--key",
+        key.to_str().unwrap(),
+        "--project",
+        PROJECT,
+        "--organization",
+        "tax-agency",
+        "--url",
+        &fake.url,
+    ];
+    args.extend_from_slice(extra);
+    let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .args(&args)
+        .env("ENCOMPUTE_TOKEN", "test-token")
+        .env_remove("ENCOMPUTE_SERVICE_ID")
+        .env_remove("ENCOMPUTE_SERVICE_KEY_FILE")
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into(),
+        String::from_utf8_lossy(&out.stderr).into(),
+    )
+}
+
+/// The tool signs a head only over a root it recomputed from the leaves the
+/// draft lists: a control plane that states another root (or leaves out of
+/// order) gets nothing signed.
+#[test]
+fn draft_recomputed_by_cli_before_signing() {
+    let d = dir("head-draft");
+    let fake = Fake::start();
+    let tax = Member::new(&d, "tax");
+    let tax_pk = {
+        let seed: [u8; 32] = std::fs::read(&tax.key).unwrap().try_into().unwrap();
+        encompute_runtime::verification::hex(
+            &ed25519_dalek::SigningKey::from_bytes(&seed)
+                .verifying_key()
+                .to_bytes(),
+        )
+    };
+    let honest = draft_of(&["asset.revoked:ast_1", "purpose.retired:pur_1"], 3);
+    fake.script.lock().unwrap().draft = Some(honest.clone());
+
+    // What would be signed is printed; nothing is.
+    let (c, out, err) = sign_head(&fake, &tax.key, &["--verify-draft"]);
+    assert_eq!(c, 0, "{out} {err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["would_sign"]["seq"], 3, "{v}");
+    assert_eq!(v["would_sign"]["root"], honest["root"], "{v}");
+    assert!(v.get("signature").is_none(), "{v}");
+    assert!(
+        err.contains("asset.revoked:ast_1") && err.contains("nothing signed"),
+        "{err}"
+    );
+
+    // Signed under the organization's key, over the recomputed root.
+    let (c, out, err) = sign_head(&fake, &tax.key, &[]);
+    assert_eq!(c, 0, "{out} {err}");
+    let signed: SignedRevocationHead = serde_json::from_str(&out).unwrap();
+    signed.verify(&tax_pk).unwrap();
+    assert_eq!(signed.body.seq, 3);
+    assert_eq!(signed.body.root, honest["root"].as_str().unwrap());
+    assert!(signed.body.covers(&[
+        "asset.revoked:ast_1".to_string(),
+        "purpose.retired:pur_1".to_string()
+    ]));
+
+    // A draft whose root is not the root of its leaves: refused, nothing
+    // printed to stdout.
+    let mut forged = honest.clone();
+    forged["root"] = json!("ab".repeat(32));
+    fake.script.lock().unwrap().draft = Some(forged);
+    for extra in [&[][..], &["--verify-draft"][..]] {
+        let (c, out, err) = sign_head(&fake, &tax.key, extra);
+        assert_eq!(c, 2, "{out} {err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("refusing to sign"), "{err}");
+    }
+    // A draft that drops a leaf but keeps the root it was computed over.
+    let mut dropped = honest.clone();
+    dropped["leaves"] = json!(["asset.revoked:ast_1"]);
+    fake.script.lock().unwrap().draft = Some(dropped);
+    let (c, out, err) = sign_head(&fake, &tax.key, &[]);
+    assert_eq!((c, out.is_empty()), (2, true), "{err}");
+    // Leaves out of order, a draft for another project or organization.
+    let mut unsorted = honest.clone();
+    unsorted["leaves"] = json!(["purpose.retired:pur_1", "asset.revoked:ast_1"]);
+    fake.script.lock().unwrap().draft = Some(unsorted);
+    assert_eq!(sign_head(&fake, &tax.key, &[]).0, 2);
+    let mut other = honest.clone();
+    other["organization"] = json!("benefits-agency");
+    fake.script.lock().unwrap().draft = Some(other);
+    let (c, _, err) = sign_head(&fake, &tax.key, &[]);
+    assert_eq!(c, 2, "{err}");
+    // The owner's own records: a draft that omits a revocation they list
+    // is refused, one that has them all is signed.
+    let mine = write(&d, "mine.json", &json!(["asset.revoked:ast_1"]));
+    fake.script.lock().unwrap().draft = Some(honest.clone());
+    assert_eq!(sign_head(&fake, &tax.key, &["--expect-leaves", &mine]).0, 0);
+    let missing = write(
+        &d,
+        "missing.json",
+        &json!(["asset.revoked:ast_1", "asset.expired:ast_7"]),
+    );
+    let (c, out, err) = sign_head(&fake, &tax.key, &["--expect-leaves", &missing]);
+    assert_eq!((c, out.is_empty()), (2, true), "{err}");
+    assert!(err.contains("asset.expired:ast_7"), "{err}");
+    // A saved draft file works without a control plane, and is checked the same.
+    let saved = write(&d, "draft.json", &honest);
+    let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .args(["governance", "sign", "--kind", "revocation-head", "--key"])
+        .arg(&tax.key)
+        .arg(&saved)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut tampered = honest;
+    tampered["leaves"] = json!([]);
+    let saved = write(&d, "tampered.json", &tampered);
+    let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .args(["governance", "sign", "--kind", "revocation-head", "--key"])
+        .arg(&tax.key)
+        .arg(&saved)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}
+
+/// verify-audit, given pins, checks each organization's latest revocation
+/// head against the revocations in the verified events: covered, behind (a
+/// head is owed: unchecked), absent (unchecked) or contradicted.
+#[test]
+fn verify_audit_checks_revocation_heads() {
+    let d = dir("verify-heads");
+    let fake = Fake::start();
+    let pins = write(
+        &d,
+        "pins.json",
+        &json!({"tax-agency": org_pk(1), "benefits-agency": org_pk(2)}),
+    );
+    let revoked = |pseq| gov_event(pseq, "asset.revoked", "tax-agency", &[]);
+    let heads_over =
+        |events: &[GovEvent], seq: u64, key: u8, root_of: &[GovEvent]| -> (Value, GovEvent) {
+            let leaves = revocation_leaves(root_of, "tax-agency");
+            let root = hash_hex(&revocation_root(&leaves).unwrap());
+            let h = RevocationHead {
+                version: 1,
+                organization: "tax-agency".into(),
+                project: PROJECT.into(),
+                seq,
+                root: root.clone(),
+                at: 1_800_000_500,
+            }
+            .sign(&org_key(key))
+            .unwrap();
+            let pseq = events.len() as u64 + 1;
+            let e = gov_event(
+                pseq,
+                "revocation_head.signed",
+                "tax-agency",
+                &[("seq", &seq.to_string()), ("root", &root)],
+            );
+            (serde_json::to_value(h).unwrap(), e)
+        };
+    let status = |out: &str| -> String {
+        let v: Value = serde_json::from_str(out).unwrap();
+        v["revocation_heads"][0]["status"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let base = || vec![revoked(1), revoked(2)];
+
+    // Covered: the head's root is exactly the two revocations.
+    let mut events = base();
+    let (head, e) = heads_over(&events, 1, 1, &events.clone());
+    events.push(e);
+    let mut a = Audit::new(events.clone());
+    a.heads = vec![head.clone()];
+    serve_audit(&fake, a);
+    let (c, out, err) = verify_audit(&fake, &["--pins", &pins, "--as-of", "1"]);
+    assert_eq!(c, 0, "{out} {err}");
+    assert_eq!(status(&out), "COVERED", "{out}");
+
+    // Behind: a newer revocation came after the head. Owed: UNCHECKED,
+    // never covered, and not an omission; the exit is 3 unless accepted.
+    let mut behind = events.clone();
+    behind.push(revoked(4));
+    let mut a = Audit::new(behind);
+    a.heads = vec![head.clone()];
+    serve_audit(&fake, a);
+    let (c, out, _) = verify_audit(&fake, &["--pins", &pins, "--as-of", "1"]);
+    assert_eq!(c, 3, "{out}");
+    assert!(status(&out).starts_with("UNCHECKED"), "{out}");
+    assert!(out.contains("a head is owed"), "{out}");
+    let (c, _, _) = verify_audit(
+        &fake,
+        &["--pins", &pins, "--as-of", "1", "--allow-unchecked"],
+    );
+    assert_eq!(c, 0);
+
+    // No head at all, with revocations: unchecked.
+    let mut a = Audit::new(base());
+    a.heads = vec![];
+    serve_audit(&fake, a);
+    let (c, out, _) = verify_audit(&fake, &["--pins", &pins, "--as-of", "1"]);
+    assert_eq!(c, 3, "{out}");
+    assert!(status(&out).starts_with("UNCHECKED"), "{out}");
+
+    // A head that omits a revocation while nothing is owed: contradicted.
+    let mut events = base();
+    let (head, e) = heads_over(&events, 1, 1, &events[..1]);
+    events.push(e);
+    let mut a = Audit::new(events);
+    a.heads = vec![head];
+    serve_audit(&fake, a);
+    let (c, out, _) = verify_audit(&fake, &["--pins", &pins, "--as-of", "1"]);
+    assert_eq!(c, 1, "{out}");
+    assert_eq!(status(&out), "OMITTED_REVOCATION", "{out}");
+
+    // A head under another key than the pinned one (rotated): the owner
+    // owes a head under its current key. UNCHECKED, not a failure.
+    let mut events = base();
+    let (head, e) = heads_over(&events, 1, 9, &events.clone());
+    events.push(e);
+    let mut a = Audit::new(events.clone());
+    a.heads = vec![head];
+    serve_audit(&fake, a);
+    let (c, out, _) = verify_audit(&fake, &["--pins", &pins, "--as-of", "1"]);
+    assert_eq!(c, 3, "{out}");
+    assert!(status(&out).starts_with("UNCHECKED"), "{out}");
+    assert!(out.contains("current key"), "{out}");
+
+    // The log records head 1 but only nothing is served (withheld).
+    let mut a = Audit::new(events.clone());
+    a.heads = vec![];
+    serve_audit(&fake, a);
+    let (c, out, _) = verify_audit(&fake, &["--pins", &pins, "--as-of", "1"]);
+    assert_eq!(c, 3, "{out}");
+    assert!(out.contains("not supplied"), "{out}");
+
+    // A head dated before --as-of says nothing of what came after it.
+    let mut events = base();
+    let (head, e) = heads_over(&events, 1, 1, &events.clone());
+    events.push(e);
+    let mut a = Audit::new(events);
+    a.heads = vec![head.clone()];
+    serve_audit(&fake, a);
+    let (c, out, _) = verify_audit(&fake, &["--pins", &pins, "--as-of", "1800000501"]);
+    assert_eq!(c, 3, "{out}");
+    assert!(status(&out).starts_with("UNCHECKED"), "{out}");
+
+    // Two roots signed for one number: the owner equivocated (exit 1, and
+    // `check-equivocation --org-key` proves it from the two heads).
+    let other = {
+        let leaves = vec!["asset.revoked:sub_1".to_string()];
+        RevocationHead {
+            version: 1,
+            organization: "tax-agency".into(),
+            project: PROJECT.into(),
+            seq: 1,
+            root: hash_hex(&revocation_root(&leaves).unwrap()),
+            at: 1_800_000_500,
+        }
+        .sign(&org_key(1))
+        .unwrap()
+    };
+    let extra = write(&d, "other-head.json", &other);
+    let (c, out, _) = verify_audit(&fake, &["--pins", &pins, "--as-of", "1", "--heads", &extra]);
+    assert_eq!(c, 1, "{out}");
+    assert_eq!(status(&out), "OWNER_EQUIVOCATION", "{out}");
+    let first = write(&d, "first-head.json", &head);
+    let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .args([
+            "governance",
+            "check-equivocation",
+            "--org-key",
+            &org_pk(1),
+            &first,
+            &extra,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("OWNER EQUIVOCATION"));
+    let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .args([
+            "governance",
+            "check-equivocation",
+            "--org-key",
+            &org_pk(2),
+            &first,
+            &extra,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+
+    // Without pins nothing about heads is verified, and the run says so.
+    let mut events = base();
+    let (head, e) = heads_over(&events, 1, 1, &events.clone());
+    events.push(e);
+    let mut a = Audit::new(events);
+    a.heads = vec![head];
+    serve_audit(&fake, a);
+    let (c, out, _) = verify_audit(&fake, &["--allow-unpinned"]);
+    assert_eq!(c, 0, "{out}");
+    assert!(status(&out).starts_with("UNVERIFIED"), "{out}");
+}
+
 // --- members against a real control plane -----------------------------------------
 
 mod real {
@@ -877,7 +1231,7 @@ mod real {
         dir: PathBuf,
     }
 
-    fn start() -> Option<Plane> {
+    fn start(name: &str) -> Option<Plane> {
         let admin = match std::env::var("ENCOMPUTE_TEST_DATABASE_URL") {
             Ok(u) => u,
             Err(_) if std::env::var("ENCOMPUTE_REQUIRE_SERVICES").is_ok() => {
@@ -888,8 +1242,9 @@ mod real {
                 return None;
             }
         };
-        let name = format!(
-            "enc_cli_witness_{}_{}",
+        let db_name = format!(
+            "enc_cli_witness_{}_{}_{}",
+            name.replace('-', "_"),
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -899,11 +1254,11 @@ mod real {
         );
         postgres::Client::connect(&admin, postgres::NoTls)
             .unwrap()
-            .batch_execute(&format!("CREATE DATABASE {name}"))
+            .batch_execute(&format!("CREATE DATABASE {db_name}"))
             .unwrap();
         let (base, _) = admin.rsplit_once('/').unwrap();
-        let db = format!("{base}/{name}");
-        let d = dir("real");
+        let db = format!("{base}/{db_name}");
+        let d = dir(name);
         let control = Control::with_parts(
             Env::Development,
             "control-plane",
@@ -993,13 +1348,9 @@ mod real {
         }
     }
 
-    /// Each member organization witnesses with its own key file and a
-    /// security admin's credentials; the control plane labels the
-    /// checkpoint `witnessed` once both have, and a later checkpoint is
-    /// witnessed after the consistency check.
-    #[test]
-    fn members_witness_with_the_cli_against_a_real_control_plane() {
-        let Some(p) = start() else { return };
+    /// Two member organizations with security admins, a governed project
+    /// and a governance key file registered for each: (project, tax, ben).
+    fn governed_world(p: &Plane) -> (String, Member, Member) {
         for (org, admin) in [("tax-agency", "t-admin"), ("benefits-agency", "b-admin")] {
             p.call(
                 "platform-admin",
@@ -1070,7 +1421,17 @@ mod real {
             );
         }
         p.control.checkpoint_log().unwrap();
+        (proj, tax, ben)
+    }
 
+    /// Each member organization witnesses with its own key file and a
+    /// security admin's credentials; the control plane labels the
+    /// checkpoint `witnessed` once both have, and a later checkpoint is
+    /// witnessed after the consistency check.
+    #[test]
+    fn members_witness_with_the_cli_against_a_real_control_plane() {
+        let Some(p) = start("real") else { return };
+        let (proj, tax, ben) = governed_world(&p);
         let (c, out) = p.witness("t-sec1", &tax, "tax-agency");
         assert_eq!(c, 0, "{out}");
         assert!(out.contains("\"unwitnessed\""), "{out}");
@@ -1130,5 +1491,148 @@ mod real {
         );
         let (c, out) = check(&["--state", tax.state.to_str().unwrap(), &a, &b]);
         assert_eq!(c, 1, "{out}");
+    }
+    /// A member signs its revocation head with the CLI from the control
+    /// plane's draft and the control plane accepts it; a reader's
+    /// `verify-audit` with pins then finds the head covering the log's
+    /// revocations, and a later revocation shows the head behind.
+    #[test]
+    fn a_member_signs_its_revocation_head_with_the_cli_against_a_real_control_plane() {
+        let Some(p) = start("real-heads") else { return };
+        let (proj, tax, _ben) = governed_world(&p);
+        p.control
+            .db
+            .tx(|t| {
+                govlog::append(
+                    t,
+                    Draft::new(
+                        Partition::Project(proj.clone()),
+                        kind::ASSET_REVOKED,
+                        "ast_cli_1",
+                    )
+                    .org("tax-agency"),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        p.control.checkpoint_log().unwrap();
+        let sign = |who: &str, extra: &[&str]| {
+            let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+                .args([
+                    "governance",
+                    "sign",
+                    "--kind",
+                    "revocation-head",
+                    "--project",
+                    &proj,
+                    "--organization",
+                    "tax-agency",
+                    "--key",
+                    tax.key.to_str().unwrap(),
+                ])
+                .args(extra)
+                .env("ENCOMPUTE_CONTROL_URL", &p.url)
+                .env("ENCOMPUTE_TOKEN", dev_token(SECRET, who, 3600).unwrap())
+                .env_remove("ENCOMPUTE_SERVICE_ID")
+                .env_remove("ENCOMPUTE_SERVICE_KEY_FILE")
+                .env("HOME", &p.dir)
+                .env("XDG_CONFIG_HOME", &p.dir)
+                .output()
+                .unwrap();
+            (
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        };
+        // The draft is read by the organization's security admin.
+        let (c, out, err) = sign("t-sec1", &["--verify-draft"]);
+        assert_eq!(c, 0, "{out} {err}");
+        assert!(
+            err.contains("asset.revoked:ast_cli_1") && err.contains("has been owed"),
+            "{err}"
+        );
+        let (c, out, err) = sign("t-sec1", &[]);
+        assert_eq!(c, 0, "{out} {err}");
+        let head: Value = serde_json::from_str(&out).unwrap();
+        p.call(
+            "t-sec1",
+            "POST",
+            &format!("/v1/projects/{proj}/revocation-heads"),
+            head.clone(),
+        );
+        p.control.checkpoint_log().unwrap();
+        // A second head: the next number, now nothing owed.
+        let (c, out, err) = sign("t-sec1", &["--verify-draft"]);
+        assert_eq!(c, 0, "{out} {err}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["would_sign"]["seq"], 2, "{v}");
+        assert!(!err.contains("has been owed"), "{err}");
+
+        // A reader checks it against pinned keys (the tax key is the one
+        // the CLI signed with; benefits' is not needed for this check).
+        let seed: [u8; 32] = std::fs::read(&tax.key).unwrap().try_into().unwrap();
+        let tax_pk = encompute_runtime::verification::hex(
+            &ed25519_dalek::SigningKey::from_bytes(&seed)
+                .verifying_key()
+                .to_bytes(),
+        );
+        let pins = write(&p.dir, "pins.json", &json!({"tax-agency": tax_pk}));
+        let verify = |extra: &[&str]| {
+            let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+                .args([
+                    "governance",
+                    "verify-audit",
+                    "--project",
+                    &proj,
+                    "--control-key",
+                    &control_signer().public_key_hex(),
+                ])
+                .args(extra)
+                .env("ENCOMPUTE_CONTROL_URL", &p.url)
+                .env(
+                    "ENCOMPUTE_TOKEN",
+                    dev_token(SECRET, "b-admin", 3600).unwrap(),
+                )
+                .env_remove("ENCOMPUTE_SERVICE_ID")
+                .env_remove("ENCOMPUTE_SERVICE_KEY_FILE")
+                .env("HOME", &p.dir)
+                .env("XDG_CONFIG_HOME", &p.dir)
+                .output()
+                .unwrap();
+            (
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            )
+        };
+        let (_, out) = verify(&["--pins", &pins, "--as-of", "1", "--allow-unchecked"]);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["revocation_heads"][0]["status"], "COVERED", "{v}");
+        // A revocation after the head: the head is behind and a head is owed.
+        p.control
+            .db
+            .tx(|t| {
+                govlog::append(
+                    t,
+                    Draft::new(
+                        Partition::Project(proj.clone()),
+                        kind::ASSET_EXPIRED,
+                        "ast_cli_2",
+                    )
+                    .org("tax-agency"),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        p.control.checkpoint_log().unwrap();
+        let (_, out) = verify(&["--pins", &pins, "--as-of", "1", "--allow-unchecked"]);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            v["revocation_heads"][0]["status"]
+                .as_str()
+                .unwrap()
+                .starts_with("UNCHECKED"),
+            "{v}"
+        );
     }
 }

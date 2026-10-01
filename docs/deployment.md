@@ -649,9 +649,56 @@ time the log is checkpointed:
   proof against the checkpoint's signature, the members at that size from
   the verified membership events, each witness signature under the
   organizations' pinned governance keys (`pins.json`: organization to
-  public key), and the `witnessed` label computed locally. It exits 1 when
-  the control plane's label or members differ, and without `--pins` it
-  says the witness signatures were not verified.
+  public key), and the `witnessed` label computed locally, and, with
+  pins, each organization's latest revocation head (below). Exit codes:
+
+  | Exit | Meaning |
+  |---|---|
+  | 0 | Everything checked and consistent (or the unchecked parts were accepted with `--allow-unpinned` / `--allow-unchecked`; the output still says `unpinned` and which organizations are UNCHECKED) |
+  | 1 | The control plane's label or members differ, or a revocation head contradicts the log (omitted revocation, bad signature, recorded after its key was revoked, owner equivocation) |
+  | 2 | A proof or signature fails, or an input cannot be read |
+  | 3 | Nothing contradicted but not everything was checked: no `--pins` (unless `--allow-unpinned`), or any organization's revocation head is UNCHECKED (unless `--allow-unchecked`): none in the log, one owed, the latest one withheld from what was supplied, one dated before `--as-of`, one under an older key, or no pinned key for the organization |
+- **Revocation heads.** Each owner and member organization also signs a
+  head over every revocation it made in the project, so an evidence
+  bundle cannot omit one unnoticed. `encompute governance sign --kind
+  revocation-head --project PRJ --organization ORG --key governance.key
+  --url https://control.example` fetches the control plane's draft, which
+  lists the organization's revocations as sorted leaves with the root the
+  head must carry, recomputes that root itself from the leaves (a draft
+  whose root is not the root of its leaves is refused and nothing is
+  signed; `--verify-draft` prints what would be signed and signs nothing),
+  and prints the signed head, which the organization's security admin
+  posts to `POST /v1/projects/PRJ/revocation-heads`. A governed
+  revocation (an authorization or a purpose retirement) may carry its head
+  in the same request: both are recorded or neither. Without one the
+  revocation still takes effect at once, and the head is owed: it is the
+  revocations recorded after the latest head's event that no head covers,
+  and the draft shows `pending_since` and `overdue` after 24 hours. Sign the next head after any revocation, and
+  after one that reaches several projects (an asset's revocation or
+  expiry, a governance key's), once per project. While a head is owed a
+  bundle checked against the latest head is UNCHECKED, never a pass; a
+  head dated before the grant says nothing of later revocations, so a
+  decision needs a head dated at or after it (`--as-of`, default now).
+  Covered means as of the head: a head presented without a newer one the
+  log records, or before a later revocation, is UNCHECKED. A head counts
+  only through the log: `verify-audit` takes the latest
+  `revocation_head.signed` event from the verified events and requires that
+  head to be supplied, signed under the pinned key and recorded before the
+  key's revocation event (a head's own date is the signer's claim and
+  decides nothing about keys). Two signed heads with one number and
+  different roots prove the owner equivocated (`encompute governance
+  check-equivocation --org-key KEY HEAD1 HEAD2`; `verify-audit --heads
+  FILE` checks copies you hold). A head must be dated no earlier than the
+  newest revocation it covers and no more than a minute ahead; when
+  signing together with a revocation date it a few seconds ahead. A head
+  refused because the log moved on comes back as 409 with the current
+  draft (`retryable`). Compare the draft's leaves with your own records:
+  `sign --expect-leaves FILE` refuses a draft that omits one you list.
+  An organization that left the project, or has no active governance key,
+  cannot clear a head it owes: its bundles stay UNCHECKED and its draft
+  says so (`cannot_sign_reason`); register a key before relying on a
+  rotation. A schedule that signs and posts a head every hour keeps every
+  bundle checkable. Alert when a draft is `overdue`.
 - **What witnessing detects, and what it does not.** The control plane
   signs the checkpoints, so a member that checks nothing only has the
   control plane's word. Witnessing detects a control plane that shows

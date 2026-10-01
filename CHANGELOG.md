@@ -268,6 +268,35 @@ Work toward confidential cross-agency computation
   verify-audit` recomputes the whole check (every proof, the members, the
   witnesses under pinned keys) without trusting the control plane's label.
   ENC2718; INV-247.
+- **Owner revocation heads.** Each organization signs, with its governance
+  key, the root over every revocation it made in a governed project (its
+  authorizations and their signed revocations, its assets revoked or
+  expired where the project used them, the purposes it retired, the keys it
+  revoked), so an evidence bundle cannot omit one. `GET
+  /v1/projects/{id}/revocation-heads/{org}/draft` states the sorted leaves,
+  the root and the next number; `encompute governance sign --kind
+  revocation-head` recomputes the root from the leaves before signing
+  (`--verify-draft` prints what would be signed); `POST
+  /v1/projects/{id}/revocation-heads` accepts a head only from a security
+  admin, under the organization's active key, one past the previous head
+  (never in the future or before it) and with exactly the control plane's
+  own fold of the log (ENC2717). A governed authorization revocation or
+  purpose retirement may carry its head and is then recorded with it or
+  not at all; without one the revocation takes effect at once and the
+  owner owes the next head (derived from the log: the revocations after
+  its latest head). The trust crate gains
+  `RevocationHead::covers`, `latest_at_or_after` and a verdict (covered,
+  omitted revocation, head too old or missing: unchecked, never a pass,
+  head under a revoked key, bad signature). `verify-audit` checks each
+  organization's head when pins are given, and now exits 3 without
+  `--pins` unless `--allow-unpinned` is passed. Standard projects are
+  unchanged. ENC2717; INV-247. Heads are judged through the proven log
+  (the latest recorded head must be supplied, dated at or after the
+  decision time, not recorded after its key's revocation), a stale or
+  older-key head is UNCHECKED, two roots for one number are provable owner
+  equivocation, `verify-audit` exits 3 on any UNCHECKED organization
+  unless `--allow-unchecked`, and `sign --expect-leaves` checks the draft
+  against the owner's own records.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
   INV-236 (the control plane can only deny; broker state cannot be
   rolled back), INV-223 (auditors), INV-229 (cross-organization

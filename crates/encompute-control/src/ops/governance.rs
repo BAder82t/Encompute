@@ -597,6 +597,18 @@ impl Control {
     /// A security admin of the proposing organization retires the purpose;
     /// it takes no new authorization, and is never active again.
     pub fn retire_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        self.retire_purpose_with_head(ctx, id, None)
+    }
+
+    /// [`Self::retire_purpose`], with the proposer's next revocation head
+    /// when the project is governed: accepted with the retirement or the
+    /// retirement is not recorded.
+    pub fn retire_purpose_with_head(
+        &self,
+        ctx: &Ctx,
+        id: &str,
+        head: Option<encompute_trust::govlog::SignedRevocationHead>,
+    ) -> Result<Value> {
         let out = self.tx_anchored(|t| {
             let (project, org, status, _, _) = purpose_row(t, id, true)?;
             let p = project_visible(t, &ctx.principal, &project)
@@ -627,6 +639,9 @@ impl Control {
                         .org(&org)
                         .r#ref("project", project.as_str()),
                 )?;
+                if let Some(h) = &head {
+                    self.accept_head_with(t, ctx, &project, &org, h)?;
+                }
                 audit::append(
                     t,
                     ctx.draft("purpose.retired", "purpose", id, Outcome::Succeeded)
@@ -640,6 +655,35 @@ impl Control {
         // checkpoints again.
         self.checkpoint_log()?;
         Ok(out)
+    }
+
+    /// A revocation head sent with a revocation `org` made in `project`:
+    /// the project must be governed and the head its own; refused (and the
+    /// revocation with it) as [`super::revocation_heads::accept_head`]
+    /// says. The revocation's events are already appended, so the head
+    /// covers it.
+    fn accept_head_with(
+        &self,
+        t: &mut postgres::Transaction<'_>,
+        ctx: &Ctx,
+        project: &str,
+        org: &str,
+        h: &encompute_trust::govlog::SignedRevocationHead,
+    ) -> Result<()> {
+        let p =
+            crate::authz::project_row(t, project)?.ok_or_else(|| not_found("project", project))?;
+        if !p.governed() {
+            return Err(bad(
+                "a revocation head belongs to governed projects: revoke without one",
+            ));
+        }
+        if h.body.organization != org {
+            return Err(Error::new(
+                Code::GovernanceRevocationHead,
+                format!("the head is {}'s, not {org}'s", h.body.organization),
+            ));
+        }
+        super::revocation_heads::accept_head(t, ctx, &p, h, false).map(|_| ())
     }
 
     pub fn get_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
@@ -1220,6 +1264,9 @@ impl Control {
                 g = g.r#ref("revocation_id", rev.id()?);
             }
             crate::govlog::append(t, g)?;
+            if let Some(h) = &r.revocation_head {
+                self.accept_head_with(t, ctx, &row.project, &row.org, h)?;
+            }
             // Jobs that run under it and have not started cannot start now
             // (rows locked before the audit chain, which every transaction
             // takes last). One that runs already may finish: revocation

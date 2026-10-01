@@ -190,7 +190,9 @@ pub enum Code {
     GovernanceCustody,
     /// Auditor separation: an auditor is read-only and exclusive of every other role in an organization taking part in a governed project, and an auditor organization never owns, submits, receives, approves or holds keys there (ENC2716).
     GovernanceAuditorSeparation,
-    /// A checkpoint witness refused: it does not witness the control plane's stored checkpoint of the project at that size (another size, partition or root), so it cannot count towards it (ENC2718). ENC2717 is reserved for revocation heads.
+    /// A revocation head refused: it is not the next head of its organization in the project (a skipped or repeated number, a date in the future or before the previous head), its root is not the control plane's own fold of the organization's revocations in the log, or it is for another project or an organization that does not take part (ENC2717).
+    GovernanceRevocationHead,
+    /// A checkpoint witness refused: it does not witness the control plane's stored checkpoint of the project at that size (another size, partition or root), so it cannot count towards it (ENC2718).
     GovernanceCheckpointWitness,
 }
 
@@ -274,6 +276,7 @@ impl Code {
             Code::GovernanceAuthorizationLimit => "ENC2714",
             Code::GovernanceCustody => "ENC2715",
             Code::GovernanceAuditorSeparation => "ENC2716",
+            Code::GovernanceRevocationHead => "ENC2717",
             Code::GovernanceCheckpointWitness => "ENC2718",
         }
     }
@@ -281,7 +284,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 78] = [
+    pub const ALL: [Code; 79] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -359,6 +362,7 @@ impl Code {
         Code::GovernanceAuthorizationLimit,
         Code::GovernanceCustody,
         Code::GovernanceAuditorSeparation,
+        Code::GovernanceRevocationHead,
         Code::GovernanceCheckpointWitness,
     ];
 

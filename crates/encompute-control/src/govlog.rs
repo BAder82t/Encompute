@@ -197,6 +197,7 @@ thread_local! {
 fn is_deny(kind: &str) -> bool {
     kind != kind::AUTHORIZATION_ISSUED
         && kind != kind::MEMBERSHIP_ADDED
+        && kind != kind::REVOCATION_HEAD_SIGNED
         && kind != extra_kind::ANCHOR_GENESIS
         && !kind.starts_with(extra_kind::MIGRATED)
 }
