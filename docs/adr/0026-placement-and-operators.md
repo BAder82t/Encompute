@@ -420,6 +420,16 @@ Planned changes touch:
   and the grant records the endpoint, which start compares.
 - **Owner-pinned project constraints.** `limits.project_placement_digest`
   in the signed authorization; the broker requires the binding to name it.
+- **Naming an outsider is a loosening.** A project constraint that names an
+  operator or evaluator of a non-member needs every member (the same digest
+  from each), not one member's tightening. Owners name operators in their
+  own authorizations as their own act.
+- **Consequence of an honest control plane.** A compromised one can misname
+  an evaluator's operator and place a job on an operator that separation or
+  the constraints exclude; brokers cannot see operators; clients pin only
+  key, URL, operator and location. An evaluator holds ciphertext only, so
+  the exposure is availability, result integrity (bounded by receipts) and
+  metadata.
 - **Not built:** an operator-signed evaluator binding verified by brokers
   and clients (operator separation therefore assumes an honest control
   plane), and placement on export tickets.

@@ -481,6 +481,16 @@ these limits:
   then requires the binding to name it. Without a pin, a compromised
   control plane could drop them for that owner's keys (never the owner's
   own constraints, which the broker reads from the authorization).
+- **A changed project constraint stops an owner-pinned job.** When the
+  project's constraints change after an owner pinned their digest, a new
+  job is refused with "the project's placement constraints changed since the
+  owner pinned them; the owner must re-authorize" (ENC2710), and the owner's
+  broker refuses likewise.
+- **Merge task for the governance report.** The report is not in this
+  branch. Wherever it reports operator separation it must carry the
+  qualifier "assuming an honest control plane" (see above), and a test must
+  fail if it claims separation without it. To be added when the report
+  merges.
 - **Running jobs are not re-checked.** Placement is judged at submission,
   scheduling, start and every release ticket; a job already running is not
   stopped when its evaluator moves or constraints tighten (its receipt

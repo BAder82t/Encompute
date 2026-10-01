@@ -566,11 +566,20 @@ fn declarations_are_bounded_per_evaluator() {
     let Some(w) = world() else { return };
     org_evaluator(&w.t, &w.b_admin, "modelco", "ev-modelco", None);
     for i in 0..30 {
-        let (s, v) = declare(&w.t, &w.b_sec, "ev-modelco", gcp("europe-west3"));
+        let r = if i % 2 == 0 {
+            "europe-west3"
+        } else {
+            "europe-west1"
+        };
+        let (s, v) = declare(&w.t, &w.b_sec, "ev-modelco", gcp(r));
         assert_eq!(s, 201, "{i}: {v}");
     }
+    // The 30th (odd i=29) set europe-west1: a different place is refused...
     refused(
         declare(&w.t, &w.b_sec, "ev-modelco", gcp("europe-west3")),
         "ENC2723",
     );
+    // ...a repeat of the current declaration (a renewal) is not counted.
+    let (s, v) = declare(&w.t, &w.b_sec, "ev-modelco", gcp("europe-west1"));
+    assert_eq!(s, 201, "{v}");
 }

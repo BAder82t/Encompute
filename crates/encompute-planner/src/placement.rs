@@ -57,17 +57,14 @@ impl Admission {
             .filter(|(id, _)| !self.hidden.contains(id))
             .map(|(id, why)| format!("evaluator {id}: {why}"))
             .collect();
-        let hidden = self.hidden.len();
-        match (shown.is_empty(), hidden) {
-            (true, 0) => "no evaluator is registered".to_owned(),
-            (true, n) => {
-                format!("{n} evaluator(s) of organizations outside the project are not admissible")
+        if shown.is_empty() {
+            if self.hidden.is_empty() {
+                "no evaluator is registered".to_owned()
+            } else {
+                "no evaluator is available to this project".to_owned()
             }
-            (false, 0) => shown.join("; "),
-            (false, n) => format!(
-                "{}; {n} evaluator(s) of organizations outside the project are not admissible",
-                shown.join("; ")
-            ),
+        } else {
+            shown.join("; ")
         }
     }
 }
@@ -134,33 +131,6 @@ pub fn judge(
         separation: false,
         outsider: false,
     };
-    if let Some(b) = backend {
-        if !offer.backends.iter().any(|x| x == b) {
-            return Some(no(format!("it does not offer the {b} backend")));
-        }
-    }
-    // Operator separation: whoever runs the evaluator is neither a source
-    // owner nor a decryptor.
-    if pc.roles.source_owners.contains(&offer.operator) {
-        return Some(Unusable {
-            why: format!(
-                "its operator {} owns a source of the job (operator separation)",
-                offer.operator
-            ),
-            separation: true,
-            outsider: false,
-        });
-    }
-    if pc.roles.decryptors.contains(&offer.operator) || decryptors.contains(&offer.operator) {
-        return Some(Unusable {
-            why: format!(
-                "its operator {} holds a decryption key for the output (operator separation)",
-                offer.operator
-            ),
-            separation: true,
-            outsider: false,
-        });
-    }
     let mut sources: Vec<PlacementSource> = pc.constraints.clone();
     sources.extend(extra.iter().cloned());
     // Deny by default: another tenant's evaluator is admissible only when
@@ -186,6 +156,33 @@ pub fn judge(
             ),
             separation: false,
             outsider: true,
+        });
+    }
+    if let Some(b) = backend {
+        if !offer.backends.iter().any(|x| x == b) {
+            return Some(no(format!("it does not offer the {b} backend")));
+        }
+    }
+    // Operator separation: whoever runs the evaluator is neither a source
+    // owner nor a decryptor.
+    if pc.roles.source_owners.contains(&offer.operator) {
+        return Some(Unusable {
+            why: format!(
+                "its operator {} owns a source of the job (operator separation)",
+                offer.operator
+            ),
+            separation: true,
+            outsider: false,
+        });
+    }
+    if pc.roles.decryptors.contains(&offer.operator) || decryptors.contains(&offer.operator) {
+        return Some(Unusable {
+            why: format!(
+                "its operator {} holds a decryption key for the output (operator separation)",
+                offer.operator
+            ),
+            separation: true,
+            outsider: false,
         });
     }
     if pc.production {

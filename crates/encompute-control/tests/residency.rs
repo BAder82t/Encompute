@@ -1585,11 +1585,14 @@ fn named_operator_admitted() {
         None,
     );
     stranger(&g);
-    assert_eq!(
-        g.constrain(&g.tax_sec1, json!({"allowed_operators": ["stranger-co"]}))
-            .0,
-        200
-    );
+    // Naming an outsider needs every member.
+    for who in [&g.tax_sec1, &g.ben_sec, &g.other_sec] {
+        assert_eq!(
+            g.constrain(who, json!({"allowed_operators": ["stranger-co"]}))
+                .0,
+            200
+        );
+    }
     let (_, _, _, j) = g.job("2026-q1", |_| {});
     let v = g.view(&id(&j));
     assert_eq!(v["evaluator"], "aaa-stranger", "{v}");
@@ -1671,4 +1674,46 @@ fn an_owner_can_pin_the_project_constraints_its_jobs_are_bound_to() {
     let plan = g.plan(&g.ben_dev, &prog);
     let (s, r) = g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k-pin");
     assert_eq!(code(&r), "ENC2710", "{s} {r}");
+    assert!(
+        r["message"].as_str().unwrap().contains("must re-authorize"),
+        "{r}"
+    );
+}
+
+#[test]
+fn single_member_cannot_admit_an_outsider_operator() {
+    let Some(g) = world() else { return };
+    stranger(&g);
+    let name = json!({"allowed_operators": ["stranger-co"]});
+    // Naming an organization that is not a member admits what no member's
+    // own rule did: one member's word is a proposal, not a tightening.
+    let (s, v) = g.constrain(&g.tax_sec1, name.clone());
+    assert_eq!((s, v["status"].as_str()), (200, Some("pending")), "{v}");
+    assert_eq!(g.placement().0, 0);
+    // Naming the stranger's evaluator by ID is the same.
+    let (_, v) = g.constrain(&g.tax_sec1, json!({"allowed_evaluators": ["aaa-stranger"]}));
+    assert_eq!(v["status"], "pending", "{v}");
+    // Naming a member or the platform is a plain tightening.
+    let (_, v) = g.constrain(&g.tax_sec1, json!({"allowed_operators": [BEN, "platform"]}));
+    assert_eq!(v["status"], "applied", "{v}");
+}
+
+#[test]
+fn all_members_can_admit_a_named_operator() {
+    let Some(g) = world() else { return };
+    g.t.ok(
+        &g.platform,
+        "POST",
+        "/v1/organizations/platform/service-accounts/evaluator-1/disable",
+        None,
+    );
+    stranger(&g);
+    let name = json!({"allowed_operators": ["stranger-co"]});
+    for who in [&g.tax_sec1, &g.ben_sec] {
+        assert_eq!(g.constrain(who, name.clone()).1["status"], "pending");
+    }
+    let (_, v) = g.constrain(&g.other_sec, name);
+    assert_eq!(v["status"], "applied", "{v}");
+    let (_, _, _, j) = g.job("2026-q1", |_| {});
+    assert_eq!(g.view(&id(&j))["evaluator"], "aaa-stranger");
 }

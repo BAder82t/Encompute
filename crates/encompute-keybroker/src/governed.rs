@@ -1929,8 +1929,8 @@ fn check_attested_placement(
     if let Some(pin) = owner_pin {
         if digest != Some(pin) {
             return Err(residency(
-                "the owner's authorization pins the project placement constraints, and the \
-                 execution is not bound to them: no key is released"
+                "the project's placement constraints changed since the owner pinned them; the \
+                 owner must re-authorize: no key is released"
                     .into(),
             ));
         }
@@ -1938,7 +1938,10 @@ fn check_attested_placement(
     let project =
         match (digest, document) {
             (None, _) => None,
-            (Some(d), Some(doc)) if doc.digest() == d => Some(doc),
+            (Some(d), Some(doc)) if doc.digest() == d => {
+                doc.check().map_err(|e| residency(e.message))?;
+                Some(doc)
+            }
             (Some(_), _) => return Err(residency(
                 "the execution declares project placement constraints, and the release carries \
                  no document the binding's digest names: no key is released"

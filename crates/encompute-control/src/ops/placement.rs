@@ -436,7 +436,15 @@ impl Control {
                 )
                 .map_err(db_err)?
                 .get(0);
-            if recent >= MAX_DECLARATIONS_PER_HOUR {
+            let renewal: bool = t
+                .query_one(
+                    "SELECT COALESCE((SELECT location = $2 AND location_evidence = 'operator_declared'
+                                        FROM evaluators WHERE id = $1), false)",
+                    &[&id, &serde_json::to_value(&location).expect("serializable")],
+                )
+                .map_err(db_err)?
+                .get(0);
+            if recent >= MAX_DECLARATIONS_PER_HOUR && !renewal {
                 return Err(evidence_err(format!(
                     "at most {MAX_DECLARATIONS_PER_HOUR} location declarations an hour for one \
                      evaluator: declare again later"
@@ -575,6 +583,42 @@ pub fn project_placement_by_digest(
     .transpose()
 }
 
+/// Whether `new` names (in `allowed_operators` or `allowed_evaluators`) an
+/// operator that is neither the platform nor a member of the project, and
+/// that `cur` did not already name.
+fn names_outsider(
+    t: &mut impl GenericClient,
+    new: &PlacementConstraints,
+    cur: &PlacementConstraints,
+    members: &[String],
+) -> Result<bool> {
+    let known = |o: &str| o == PLATFORM_ORG || members.iter().any(|m| m == o);
+    for o in new.allowed_operators.iter().flatten() {
+        if !known(o)
+            && !cur
+                .allowed_operators
+                .as_ref()
+                .is_some_and(|c| c.contains(o))
+        {
+            return Ok(true);
+        }
+    }
+    for e in new.allowed_evaluators.iter().flatten() {
+        if cur
+            .allowed_evaluators
+            .as_ref()
+            .is_some_and(|c| c.contains(e))
+        {
+            continue;
+        }
+        match operator_of(t, e)? {
+            Some(o) if known(&o) => {}
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
 impl Control {
     /// `GET /v1/projects/{id}/placement`: the project's constraints, shared
     /// by every member and auditor, with the change proposals waiting for
@@ -673,7 +717,11 @@ impl Control {
                 return Ok(json!({"status": "unchanged", "version": n}));
             }
             let digest = r.constraints.digest();
-            let tightening = r.constraints.tightens(&cur);
+            // Naming an operator or an evaluator of an organization that is
+            // not a member admits something no member's own rule did: it is
+            // a loosening, whatever else the change narrows.
+            let tightening = r.constraints.tightens(&cur)
+                && !names_outsider(t, &r.constraints, &cur, &p.members)?;
             let proposal = |t: &mut Transaction<'_>| -> Result<Vec<String>> {
                 t.execute(
                     "INSERT INTO project_placement_proposals
@@ -906,8 +954,8 @@ impl Control {
         {
             return Err(Error::new(
                 Code::GovernanceResidency,
-                "an owner's authorization pins project placement constraints the job is not \
-                 bound to",
+                "the project's placement constraints changed since the owner pinned them; the \
+                 owner must re-authorize",
             ));
         }
         let participants: BTreeSet<String> = crate::authz::project_row(t, j.project)?
@@ -980,10 +1028,14 @@ impl Control {
         let adm = self.admission_for_job(t, job, binding)?;
         let Some(ev) = evaluator else { return Ok(()) };
         let Some(now_admitted) = adm.admitted.iter().find(|a| a.id == ev) else {
-            let why = adm.excluded.iter().find(|(id, _)| id == ev).map_or(
-                "it is not a registered, active evaluator".to_owned(),
-                |(_, w)| w.clone(),
-            );
+            let why = if adm.hidden.contains(ev) {
+                "its operator takes no part in the project".to_owned()
+            } else {
+                adm.excluded.iter().find(|(id, _)| id == ev).map_or(
+                    "it is not a registered, active evaluator".to_owned(),
+                    |(_, w)| w.clone(),
+                )
+            };
             let code = if adm.separation.contains(ev) {
                 Code::GovernanceOperatorSeparation
             } else {

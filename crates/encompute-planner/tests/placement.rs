@@ -844,7 +844,7 @@ fn unrelated_tenant_evaluator_never_admitted_by_default() {
     assert!(a.admitted.is_empty());
     let why = a.why_none();
     assert!(
-        !why.contains("ev-stranger") && why.contains("outside the project"),
+        !why.contains("ev-stranger") && why.contains("no evaluator is available"),
         "{why}"
     );
     let e = plan_or_fail(&parse(PROGRAM).unwrap(), &only).unwrap_err();
@@ -916,4 +916,50 @@ fn platform_evaluator_unchanged() {
         false,
     );
     assert_eq!(ids(&admission(&ctx, None, &[], &BTreeSet::new())), ["ev-p"]);
+}
+
+#[test]
+fn outsider_evaluator_never_named_in_any_refusal_reason() {
+    let mut no_backend = offer(
+        "ev-secret",
+        "stranger",
+        Some(loc("gcp", "us-central1")),
+        LocationEvidence::Attested,
+    );
+    no_backend.backends = vec!["other".into()];
+    let with_backend = offer(
+        "ev-secret2",
+        "stranger",
+        Some(loc("gcp", "us-central1")),
+        LocationEvidence::Attested,
+    );
+    for (constraints, sep) in [
+        (vec![], false),
+        (vec![project(allow(&[de()]))], false),
+        (vec![], true),
+    ] {
+        let mut ctx = context(
+            constraints,
+            vec![no_backend.clone(), with_backend.clone()],
+            false,
+        );
+        if sep {
+            ctx.placement.as_mut().unwrap().roles.source_owners = ["stranger".to_owned()].into();
+            ctx.placement.as_mut().unwrap().roles.decryptors = ["stranger".to_owned()].into();
+        }
+        for backend in [Some("openfhe-exact"), None] {
+            let a = admission(&ctx, backend, &[], &BTreeSet::new());
+            assert!(a.admitted.is_empty());
+            let why = a.why_none();
+            for leak in ["ev-secret", "stranger", "outside", "1 ", "2 "] {
+                assert!(!why.contains(leak), "{leak} in {why}");
+            }
+        }
+        let e = plan_or_fail(&parse(PROGRAM).unwrap(), &ctx).unwrap_err();
+        assert!(
+            !e.message.contains("ev-secret") && !e.message.contains("stranger"),
+            "{}",
+            e.message
+        );
+    }
 }

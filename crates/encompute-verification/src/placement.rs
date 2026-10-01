@@ -272,6 +272,9 @@ pub fn check_pinned_placement(
 ) -> Result<()> {
     let refuse = |m: String| Error::new(Code::GovernanceClientPlacement, m);
     constraints.check().map_err(|e| refuse(e.message))?;
+    if url.is_empty() || pins.iter().any(|p| p.url.is_empty()) {
+        return Err(refuse("a pin names the URL the client sends to".into()));
+    }
     if !constraints.applies(&[Scope::Ciphertext]) {
         return Ok(());
     }
