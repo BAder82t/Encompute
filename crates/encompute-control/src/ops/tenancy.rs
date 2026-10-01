@@ -167,7 +167,7 @@ impl Control {
     /// First start: the platform organization and its first admin (an OIDC
     /// identity). Refused once any organization exists.
     pub fn bootstrap(&self, issuer: &str, subject: &str, email: Option<&str>) -> Result<String> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let n: i64 = t
                 .query_one("SELECT count(*) FROM organizations", &[])
                 .map_err(db_err)?
@@ -216,7 +216,7 @@ impl Control {
         if r.id == PLATFORM_ORG {
             return Err(conflict("the platform organization is reserved"));
         }
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             t.execute(
                 "INSERT INTO organizations (id, display_name, status, policy_namespace)
                  VALUES ($1, $2, 'active', $1)",
@@ -302,7 +302,7 @@ impl Control {
             return Err(bad("a user needs at least one role"));
         }
         let id = new_id("usr");
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             check_auditor_grant(t, org, &r.roles)?;
             t.execute(
                 "INSERT INTO users (id, organization_id, issuer, subject, email, status)
@@ -384,10 +384,14 @@ impl Control {
         // A disabled service's ID is never registered again, even when its
         // row is gone: whatever trusts it by ID (an asset's broker, an
         // evaluator) would trust the new key.
-        if self.anchor.snapshot().disabled_services.contains(&r.id) {
+        let disabled = {
+            let mut c = self.db.conn()?;
+            crate::govlog::contains(&mut *c, crate::govlog::NegSet::DisabledServices, &r.id)?
+        };
+        if disabled {
             return Err(conflict("this service ID or key is already registered"));
         }
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             check_auditor_grant(t, org, &r.roles)?;
             // An organization's key broker cannot take the name another
             // organization's assets give their broker (it would receive
@@ -447,7 +451,7 @@ impl Control {
             &[Role::OrganizationAdmin, Role::SecurityAdmin],
             "disabling a service account",
         )?;
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             // Platform services are stored without an organization, the
             // platform's automation accounts with `platform`: both are the
             // platform's to disable.
@@ -494,7 +498,7 @@ impl Control {
         })?;
         // Anchored before acknowledging: a restored database cannot bring
         // the account back.
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         Ok(out)
     }
 
@@ -508,7 +512,7 @@ impl Control {
             &[Role::OrganizationAdmin, Role::SecurityAdmin],
             "disabling a user",
         )?;
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let row = t
                 .query_opt(
                     "SELECT status FROM users WHERE id = $1 AND organization_id = $2 FOR UPDATE",
@@ -534,7 +538,7 @@ impl Control {
             )?;
             Ok(json!({"id": id, "status": "disabled"}))
         })?;
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         Ok(out)
     }
 
@@ -552,7 +556,7 @@ impl Control {
             "removing a role",
         )?;
         check_name("principal", &r.principal)?;
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let mut removed: Vec<(String, String)> = t
                 .query(
                     "DELETE FROM memberships WHERE principal_id = $1 AND organization_id = $2
@@ -602,7 +606,7 @@ impl Control {
         })?;
         // Anchored before acknowledging: a restored database cannot give
         // the role back.
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         Ok(out)
     }
 
@@ -672,7 +676,7 @@ impl Control {
         if new <= old {
             return Err(bad("the new key version must be newer"));
         }
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             audit::append(
                 t,
                 ctx.draft("key.rotated", "organization", org, Outcome::Succeeded)
@@ -731,7 +735,7 @@ impl Control {
             }
         }
         let id = new_id("prj");
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             // Auditor separation: the owner takes part from now on.
             if mode == GovernanceMode::Governed {
                 org_roles_lock(t, &r.organization)?;
@@ -930,7 +934,7 @@ impl Control {
             }
             v
         };
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let p = project_row(t, project)?.ok_or_else(|| not_found("project", project))?;
             let current: Option<(String, Participation)> = t
                 .query_opt(
@@ -1085,7 +1089,7 @@ impl Control {
         r: AddProjectMember,
     ) -> Result<Value> {
         check_name("organization", &r.organization)?;
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let p = project_row(t, project)?.ok_or_else(|| not_found("project", project))?;
             deny_auditor_role(&ctx.principal, &p)?;
             let own = ctx.principal.has_role(&r.organization, Role::OrganizationAdmin);
@@ -1171,7 +1175,7 @@ impl Control {
             )?;
             Ok(json!({"project": project, "member": r.organization, "removed": true, "failed_jobs": failed}))
         })?;
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         Ok(out)
     }
 }

@@ -487,12 +487,15 @@ fn restoring_an_older_backup_cannot_unrevoke_an_asset() {
         None,
     );
     assert_eq!(out["failed_jobs"], json!([job]));
-    assert!(t.control.anchor.snapshot().revoked.contains(&model_b));
+    assert!(t
+        .control
+        .anchored(encompute_control::govlog::NegSet::RevokedAssets, &model_b)
+        .unwrap());
     let env0 = t.env0;
     drop(t.control);
 
     // The older database still shows the asset active: refused.
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     let e = env0
         .start()
         .err()

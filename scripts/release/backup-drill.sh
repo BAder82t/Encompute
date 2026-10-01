@@ -740,6 +740,10 @@ ok b-owner POST "/v1/assets/$MODEL2/revoke" >/dev/null
 if [ "$BAO_OK" = 1 ]; then
   for _ in $(seq 50); do [ "$(broker_key_state model-8)" = destroyed ] && break; sleep 0.2; done
 fi
+# The revocation is a governance log event, newer than b1; its checkpoint
+# wrote it to the log's mirror next to the anchor before the anchor.
+check "the governance log mirror next to the anchor holds the revocation" \
+  test "$(cat "$LIVE"/anchor/governance-log/*.jsonl | grep -c "\"subject\":\"$MODEL2\"")" -ge 1
 stop "$KB_PID" "$EVAL_PID" "$CTL_PID"
 restore "$BACKUPS/b1" > "$W/restore3.txt"
 check "restoring the older backup keeps the newer anchor" contains "$W/restore3.txt" "anchor kept"
@@ -750,16 +754,28 @@ else
   wait "$CTL_PID" 2>/dev/null && rc=0 || rc=$?
   check "the control plane refuses to start on the older backup (exit $rc, not ready)" \
     test "$rc" -ne 0 -a "$(curl -fs "$CTL_URL/ready" >/dev/null 2>&1 && echo up || echo down)" = down
-  check "the refusal names PRIVACY STATE ROLLBACK and STARTUP REFUSED" \
-    eq "$(grep -c 'PRIVACY STATE ROLLBACK.*STARTUP REFUSED' "$CTL_LOG")" 1
+  check "the refusal names GOVERNANCE LOG STATE ROLLBACK and STARTUP REFUSED" \
+    eq "$(grep -c 'GOVERNANCE LOG STATE ROLLBACK.*STARTUP REFUSED' "$CTL_LOG")" 1
 fi
 if ctl verify-state >"$W/verify3.txt" 2>&1; then
   fail_check "verify-state refuses the older backup"
 else
-  check "verify-state refuses the older backup (PRIVACY STATE ROLLBACK, ledger $DS1)" \
-    eq "$(grep -c "PRIVACY STATE ROLLBACK.*$DS1" "$W/verify3.txt")" 1
+  check "verify-state refuses the older backup (GOVERNANCE LOG STATE ROLLBACK)" \
+    eq "$(grep -c "GOVERNANCE LOG STATE ROLLBACK" "$W/verify3.txt")" 1
 fi
+# The mirror rolled back too (its newest segment gone): recovery is refused.
+cp -a "$LIVE/anchor/governance-log" "$W/mirror-copy"
+rm -f "$(ls "$LIVE"/anchor/governance-log/*.jsonl | sort | tail -n 1)"
+ctl recover --operator drill-operator >"$W/recover0.txt" 2>&1 || true
+check "recover with a truncated mirror is refused" \
+  eq "$(grep -c "RECOVERY REFUSED" "$W/recover0.txt") $(grep -c RECOVERED "$W/recover0.txt")" "1 0"
+rm -rf "$LIVE/anchor/governance-log" && cp -a "$W/mirror-copy" "$LIVE/anchor/governance-log"
+# With the mirror intact, recovery restores the missing events from it on
+# its own, up to the anchored head.
 ctl recover --operator drill-operator >"$W/recover.txt" 2>&1 || true
+check "recover restores the governance log from the mirror" contains "$W/recover.txt" "from the mirror"
+check "recover re-applies the revocation the backup forgot" \
+  eq "$(grep -c "asset $MODEL2: revocation re-applied" "$W/recover.txt")" 1
 check "recover --operator freezes exactly the rolled-back ledger ($DS1, not $DS2)" eq \
   "$(grep -c "privacy ledger $DS1: frozen" "$W/recover.txt") $(grep -c "privacy ledger $DS2" "$W/recover.txt") $(grep -c RECOVERED "$W/recover.txt")" \
   "1 0 1"

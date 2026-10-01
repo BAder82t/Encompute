@@ -80,7 +80,17 @@ const HELP: &[(&str, &str, &str)] = &[
     (
         "encompute_state_rollback_total",
         "counter",
-        "Database state found behind the state anchor while running (privacy, audit): refused",
+        "Database state found behind the state anchor while running (privacy, audit, governance): refused",
+    ),
+    (
+        "encompute_mirror_rewrite_bytes",
+        "gauge",
+        "Size in bytes of the governance log mirror's open segment as last rewritten (at most about 256 KiB)",
+    ),
+    (
+        "encompute_mirror_write_seconds",
+        "summary",
+        "Time to write the governance log mirror's open segment at a checkpoint",
     ),
     (
         "encompute_anchor_bytes",

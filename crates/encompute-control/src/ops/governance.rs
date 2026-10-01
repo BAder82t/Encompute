@@ -30,8 +30,9 @@
 //! revocation fails the jobs under it that have not started.
 //!
 //! Purpose retirements and governance-key revocations are recorded in the
-//! governance event log (`govlog.rs`) in the same transaction; the log is
-//! not yet anchored against database rollback (a later step).
+//! governance event log (`govlog.rs`) in the same transaction and anchored
+//! with it: a restored database that shows them undone is refused at start
+//! (PURPOSE, GOVERNANCE KEY STATE ROLLBACK).
 
 use std::collections::BTreeMap;
 
@@ -177,7 +178,7 @@ impl Control {
         }
         let key_id = governance_key_id(&r.public_key);
         let id = new_id("gky");
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             t.execute(
                 "INSERT INTO governance_keys (id, organization_id, key_id, public_key, kms_key_ref, status, proposed_by)
                  VALUES ($1, $2, $3, $4, $5, 'proposed', $6)",
@@ -209,7 +210,7 @@ impl Control {
             &[Role::SecurityAdmin],
             "approving a governance key",
         )?;
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let r = t
                 .query_opt(
                     "SELECT status, proposed_by, key_id FROM governance_keys
@@ -267,7 +268,7 @@ impl Control {
             &[Role::SecurityAdmin, Role::OrganizationAdmin],
             "revoking a governance key",
         )?;
-        self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let r = t
                 .query_opt(
                     "SELECT status, key_id FROM governance_keys WHERE id = $1 AND organization_id = $2 FOR UPDATE",
@@ -302,7 +303,11 @@ impl Control {
                 .get(0);
             Ok(json!({"id": id, "organization": org, "key_id": key_id, "status": "revoked",
                       "revoked_at": revoked_at}))
-        })
+        })?;
+        // A deny event: anchored (mirror, then anchor) before it is
+        // acknowledged; a retry checkpoints again.
+        self.checkpoint_log()?;
+        Ok(out)
     }
 
     /// `org`'s governance keys, to its members.
@@ -429,7 +434,7 @@ impl Control {
         check_window(purpose.valid_from, purpose.valid_until)?;
         let id = purpose.id().hex();
         let document = serde_json::to_value(&purpose).expect("serializable");
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let p = governed_project(t, ctx, project)?;
             deny_auditor(&ctx.principal, &p)?;
             require_human(
@@ -496,7 +501,7 @@ impl Control {
     /// A different security admin of the proposing organization approves:
     /// the purpose becomes active (and can then be accepted).
     pub fn approve_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let (project, org, status, proposer, valid_until) = purpose_row(t, id, true)?;
             let p = project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
             deny_auditor(&ctx.principal, &p)?;
@@ -532,7 +537,7 @@ impl Control {
     /// key (the signed acceptance is kept as evidence).
     pub fn accept_purpose(&self, ctx: &Ctx, id: &str, r: AcceptPurpose) -> Result<Value> {
         let a = r.acceptance.body.clone();
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let (project, _, status, _, _) = purpose_row(t, id, true)?;
             let p = project_visible(t, &ctx.principal, &project).map_err(|_| not_found("purpose", id))?;
             deny_auditor(&ctx.principal, &p)?;
@@ -592,7 +597,7 @@ impl Control {
     /// A security admin of the proposing organization retires the purpose;
     /// it takes no new authorization, and is never active again.
     pub fn retire_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let (project, org, status, _, _) = purpose_row(t, id, true)?;
             let p = project_visible(t, &ctx.principal, &project)
                 .map_err(|_| not_found("purpose", id))?;
@@ -630,11 +635,15 @@ impl Control {
                 )?;
             }
             Ok(json!({"id": id, "project": project, "status": "retired"}))
-        })
+        })?;
+        // A deny event: anchored before it is acknowledged; a retry
+        // checkpoints again.
+        self.checkpoint_log()?;
+        Ok(out)
     }
 
     pub fn get_purpose(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let r = t
                 .query_opt(
                     "SELECT project_id, organization_id, status, document FROM purposes WHERE id = $1",
@@ -660,7 +669,7 @@ impl Control {
     }
 
     pub fn list_purposes(&self, ctx: &Ctx, project: &str) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             governed_project(t, ctx, project)?;
             let rows = t
                 .query(
@@ -698,7 +707,7 @@ impl Control {
         b.check_probing_limits()?;
         check_window(b.valid_from, b.valid_until)?;
         let id = new_id("atz");
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let p = governed_project(t, ctx, &b.project)?;
             deny_auditor(&ctx.principal, &p)?;
             require_human(
@@ -866,7 +875,7 @@ impl Control {
         id: &str,
         r: ApproveAuthorization,
     ) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let row = owned_authorization(t, ctx, id)?;
             require_human(
                 &ctx.principal,
@@ -952,7 +961,7 @@ impl Control {
     /// and a pseudonym of the approver, and without the signed copy (whose
     /// approvals name the approvers); the same bytes for each of them.
     pub fn get_authorization(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let (row, _) = authorization_row(t, ctx, id)?;
             let owner = ctx.principal.member_of(&row.org);
             let body = if owner {
@@ -1032,7 +1041,7 @@ impl Control {
         id: &str,
         r: AuthorizationSignature,
     ) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let row = owned_authorization(t, ctx, id)?;
             require_human(
                 &ctx.principal,
@@ -1125,7 +1134,7 @@ impl Control {
     /// execution that ran then. See [`usable_at`]; the enforcement phases
     /// call it inside their own transactions.
     pub fn authorization_usable_at(&self, authorization: &str, at: u64) -> Result<()> {
-        self.db.tx(|t| usable_at(t, authorization, at))
+        self.tx_anchored(|t| usable_at(t, authorization, at))
     }
 
     /// A person of the owning organization revokes the authorization (with
@@ -1139,7 +1148,7 @@ impl Control {
         r: RevokeAuthorization,
     ) -> Result<Value> {
         check_name("reason", &r.reason)?;
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             // One lock order everywhere: jobs (by ID) before the
             // authorizations they run under, as scheduling, start and
             // release tickets take them. The unstarted jobs under this
@@ -1248,7 +1257,7 @@ impl Control {
         })?;
         // Anchored before acknowledging (a retry of a revoked one
         // re-anchors); the brokers' messages go out only after that.
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         let _ = self.deliver_outbox();
         Ok(out)
     }

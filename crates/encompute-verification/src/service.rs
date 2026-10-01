@@ -33,8 +33,12 @@ pub const SERVICE_MESSAGE: &str = "encompute.service-message.v1";
 pub const JOB_GRANT: &str = "encompute.job-grant.v1";
 /// Domain of signed audit checkpoints.
 pub const AUDIT_CHECKPOINT: &str = "encompute.audit-checkpoint.v1";
-/// Domain of the control plane's state anchor (privacy and audit roots).
+/// Domain of the control plane's state anchor, version 1 (privacy and
+/// audit roots and the sets of security-negative IDs).
 pub const STATE_ANCHOR: &str = "encompute.state-anchor.v1";
+/// Domain of the control plane's state anchor, version 2 (privacy and
+/// audit roots and the governance event log's anchored head).
+pub const STATE_ANCHOR_V2: &str = "encompute.state-anchor.v2";
 
 /// Requests older or newer than this are refused.
 pub const MAX_CLOCK_SKEW_SECS: u64 = 300;

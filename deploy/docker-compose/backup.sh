@@ -2,7 +2,11 @@
 # Backs up the deployment's durable state into DIR:
 #   db.sql          PostgreSQL (organizations, projects, assets, plans, jobs,
 #                   privacy ledgers, trust metadata, audit records)
-#   anchor.tar      the state anchor (signed privacy and audit roots)
+#   anchor.tar      the state anchor (signed privacy and audit roots and the
+#                   governance log's head) with the governance log's mirror
+#                   (governance-log/: every anchored event, in immutable
+#                   segments), from which recovery restores the events an
+#                   older database backup lacks
 #   broker.tar      the key broker's state: wrapped keys and the wrapped KEK
 #                   (no plaintext key: the root key stays in the KMS). The
 #                   state is authenticated under the KEK, but restoring an
@@ -25,6 +29,8 @@ vol() { docker run --rm -v "encompute_$1:/v:ro" alpine tar -C /v -cf - . > "$DIR
 # order lets a spend (or an audit checkpoint) land between the two, and the
 # backup restores as a rollback that only `recover` (freezing) gets past.
 vol anchor
+test -n "$(tar -tf "$DIR/anchor.tar" | grep -m1 'governance-log/' || true)" \
+  || echo "note: the anchor volume holds no governance log mirror yet (written at the first checkpoint)" >&2
 docker compose exec -T postgres pg_dump -U encompute --clean --if-exists encompute > "$DIR/db.sql"
 vol broker; vol evaluator
 chmod 600 "$DIR"/*

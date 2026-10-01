@@ -36,13 +36,7 @@ fn deleted_then_recovered(t: T, f: impl FnOnce(&str), expect: &str, id: &str) ->
         "{notes:?}"
     );
     let t = env0.started();
-    assert!(t
-        .control
-        .anchor
-        .snapshot()
-        .lost
-        .iter()
-        .any(|l| l.ends_with(id)));
+    assert!(is_lost(&t, id), "{id} is not recorded as lost");
     t
 }
 

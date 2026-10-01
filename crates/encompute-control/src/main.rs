@@ -4,7 +4,8 @@
 //!     encompute-control migrate            apply database migrations
 //!     encompute-control verify-state       check the database extends the state anchor
 //!     encompute-control bootstrap --issuer ISS --subject SUB [--email E]
-//!     encompute-control recover --operator NAME
+//!     encompute-control recover --operator NAME [--governance-log FILE]
+//!     encompute-control export-governance-log [--after GSEQ]   (JSON lines on stdout)
 //!     encompute-control dev-token --subject SUB      (development only)
 //!     encompute-control public-key FILE              a service key file's public key
 //!
@@ -86,11 +87,30 @@ fn run(args: &[String]) -> Result<(), Error> {
             let signer = encompute_control::control::load_signer(&cfg)?;
             let store = encompute_control::anchor::open_store(&cfg.anchor)?;
             let c = Control::for_recovery(&cfg, db, signer, store)?;
-            for n in c.recover(&operator)? {
+            let export = match arg(args, "--governance-log") {
+                Some(f) => Some(std::fs::read_to_string(&f).map_err(|e| {
+                    Error::new(Code::BadInput, format!("--governance-log {f}: {e}"))
+                })?),
+                None => None,
+            };
+            for n in c.recover_importing(&operator, export.as_deref())? {
                 println!("{n}");
             }
             c.verify_state(true)?;
             println!("RECOVERED: frozen ledgers are treated as exhausted");
+        }
+        "export-governance-log" => {
+            // Read-only: the governance log's events after GSEQ, to keep a
+            // copy outside the database (recovery accepts it).
+            let after = match arg(args, "--after") {
+                Some(a) => a
+                    .parse::<i64>()
+                    .map_err(|_| Error::new(Code::BadInput, "--after GSEQ"))?,
+                None => 0,
+            };
+            let db = encompute_control::db::Db::connect(&cfg.database_url)?;
+            let mut c = db.conn()?;
+            print!("{}", encompute_control::govlog::export(&mut *c, after)?);
         }
         "serve" => {
             let c = Arc::new(Control::start(&cfg)?);
@@ -102,7 +122,7 @@ fn run(args: &[String]) -> Result<(), Error> {
             encompute_control::api::serve(c, &cfg.listen, workers)?;
         }
         _ => {
-            eprintln!("usage: encompute-control serve | migrate | verify-state | bootstrap --issuer ISS --subject SUB | recover --operator NAME | dev-token --subject SUB");
+            eprintln!("usage: encompute-control serve | migrate | verify-state | bootstrap --issuer ISS --subject SUB | recover --operator NAME [--governance-log FILE] | export-governance-log [--after GSEQ] | dev-token --subject SUB");
             return Err(Error::new(Code::BadInput, "unknown command"));
         }
     }

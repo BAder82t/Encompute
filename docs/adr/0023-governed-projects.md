@@ -607,7 +607,7 @@ As built (auditors and views):
 - Each owner signs revocation heads, so an exported bundle cannot silently
   omit a revocation.
 
-As built (event log, recorded alongside the anchor; schema version 13):
+As built (event log, schema version 13; its head anchored in place of the sets):
 
 - Every transition the state anchor records appends exactly one event in
   the same transaction: an asset revoked or expired, a service account or
@@ -641,9 +641,48 @@ As built (event log, recorded alongside the anchor; schema version 13):
   which stays last; the audit append and the audit checkpoint take it
   first, so the two are always locked in that order. The database's
   refusals do not stop a database superuser (as with the audit chain).
-- For now nothing reads the log to decide: the anchor still carries the
-  sets of IDs. Anchoring the log's head in their place, the project audit
-  route with proofs, witnessing and revocation heads follow.
+- The state anchor (version 2) holds the log's size and chain head in
+  place of the sets of IDs, so it no longer grows with them (it still
+  carries one checkpoint per privacy ledger; those move into the log
+  later). Each security-negative transition checkpoints the log before it
+  is acknowledged: the events after the anchored head must link and hash
+  correctly, each partition they touched gets a signed checkpoint, and
+  the anchor records the new head. A key broker hears of a revocation or
+  an expiry only once its event lies within the anchored size.
+- Every start recomputes the whole log and refuses one that does not hold
+  the anchored head at the anchored size, or whose partitions' latest
+  checkpoints are no longer their roots (GOVERNANCE LOG STATE ROLLBACK,
+  ENC2202, the code every state rollback uses); then a database that
+  shows undone any transition the log records (now including retired
+  purposes and revoked governance keys), or lost the row of one, is
+  refused naming it. These checks are SQL semi-joins on the log's index
+  of kinds, never sets held in memory.
+- Recovery re-applies what the log records, each re-application an event
+  of its own (`<kind>.reapplied`; `row.lost` for a lost row,
+  `ledger.frozen` for a frozen ledger). It needs the log to hold the
+  anchored head first: after restoring a backup older than the anchor,
+  the log's missing events come back from a newer copy of its tables or
+  an export, which is accepted only if it continues the database's log
+  and reaches the anchored head.
+- The anchor store keeps a mirror of the log: each checkpoint writes the
+  new events as an immutable segment before the anchor's compare-and-set,
+  which stays the commit point. Recovery after an older database backup
+  takes the missing events from it, only up to the signed anchor's size
+  and head; a suffix past it is an orphan, never used. Every start checks
+  that the mirror reaches the anchored head. A security-negative
+  transition's call returns only after its checkpoint (mirror, then
+  anchor) is durable; if that fails the call fails, the database still
+  enforces the change, and a retry anchors it.
+- A version-1 anchor migrates once, at the first start, only after every
+  check its release made passes: one transaction writes the genesis event
+  (the version-1 anchor's digest; the signed anchor kept beside the log,
+  outside the shared leaf) and one event per ID of its sets, then the
+  anchor is replaced compare-and-set. A crash in between resumes; a
+  version-1 anchor stored again after the log moved on, or another one
+  than the migrated, is refused. Earlier releases refuse a version-2
+  anchor: there is no downgrade.
+- The project audit route with proofs, witnessing and revocation heads
+  follow.
 
 ### 13. Error codes (D13)
 

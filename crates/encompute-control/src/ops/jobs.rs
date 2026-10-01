@@ -642,7 +642,7 @@ impl Control {
             estimated_gates: estimated_gates(&compiled),
         };
         let id = new_id("pln");
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             t.execute(
                 "INSERT INTO plans (id, organization_id, project_id, program_id, spec_id, program, document, created_by)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -816,7 +816,7 @@ impl Control {
         digest: &str,
     ) -> Result<(Value, bool)> {
         let denied: Denied = RefCell::new(None);
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let project = project_visible(t, &ctx.principal, &r.project)?;
             deny_auditor(&ctx.principal, &project)?;
             let orgs = project_role_orgs(&ctx.principal, &project, &[Role::MlDeveloper]);
@@ -1271,9 +1271,8 @@ impl Control {
         // One owner authorization per source, and, for a derived result,
         // one of every organization owning an ancestor of it (consent
         // carries through derivation: the custodian's alone never
-        // suffices). What the anchor holds revoked stays revoked, whatever
-        // the database says now.
-        let anchored = self.anchor.snapshot().revoked_authorizations;
+        // suffices). What the governance log holds revoked stays revoked,
+        // whatever the authorization's row says now.
         // (source, authorizing organization) → (row, document).
         let mut chosen: BTreeMap<(String, String), (String, SignedAuthorizationV2)> =
             BTreeMap::new();
@@ -1306,7 +1305,14 @@ impl Control {
                     .map(|(_, x)| x.body.asset_digest_commitment.clone());
                 let mut refusal: Option<(&'static str, Error)> = None;
                 for (row, aid, signed) in candidates {
-                    if anchored.contains(&row) || aid.as_ref().is_some_and(|x| anchored.contains(x))
+                    let mut ids = vec![row.as_str()];
+                    ids.extend(aid.as_deref());
+                    if crate::govlog::first_in(
+                        t,
+                        crate::govlog::NegSet::RevokedAuthorizations,
+                        &ids,
+                    )?
+                    .is_some()
                     {
                         refusal.get_or_insert((
                             "revoked_authorization",
@@ -1559,7 +1565,7 @@ impl Control {
     ///    (ENC2715); or, for a derived result, a source of it revoked or
     ///    expired since (ENC2706, ENC2705);
     /// 4. each authorization: not the document recorded (ENC2703), no
-    ///    longer active (revoked, in the database or the anchor: ENC2706;
+    ///    longer active (revoked, in the database or the governance log: ENC2706;
     ///    otherwise ENC2701), for another version (ENC2704), unusable at
     ///    `at` (its window, governance key, purpose or version: ENC2705,
     ///    ENC2706, ENC2708), or no longer covering the job (ENC2703,
@@ -1777,8 +1783,8 @@ impl Control {
     /// One authorization a governed job runs under (row `row`, document
     /// `authorization_id`), checked at `at` with its row share-locked: the
     /// per-authorization step of [`Self::revalidate_governed`], and what a
-    /// release ticket checks for its source. Refused: revoked in the anchor
-    /// or the database (ENC2706), no longer active (ENC2701), not the
+    /// release ticket checks for its source. Refused: revoked in the
+    /// governance log or the database (ENC2706), no longer active (ENC2701), not the
     /// recorded document or its purpose (ENC2703), for another version
     /// than its source in `versions` (asset → version, ENC2704), unusable at
     /// `at` (ENC2705, ENC2706, ENC2708), no longer matching the binding's
@@ -1793,8 +1799,9 @@ impl Control {
         let (row, aid) = (b.row, b.authorization_id);
         let identity = |m: String| gov(Code::GovernanceProgramNotAuthorized, m);
         let withdrawn = |m: String| gov(Code::GovernanceAuthorizationRevoked, m);
-        let anchored = self.anchor.snapshot().revoked_authorizations;
-        if anchored.contains(row) || anchored.contains(aid) {
+        if crate::govlog::first_in(t, crate::govlog::NegSet::RevokedAuthorizations, &[row, aid])?
+            .is_some()
+        {
             return Err(withdrawn(format!("authorization {row} was revoked")));
         }
         let r = t
@@ -1898,7 +1905,7 @@ impl Control {
     /// same code and message). Returns `not_after`. For a later layer (an
     /// execution epoch) to bind to; the transitions themselves call it.
     pub fn revalidate_governed_job(&self, id: &str, stage: GovernedStage) -> Result<u64> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let j = job_row(t, id, false)?.ok_or_else(|| not_found("job", id))?;
             self.revalidate_governed(t, &j, stage, now())
         })
@@ -2072,46 +2079,41 @@ impl Control {
     }
 
     pub fn cancel_job(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.db
-            .tx(|t| {
-                let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
-                job_visible(t, ctx, &j)?;
-                job_project(t, ctx, &j)?;
-                if !ctx.principal.member_of(&j.organization) {
-                    return Err(not_found("job", id));
-                }
-                require(
-                    &ctx.principal,
-                    &j.organization,
-                    &[
-                        Role::MlDeveloper,
-                        Role::OrganizationAdmin,
-                        Role::SecurityAdmin,
-                    ],
-                    "cancelling a job",
-                )?;
-                self.transition_in(
-                    t,
-                    ctx.actor(),
-                    &ctx.request_id,
-                    id,
-                    JobState::Cancelled,
-                    Some("cancelled"),
-                )?;
-                audit::append(
-                    t,
-                    ctx.draft("job.cancelled", "job", id, Outcome::Succeeded)
-                        .org(&j.organization)
-                        .project(&j.project),
-                )?;
-                Ok(json!({"id": id, "state": "cancelled"}))
-            })
-            .and_then(|v| {
-                // Anchored before acknowledging: a restored database cannot
-                // bring the job back.
-                self.sync_anchor()?;
-                Ok(v)
-            })
+        self.tx_anchored(|t| {
+            let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
+            job_visible(t, ctx, &j)?;
+            job_project(t, ctx, &j)?;
+            if !ctx.principal.member_of(&j.organization) {
+                return Err(not_found("job", id));
+            }
+            require(
+                &ctx.principal,
+                &j.organization,
+                &[
+                    Role::MlDeveloper,
+                    Role::OrganizationAdmin,
+                    Role::SecurityAdmin,
+                ],
+                "cancelling a job",
+            )?;
+            self.transition_in(
+                t,
+                ctx.actor(),
+                &ctx.request_id,
+                id,
+                JobState::Cancelled,
+                Some("cancelled"),
+            )?;
+            audit::append(
+                t,
+                ctx.draft("job.cancelled", "job", id, Outcome::Succeeded)
+                    .org(&j.organization)
+                    .project(&j.project),
+            )?;
+            Ok(json!({"id": id, "state": "cancelled"}))
+        })
+        // (`tx_anchored` anchors the cancellation before it returns: a
+        // restored database cannot bring the job back.)
     }
 
     /// An owner approves a job that uses its asset (assets whose policy
@@ -2119,7 +2121,7 @@ impl Control {
     /// field is ignored: see [`Self::approve_governed`].
     pub fn approve_job(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         let ended = std::cell::Cell::new(false);
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             ended.set(false);
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             job_visible(t, ctx, &j)?;
@@ -2177,7 +2179,7 @@ impl Control {
         })?;
         if ended.get() {
             // Anchored as ended: a restored database cannot revive it.
-            self.sync_anchor()?;
+            self.checkpoint_log()?;
         }
         out?;
         let _ = self.schedule_job(id);
@@ -2364,7 +2366,7 @@ impl Control {
     /// role now) is not failed but waits for approval again; once
     /// scheduled, start refuses and fails it instead.
     pub fn schedule_job(&self, id: &str) -> Result<bool> {
-        let (placed, ended) = self.db.tx(|t| {
+        let (placed, ended) = self.tx_anchored(|t| {
             let Some(j) = job_row(t, id, true)? else { return Ok((false, false)) };
             if j.state != JobState::Authorized {
                 return Ok((false, false));
@@ -2488,7 +2490,7 @@ impl Control {
         })?;
         if ended {
             // Anchored as ended: a restored database cannot revive it.
-            self.sync_anchor()?;
+            self.checkpoint_log()?;
         }
         Ok(placed)
     }
@@ -2501,7 +2503,7 @@ impl Control {
             return Err(forbidden("only the scheduled evaluator starts a job"));
         }
         let ended = std::cell::Cell::new(false);
-        let r = self.db.tx(|t| {
+        let r = self.tx_anchored(|t| {
             ended.set(false);
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             if j.evaluator.as_deref() != Some(ctx.actor()) {
@@ -2573,7 +2575,7 @@ impl Control {
             Ok(Ok(json!({"id": id, "state": "running", "grant": g})))
         })?;
         if ended.get() {
-            self.sync_anchor()?;
+            self.checkpoint_log()?;
         }
         r
     }
@@ -2587,9 +2589,8 @@ impl Control {
         receipt: &Value,
         eval_seconds: Option<f64>,
     ) -> Result<Value> {
-        let out = self
-            .db
-            .tx(|t| self.evaluator_completed_in(t, evaluator, request, id, receipt))?;
+        let out =
+            self.tx_anchored(|t| self.evaluator_completed_in(t, evaluator, request, id, receipt))?;
         if let Some(s) = eval_seconds {
             self.metrics
                 .observe("encompute_evaluation_duration_seconds", "all", s);
@@ -2668,7 +2669,7 @@ impl Control {
     /// the exact bytes it sent and got; the control plane verifies every
     /// binding against the job's spec and the registered evaluator key.
     pub fn complete_job(&self, ctx: &Ctx, id: &str, r: CompleteJob) -> Result<Value> {
-        let res = self.db.tx(|t| {
+        let res = self.tx_anchored(|t| {
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             job_visible(t, ctx, &j)?;
             job_project(t, ctx, &j)?;
@@ -2983,7 +2984,7 @@ impl Control {
         if let Some(g) = &j.governance {
             let status = match j.started_at {
                 None => Err(conflict("the job never started")),
-                Some(at) => self.db.tx(|t| {
+                Some(at) => self.tx_anchored(|t| {
                     let mut current = vec![];
                     for row in g.authorizations.keys() {
                         crate::ops::governance::usable_at(t, row, at)?;
@@ -3074,7 +3075,7 @@ impl Control {
         if r.memory_bytes.is_some_and(|n| n <= 0) {
             return Err(bad("memory_bytes must be positive"));
         }
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let status: String = t.query_one(
                 "INSERT INTO evaluators (id, service_account, url, receipt_key, backends, profiles, openfhe_version, capacity, status,
                                          cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates)
@@ -3146,14 +3147,14 @@ impl Control {
             audit::append(t, d)?;
             Ok(json!({"id": r.id, "status": status, "control_public_key": self.signer.public_key_hex()}))
         })?;
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         Ok(out)
     }
 
     /// Heartbeat / status: the evaluator itself (ready, busy, draining,
     /// unhealthy) or a platform operator (draining, ready).
     pub fn evaluator_status(&self, ctx: &Ctx, id: &str, r: EvaluatorStatus) -> Result<Value> {
-        self.db.tx(|t| self.evaluator_status_in(t, ctx, id, &r))
+        self.tx_anchored(|t| self.evaluator_status_in(t, ctx, id, &r))
     }
 
     fn evaluator_status_in(
@@ -3249,7 +3250,7 @@ impl Control {
     /// re-authorized (they never started); running jobs on an evaluator
     /// that is gone fail (never replayed).
     pub fn expire_evaluators(&self) -> Result<()> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             t.execute(
                 "UPDATE evaluators SET status = 'unhealthy'
                   WHERE status IN ('ready', 'busy') AND last_heartbeat < now() - make_interval(secs => $1)",
@@ -3322,7 +3323,7 @@ impl Control {
             // The ledger applies an event once by its ID, under the
             // ledger row's lock, in its own transaction (and anchors it
             // after commit): a concurrent duplicate finds the entry.
-            if let Some(v) = self.db.tx(|t| duplicate(t))? {
+            if let Some(v) = self.tx_anchored(|t| duplicate(t))? {
                 return Ok(v);
             }
             let asset = m.payload["asset"]
@@ -3342,7 +3343,7 @@ impl Control {
         }
         // One transaction: the inbox row first (a concurrent delivery of
         // the same message waits on it, then finds it), then the effect.
-        let outcome = self.db.tx(|t| {
+        let outcome = self.tx_anchored(|t| {
             let fresh = t
                 .execute(
                     "INSERT INTO inbox (consumer, message_id, outcome) VALUES ($1, $2, 'null') ON CONFLICT DO NOTHING",
@@ -3477,24 +3478,28 @@ impl Control {
             .iter()
             .map(|r| (r.get(0), r.get(1), r.get(2)))
             .collect();
-        let anchored = self.anchor.snapshot();
         for (id, url, env) in pending {
             let m: MessageEnvelope = serde_json::from_value(env).map_err(db_err)?;
             // A key broker learns of a revocation only once the anchor holds
-            // it: a restored database cannot then un-revoke an asset whose
-            // key the broker already destroyed without it being noticed.
-            // Likewise an owner authorization's revocation and an asset's
-            // expiry.
-            let (field, set) = match m.kind.as_str() {
-                "asset.revoked" => ("asset", Some(&anchored.revoked)),
-                "authorization.revoked" => {
-                    ("authorization", Some(&anchored.revoked_authorizations))
-                }
-                "asset.expired" => ("asset", Some(&anchored.expired_assets)),
-                _ => ("", None),
+            // the governance log's event of it (its position is at most the
+            // anchored size): a restored database cannot then un-revoke an
+            // asset whose key the broker already destroyed without it being
+            // noticed. Likewise an owner authorization's revocation and an
+            // asset's expiry.
+            let gate = match m.kind.as_str() {
+                "asset.revoked" => Some(("asset", crate::govlog::NegSet::RevokedAssets)),
+                "authorization.revoked" => Some((
+                    "authorization",
+                    crate::govlog::NegSet::RevokedAuthorizations,
+                )),
+                "asset.expired" => Some(("asset", crate::govlog::NegSet::ExpiredAssets)),
+                _ => None,
             };
-            if let Some(set) = set {
-                if !m.payload[field].as_str().is_some_and(|x| set.contains(x)) {
+            if let Some((field, set)) = gate {
+                let Some(subject) = m.payload[field].as_str() else {
+                    continue;
+                };
+                if !self.anchored(set, subject)? {
                     continue;
                 }
             }

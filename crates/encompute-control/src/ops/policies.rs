@@ -28,7 +28,7 @@ impl Control {
             ));
         }
         let digest = sha256_hex(&canonical_json(&document)?);
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let p = project_visible(t, &ctx.principal, project)?;
             deny_auditor(&ctx.principal, &p)?;
             let orgs = project_role_orgs(&ctx.principal, &p, &[Role::SecurityAdmin]);
@@ -52,7 +52,7 @@ impl Control {
     }
 
     pub fn approve_policy(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let r = t
                 .query_opt(
                     "SELECT organization_id, project_id, status, created_by, digest FROM policies WHERE id = $1 FOR UPDATE",

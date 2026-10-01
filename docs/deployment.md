@@ -324,7 +324,7 @@ The scheduled evaluator of a governed job asks the control plane for a
 ticket per source (`POST /v1/jobs/{id}/release-ticket`); a ticket lives at
 most five minutes and never beyond the job's governed window or grant.
 When an owner revokes an authorization, the control plane anchors the
-revocation first, then tells the organization's registered brokers
+revocation (its governance log event) first, then tells the organization's registered brokers
 (`authorization.revoked`); the owner can always revoke at its own broker
 directly, without the control plane.
 
@@ -358,6 +358,46 @@ directly, without the control plane.
   backup together with its matching anchor, then start the older
   release.
 
+## Upgrading from 0.3.0: state anchor version 2
+
+The state anchor of 0.3.0 (version 1) held the sets of every revoked,
+disabled, ended, withdrawn, removed and expired ID, and grew with each.
+This release keeps them in the governance event log (one event per
+transition, written in the same transaction) and anchors only the log's
+size and head, so the anchor no longer grows with them.
+
+- **Migration, at the first start.** Nothing to run by hand. The control
+  plane first makes every check 0.3.0 made at its start; if the database
+  does not extend the version-1 anchor, it refuses to start and migrates
+  nothing (recover with 0.3.0 first, then upgrade). Otherwise one
+  transaction writes an `anchor.genesis` event (the version-1 anchor's
+  digest; the signed anchor itself is kept beside the log) and one event
+  per ID of its sets (`migrated.<set>`, in the project's or
+  organization's partition where the database knows it; `ledger.frozen`
+  for a frozen ledger; `row.lost` for a row recovery recorded lost), then
+  the log's mirror is written into the anchor store and the anchor is
+  replaced by version 2, compare-and-set on its counter. The checks, the
+  gathering and the events share one snapshot under the log's lock: a
+  transition committed meanwhile waits and is logged after them.
+  The start logs `state_anchor_migrated`. The version-1 anchor stays
+  authoritative until the replacement: there is no window in which a
+  rollback goes unnoticed.
+- **A crash during the migration** (after the transaction, before the
+  replacement) is completed by the next start, which finds the genesis
+  event with the stored anchor's digest. A start refuses a stored
+  version-1 anchor once the log moved on after its migration, or that is
+  another anchor than the one migrated (ANCHOR STATE ROLLBACK): the anchor
+  store was rolled back or replaced.
+- **No downgrade.** Earlier releases refuse a version-2 anchor and do not
+  start. Take a database backup and a copy of the anchor before
+  upgrading; to roll back, restore both together and start the older
+  release.
+- **Mirror.** The migration also writes the log's mirror (below) before it
+  replaces the anchor.
+- **Recovery** runs only on a version-2 anchor: `encompute-control
+  recover` on a version-1 anchor tells you to recover with the release
+  that wrote it.
+
 ## Privacy state and backups
 
 The privacy ledgers (every charged release) live in PostgreSQL, hash-chained,
@@ -368,12 +408,17 @@ The control plane signs into the **state anchor**:
 
 - the ledgers' latest roots, after every spend;
 - the audit chain's root, at each checkpoint;
-- every security-negative transition: revoked assets, frozen ledgers,
-  disabled service accounts and users, cancelled and failed jobs,
-  withdrawn asset approvals (including the grants an organization lost by
-  leaving a project), removed project memberships, organization roles
-  removed from a user or service account, revoked owner authorizations of
-  governed projects, and expired assets.
+- the governance event log's size and head, after every
+  security-negative transition and before it is acknowledged: revoked
+  assets, frozen ledgers, disabled service accounts and users, cancelled
+  and failed jobs, withdrawn asset approvals (including the grants an
+  organization lost by leaving a project), removed project memberships,
+  organization roles removed from a user or service account, revoked
+  owner authorizations of governed projects, retired purposes, revoked
+  governance keys and expired assets. Each is an event of the log,
+  written in the same transaction; the anchor holds only where the log
+  stands, so its size does not grow with them. A key broker is told of a
+  revocation or an expiry only once its event is anchored.
 
 The anchor is kept outside the database: on its own volume, or in the
 customer's vault (OpenBao or Vault KV). It only moves forward along the
@@ -382,7 +427,9 @@ same chains. Run one control-plane process per anchor.
 While the service runs, a spend on a ledger that no longer extends the
 anchor is refused (ENC2202 PRIVACY STATE ROLLBACK), and so is an audit
 checkpoint over a chain that does not extend the anchored one (ENC2202
-AUDIT STATE ROLLBACK). Neither is written into the anchor. Each raises an
+AUDIT STATE ROLLBACK), and so is a governance log checkpoint over a log
+that does not extend the anchored head (GOVERNANCE LOG STATE ROLLBACK).
+None is written into the anchor. Each raises an
 alarm: a `state_rollback_detected` log line and the
 `encompute_state_rollback_total` metric. A ledger frozen in the anchor is
 refused for spending whatever the database says (ENC2201).
@@ -394,19 +441,120 @@ control plane refuses to start:
 error[ENC2202]: PRIVACY STATE ROLLBACK: ... STARTUP REFUSED
 ```
 
-The same refusal names AUDIT, FREEZE (a frozen ledger shown spendable),
-REVOCATION, SERVICE ACCOUNT, USER, JOB (a cancelled or failed job shown
-live), APPROVAL (a withdrawn asset approval held again), MEMBERSHIP (an
-organization listed again in a project it left), ROLE (a removed role
-held again), AUTHORIZATION (a revoked owner authorization shown unrevoked)
-or EXPIRY (an expired asset shown unexpired) when that is what the
-database undid. That happens when an older
+The same refusal names GOVERNANCE LOG (the log does not verify, or does
+not hold the anchored head at the anchored size: events dropped,
+truncated, reordered or rewritten), AUDIT, FREEZE (a frozen ledger shown
+spendable), REVOCATION, SERVICE ACCOUNT, USER, JOB (a cancelled or failed
+job shown live), APPROVAL (a withdrawn asset approval held again),
+MEMBERSHIP (an organization listed again in a project it left), ROLE (a
+removed role held again), AUTHORIZATION (a revoked owner authorization
+shown unrevoked), EXPIRY (an expired asset shown unexpired), PURPOSE (a
+retired purpose shown active) or GOVERNANCE KEY (a revoked governance key
+shown unrevoked) when that is what the database undid. The startup check
+recomputes the whole log (about 1.6 seconds for 100,000 events on a
+development machine). That happens when an older
 database backup was restored, or the database was edited. Recovery is
 explicit:
 
 ```sh
-encompute-control recover --operator NAME
+encompute-control recover --operator NAME [--governance-log FILE]
 ```
+
+### The governance log mirror
+
+Every checkpoint appends the log's new events to a mirror in the anchor
+store, **before** the signed anchor is replaced (the anchor's
+compare-and-set is the commit point): events are appended, the new head
+computed, the mirror written durably (fsync), then the anchor stored. In a
+directory store the mirror is `governance-log/` next to
+`state-anchor.json`: numbered segment files (`NNNNNNNNNNNN.jsonl`, the
+number is the whole name), each holding contiguous events, at most 500
+events and about 256 KiB (a read refuses more than 512 KiB; an OpenBao KV
+entry may be 1 MiB). A checkpoint extends the last, not yet full,
+segment by replacing it atomically (temporary file, fsync, rename, fsync of
+the directory) with one that holds the same events and the new ones, and
+creates a further segment (one create-only operation on its name: a hard
+link, or an exclusive create where links are unsupported; in OpenBao KV a
+`cas: 0` write of one entry under `<path>-glog/`) only when it fills, so
+segments grow with the log, not with the number of checkpoints. Two
+writers racing for a segment: exactly one wins, the other fails closed and
+retries. Only one control plane per anchor store is supported. The anchor
+file itself is written the same atomic way (unique temporary name, fsync,
+rename, directory fsync; a leftover temporary file is ignored). The signed anchor is the only authority: the
+mirror is used only up to the anchored size and only if it chains,
+recomputed, to the anchored head. A suffix past it (a crash between the
+mirror and the anchor) is an orphan: logged (`governance_mirror_orphan`),
+never recovered from, and rewritten from the database's own events at the
+next checkpoint. A replacement never shrinks or alters what the anchor already holds (a
+stale writer is refused), and the anchor never moves unless the mirror
+reaches the new head. A mirror that is truncated, reordered, forked or edited
+refuses the start (GOVERNANCE LOG STATE ROLLBACK) until recovery rebuilds
+it from a database that extends the anchor.
+
+A security deny event (a revocation, expiry, disable, removal, retirement,
+withdrawal, cancellation) checkpoints synchronously: the call returns
+success only after the mirror and the anchor are durable, and a failed
+checkpoint fails the call. The change may already be committed to the
+database, which enforces it; retrying the call is idempotent and anchors
+it, and the background task anchors it otherwise. Ordinary events are
+batched by the background checkpoint.
+
+Size and pruning: about 300 bytes per event, so 100,000 events are about
+30 MB in about 200 segments. The mirror is never pruned below the anchored head. Segments may be
+compacted (rewritten as fewer, larger segments starting at event 1) only
+when the result still chains to the anchored head. Keep the anchor store
+backed up with the anchor.
+
+Recovery reads what to re-apply from the governance log, so the log must
+first hold the anchored head. It takes the missing events from the mirror
+by itself (streaming, segment by segment, verifying a running hash), exactly up to the anchored head; the export below is a second
+path, and the only one when the mirror is lost too. A restored backup older than the anchor
+lacks the log's latest events; recovery takes them from the **governance
+log mirror** in the anchor store (below) on its own, exactly up to the
+anchored head, after checking that they chain to it. If the mirror cannot
+supply them (it was rolled back or truncated with the database, or
+damaged), recovery refuses (GOVERNANCE LOG STATE ROLLBACK ... RECOVERY
+REFUSED) until they are back: restore the log's tables
+(`governance_events`, `governance_tree_nodes`, `governance_head`,
+`governance_checkpoints`, `governance_anchor_genesis`) from a newer
+backup or replica, or pass an export with `--governance-log FILE`
+(`encompute-control export-governance-log > FILE`, JSON lines;
+read-only). An export holds events and their hashes only, no private
+data; recovery appends the events the database lacks only if they
+continue its log and reach the anchored head, so an export from anywhere
+is safe to use.
+
+### The governance log mirror
+
+Every checkpoint of the governance log writes the events since the
+mirror's end into the anchor store **before** it replaces the anchor; the
+anchor's compare-and-set is the commit point. The mirror lives next to the
+anchor: `governance-log/` in the anchor directory (one immutable file per
+segment, written to a temporary name, synced, linked into place without
+replacing anything, and the directory synced), or `<path>-glog/<segment>`
+entries in the OpenBao/Vault KV mount (created only if absent). A segment
+is named by its number in write order and the events it holds
+(`{n}-{from}-{to}`), at most 500 events each.
+
+- The signed anchor is the only authority: recovery uses the mirror only
+  up to the anchored size and only when it chains to the anchored head.
+  Events past it (a crash between the mirror's write and the anchor's) are
+  an orphan: logged (`governance_mirror_orphan`), never recovered from,
+  and replaced by the next checkpoint with the database's own events.
+- Every start checks that the mirror reaches the anchored head. A
+  truncated, reordered, forked or edited mirror is refused (GOVERNANCE LOG
+  STATE ROLLBACK); `encompute-control recover` rebuilds it from a database
+  whose log extends the anchor (a new segment that starts at the first
+  event, which reading then starts from).
+- **Size.** The mirror grows with the log: roughly 400 bytes per event
+  and one segment per checkpoint (each security-negative transition
+  checkpoints at once). It is never pruned below the anchored head.
+  Segments may be compacted into one that starts at the first event, but
+  only when the result still chains to the anchored head (recovery's
+  rebuild does exactly that). On OpenBao each segment is one KV entry;
+  reading the mirror at start reads every segment.
+- Back it up with the anchor (`backup.sh` captures the anchor volume, the
+  mirror included; `restore.sh` restores both only into an empty volume).
 
 It **freezes** every rolled-back ledger: the ledger is treated as exhausted,
 so budget the database forgot is never spent again. Ledgers the anchor had
@@ -418,8 +566,13 @@ twice). Withdrawn asset approvals are withdrawn again, organizations
 that left a project are removed from it again, and removed roles are
 removed again. Revoked owner authorizations are revoked again and expired
 assets expire again, each at the time of recovery, and their key brokers
-are told again. It records all of this,
-and any audit gap, in the audit trail. If the database lost a frozen
+are told again. Retired purposes are retired, and revoked governance keys
+revoked, again, each at its originally recorded time. Each
+re-application is a log event of its own (`<kind>.reapplied`, or the
+transition's own kind where the usual path re-applies it), a row the
+database lost is recorded lost (`row.lost`; its ID stays blocked), and a
+ledger frozen is `ledger.frozen`. It records all of this,
+and any audit gap, in the audit trail, then checkpoints the log. If the database lost a frozen
 ledger's row but still holds its asset, recovery re-creates the row,
 frozen, with no entries and a placeholder budget that pays for nothing
 (audited as `privacy.ledger.frozen` with `ledger=recreated_missing_row`);
@@ -427,8 +580,8 @@ that ledger stays exhausted.
 
 **Back up** ([backup.sh](../deploy/docker-compose/backup.sh)):
 
-- PostgreSQL;
-- the anchor;
+- PostgreSQL (with the governance log's tables);
+- the anchor, with the governance log's mirror beside it;
 - the key broker's state (wrapped keys only);
 - the evaluator's receipt identity.
 
@@ -570,17 +723,20 @@ Every refusal is ENC2605.
   - trust failures;
   - SecAgg round durations;
   - state rollbacks found while running (`encompute_state_rollback_total`,
-    labelled `privacy` or `audit`);
+    labelled `privacy`, `audit` or `governance`);
+  - the governance log mirror's open segment: its size as last rewritten
+    (`encompute_mirror_rewrite_bytes`, a gauge, at most about 256 KiB) and
+    the time each rewrite takes (`encompute_mirror_write_seconds`);
   - service accounts still holding `security_admin`
     (`encompute_legacy_service_admins`, a gauge that should be 0);
   - the size of the signed state anchor in bytes
-    (`encompute_anchor_bytes`, a gauge). The anchor keeps every ended job,
-    disable, withdrawal and removal, and is rewritten whole on each
-    update. OpenBao's KV store refuses an entry larger than its raft
-    `max_entry_size` (1 MiB by default, roughly 25,000 to 30,000 ended
-    jobs); from then on anchor writes fail and the control plane fails
-    closed (privacy spends, cancellations and revocation acknowledgements
-    stop). Above 512 KiB every start and every anchor write logs an
+    (`encompute_anchor_bytes`, a gauge). Security-negative transitions no
+    longer grow it (they are governance log events); it keeps one
+    checkpoint per privacy ledger and is rewritten whole on each update.
+    OpenBao's KV store refuses an entry larger than its raft
+    `max_entry_size` (1 MiB by default); from then on anchor writes fail
+    and the control plane fails closed (privacy spends, cancellations and
+    revocation acknowledgements stop). Above 512 KiB every start and every anchor write logs an
     `anchor_size_warning` line. Alert on `encompute_anchor_bytes >
     524288`, and raise `max_entry_size` on the vault before the limit is
     reached.
@@ -628,7 +784,8 @@ encompute-control migrate                # apply database migrations (versioned;
 encompute-control bootstrap --issuer ISS --subject SUB   # the first platform admin
 encompute-control serve
 encompute-control verify-state           # does the database extend the anchor?
-encompute-control recover --operator NAME
+encompute-control recover --operator NAME [--governance-log FILE]
+encompute-control export-governance-log [--after GSEQ] > FILE   # the log's events, JSON lines
 encompute-control public-key FILE        # a service key's public key, for registration
 
 encompute login --url URL --token-file TOKEN

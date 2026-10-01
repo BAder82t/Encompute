@@ -1,5 +1,5 @@
 -- Encompute control plane, schema version 13: the governance event log
--- (governed projects, part 8), recorded alongside the state anchor.
+-- (governed projects, part 8), whose head the state anchor holds.
 --
 -- Every security-negative governance transition (a revoked or expired
 -- asset, a disabled service account or user, a cancelled or failed job, a
@@ -35,11 +35,15 @@
 -- (the head row is only ever moved forward by an append). The triggers
 -- stop the control plane and anyone using its credentials as granted; they
 -- do not stop a database superuser or the table owner, who can disable
--- them (as with the audit chain). Against those, the anchored head (a
--- later version) and the members' witnessed checkpoints are the defence.
--- In this version
--- the log is recorded but not yet anchored: the state anchor still holds
--- the sets of negative IDs.
+-- them (as with the audit chain). Against those, the anchored head (the
+-- state anchor holds the log's size and head, and every start checks the
+-- log still contains it) and the members' witnessed checkpoints are the
+-- defence.
+--
+-- `governance_anchor_genesis` keeps the signed state anchor of an earlier
+-- release (version 1, which held the sets of negative IDs) that was
+-- migrated into the log: the `anchor.genesis` event records its digest,
+-- and the following `migrated.<set>` events its IDs.
 
 CREATE TABLE governance_events (
     gseq        BIGINT PRIMARY KEY CHECK (gseq > 0),
@@ -57,6 +61,10 @@ CREATE TABLE governance_events (
 );
 
 CREATE INDEX governance_events_kind ON governance_events (kind, subject_id);
+-- A revoked authorization's signed document ID (startup and run-time
+-- checks look it up).
+CREATE INDEX governance_events_authorization ON governance_events ((body #>> '{refs,authorization_id}'))
+    WHERE body #>> '{refs,authorization_id}' IS NOT NULL;
 
 -- Single-row lock serializing appends to the chain.
 CREATE TABLE governance_head (
@@ -107,6 +115,12 @@ CREATE TABLE revocation_heads (
     UNIQUE (organization_id, project_id, seq)
 );
 
+CREATE TABLE governance_anchor_genesis (
+    gseq   BIGINT PRIMARY KEY,
+    digest TEXT NOT NULL,
+    anchor TEXT NOT NULL
+);
+
 CREATE FUNCTION encompute_governance_log_append_only() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'the governance event log is append-only (%)', TG_TABLE_NAME
@@ -124,6 +138,8 @@ CREATE TRIGGER checkpoint_witnesses_append_only BEFORE UPDATE OR DELETE ON check
     FOR EACH ROW EXECUTE FUNCTION encompute_governance_log_append_only();
 CREATE TRIGGER revocation_heads_append_only BEFORE UPDATE OR DELETE ON revocation_heads
     FOR EACH ROW EXECUTE FUNCTION encompute_governance_log_append_only();
+CREATE TRIGGER governance_anchor_genesis_append_only BEFORE UPDATE OR DELETE ON governance_anchor_genesis
+    FOR EACH ROW EXECUTE FUNCTION encompute_governance_log_append_only();
 CREATE TRIGGER governance_head_append_only BEFORE DELETE ON governance_head
     FOR EACH ROW EXECUTE FUNCTION encompute_governance_log_append_only();
 
@@ -136,6 +152,8 @@ CREATE TRIGGER governance_checkpoints_no_truncate BEFORE TRUNCATE ON governance_
 CREATE TRIGGER checkpoint_witnesses_no_truncate BEFORE TRUNCATE ON checkpoint_witnesses
     FOR EACH STATEMENT EXECUTE FUNCTION encompute_governance_log_append_only();
 CREATE TRIGGER revocation_heads_no_truncate BEFORE TRUNCATE ON revocation_heads
+    FOR EACH STATEMENT EXECUTE FUNCTION encompute_governance_log_append_only();
+CREATE TRIGGER governance_anchor_genesis_no_truncate BEFORE TRUNCATE ON governance_anchor_genesis
     FOR EACH STATEMENT EXECUTE FUNCTION encompute_governance_log_append_only();
 CREATE TRIGGER governance_head_no_truncate BEFORE TRUNCATE ON governance_head
     FOR EACH STATEMENT EXECUTE FUNCTION encompute_governance_log_append_only();

@@ -13,7 +13,7 @@
 //! broker told (`asset.expired`). A job that started before the deletion
 //! date may finish, but nothing derived from an expired version is used,
 //! derived from or exported again: every such check walks the ancestors
-//! themselves, whose expiry the state anchor holds.
+//! themselves, whose expiry the governance log records.
 //!
 //! Deleting the data itself is the job of the owner's storage. Encompute
 //! blocks every further use and records the expiry; the evidence about the
@@ -62,7 +62,7 @@ impl Control {
             }
         }
         let at = now();
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -167,7 +167,10 @@ impl Control {
         if !expired.is_empty() {
             // Anchored before any broker hears of it (`deliver_outbox`
             // holds `asset.expired` until then).
-            self.sync_anchor()?;
+            self.checkpoint_log()?;
+            // (Its plain transactions left the thread's deny flag set; the
+            // checkpoint just settled it.)
+            crate::govlog::DENY_PENDING.with(|d| d.set(false));
             let _ = self.deliver_outbox();
         }
         Ok(expired)
@@ -176,6 +179,12 @@ impl Control {
     /// Expires, in the database only (nothing is anchored or sent), every
     /// dataset version whose deletion date is at or before `at`: one
     /// transaction each. Returns the versions expired now.
+    ///
+    /// **Not for callers outside this crate's own tasks and tests**: an
+    /// expiry that is not anchored is not yet protected against a restore.
+    /// Use [`Self::expire_assets`], which anchors them before any broker
+    /// is told.
+    #[doc(hidden)]
     pub fn expire_due(&self, at: u64) -> Result<Vec<String>> {
         let due: Vec<String> = {
             let mut c = self.db.conn()?;
@@ -219,11 +228,11 @@ impl Control {
     /// everything an expiry does ([`Self::retire_in`]), anchors it and tells
     /// its key broker. Returns whether it was newly expired.
     pub fn expire_asset(&self, actor: &str, id: &str) -> Result<bool> {
-        let newly = self.db.tx(|t| {
+        let newly = self.tx_anchored(|t| {
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             Ok(self.retire_in(t, actor, "retention", &a, None)?.is_some())
         })?;
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         let _ = self.deliver_outbox();
         Ok(newly)
     }

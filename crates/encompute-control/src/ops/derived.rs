@@ -23,7 +23,7 @@
 //! Revocation blocks new use; it is not retroactive. Revoking a source
 //! marks its derived descendants (`source_revoked_at`), and every use,
 //! derivation and export walks the ancestors themselves, whose revocation
-//! the state anchor holds: a restored database that lost the mark changes
+//! the governance log records: a restored database that lost the mark changes
 //! nothing. Nothing already released is erased, and nothing here claims it
 //! is.
 
@@ -302,9 +302,9 @@ pub(crate) fn check_executions(
 
 impl Control {
     /// Walks `assets` and every ancestor, and refuses when one is revoked,
-    /// in the database or in the state anchor (ENC2706), marked
-    /// source-revoked (ENC2706), expired (in the database or in the state
-    /// anchor), marked source-expired or past its deletion date at `at`
+    /// in the database or in the governance log (ENC2706), marked
+    /// source-revoked (ENC2706), expired (in the database or in the
+    /// governance log), marked source-expired or past its deletion date at `at`
     /// (ENC2705), or not on record. The check a governed use, derivation,
     /// key-release ticket and export make: revocation blocks new use
     /// downstream without relying on the mark.
@@ -321,7 +321,6 @@ impl Control {
         assets: &[String],
         at: u64,
     ) -> Result<Vec<LineageNode>> {
-        let anchor = self.anchor.snapshot();
         let mut out = vec![];
         let mut seen = BTreeSet::new();
         let mut todo: Vec<String> = assets.to_vec();
@@ -366,7 +365,9 @@ impl Control {
                 } else {
                     format!("its ancestor {id}")
                 };
-                if r.get::<_, String>(2) == "revoked" || anchor.revoked.contains(&id) {
+                if r.get::<_, String>(2) == "revoked"
+                    || crate::govlog::contains(t, crate::govlog::NegSet::RevokedAssets, &id)?
+                {
                     return Err(gov(
                         Code::GovernanceAuthorizationRevoked,
                         format!("{which} is revoked"),
@@ -385,7 +386,7 @@ impl Control {
                     ));
                 }
                 if r.get::<_, bool>(3)
-                    || anchor.expired_assets.contains(&id)
+                    || crate::govlog::contains(t, crate::govlog::NegSet::ExpiredAssets, &id)?
                     || r.get::<_, Option<i64>>(4)
                         .is_some_and(|d| d.max(0) as u64 <= at)
                 {
@@ -424,7 +425,7 @@ impl Control {
         check_name("key_ref.broker", &r.key_ref.broker)?;
         check_name("key_ref.key_ref", &r.key_ref.key_ref)?;
         let at = now();
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             // Visible, and never by an auditor (D9).
             let (j, p) = released_job(t, Some(ctx), job)?;
             if !j.succeeded {
@@ -753,7 +754,7 @@ impl Control {
     pub fn export_asset(&self, ctx: &Ctx, id: &str, r: RequestExport) -> Result<Value> {
         check_name("recipient", &r.recipient)?;
         let at = now();
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -807,11 +808,16 @@ impl Control {
                     own_class.as_str()
                 )));
             }
-            let anchored = self.anchor.snapshot().revoked_authorizations;
             let mut until = at + MAX_TICKET_TTL_SECS;
             let mut limits: BTreeMap<String, u64> = BTreeMap::new();
             for (row, a) in lineage_authorizations(t, &jobs)? {
-                if anchored.contains(&row) || anchored.contains(&a.id()) {
+                if crate::govlog::first_in(
+                    t,
+                    crate::govlog::NegSet::RevokedAuthorizations,
+                    &[row.as_str(), a.id().as_str()],
+                )?
+                .is_some()
+                {
                     return Err(gov(
                         Code::GovernanceAuthorizationRevoked,
                         format!("authorization {row} was revoked"),
@@ -970,7 +976,7 @@ impl Control {
     /// already names every owner's active key.
     pub fn reissue_release_cosignature(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         let at = now();
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -1135,7 +1141,7 @@ impl Control {
             binding: j.binding.clone(),
             not_before: at,
             not_after: until,
-            anchor_counter: self.anchor.snapshot().counter,
+            anchor_counter: self.anchor.counter(),
             issuer: String::new(),
             issuer_public_key: String::new(),
             signature: String::new(),

@@ -11,6 +11,7 @@
 //! a separate service with its own identity.
 
 pub mod anchor;
+mod anchor_migration;
 pub mod api;
 pub mod audit;
 pub mod authn;
@@ -21,11 +22,14 @@ pub mod db;
 pub mod govlog;
 pub mod log;
 pub mod metrics;
+pub mod mirror;
 pub mod model;
 mod ops;
 pub mod transport;
 pub mod views;
 
+#[doc(hidden)]
+pub use anchor_migration::set_migration_test_hook;
 pub use control::{Control, Ctx};
 pub use ops::{
     asset_json, check_reservation, estimated_ms, job_profile, keybroker_lock, least_sensitivity,

@@ -453,7 +453,7 @@ impl Control {
         } else {
             r.policy.clone()
         };
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             // Parents must be visible and not revoked.
             let mut roots = BTreeSet::new();
             for p in &r.parents {
@@ -683,7 +683,7 @@ impl Control {
     /// owner approves again.
     pub fn approve_asset(&self, ctx: &Ctx, id: &str, r: ApproveAsset) -> Result<Value> {
         check_name("purpose", &r.purpose)?;
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -752,7 +752,7 @@ impl Control {
     /// it there that have not started fail (running ones finish).
     pub fn withdraw_asset_approval(&self, ctx: &Ctx, id: &str, r: ApproveAsset) -> Result<Value> {
         check_name("purpose", &r.purpose)?;
-        let out = self.db.tx(|t| {
+        let out = self.tx_anchored(|t| {
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -792,7 +792,7 @@ impl Control {
             )?;
             Ok(json!({"asset": id, "project": r.project, "purpose": r.purpose, "withdrawn": true, "failed_jobs": failed}))
         })?;
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         Ok(out)
     }
 
@@ -838,7 +838,7 @@ impl Control {
     /// revocation is anchored before it is acknowledged, so restoring an
     /// older database cannot silently make the asset usable again.
     pub fn revoke_asset(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        let r = self.db.tx(|t| {
+        let r = self.tx_anchored(|t| {
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -863,7 +863,7 @@ impl Control {
         // Anchored before acknowledging (a retry, "already", re-anchors),
         // with the jobs it failed; the broker's revocation message is sent
         // only once the revocation is anchored (see `deliver_outbox`).
-        self.sync_anchor()?;
+        self.checkpoint_log()?;
         self.metrics
             .inc("encompute_key_release_denied_total", "revoked");
         let _ = self.deliver_outbox();
@@ -1091,13 +1091,11 @@ impl Control {
             )
             .map_err(db_err)?
             .get(0);
-        // Frozen in the anchor holds even where the database forgot it.
+        // Frozen in the governance log holds even where the ledger's row
+        // forgot it.
+        let logged = crate::govlog::contains(&mut *c, crate::govlog::NegSet::FrozenLedgers, asset)?;
         let frozen = frozen.or_else(|| {
-            self.anchor
-                .snapshot()
-                .frozen
-                .contains(asset)
-                .then(|| "frozen in the state anchor after a detected rollback".to_owned())
+            logged.then(|| "frozen after a detected rollback (governance log)".to_owned())
         });
         let cost = view.cost()?;
         let cp = view.checkpoint()?;
@@ -1137,7 +1135,7 @@ impl Control {
         asset: &str,
         service: &str,
     ) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let a = asset_row(t, asset)?.ok_or_else(|| not_found("asset", asset))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", asset));
@@ -1189,7 +1187,11 @@ impl Control {
     /// same event again returns the stored entry), and anchored before it
     /// returns: committed spending is never forgotten.
     pub fn privacy_spend(&self, ctx: &Ctx, asset: &str, event: PrivacyEvent) -> Result<Value> {
-        let res = self.db.tx(|t| {
+        // Read before the transaction: it takes the ledger's lock, and the
+        // anchor's lock is outermost (see `Anchor::counter`). (What was
+        // anchored by the time the ledger lock is held is at least this.)
+        let anchored = self.anchor.snapshot();
+        let res = self.tx_anchored(|t| {
             let row = t
                 .query_opt(
                     "SELECT organization_id, frozen_reason FROM privacy_ledgers WHERE asset_id = $1 FOR UPDATE",
@@ -1228,8 +1230,9 @@ impl Control {
             // The database must still extend the anchored ledger: one rolled
             // back, reset or rewritten while the service runs is refused now,
             // not only at the next start. (Everything anchored committed
-            // before this transaction took the ledger's lock.)
-            let anchored = self.anchor.snapshot();
+            // before this transaction took the ledger's lock, and so is
+            // this snapshot's checkpoint, which an extended ledger
+            // extends.)
             if let Some(cp) = anchored.ledgers.get(asset) {
                 view.extends(cp).map_err(|e| {
                     self.rollback_alarm("privacy", asset);
@@ -1246,9 +1249,11 @@ impl Control {
                 }
                 return Err(conflict(format!("event {} was recorded with other contents", event.event_id())));
             }
-            // Frozen in the database or in the anchor: the anchor's freeze
-            // holds whatever the database says.
-            if frozen.is_some() || anchored.frozen.contains(asset) {
+            // Frozen in the ledger's row or in the governance log: the
+            // log's freeze holds whatever the row says.
+            if frozen.is_some()
+                || crate::govlog::contains(t, crate::govlog::NegSet::FrozenLedgers, asset)?
+            {
                 return Err(Error::new(
                     Code::PrivacyBudgetExceeded,
                     "this privacy ledger is frozen after a detected rollback: treated as exhausted",

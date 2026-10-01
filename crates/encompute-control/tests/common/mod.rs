@@ -12,11 +12,14 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+pub mod gov;
+
 use encompute_control::anchor::DirAnchor;
 use encompute_control::api::{handle, Request};
 use encompute_control::authn::{dev_token, Authenticator, DEV_ISSUER};
 use encompute_control::config::{Env, OidcIssuer};
 use encompute_control::db::Db;
+pub use encompute_control::govlog::NegSet;
 use encompute_control::transport::InMemoryTransport;
 use encompute_control::Control;
 use encompute_verification::ServiceSigner;
@@ -217,6 +220,194 @@ pub fn run_recovery(env0: &Env0) -> Vec<String> {
     rc.recover("operator-1").unwrap()
 }
 
+/// Runs `encompute-control recover --governance-log FILE` with `export`
+/// (an `export-governance-log` taken before the restore): its notes.
+pub fn run_recovery_importing(env0: &Env0, export: &str) -> Vec<String> {
+    let db = Db::connect(&env0.url).unwrap();
+    let signer = ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
+    let store = Box::new(DirAnchor::new(env0.anchor_dir.clone()).unwrap());
+    let rc = Control::for_recovery(&recovery_config(env0), db, signer, store)
+        .unwrap_or_else(|e| panic!("the control plane failed to open for recovery: {e}"));
+    rc.recover_importing("operator-1", Some(export)).unwrap()
+}
+
+/// Puts the events of `export` that `url`'s governance log lacks back
+/// (what `recover --governance-log` does first).
+pub fn import_log(url: &str, export: &str) -> u64 {
+    let db = Db::connect(url).unwrap();
+    db.tx(|t| encompute_control::govlog::import(t, export))
+        .unwrap()
+}
+
+/// Restores `backup` over `env0`'s database after the governance log moved
+/// on: the start is refused (GOVERNANCE LOG STATE ROLLBACK), and so is a
+/// recovery without the missing events. Returns an export of the log taken
+/// before the restore (what an operator keeps with `encompute-control
+/// export-governance-log`).
+pub fn restore_behind_the_log(env0: &Env0, backup: &str) -> String {
+    let export = export_log(&env0.url);
+    restore_database(backup, &env0.url);
+    let e = env0
+        .start()
+        .err()
+        .expect("a database behind the anchored governance log started");
+    assert!(e.message.contains("GOVERNANCE LOG STATE ROLLBACK"), "{e}");
+    export
+}
+
+/// [`restore_behind_the_log`], then the operator puts the governance log's
+/// missing events back (from a newer copy of its tables, or an export):
+/// the database's other tables stay as restored.
+pub fn restore_keeping_log(env0: &Env0, backup: &str) {
+    let export = restore_behind_the_log(env0, backup);
+    assert!(import_log(&env0.url, &export) > 0);
+}
+
+/// `encompute-control export-governance-log` of `url`'s database.
+pub fn export_log(url: &str) -> String {
+    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    encompute_control::govlog::export(&mut c, 0).unwrap()
+}
+
+/// Whether the transition putting `id` in `set` is anchored (its
+/// governance log event lies within the anchored size).
+pub fn anchored(t: &T, set: NegSet, id: &str) -> bool {
+    t.control.anchored(set, id).unwrap()
+}
+
+/// The IDs of a negative set, as the governance log records them.
+pub fn log_set(t: &T, set: NegSet) -> Vec<String> {
+    let mut c = t.control.db.conn().unwrap();
+    encompute_control::govlog::negative_set(&mut *c, set).unwrap()
+}
+
+/// Whether recovery recorded the row of `id` as lost.
+pub fn is_lost(t: &T, id: &str) -> bool {
+    let mut c = t.control.db.conn().unwrap();
+    c.query_opt(
+        "SELECT 1 FROM governance_events WHERE kind = 'row.lost' AND subject_id = $1",
+        &[&id],
+    )
+    .unwrap()
+    .is_some()
+}
+
+/// A directory anchor store whose anchor writes fail while `fail` is set
+/// (a crash between the governance log mirror's write and the anchor's).
+pub struct FlakyAnchor {
+    pub inner: DirAnchor,
+    pub fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl encompute_control::anchor::AnchorStore for FlakyAnchor {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn load(&self) -> encompute_ir::Result<Option<encompute_control::anchor::StoredAnchor>> {
+        self.inner.load()
+    }
+    fn store(
+        &self,
+        next: &encompute_control::anchor::StateAnchor,
+        expected: u64,
+    ) -> encompute_ir::Result<()> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(encompute_ir::Error::new(
+                encompute_ir::Code::PrivacyLedger,
+                "anchor store unavailable (injected)",
+            ));
+        }
+        self.inner.store(next, expected)
+    }
+    fn mirror_list(&self) -> encompute_ir::Result<Vec<u64>> {
+        self.inner.mirror_list()
+    }
+    fn mirror_read(&self, n: u64) -> encompute_ir::Result<String> {
+        self.inner.mirror_read(n)
+    }
+    fn mirror_create(&self, n: u64, lines: &str) -> encompute_ir::Result<()> {
+        self.inner.mirror_create(n, lines)
+    }
+    fn mirror_replace(
+        &self,
+        n: u64,
+        lines: &str,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_replace(n, lines, allow)
+    }
+}
+
+/// A directory anchor store that kills the process (as a crash would)
+/// when the anchor is written while `armed` is set: after the governance
+/// log mirror's write, before the anchor's compare-and-set.
+pub struct KillAnchor {
+    pub inner: DirAnchor,
+    pub armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl encompute_control::anchor::AnchorStore for KillAnchor {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn load(&self) -> encompute_ir::Result<Option<encompute_control::anchor::StoredAnchor>> {
+        self.inner.load()
+    }
+    fn store(
+        &self,
+        next: &encompute_control::anchor::StateAnchor,
+        expected: u64,
+    ) -> encompute_ir::Result<()> {
+        if self.armed.load(Ordering::SeqCst) {
+            std::process::exit(137);
+        }
+        self.inner.store(next, expected)
+    }
+    fn mirror_list(&self) -> encompute_ir::Result<Vec<u64>> {
+        self.inner.mirror_list()
+    }
+    fn mirror_read(&self, n: u64) -> encompute_ir::Result<String> {
+        self.inner.mirror_read(n)
+    }
+    fn mirror_create(&self, n: u64, lines: &str) -> encompute_ir::Result<()> {
+        self.inner.mirror_create(n, lines)
+    }
+    fn mirror_replace(
+        &self,
+        n: u64,
+        lines: &str,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_replace(n, lines, allow)
+    }
+}
+
+impl Env0 {
+    /// Starts over a [`KillAnchor`]: the control plane and its trigger.
+    pub fn start_killable(&self) -> (T, Arc<std::sync::atomic::AtomicBool>) {
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t = self
+            .start_with(Box::new(KillAnchor {
+                inner: DirAnchor::new(self.anchor_dir.clone()).unwrap(),
+                armed: armed.clone(),
+            }))
+            .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
+        (t, armed)
+    }
+
+    /// Starts over a [`FlakyAnchor`]: the control plane and its switch.
+    pub fn start_flaky(&self) -> (T, Arc<std::sync::atomic::AtomicBool>) {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t = self
+            .start_with(Box::new(FlakyAnchor {
+                inner: DirAnchor::new(self.anchor_dir.clone()).unwrap(),
+                fail: fail.clone(),
+            }))
+            .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
+        (t, fail)
+    }
+}
+
 pub fn tmp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
         "encompute-control-{tag}-{}-{}",
@@ -262,6 +453,15 @@ impl Env0 {
     }
 
     pub fn start(&self) -> encompute_ir::Result<T> {
+        self.start_with(Box::new(DirAnchor::new(self.anchor_dir.clone())?))
+    }
+
+    /// [`Self::start`] with another anchor store (over the same directory,
+    /// say, failing on demand).
+    pub fn start_with(
+        &self,
+        store: Box<dyn encompute_control::anchor::AnchorStore>,
+    ) -> encompute_ir::Result<T> {
         let db = Db::connect(&self.url)?;
         db.migrate()?;
         let signer = ServiceSigner::from_seed("control-plane", &self.seed)?;
@@ -277,7 +477,7 @@ impl Env0 {
                 Some(zeroize::Zeroizing::new(SECRET.into())),
             ),
             signer,
-            Box::new(DirAnchor::new(self.anchor_dir.clone())?),
+            store,
             Some(Box::new(SharedTransport(transport.clone()))),
             5,
         )?;

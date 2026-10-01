@@ -13,8 +13,9 @@
 //! platform broker (ENC2715).
 //!
 //! A broker learns of a revocation or an expiry only once the state anchor
-//! holds it (see `deliver_outbox`): a restored database cannot then undo a
-//! revocation a broker already applied without it being noticed.
+//! holds its governance log event (see `deliver_outbox`): a restored
+//! database cannot then undo a revocation a broker already applied without
+//! it being noticed.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -171,7 +172,7 @@ impl Control {
         check_location(&r.location)?;
         encompute_verification::EvaluatorIdentity::from_public_key_hex(&r.grant_public_key)
             .map_err(|_| bad("grant_public_key must be a 32-byte Ed25519 key in hex"))?;
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             deny_auditor_in(t, &ctx.principal, org)?;
             // An auditor organization holds no keys for a governed project
             // (D9, ENC2716): serialized with its joining one.
@@ -357,7 +358,7 @@ impl Control {
         };
         let base_spec = self.cached_plan_spec(&plan)?;
         let version_mismatch = |m: String| Error::new(Code::GovernanceAssetVersionMismatch, m);
-        let ticket = self.db.tx(|t| {
+        let ticket = self.tx_anchored(|t| {
             // The source first, then the job (the order revocation takes).
             let a = t
                 .query_opt(
@@ -574,7 +575,7 @@ impl Control {
                 binding: g.binding.clone(),
                 not_before: at,
                 not_after,
-                anchor_counter: self.anchor.snapshot().counter,
+                anchor_counter: self.anchor.counter(),
                 issuer: String::new(),
                 issuer_public_key: String::new(),
                 signature: String::new(),

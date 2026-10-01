@@ -1035,7 +1035,11 @@ fn start_after_valid_until_fails_and_is_anchored_2705() {
     after(until);
     refused(g.start(&job), "ENC2705");
     assert_eq!(g.state(&job), "failed");
-    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job)
+        .unwrap());
     // Scheduling refuses it too: a queued job is re-checked.
     let n: i64 = g
         .t
@@ -1067,7 +1071,11 @@ fn revocation_before_start_fails_job_2706() {
     // The unstarted job failed with the revocation, anchored.
     let v = g.view(&job);
     assert_eq!(v["state"], "failed", "{v}");
-    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job)
+        .unwrap());
     let (s, _) = g.start(&job);
     assert_eq!(s, 409);
     // A source revoked behind the job's back is found at start (ENC2706).
@@ -1116,7 +1124,11 @@ fn revocation_before_start_fails_job_2706() {
     after(now());
     refused(g.start(&job2), "ENC2708");
     assert_eq!(g.state(&job2), "failed");
-    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job2));
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job2)
+        .unwrap());
 }
 
 #[test]
@@ -1266,7 +1278,9 @@ fn start_refused(g: &G, job: &str, code: &str) -> Value {
     let view = g.view(job);
     assert_eq!(view["state"], "failed", "{view}");
     assert!(
-        g.t.control.anchor.snapshot().ended_jobs.contains(job),
+        g.t.control
+            .anchored(encompute_control::govlog::NegSet::EndedJobs, job)
+            .unwrap(),
         "{job} is not anchored as ended"
     );
     // Audited as a failed revalidation at start.
@@ -1446,7 +1460,11 @@ fn start_refuses_a_revoked_or_expired_source() {
     let (v, _, job) = queued(&g, "2026-q2");
     g.t.control.expire_asset("retention", &v.asset).unwrap();
     assert_eq!(g.state(&job), "failed");
-    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job)
+        .unwrap());
     let refs: Value =
         g.t.control
             .db
@@ -1639,7 +1657,11 @@ fn schedule_and_start_share_one_revalidation() {
     // Scheduling fails A, start fails B: the same check, the same code.
     g.t.control.schedule_pending().unwrap();
     assert_eq!(g.state(&job_a), "failed");
-    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job_a));
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job_a)
+        .unwrap());
     let v = start_refused(&g, &job_b, "ENC2715");
     assert_eq!(v["message"].as_str().unwrap(), at_start.message);
     let refs: Value =
@@ -2087,7 +2109,11 @@ fn approval_after_window_2705() {
     refused(approve(&g, &g.tax_owner, &job), "ENC2705");
     // The job can never run now: it failed, anchored as ended.
     assert_eq!(g.state(&job), "failed");
-    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job)
+        .unwrap());
     assert_eq!(approvals(&g, &job).len(), 1);
     let refs: Value =
         g.t.control
@@ -2120,7 +2146,11 @@ fn approval_of_revoked_authorization_job_fails() {
     );
     refused(approve(&g, &g.tax_owner, &job), "ENC2706");
     assert_eq!(g.state(&job), "failed");
-    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job)
+        .unwrap());
     assert!(approvals(&g, &job).is_empty());
     // Revoked properly: the waiting job fails with the revocation, and
     // there is nothing left to approve.
@@ -4310,12 +4340,24 @@ fn lineage_revocation_forwarded_to_custodian_brokers() {
         g.t.control
             .db
             .tx(|t| {
-                t.execute(
-                "UPDATE authorizations SET status = 'revoked', revoked_by = 'x', revoked_at = now()
-                  WHERE id = $1",
-                &[&rel.a.row],
-            )
-            .unwrap();
+                let project: String = t
+                    .query_one(
+                        "UPDATE authorizations SET status = 'revoked', revoked_by = 'x', revoked_at = now()
+                          WHERE id = $1 RETURNING project_id",
+                        &[&rel.a.row],
+                    )
+                    .unwrap()
+                    .get(0);
+                // Its governance log event, in the same commit.
+                let partition = encompute_control::govlog::for_project(t, &project, None)?;
+                encompute_control::govlog::append(
+                    t,
+                    encompute_control::govlog::Draft::new(
+                        partition,
+                        encompute_control::govlog::kind::AUTHORIZATION_REVOKED,
+                        &rel.a.row,
+                    ),
+                )?;
                 g.t.control
                     .queue_authorization_revoked(t, "x", "test", &rel.a.row)
             })
@@ -4329,19 +4371,21 @@ fn lineage_revocation_forwarded_to_custodian_brokers() {
     assert!(!g
         .t
         .control
-        .anchor
-        .snapshot()
-        .revoked_authorizations
-        .contains(&rel.a.row));
+        .anchored(
+            encompute_control::govlog::NegSet::RevokedAuthorizations,
+            &rel.a.row
+        )
+        .unwrap());
     // Anchored: delivered to the custodian's broker, for its organization.
     g.t.control.tick();
     assert!(g
         .t
         .control
-        .anchor
-        .snapshot()
-        .revoked_authorizations
-        .contains(&rel.a.row));
+        .anchored(
+            encompute_control::govlog::NegSet::RevokedAuthorizations,
+            &rel.a.row
+        )
+        .unwrap());
     let sent = g.t.transport.drain();
     let (_, m) = sent
         .iter()
@@ -4660,10 +4704,8 @@ fn version_past_delete_after_is_not_used_2705() {
     assert!(g
         .t
         .control
-        .anchor
-        .snapshot()
-        .expired_assets
-        .contains(&v.asset));
+        .anchored(encompute_control::govlog::NegSet::ExpiredAssets, &v.asset)
+        .unwrap());
     refused(
         g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k2"),
         "ENC2705",
@@ -4692,7 +4734,11 @@ fn expired_source_blocks_start_and_export() {
     assert_eq!(s, 200, "{r}");
     assert_eq!(r["expires_now"], true, "{r}");
     assert_eq!(g.state(&job), "failed");
-    assert!(g.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job)
+        .unwrap());
     let (s, _) = g.start(&job);
     assert!(s >= 400);
     // A derived result of another version.
@@ -4869,10 +4915,11 @@ fn evidence_verifies_after_source_deletion() {
     assert!(g
         .t
         .control
-        .anchor
-        .snapshot()
-        .expired_assets
-        .contains(&rel.v.asset));
+        .anchored(
+            encompute_control::govlog::NegSet::ExpiredAssets,
+            &rel.v.asset
+        )
+        .unwrap());
     let tr =
         g.t.ok(&g.ben_dev, "GET", &format!("/v1/trust/{}", rel.job), None);
     assert_eq!(tr["verdict"], "SATISFIED", "{tr}");
@@ -5101,10 +5148,8 @@ fn restore_undoing_expiry_refuses_start() {
     assert!(g
         .t
         .control
-        .anchor
-        .snapshot()
-        .expired_assets
-        .contains(&v.asset));
+        .anchored(encompute_control::govlog::NegSet::ExpiredAssets, &v.asset)
+        .unwrap());
     // The restore: the expiry and the brought-forward date undone.
     attacker(
         &g.t.env0.url,
@@ -5153,19 +5198,15 @@ fn background_expiry_sends_asset_expired_after_anchor() {
     assert!(!g
         .t
         .control
-        .anchor
-        .snapshot()
-        .expired_assets
-        .contains(&v.asset));
+        .anchored(encompute_control::govlog::NegSet::ExpiredAssets, &v.asset)
+        .unwrap());
     // The background tick anchors it, then sends it.
     g.t.control.tick();
     assert!(g
         .t
         .control
-        .anchor
-        .snapshot()
-        .expired_assets
-        .contains(&v.asset));
+        .anchored(encompute_control::govlog::NegSet::ExpiredAssets, &v.asset)
+        .unwrap());
     let sent = g.t.transport.drain();
     let (_, m) = sent
         .iter()
@@ -5181,10 +5222,8 @@ fn background_expiry_sends_asset_expired_after_anchor() {
     assert!(g
         .t
         .control
-        .anchor
-        .snapshot()
-        .expired_assets
-        .contains(&w.asset));
+        .anchored(encompute_control::govlog::NegSet::ExpiredAssets, &w.asset)
+        .unwrap());
     let refs: Value =
         g.t.control
             .db

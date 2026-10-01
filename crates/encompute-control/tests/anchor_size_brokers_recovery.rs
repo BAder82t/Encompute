@@ -36,18 +36,44 @@ fn the_anchor_size_is_measured_on_every_write_and_exported() {
     let now = t.control.anchor.bytes();
     assert_eq!(now, serialized_len(&t.control.anchor.snapshot()));
     assert_eq!(anchor_bytes_metric(&t.control.render_metrics()), now);
-    // Every write measures it again.
+    // Every write measures it again. (Only the privacy ledgers' checkpoints
+    // grow it now: here 100 frozen ledgers of assets the database does not
+    // hold, which the start check accepts.)
+    use encompute_control::govlog::{self, extra_kind, Draft};
+    use encompute_trust::govlog::Partition;
+    let ids: Vec<String> = (0..100).map(|i| format!("ast_{i:032}")).collect();
+    t.control
+        .db
+        .tx(|tx| {
+            for id in &ids {
+                govlog::append(
+                    tx,
+                    Draft::new(Partition::Platform, extra_kind::LEDGER_FROZEN, id),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    t.control.checkpoint_log().unwrap();
+    let before = t.control.anchor.bytes();
     t.control
         .anchor
         .update(&t.control.signer, |a| {
-            // (Removed roles: their anchored state is the absence of their
-            // rows, so IDs the database never held pass the start check;
-            // an ended job the database does not hold is a rollback.)
-            for i in 0..100 {
-                a.removed_roles.insert(format!("rol_{i:032}"));
+            for id in &ids {
+                a.ledgers.insert(
+                    id.clone(),
+                    encompute_privacy::Checkpoint {
+                        seq: 0,
+                        root: "00".repeat(32),
+                    },
+                );
             }
         })
         .unwrap();
+    assert!(
+        before < now + 64,
+        "the governance log's events did not grow it: {now} -> {before}"
+    );
     let grown = t.control.anchor.bytes();
     assert!(grown > now + 100 * 36, "{now} -> {grown}");
     assert_eq!(grown, serialized_len(&t.control.anchor.snapshot()));
@@ -203,7 +229,10 @@ fn recovery_recreates_a_frozen_ledger_whose_row_was_lost() {
     assert!(env0.start().is_err());
     run_recovery(&env0);
     let t = env0.started();
-    assert!(t.control.anchor.snapshot().frozen.contains(&d));
+    assert!(t
+        .control
+        .anchored(encompute_control::govlog::NegSet::FrozenLedgers, &d)
+        .unwrap());
     assert_eq!(spend(&t, "frozen-1").0, 409);
     let env0 = t.env0;
     drop(t.control);
@@ -248,7 +277,7 @@ fn recovery_recreates_a_frozen_ledger_whose_row_was_lost() {
 
     let t = env0.start().expect("starts after recovery");
     let a = t.control.anchor.snapshot();
-    assert!(a.frozen.contains(&d));
+    assert!(anchored(&t, NegSet::FrozenLedgers, &d));
     assert_eq!(
         a.ledgers[&d].seq, 0,
         "the anchor follows the re-created ledger"

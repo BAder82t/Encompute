@@ -478,6 +478,16 @@ fn restart_preserves_jobs_and_never_replays() {
     t.control.expire_evaluators().unwrap();
     assert_eq!(get(&running), "failed");
     assert_eq!(get(&queued), "failed");
+    // Both ended jobs were anchored before the call returned (the policy is
+    // uniform: any path that ends a job checkpoints the log).
+    for j in [&running, &queued] {
+        assert!(
+            t.control
+                .anchored(encompute_control::govlog::NegSet::EndedJobs, j)
+                .unwrap(),
+            "{j} is not anchored as ended"
+        );
+    }
     let v = t.ok(&b_dev, "GET", &format!("/v1/jobs/{running}"), None);
     assert!(v["error"].as_str().unwrap().contains("not replayed"), "{v}");
     let _ = ev;

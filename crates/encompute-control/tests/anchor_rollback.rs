@@ -148,7 +148,10 @@ fn a_frozen_ledger_stays_frozen_whatever_the_database_says() {
     run_recovery(&env0);
     let t = env0.started();
     assert_eq!(spend(&t, &a_owner, &d, "frozen-try", 200).0, 409);
-    assert!(t.control.anchor.snapshot().frozen.contains(&d));
+    assert!(t
+        .control
+        .anchored(encompute_control::govlog::NegSet::FrozenLedgers, &d)
+        .unwrap());
 
     // (A) The database attacker clears the flag while the service runs.
     let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
@@ -176,7 +179,7 @@ fn a_frozen_ledger_stays_frozen_whatever_the_database_says() {
     // again; the operator follows the printed instruction and recovers.
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     assert!(env0.start().is_err(), "the second restore is refused");
     let notes = run_recovery(&env0);
     assert!(
@@ -311,13 +314,12 @@ fn restore_and_recovery_keep_disables_and_cancellations() {
         None,
     );
     t.ok(&b_dev, "POST", &format!("/v1/jobs/{job}/cancel"), None);
-    let a = t.control.anchor.snapshot();
-    assert!(a.disabled_services.contains("secagg-9"));
-    assert!(a.disabled_users.contains(&a_dev_id));
-    assert!(a.ended_jobs.contains(&job));
+    assert!(anchored(&t, NegSet::DisabledServices, "secagg-9"));
+    assert!(anchored(&t, NegSet::DisabledUsers, &a_dev_id));
+    assert!(anchored(&t, NegSet::EndedJobs, &job));
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     let e = env0
         .start()
         .err()
@@ -383,31 +385,44 @@ fn broker_revocation_is_delivered_only_once_anchored() {
         300,
     )
     .unwrap();
-    {
-        let mut c = w.t.control.db.conn().unwrap();
-        c.execute(
-            "UPDATE assets SET status = 'revoked' WHERE id = $1",
-            &[&w.model_b],
-        )
+    w.t.control
+        .db
+        .tx(|c| {
+            c.execute(
+                "UPDATE assets SET status = 'revoked' WHERE id = $1",
+                &[&w.model_b],
+            )
+            .unwrap();
+            encompute_control::govlog::append_asset_event(
+                c,
+                encompute_control::govlog::kind::ASSET_REVOKED,
+                &w.model_b,
+                "modelco",
+            )?;
+            c.execute(
+                "INSERT INTO outbox (message_id, recipient, url, envelope) VALUES ($1, $2, $3, $4)",
+                &[
+                    &m.message_id,
+                    &"keybroker-modelco",
+                    &"http://kb.internal:8760",
+                    &serde_json::to_value(&m).unwrap(),
+                ],
+            )
+            .unwrap();
+            Ok(())
+        })
         .unwrap();
-        c.execute(
-            "INSERT INTO outbox (message_id, recipient, url, envelope) VALUES ($1, $2, $3, $4)",
-            &[
-                &m.message_id,
-                &"keybroker-modelco",
-                &"http://kb.internal:8760",
-                &serde_json::to_value(&m).unwrap(),
-            ],
-        )
-        .unwrap();
-    }
     w.t.control.deliver_outbox().unwrap();
     assert!(
         w.t.transport.drain().is_empty(),
         "sent before it was anchored"
     );
     w.t.control.tick();
-    assert!(w.t.control.anchor.snapshot().revoked.contains(&w.model_b));
+    assert!(w
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::RevokedAssets, &w.model_b)
+        .unwrap());
     let sent = w.t.transport.drain();
     assert!(
         sent.iter()
@@ -491,20 +506,20 @@ fn restore_and_recovery_keep_withdrawn_approvals() {
         &format!("/v1/projects/{project}/members/remove"),
         Some(json!({"organization": "hospital-a"})),
     );
-    let a = t.control.anchor.snapshot();
+    let withdrawn = log_set(&t, NegSet::WithdrawnGrants);
     assert!(
-        a.withdrawn_grants.contains(&first),
-        "{:?}",
-        a.withdrawn_grants
+        anchored(&t, NegSet::WithdrawnGrants, &first),
+        "{withdrawn:?}"
     );
     assert!(
-        a.withdrawn_grants.iter().any(|g| g.starts_with("apg_")),
-        "the ended grants: {:?}",
-        a.withdrawn_grants
+        withdrawn
+            .iter()
+            .any(|g| g.starts_with("apg_") && anchored(&t, NegSet::WithdrawnGrants, g)),
+        "the ended grants: {withdrawn:?}"
     );
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     let e = env0
         .start()
         .err()
@@ -631,16 +646,15 @@ fn restore_and_recovery_keep_a_left_project_left() {
         Some(json!({"organization": "hospital-a"})),
     );
     assert_eq!(v["failed_jobs"], json!([job]), "{v}");
-    let a = t.control.anchor.snapshot();
     assert!(
-        a.removed_memberships.contains(&first),
+        anchored(&t, NegSet::RemovedMemberships, &first),
         "{:?}",
-        a.removed_memberships
+        log_set(&t, NegSet::RemovedMemberships)
     );
-    assert!(a.ended_jobs.contains(&job));
+    assert!(anchored(&t, NegSet::EndedJobs, &job));
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     // (The failed job is found first; the membership on its own below.)
     let e = env0
         .start()
@@ -723,7 +737,7 @@ fn restore_and_recovery_keep_a_left_project_left() {
     );
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup2, &url);
+    restore_keeping_log(&env0, &backup2);
     let e = env0
         .start()
         .err()
@@ -806,14 +820,16 @@ fn restore_and_recovery_keep_a_removed_role_removed() {
     );
     assert_eq!(v["removed"], json!(["ml_developer"]), "{v}");
     assert!(
-        t.control.anchor.snapshot().removed_roles.contains(&first),
+        t.control
+            .anchored(encompute_control::govlog::NegSet::RemovedRoles, &first)
+            .unwrap(),
         "the removal was acknowledged before it was anchored"
     );
     let (s, _) = create(&t, "after-removal");
     assert_eq!(s, 403);
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     let e = env0
         .start()
         .err()

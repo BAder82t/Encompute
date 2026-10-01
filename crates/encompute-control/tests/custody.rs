@@ -1067,10 +1067,11 @@ fn authorization_revoked_sent_only_after_anchor() {
     assert!(c
         .t
         .control
-        .anchor
-        .snapshot()
-        .revoked_authorizations
-        .contains(&r.authorization_row));
+        .anchored(
+            encompute_control::govlog::NegSet::RevokedAuthorizations,
+            &r.authorization_row
+        )
+        .unwrap());
     let sent = c.t.transport.drain();
     let m = sent
         .iter()
@@ -1094,19 +1095,37 @@ fn authorization_revoked_sent_only_after_anchor() {
         300,
     )
     .unwrap();
-    {
-        let mut db = c.t.control.db.conn().unwrap();
-        db.execute(
-            "UPDATE authorizations SET status = 'revoked', revoked_by = 'x', revoked_at = now() WHERE id = $1",
-            &[&row],
-        )
+    // The revocation as it stands after its commit (its governance log
+    // event included), before the log is checkpointed and anchored.
+    c.t.control
+        .db
+        .tx(|db| {
+            let project: String = db
+                .query_one(
+                    "UPDATE authorizations SET status = 'revoked', revoked_by = 'x', revoked_at = now()
+                      WHERE id = $1 RETURNING project_id",
+                    &[&row],
+                )
+                .unwrap()
+                .get(0);
+            let partition = encompute_control::govlog::for_project(db, &project, None)?;
+            encompute_control::govlog::append(
+                db,
+                encompute_control::govlog::Draft::new(
+                    partition,
+                    encompute_control::govlog::kind::AUTHORIZATION_REVOKED,
+                    &row,
+                )
+                .r#ref("authorization_id", aid.as_str()),
+            )?;
+            db.execute(
+                "INSERT INTO outbox (message_id, recipient, url, envelope) VALUES ($1, 'tax-broker', $2, $3)",
+                &[&m.message_id, &TAX_BROKER_URL, &serde_json::to_value(&m).unwrap()],
+            )
+            .unwrap();
+            Ok(())
+        })
         .unwrap();
-        db.execute(
-            "INSERT INTO outbox (message_id, recipient, url, envelope) VALUES ($1, 'tax-broker', $2, $3)",
-            &[&m.message_id, &TAX_BROKER_URL, &serde_json::to_value(&m).unwrap()],
-        )
-        .unwrap();
-    }
     c.t.control.deliver_outbox().unwrap();
     assert!(
         c.t.transport.drain().is_empty(),
@@ -1116,10 +1135,11 @@ fn authorization_revoked_sent_only_after_anchor() {
     assert!(c
         .t
         .control
-        .anchor
-        .snapshot()
-        .revoked_authorizations
-        .contains(&row));
+        .anchored(
+            encompute_control::govlog::NegSet::RevokedAuthorizations,
+            &row
+        )
+        .unwrap());
     let sent = c.t.transport.drain();
     assert!(
         sent.iter()
@@ -1145,10 +1165,8 @@ fn asset_expiry_is_anchored_before_the_broker_hears_of_it() {
     assert!(c
         .t
         .control
-        .anchor
-        .snapshot()
-        .expired_assets
-        .contains(&r.asset));
+        .anchored(encompute_control::govlog::NegSet::ExpiredAssets, &r.asset)
+        .unwrap());
     let sent = c.t.transport.drain();
     assert!(
         sent.iter().any(|(u, m)| u == TAX_BROKER_URL
@@ -1189,13 +1207,14 @@ fn restore_dropping_revoked_authorization_refuses_start() {
     );
     assert!(t
         .control
-        .anchor
-        .snapshot()
-        .revoked_authorizations
-        .contains(&r.authorization_row));
+        .anchored(
+            encompute_control::govlog::NegSet::RevokedAuthorizations,
+            &r.authorization_row
+        )
+        .unwrap());
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     let e = env0
         .start()
         .err()
@@ -1245,9 +1264,16 @@ fn deleting_a_revoked_authorization_row_refuses_start() {
         &format!("/v1/authorizations/{}/revoke", r.authorization_row),
         Some(json!({"reason": "withdrawn"})),
     );
-    let a = c.t.control.anchor.snapshot();
-    assert!(a.revoked_authorizations.contains(&r.authorization_row));
-    assert!(a.revoked_authorizations.contains(&r.authorization_id));
+    assert!(anchored(
+        &c.t,
+        NegSet::RevokedAuthorizations,
+        &r.authorization_row
+    ));
+    assert!(anchored(
+        &c.t,
+        NegSet::RevokedAuthorizations,
+        &r.authorization_id
+    ));
     // The row as it was, to replay later.
     let row: (
         String,

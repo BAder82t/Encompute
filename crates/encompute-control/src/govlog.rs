@@ -21,11 +21,15 @@
 //! anchored head and the members' witnessed checkpoints are what detect
 //! such edits.
 //!
-//! The log is recorded alongside the state anchor's sets for now: nothing
-//! reads it to decide yet.
+//! The state anchor holds the log's size and head (`checkpoint_log`): at
+//! every start the database's log must contain the anchored head at the
+//! anchored size, and the security-negative state the log records (its
+//! [`NegSet`]s) must still hold in the database. The anchor's size no
+//! longer grows with them.
 
 use std::collections::{BTreeMap, HashMap};
 
+use postgres::types::Type;
 use postgres::GenericClient;
 
 use encompute_ir::{Code, Error, Result};
@@ -48,17 +52,17 @@ fn log_err(m: impl Into<String>) -> Error {
 #[derive(Clone, Debug)]
 pub struct Draft {
     pub partition: Partition,
-    pub kind: &'static str,
+    pub kind: String,
     pub subject: String,
     pub org: Option<String>,
     pub refs: BTreeMap<String, String>,
 }
 
 impl Draft {
-    pub fn new(partition: Partition, kind: &'static str, subject: &str) -> Self {
+    pub fn new(partition: Partition, kind: &str, subject: &str) -> Self {
         Self {
             partition,
-            kind,
+            kind: kind.to_owned(),
             subject: subject.to_owned(),
             org: None,
             refs: BTreeMap::new(),
@@ -174,71 +178,168 @@ fn now_secs() -> u64 {
     encompute_verification::service::now()
 }
 
+thread_local! {
+    /// Set when a security deny event was appended (anything but an issued
+    /// authorization or the migration's own events): the transaction that
+    /// appended it is followed by a synchronous checkpoint
+    /// ([`crate::Control::tx_anchored`]), so no deny transition is
+    /// acknowledged before it is anchored, whichever path made it.
+    ///
+    /// Per thread: the transaction and its caller run on one thread.
+    pub static DENY_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A checkpoint that failed after a deny transition committed: the next
+    /// `tx_anchored` call on this thread settles it (the background task
+    /// anchors it otherwise).
+    pub static RETRY_CHECKPOINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn is_deny(kind: &str) -> bool {
+    kind != kind::AUTHORIZATION_ISSUED
+        && kind != extra_kind::ANCHOR_GENESIS
+        && !kind.starts_with(extra_kind::MIGRATED)
+}
+
 /// Appends one event inside the caller's transaction.
+///
+/// Two round trips, each a single typed statement (no separate prepare):
+/// the head locked, with the partition's size and the complete subtrees
+/// on its right edge (all the new leaf can need), then one statement
+/// writing the event, the subtrees it completes and the head.
 pub fn append(t: &mut impl GenericClient, d: Draft) -> Result<Recorded> {
-    let (head, prev) = lock_head(t)?;
     let partition = d.partition.to_string();
-    let pseq: i64 = t
-        .query_one(
-            "SELECT COALESCE(max(pseq), 0) + 1 FROM governance_events WHERE partition = $1",
-            &[&partition],
+    let r = t
+        .query_typed_one(
+            "SELECT h.gseq, h.hash, s.n,
+                    ARRAY(SELECT x.level::text || ':' || x.hash FROM governance_tree_nodes x
+                           WHERE x.partition = $1
+                             AND (x.level, x.idx) IN (SELECT l, (s.n >> l) - 1 FROM generate_series(0, 62) AS l
+                                                       WHERE ((s.n >> l) & 1) = 1))
+               FROM governance_head h
+               CROSS JOIN LATERAL (SELECT COALESCE(max(e.pseq), 0) AS n FROM governance_events e
+                                    WHERE e.partition = $1) s
+              WHERE h.id FOR UPDATE OF h",
+            &[(&partition, Type::TEXT)],
         )
-        .map_err(db_err)?
-        .get(0);
+        .map_err(db_err)?;
+    let (head, prev, size, edge): (i64, String, i64, Vec<String>) =
+        (r.get(0), r.get(1), r.get(2), r.get(3));
+    let mut siblings = HashMap::new();
+    for x in edge {
+        let (l, h) = x
+            .split_once(':')
+            .ok_or_else(|| log_err("malformed tree node"))?;
+        let l: u32 = l.parse().map_err(|_| log_err("malformed tree node"))?;
+        siblings.insert((l, ((size as u64) >> l) - 1), parse_hash("tree node", h)?);
+    }
     let event = GovEvent {
         v: GOVLOG_VERSION,
-        partition: partition.clone(),
-        pseq: pseq as u64,
-        kind: d.kind.to_owned(),
+        partition,
+        pseq: size as u64 + 1,
+        kind: d.kind,
         subject: d.subject,
         org: d.org,
         at: now_secs(),
         refs: d.refs,
     };
+    if is_deny(&event.kind) {
+        DENY_PENDING.with(|d| d.set(true));
+    }
+    insert(t, head + 1, &prev, event, Some(siblings))
+}
+
+/// The complete subtrees a leaf at `index` needs to complete its
+/// ancestors: the left sibling at each level where it is a right child.
+struct Siblings(HashMap<(u32, u64), Hash>);
+
+impl Nodes for Siblings {
+    fn node(&mut self, level: u32, index: u64) -> Result<Hash> {
+        self.0.get(&(level, index)).copied().ok_or_else(|| {
+            log_err(format!(
+                "the governance log's tree node {level}/{index} is missing"
+            ))
+        })
+    }
+}
+
+/// Writes `event` as event `gseq` after the head `prev` (locked by the
+/// caller): its row, its partition's completed subtrees, the head.
+/// `siblings`: the partition's right-edge subtrees when the caller read
+/// them already, otherwise they are read here.
+fn insert(
+    t: &mut impl GenericClient,
+    gseq: i64,
+    prev: &str,
+    event: GovEvent,
+    siblings: Option<HashMap<(u32, u64), Hash>>,
+) -> Result<Recorded> {
+    let partition = event.partition.clone();
     let leaf = event.leaf_hash()?;
-    let gseq = head + 1;
     let hash = chain_hash(
-        &parse_hash("governance log head", &prev)?,
+        &parse_hash("governance log head", prev)?,
         gseq as u64,
         &leaf,
     );
     let (leaf_hex, hash_hex_) = (hash_hex(&leaf), hash_hex(&hash));
-    t.execute(
-        "INSERT INTO governance_events (gseq, partition, pseq, kind, subject_id, org_id, body,
-             leaf_hash, prev_hash, hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-        &[
-            &gseq,
-            &partition,
-            &pseq,
-            &event.kind,
-            &event.subject,
-            &event.org,
-            &serde_json::to_value(&event).map_err(db_err)?,
-            &leaf_hex,
-            &prev,
-            &hash_hex_,
-        ],
-    )
-    .map_err(db_err)?;
-    let nodes = completed_nodes(
-        event.leaf_index(),
-        leaf,
-        &mut DbNodes {
-            c: t,
-            partition: &partition,
-        },
-    )?;
-    for (level, idx, h) in nodes {
-        t.execute(
-            "INSERT INTO governance_tree_nodes (partition, level, idx, hash) VALUES ($1, $2, $3, $4)",
-            &[&partition, &(level as i32), &(idx as i64), &hash_hex(&h)],
-        )
-        .map_err(db_err)?;
+    // The left siblings the leaf completes, read in one statement.
+    let (mut levels, mut idxs) = (vec![], vec![]);
+    let mut i = event.leaf_index();
+    let mut level = 0i32;
+    while i % 2 == 1 {
+        levels.push(level);
+        idxs.push((i - 1) as i64);
+        i /= 2;
+        level += 1;
     }
-    t.execute(
-        "UPDATE governance_head SET gseq = $1, hash = $2 WHERE id",
-        &[&gseq, &hash_hex_],
+    let known = siblings.is_some();
+    let mut siblings = siblings.unwrap_or_default();
+    if !levels.is_empty() && !known {
+        for r in t
+            .query_typed(
+                "SELECT n.level, n.idx, n.hash FROM governance_tree_nodes n
+                   JOIN unnest($2, $3) AS w(level, idx) ON w.level = n.level AND w.idx = n.idx
+                  WHERE n.partition = $1",
+                &[
+                    (&partition, Type::TEXT),
+                    (&levels, Type::INT4_ARRAY),
+                    (&idxs, Type::INT8_ARRAY),
+                ],
+            )
+            .map_err(db_err)?
+        {
+            let (l, x, h): (i32, i64, String) = (r.get(0), r.get(1), r.get(2));
+            siblings.insert((l as u32, x as u64), parse_hash("tree node", &h)?);
+        }
+    }
+    let nodes = completed_nodes(event.leaf_index(), leaf, &mut Siblings(siblings))?;
+    let n_levels: Vec<i32> = nodes.iter().map(|(l, _, _)| *l as i32).collect();
+    let n_idxs: Vec<i64> = nodes.iter().map(|(_, x, _)| *x as i64).collect();
+    let n_hashes: Vec<String> = nodes.iter().map(|(_, _, h)| hash_hex(h)).collect();
+    let body = serde_json::to_value(&event).map_err(db_err)?;
+    let pseq = event.pseq as i64;
+    t.query_typed(
+        "WITH e AS (
+             INSERT INTO governance_events (gseq, partition, pseq, kind, subject_id, org_id, body,
+                 leaf_hash, prev_hash, hash)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)),
+         n AS (
+             INSERT INTO governance_tree_nodes (partition, level, idx, hash)
+             SELECT $2, u.level, u.idx, u.hash FROM unnest($11, $12, $13) AS u(level, idx, hash))
+         UPDATE governance_head SET gseq = $1, hash = $10 WHERE id",
+        &[
+            (&gseq, Type::INT8),
+            (&partition, Type::TEXT),
+            (&pseq, Type::INT8),
+            (&event.kind, Type::TEXT),
+            (&event.subject, Type::TEXT),
+            (&event.org, Type::TEXT),
+            (&body, Type::JSONB),
+            (&leaf_hex, Type::TEXT),
+            (&prev, Type::TEXT),
+            (&hash_hex_, Type::TEXT),
+            (&n_levels, Type::INT4_ARRAY),
+            (&n_idxs, Type::INT8_ARRAY),
+            (&n_hashes, Type::TEXT_ARRAY),
+        ],
     )
     .map_err(db_err)?;
     Ok(Recorded {
@@ -331,8 +432,38 @@ pub fn append_key_revocation(
 /// leaf hash and level-0 node, each partition's positions, the chain's
 /// links and hashes, and the head. Returns (last gseq, head hash).
 pub fn verify_chain(c: &mut impl GenericClient) -> Result<(i64, String)> {
-    let mut prev = hash_hex(&encompute_trust::govlog::CHAIN_GENESIS);
-    let mut gseq = 0i64;
+    verify_from(c, 0, &hash_hex(&encompute_trust::govlog::CHAIN_GENESIS))
+}
+
+/// The chain hash of event `gseq` (the empty log's head for 0), if the
+/// database holds it.
+pub fn hash_at(c: &mut impl GenericClient, gseq: i64) -> Result<Option<String>> {
+    if gseq == 0 {
+        return Ok(Some(hash_hex(&encompute_trust::govlog::CHAIN_GENESIS)));
+    }
+    Ok(c.query_opt(
+        "SELECT hash FROM governance_events WHERE gseq = $1",
+        &[&gseq],
+    )
+    .map_err(db_err)?
+    .map(|r| r.get(0)))
+}
+
+/// Like [`verify_chain`] for the events after `from`, whose chain hash
+/// must be `from_hash`: the log extends that head. Returns (last gseq,
+/// head hash).
+pub fn verify_from(
+    c: &mut impl GenericClient,
+    from: i64,
+    from_hash: &str,
+) -> Result<(i64, String)> {
+    if from < 0 || hash_at(c, from)?.as_deref() != Some(from_hash) {
+        return Err(log_err(format!(
+            "the governance log does not hold the anchored head at event {from}"
+        )));
+    }
+    let mut prev = from_hash.to_owned();
+    let mut gseq = from;
     let mut pseqs: HashMap<String, i64> = HashMap::new();
     loop {
         let rows = c
@@ -366,11 +497,22 @@ pub fn verify_chain(c: &mut impl GenericClient) -> Result<(i64, String)> {
             {
                 return Err(bad("its columns differ from its body"));
             }
-            let last = pseqs.entry(partition).or_insert(0);
-            if pseq != *last + 1 {
+            let last = match pseqs.get(&partition) {
+                Some(p) => *p,
+                None if from == 0 => 0,
+                None => c
+                    .query_one(
+                        "SELECT COALESCE(max(pseq), 0) FROM governance_events
+                          WHERE partition = $1 AND gseq <= $2",
+                        &[&partition, &from],
+                    )
+                    .map_err(db_err)?
+                    .get(0),
+            };
+            if pseq != last + 1 {
                 return Err(bad("its partition's positions are not contiguous"));
             }
-            *last = pseq;
+            pseqs.insert(partition, pseq);
             let leaf = e.leaf_hash()?;
             let leaf_hex = hash_hex(&leaf);
             if r.get::<_, String>(7) != leaf_hex
@@ -400,6 +542,625 @@ pub fn verify_chain(c: &mut impl GenericClient) -> Result<(i64, String)> {
         return Err(log_err("the governance log head does not match the chain"));
     }
     Ok((gseq, prev))
+}
+
+/// Checkpoints the log as it extends the anchored head (`size`, `head`):
+/// the events after it link and hash correctly, and each partition they
+/// touched gets a signed checkpoint. Under the log's head lock (appends
+/// wait). Returns the new (size, head); a log that does not extend the
+/// anchored head is an error (`Code::TrustEvidence`), and nothing is
+/// signed.
+pub fn checkpoint_extending(
+    t: &mut impl GenericClient,
+    signer: &ServiceSigner,
+    size: i64,
+    head: &str,
+) -> Result<(i64, String)> {
+    lock_head(t)?;
+    let (n, h) = verify_from(t, size, head)?;
+    if n > size {
+        let dirty: Vec<String> = t
+            .query(
+                "SELECT DISTINCT partition FROM governance_events WHERE gseq > $1 ORDER BY 1",
+                &[&size],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        for p in dirty {
+            checkpoint_partition(t, signer, &p)?;
+        }
+    }
+    Ok((n, h))
+}
+
+/// The latest signed checkpoint of every partition: (partition, size,
+/// root, signed).
+pub fn latest_checkpoints(
+    c: &mut impl GenericClient,
+) -> Result<Vec<(String, i64, String, serde_json::Value)>> {
+    Ok(c.query(
+        "SELECT DISTINCT ON (partition) partition, size, root, signed
+           FROM governance_checkpoints ORDER BY partition, size DESC",
+        &[],
+    )
+    .map_err(db_err)?
+    .iter()
+    .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+    .collect())
+}
+
+// --- security-negative sets ------------------------------------------------------
+
+/// Kinds written by recovery and by the migration of a version-1 anchor.
+pub mod extra_kind {
+    /// The migration's first event: the version-1 anchor's digest.
+    pub const ANCHOR_GENESIS: &str = "anchor.genesis";
+    /// A privacy ledger frozen after a detected rollback.
+    pub const LEDGER_FROZEN: &str = "ledger.frozen";
+    /// A row of a security-negative set the database lost, acknowledged by
+    /// recovery (`refs.state` names the set).
+    pub const ROW_LOST: &str = "row.lost";
+    /// The suffix of a transition recovery applied again.
+    pub const REAPPLIED: &str = ".reapplied";
+    /// The prefix of an ID a version-1 anchor's set held.
+    pub const MIGRATED: &str = "migrated.";
+}
+
+/// A security-negative set: the IDs whose transition the database must
+/// never show undone. The log is its record: each set is the subjects of
+/// its kinds (the transition, recovery's re-application, the migrated
+/// version-1 set).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NegSet {
+    RevokedAssets,
+    DisabledServices,
+    DisabledUsers,
+    EndedJobs,
+    WithdrawnGrants,
+    RemovedMemberships,
+    RemovedRoles,
+    RevokedAuthorizations,
+    ExpiredAssets,
+    RetiredPurposes,
+    RevokedKeys,
+    FrozenLedgers,
+}
+
+impl NegSet {
+    pub const ALL: [NegSet; 12] = [
+        NegSet::RevokedAssets,
+        NegSet::DisabledServices,
+        NegSet::DisabledUsers,
+        NegSet::EndedJobs,
+        NegSet::WithdrawnGrants,
+        NegSet::RemovedMemberships,
+        NegSet::RemovedRoles,
+        NegSet::RevokedAuthorizations,
+        NegSet::ExpiredAssets,
+        NegSet::RetiredPurposes,
+        NegSet::RevokedKeys,
+        NegSet::FrozenLedgers,
+    ];
+
+    /// Its name: the version-1 anchor's field (`migrated.<name>`).
+    pub fn name(self) -> &'static str {
+        match self {
+            NegSet::RevokedAssets => "revoked",
+            NegSet::DisabledServices => "disabled_services",
+            NegSet::DisabledUsers => "disabled_users",
+            NegSet::EndedJobs => "ended_jobs",
+            NegSet::WithdrawnGrants => "withdrawn_grants",
+            NegSet::RemovedMemberships => "removed_memberships",
+            NegSet::RemovedRoles => "removed_roles",
+            NegSet::RevokedAuthorizations => "revoked_authorizations",
+            NegSet::ExpiredAssets => "expired_assets",
+            NegSet::RetiredPurposes => "retired_purposes",
+            NegSet::RevokedKeys => "revoked_governance_keys",
+            NegSet::FrozenLedgers => "frozen",
+        }
+    }
+
+    /// The state a rollback refusal names.
+    pub fn state(self) -> &'static str {
+        match self {
+            NegSet::RevokedAssets => "REVOCATION",
+            NegSet::DisabledServices => "SERVICE ACCOUNT",
+            NegSet::DisabledUsers => "USER",
+            NegSet::EndedJobs => "JOB",
+            NegSet::WithdrawnGrants => "APPROVAL",
+            NegSet::RemovedMemberships => "MEMBERSHIP",
+            NegSet::RemovedRoles => "ROLE",
+            NegSet::RevokedAuthorizations => "AUTHORIZATION",
+            NegSet::ExpiredAssets => "EXPIRY",
+            NegSet::RetiredPurposes => "PURPOSE",
+            NegSet::RevokedKeys => "GOVERNANCE KEY",
+            NegSet::FrozenLedgers => "FREEZE",
+        }
+    }
+
+    /// The `refs.state` of its `row.lost` events (what version 1 wrote
+    /// before the colon of a lost row).
+    pub fn lost_state(self) -> String {
+        self.state().to_lowercase().replace(' ', "_")
+    }
+
+    /// The transitions that put an ID in it.
+    pub fn transition_kinds(self) -> &'static [&'static str] {
+        match self {
+            NegSet::RevokedAssets => &[kind::ASSET_REVOKED],
+            NegSet::DisabledServices => &[kind::SERVICE_ACCOUNT_DISABLED],
+            NegSet::DisabledUsers => &[kind::USER_DISABLED],
+            NegSet::EndedJobs => &[kind::JOB_FAILED, kind::JOB_CANCELLED],
+            NegSet::WithdrawnGrants => &[kind::GRANT_WITHDRAWN],
+            NegSet::RemovedMemberships => &[kind::MEMBERSHIP_REMOVED],
+            NegSet::RemovedRoles => &[kind::ROLE_REMOVED],
+            NegSet::RevokedAuthorizations => &[kind::AUTHORIZATION_REVOKED],
+            NegSet::ExpiredAssets => &[kind::ASSET_EXPIRED],
+            NegSet::RetiredPurposes => &[kind::PURPOSE_RETIRED],
+            NegSet::RevokedKeys => &[kind::GOVERNANCE_KEY_REVOKED],
+            NegSet::FrozenLedgers => &[extra_kind::LEDGER_FROZEN],
+        }
+    }
+
+    /// The kind recovery writes when it applies the transition again.
+    pub fn reapplied_kind(self) -> String {
+        format!("{}{}", self.transition_kinds()[0], extra_kind::REAPPLIED)
+    }
+
+    /// The kind of an ID migrated from a version-1 anchor's set (a frozen
+    /// ledger migrates as `ledger.frozen`).
+    pub fn migrated_kind(self) -> String {
+        match self {
+            NegSet::FrozenLedgers => extra_kind::LEDGER_FROZEN.to_owned(),
+            s => format!("{}{}", extra_kind::MIGRATED, s.name()),
+        }
+    }
+
+    /// Every kind whose subjects are in it.
+    pub fn kinds(self) -> Vec<String> {
+        let mut k: Vec<String> = self
+            .transition_kinds()
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        k.extend(
+            self.transition_kinds()
+                .iter()
+                .map(|x| format!("{x}{}", extra_kind::REAPPLIED)),
+        );
+        k.push(self.migrated_kind());
+        k.sort();
+        k.dedup();
+        k
+    }
+
+    /// A query of its IDs, with its kinds as `$1`: the subjects, and for a
+    /// revoked authorization also the signed document's ID (a document
+    /// stays revoked whatever row carries it).
+    pub fn ids_sql(self) -> &'static str {
+        match self {
+            NegSet::RevokedAuthorizations => {
+                "SELECT subject_id FROM governance_events WHERE kind = ANY($1)
+                 UNION SELECT body #>> '{refs,authorization_id}' FROM governance_events
+                  WHERE kind = ANY($1) AND body #>> '{refs,authorization_id}' IS NOT NULL"
+            }
+            _ => "SELECT subject_id FROM governance_events WHERE kind = ANY($1)",
+        }
+    }
+}
+
+/// The IDs of `set`, in order.
+pub fn negative_set(c: &mut impl GenericClient, set: NegSet) -> Result<Vec<String>> {
+    Ok(c.query(
+        &format!(
+            "SELECT DISTINCT x FROM ({}) AS s(x) ORDER BY 1",
+            set.ids_sql()
+        ),
+        &[&set.kinds()],
+    )
+    .map_err(db_err)?
+    .iter()
+    .map(|r| r.get(0))
+    .collect())
+}
+
+/// The condition that an event of `set` (kinds `$1`) names `x`: its
+/// subject, or for a revoked authorization also its document's ID. Each
+/// branch is an index lookup (kind and subject, or the document ID).
+fn names(set: NegSet, x: &str) -> String {
+    let doc = if set == NegSet::RevokedAuthorizations {
+        format!(" OR e.body #>> '{{refs,authorization_id}}' = {x}")
+    } else {
+        String::new()
+    };
+    format!("e.kind = ANY($1) AND (e.subject_id = {x}{doc})")
+}
+
+/// The first of `ids` that is in `set`, if any (one query, an index lookup
+/// per ID: run-time checks never scan the log).
+pub fn first_in(c: &mut impl GenericClient, set: NegSet, ids: &[&str]) -> Result<Option<String>> {
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    Ok(c.query_opt(
+        &format!(
+            "SELECT x FROM unnest($2::text[]) AS x
+              WHERE EXISTS (SELECT 1 FROM governance_events e WHERE {})
+              ORDER BY x LIMIT 1",
+            names(set, "x")
+        ),
+        &[&set.kinds(), &ids],
+    )
+    .map_err(db_err)?
+    .map(|r| r.get(0)))
+}
+
+/// Whether `id` is in `set`.
+pub fn contains(c: &mut impl GenericClient, set: NegSet, id: &str) -> Result<bool> {
+    Ok(first_in(c, set, &[id])?.is_some())
+}
+
+/// The first event that put `id` in `set` (its `gseq`), if any.
+pub fn first_gseq(c: &mut impl GenericClient, set: NegSet, id: &str) -> Result<Option<i64>> {
+    Ok(c.query_one(
+        &format!(
+            "SELECT min(e.gseq) FROM governance_events e WHERE {}",
+            names(set, "$2")
+        ),
+        &[&set.kinds(), &id],
+    )
+    .map_err(db_err)?
+    .get(0))
+}
+
+/// The partition (and organization) of an event about `id` in `set`,
+/// from the rows the database holds: its project's when it has one (a
+/// governed project's own, otherwise its organization's), its
+/// organization's, or the platform's when neither is known.
+pub fn route(
+    t: &mut impl GenericClient,
+    set: NegSet,
+    id: &str,
+) -> Result<(Partition, Option<String>)> {
+    let one = |t: &mut _, sql: &str| -> Result<Option<(Option<String>, Option<String>)>> {
+        Ok(GenericClient::query_opt(t, sql, &[&id])
+            .map_err(db_err)?
+            .map(|r| (r.get(0), r.get(1))))
+    };
+    let found = match set {
+        NegSet::RevokedAssets | NegSet::ExpiredAssets | NegSet::FrozenLedgers => one(
+            t,
+            "SELECT NULL::text, organization_id FROM assets WHERE id = $1",
+        )?,
+        NegSet::DisabledServices => one(
+            t,
+            "SELECT NULL::text, organization_id FROM service_accounts WHERE id = $1",
+        )?,
+        NegSet::DisabledUsers => one(
+            t,
+            "SELECT NULL::text, organization_id FROM users WHERE id = $1",
+        )?,
+        NegSet::EndedJobs => one(
+            t,
+            "SELECT project_id, organization_id FROM jobs WHERE id = $1",
+        )?,
+        NegSet::WithdrawnGrants => one(
+            t,
+            "SELECT w.project_id, a.organization_id FROM withdrawn_grants w
+               LEFT JOIN assets a ON a.id = w.asset_id WHERE w.id = $1",
+        )?,
+        NegSet::RemovedMemberships => one(
+            t,
+            "SELECT project_id, organization_id FROM removed_memberships WHERE id = $1",
+        )?,
+        NegSet::RemovedRoles => one(
+            t,
+            "SELECT NULL::text, organization_id FROM removed_roles WHERE id = $1",
+        )?,
+        NegSet::RevokedAuthorizations => one(
+            t,
+            "SELECT project_id, organization_id FROM authorizations
+              WHERE id = $1 OR authorization_id = $1 ORDER BY id LIMIT 1",
+        )?,
+        NegSet::RetiredPurposes => one(
+            t,
+            "SELECT project_id, organization_id FROM purposes WHERE id = $1",
+        )?,
+        NegSet::RevokedKeys => one(
+            t,
+            "SELECT NULL::text, organization_id FROM governance_keys WHERE id = $1",
+        )?,
+    };
+    Ok(match found {
+        Some((Some(project), org)) => (for_project(t, &project, org.as_deref())?, org),
+        Some((None, org)) => (for_org(org.as_deref()), org),
+        None => (Partition::Platform, None),
+    })
+}
+
+/// Every partition an event about `id` in `set` goes to: [`route`]'s,
+/// and for an asset's revocation, expiry or frozen ledger also each
+/// governed project that uses it ([`governed_projects_using_asset`]), as
+/// [`append_asset_event`] does.
+pub fn routes(
+    t: &mut impl GenericClient,
+    set: NegSet,
+    id: &str,
+) -> Result<Vec<(Partition, Option<String>)>> {
+    let first = route(t, set, id)?;
+    let mut out = vec![first.clone()];
+    if matches!(
+        set,
+        NegSet::RevokedAssets | NegSet::ExpiredAssets | NegSet::FrozenLedgers
+    ) {
+        for p in governed_projects_using_asset(t, id)? {
+            let p = Partition::Project(p);
+            if p != first.0 {
+                out.push((p, first.1.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Appends `kind` about `id` of `set` to every partition [`routes`] names.
+pub fn append_routed(
+    t: &mut impl GenericClient,
+    set: NegSet,
+    kind: &str,
+    id: &str,
+    refs: &[(&str, &str)],
+) -> Result<Vec<Recorded>> {
+    let mut out = vec![];
+    for (partition, org) in routes(t, set, id)? {
+        let mut d = Draft::new(partition, kind, id);
+        if let Some(o) = org {
+            d = d.org(&o);
+        }
+        for (k, v) in refs {
+            d = d.r#ref(k, *v);
+        }
+        out.push(append(t, d)?);
+    }
+    Ok(out)
+}
+
+/// Appends recovery's re-application of `set`'s transition of `id`
+/// (to every partition [`routes`] names).
+pub fn append_reapplied(
+    t: &mut impl GenericClient,
+    set: NegSet,
+    id: &str,
+    refs: &[(&str, &str)],
+) -> Result<Vec<Recorded>> {
+    append_routed(t, set, &set.reapplied_kind(), id, refs)
+}
+
+/// Appends that the database lost the row of `id` of `set`
+/// (acknowledged by recovery; the ID stays blocked).
+pub fn append_lost(t: &mut impl GenericClient, set: NegSet, id: &str) -> Result<Recorded> {
+    append(
+        t,
+        Draft::new(Partition::Platform, extra_kind::ROW_LOST, id).r#ref("state", set.lost_state()),
+    )
+}
+
+/// Whether recovery acknowledged that the database lost the row of `id`
+/// of `set`.
+pub fn is_lost(c: &mut impl GenericClient, set: NegSet, id: &str) -> Result<bool> {
+    Ok(c.query_opt(
+        "SELECT 1 FROM governance_events
+          WHERE kind = $1 AND subject_id = $2 AND body #>> '{refs,state}' = $3 LIMIT 1",
+        &[&extra_kind::ROW_LOST, &id, &set.lost_state()],
+    )
+    .map_err(db_err)?
+    .is_some())
+}
+
+// --- migration from a version-1 anchor ------------------------------------------
+
+/// The migration's genesis: (its gseq, the version-1 anchor's digest, its
+/// canonical JSON), the latest if several.
+pub fn genesis(c: &mut impl GenericClient) -> Result<Option<(i64, String, Option<String>)>> {
+    Ok(c.query_opt(
+        "SELECT e.gseq, e.body #>> '{refs,digest}', g.anchor FROM governance_events e
+           LEFT JOIN governance_anchor_genesis g ON g.gseq = e.gseq
+          WHERE e.kind = $1 ORDER BY e.gseq DESC LIMIT 1",
+        &[&extra_kind::ANCHOR_GENESIS],
+    )
+    .map_err(db_err)?
+    .map(|r| {
+        (
+            r.get(0),
+            r.get::<_, Option<String>>(1).unwrap_or_default(),
+            r.get(2),
+        )
+    }))
+}
+
+/// Appends the migration's genesis event (the version-1 anchor's digest
+/// and counter; the anchor itself, signed, is kept beside it, outside the
+/// shared leaf). Dropping or editing that copy is detected all the same:
+/// every start requires the copy's SHA-256 to equal the digest the
+/// genesis event (a leaf of the chain) and the signed version-2 anchor
+/// both carry (`check_log_extends`).
+pub fn append_genesis(
+    t: &mut impl GenericClient,
+    counter: u64,
+    digest: &str,
+    anchor: &str,
+) -> Result<Recorded> {
+    let r = append(
+        t,
+        Draft::new(
+            Partition::Platform,
+            extra_kind::ANCHOR_GENESIS,
+            &format!("state-anchor-v1-{counter}"),
+        )
+        .r#ref("digest", digest)
+        .r#ref("counter", counter.to_string()),
+    )?;
+    t.execute(
+        "INSERT INTO governance_anchor_genesis (gseq, digest, anchor) VALUES ($1, $2, $3)",
+        &[&r.gseq, &digest, &anchor],
+    )
+    .map_err(db_err)?;
+    Ok(r)
+}
+
+// --- export and import ----------------------------------------------------------
+
+/// One event of an export (`encompute-control export-governance-log`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Exported {
+    pub gseq: i64,
+    pub hash: String,
+    pub event: GovEvent,
+    /// The version-1 anchor, for the migration's genesis event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+/// The events after `after`, as JSON lines.
+pub fn export(c: &mut impl GenericClient, after: i64) -> Result<String> {
+    to_lines(&exported(c, after, i64::MAX)?)
+}
+
+/// JSON lines of `events`.
+pub fn to_lines(events: &[Exported]) -> Result<String> {
+    let mut out = String::new();
+    for x in events {
+        out.push_str(&serde_json::to_string(x).map_err(db_err)?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// The events after `after`, up to `upto` (inclusive), in order.
+pub fn exported(c: &mut impl GenericClient, after: i64, upto: i64) -> Result<Vec<Exported>> {
+    let mut out = vec![];
+    let mut from = after;
+    loop {
+        let rows = c
+            .query(
+                "SELECT e.gseq, e.hash, e.body, g.anchor FROM governance_events e
+                   LEFT JOIN governance_anchor_genesis g ON g.gseq = e.gseq
+                  WHERE e.gseq > $1 AND e.gseq <= $2 ORDER BY e.gseq LIMIT 1000",
+                &[&from, &upto],
+            )
+            .map_err(db_err)?;
+        if rows.is_empty() {
+            return Ok(out);
+        }
+        for r in &rows {
+            let x = Exported {
+                gseq: r.get(0),
+                hash: r.get(1),
+                event: serde_json::from_value(r.get(2)).map_err(db_err)?,
+                anchor: r.get(3),
+            };
+            from = x.gseq;
+            out.push(x);
+        }
+    }
+}
+
+/// Appends the events of an export (JSON lines) that the database's log
+/// lacks, in the caller's transaction. The database's own log must verify
+/// and the export must continue it: its event at the database's head (if
+/// it has one) must carry the same hash, and its events after it must
+/// follow on without a gap, each recomputed (leaf, partition position,
+/// chain hash) as it is written. Nothing in the export is trusted: the
+/// caller checks that the result holds the anchored head. Returns how
+/// many events were added.
+pub fn import(t: &mut impl GenericClient, lines: &str) -> Result<u64> {
+    let mut imp = Importer::new(t)?;
+    for (n, line) in lines.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let x: Exported = serde_json::from_str(line)
+            .map_err(|e| log_err(format!("governance log export, line {}: {e}", n + 1)))?;
+        imp.push(t, &x)?;
+    }
+    Ok(imp.added)
+}
+
+/// Appends exported events one at a time (what [`import`] does per line),
+/// so a caller can stream them from a store without holding them all.
+pub struct Importer {
+    head: i64,
+    prev: String,
+    first: bool,
+    pub added: u64,
+}
+
+impl Importer {
+    /// Verifies the database's own log and locks its head.
+    pub fn new(t: &mut impl GenericClient) -> Result<Self> {
+        let (head, prev) = verify_chain(t)?;
+        lock_head(t)?;
+        Ok(Self {
+            head,
+            prev,
+            first: true,
+            added: 0,
+        })
+    }
+
+    /// Appends `x` if the database lacks it; every field is recomputed
+    /// (leaf, partition position, chain hash). An event the database holds
+    /// must be the same (checked at its head).
+    pub fn push(&mut self, t: &mut impl GenericClient, x: &Exported) -> Result<()> {
+        let bad = |m: &str| log_err(format!("governance log export, event {}: {m}", x.gseq));
+        if self.first && x.gseq > self.head + 1 {
+            return Err(bad(&format!(
+                "the export starts after the database's last event ({}): events are missing",
+                self.head
+            )));
+        }
+        self.first = false;
+        if x.gseq <= self.head {
+            if x.gseq == self.head && x.hash != self.prev {
+                return Err(bad(
+                    "differs from the database's event there (another history)",
+                ));
+            }
+            return Ok(());
+        }
+        if x.gseq != self.head + 1 {
+            return Err(bad("out of order or missing events before it"));
+        }
+        let expected = partition_size(t, &x.event.partition)? + 1;
+        if x.event.pseq != expected {
+            return Err(bad("its partition's positions are not contiguous"));
+        }
+        let genesis = x.event.kind == extra_kind::ANCHOR_GENESIS;
+        let r = insert(t, x.gseq, &self.prev, x.event.clone(), None)?;
+        if r.hash != x.hash {
+            return Err(bad("its hash does not match its contents and position"));
+        }
+        if let (true, Some(a)) = (genesis, &x.anchor) {
+            let digest = x.event.refs.get("digest").cloned().unwrap_or_default();
+            if encompute_verification::service::sha256_hex(a.as_bytes()) != digest {
+                return Err(bad(
+                    "the version-1 anchor does not match the genesis digest",
+                ));
+            }
+            t.execute(
+                "INSERT INTO governance_anchor_genesis (gseq, digest, anchor) VALUES ($1, $2, $3)",
+                &[&r.gseq, &digest, a],
+            )
+            .map_err(db_err)?;
+        }
+        self.head = r.gseq;
+        self.prev = r.hash;
+        self.added += 1;
+        Ok(())
+    }
 }
 
 /// The subjects of every event of `kind` (for example the revoked
