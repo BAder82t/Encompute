@@ -185,6 +185,11 @@ pub struct AuditEvidence {
     pub events: Vec<AuditEntry>,
     #[serde(default)]
     pub revocation_heads: Vec<SignedRevocationHead>,
+    /// For a run that does not begin at the log's first event: each owner's
+    /// revocation leaves covered by its latest head (sorted), which the
+    /// verifier checks against the head's signed root before trusting.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub head_leaves: BTreeMap<String, Vec<String>>,
 }
 
 // --- anchors and options ----------------------------------------------------
@@ -196,6 +201,10 @@ pub struct GovernanceAnchors {
     pub organizations: BTreeMap<String, String>,
     /// The control plane's public key (hex).
     pub control_plane: Option<String>,
+    /// The project's member organizations as the verifier pins them: all of
+    /// them must witness. Without it a run that does not begin at the log's
+    /// start cannot show who the members are.
+    pub project_members: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -463,6 +472,26 @@ pub struct AuditFindings {
     /// event, or the issuance of every authorization the job runs under.
     /// Without it, nothing shows what happened to them in between.
     pub complete: bool,
+    /// The run begins at the log's first event.
+    pub from_start: bool,
+    /// The project's members are known from the log's start or the
+    /// verifier's pins, not from the exporter's list alone.
+    pub members_pinned: bool,
+    /// For a partial run: what each owner's head leaf list shows of the
+    /// revocations before the run's start.
+    pub pre_run: BTreeMap<String, PreRun>,
+}
+
+/// What is known of an owner's revocations before a partial run starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreRun {
+    /// Its head's leaf list was checked against the signed root and holds
+    /// nothing that bears on the job.
+    Clean,
+    /// Not shown, or shown but not decidable (why).
+    Unknown(String),
+    /// An authorization of the job was revoked before the run (its ID).
+    AuthorizationRevoked(String),
 }
 
 impl AuditFindings {
@@ -476,6 +505,9 @@ impl AuditFindings {
             heads: vec![],
             notes: vec![note.to_owned()],
             complete: false,
+            from_start: false,
+            members_pinned: false,
+            pre_run: BTreeMap::new(),
         }
     }
 
@@ -532,7 +564,7 @@ pub fn check_audit(
     // run is detected, so what follows the start is complete.
     let mut prev: Option<u64> = None;
     for e in &audit.events {
-        if prev.is_some_and(|p| e.event.pseq != p + 1) {
+        if prev.is_some_and(|p| p.checked_add(1) != Some(e.event.pseq)) {
             return fail(format!(
                 "the events are not a contiguous run: event {} follows {}",
                 e.event.pseq,
@@ -563,7 +595,8 @@ pub fn check_audit(
         .filter(|e| e.kind == kind::AUTHORIZATION_ISSUED)
         .filter_map(|e| e.refs.get("authorization_id").map(String::as_str))
         .collect();
-    let complete = from_start || authorizations.iter().all(|a| issued.contains(a.as_str()));
+    let complete = !authorizations.is_empty()
+        && (from_start || authorizations.iter().all(|a| issued.contains(a.as_str())));
     if !complete {
         notes.push("the run of events does not reach back to the issuance of every authorization the job ran under: nothing shows what happened to them in between. Sign a fresh revocation head (or export from a log that reaches back) to make this bundle checkable".into());
     }
@@ -595,6 +628,12 @@ pub fn check_audit(
     // before it: the control plane's baseline stays required, never dropped.
     if !from_start {
         must.extend(audit.members.iter());
+    }
+    // The members the verifier pinned, which an exporter cannot choose.
+    must.extend(a.project_members.iter());
+    let members_pinned = from_start || !a.project_members.is_empty();
+    if !members_pinned {
+        notes.push("the project's members are not pinned and the run does not show them from the log's start: the exporter's member list cannot be checked (add project_members to the pins file)".into());
     }
     let witnessed = !must.is_empty() && must.iter().all(|o| witnessed_by.contains(*o));
     for o in required {
@@ -656,6 +695,16 @@ pub fn check_audit(
             head_at,
         });
     }
+    // What the owners' heads show of the revocations before a partial run.
+    let mut pre_run = BTreeMap::new();
+    if !from_start {
+        for org in owners {
+            pre_run.insert(
+                org.clone(),
+                pre_run_of(org, &events, audit, a, authorizations),
+            );
+        }
+    }
     AuditFindings {
         state: AuditState::Verified,
         events,
@@ -665,7 +714,61 @@ pub fn check_audit(
         heads,
         notes,
         complete,
+        from_start,
+        members_pinned,
+        pre_run,
     }
+}
+
+/// An owner's latest head and the leaves it covers, for a run that does not
+/// begin at the log's start: the leaf list is trusted only if it hashes to
+/// the signed head's root.
+fn pre_run_of(
+    org: &str,
+    events: &[GovEvent],
+    audit: &AuditEvidence,
+    a: &GovernanceAnchors,
+    authorizations: &BTreeSet<String>,
+) -> PreRun {
+    let unknown = |m: &str| PreRun::Unknown(m.to_owned());
+    let Some((seq, root, _)) = crate::govlog::revocation_state(events, org).last_head else {
+        return unknown("the run shows no head of this organization");
+    };
+    let Some(key) = a.organizations.get(org) else {
+        return unknown("no pinned key for the organization");
+    };
+    let head = audit.revocation_heads.iter().find(|h| {
+        h.body.organization == org
+            && h.body.seq == seq
+            && h.body.root == root
+            && h.verify(key).is_ok()
+    });
+    if head.is_none() {
+        return unknown("the head the log records is not supplied or does not verify");
+    }
+    let Some(leaves) = audit.head_leaves.get(org) else {
+        return unknown("the bundle does not carry the leaves its head covers");
+    };
+    match crate::govlog::revocation_root(leaves) {
+        Ok(r) if crate::govlog::hash_hex(&r) == root => {}
+        _ => return unknown("the leaves in the bundle are not the ones the signed head covers"),
+    }
+    for l in leaves {
+        if let Some(id) = l.strip_prefix("authorization.revoked:") {
+            if authorizations.contains(id) {
+                return PreRun::AuthorizationRevoked(id.to_owned());
+            }
+        }
+    }
+    if leaves
+        .iter()
+        .any(|l| l.starts_with("governance_key.revoked:"))
+    {
+        return unknown(
+            "a governance key of the organization was revoked before the run; whether it signed these authorizations cannot be told from the leaf",
+        );
+    }
+    PreRun::Clean
 }
 
 // --- rows -----------------------------------------------------------------------
@@ -1544,6 +1647,20 @@ fn row_window(j: &Job<'_>) -> GovernanceRow {
                 ));
             }
         }
+        if j.audit.is_verified() && !j.audit.from_start {
+            match j.audit.pre_run.get(a.party) {
+                Some(PreRun::Clean) => {}
+                Some(PreRun::AuthorizationRevoked(x)) if *x == a.id => {
+                    t.fail(format!("{what} was revoked before the run's start"));
+                }
+                Some(PreRun::Unknown(m)) => t.unanchored(format!(
+                    "{what}: revocations before the run's start are not shown ({m})"
+                )),
+                _ => t.unanchored(format!(
+                    "{what}: revocations before the run's start are not shown"
+                )),
+            }
+        }
         if !j.audit.is_verified() || !j.audit.complete {
             t.unanchored(format!(
                 "{what}: whether it or its key was revoked before the run rests on the project's log, which is {}",
@@ -1793,16 +1910,26 @@ fn revocations(j: &Job<'_>) -> Vec<RevocationNote> {
     if !j.audit.is_verified() {
         return vec![];
     }
+    // Which derived results each identifier leads to, computed once: the
+    // work is the events plus the records, not their product.
+    let mut leads: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for r in &j.ev.release_records {
+        for id in r.body.parents.iter().chain(&r.body.authorization_ids) {
+            leads
+                .entry(id.as_str())
+                .or_default()
+                .insert(r.body.derived_version_id.as_str());
+        }
+    }
     let mut out = vec![];
     for e in &j.audit.events {
         if !kind::REVOCATIONS.contains(&e.kind.as_str()) {
             continue;
         }
-        let mut downstream = vec![];
-        for r in &j.ev.release_records {
-            let hit = |v: &String| *v == e.subject || e.refs.values().any(|x| x == v);
-            if r.body.parents.iter().any(hit) || r.body.authorization_ids.iter().any(hit) {
-                downstream.push(r.body.derived_version_id.clone());
+        let mut downstream: BTreeSet<&str> = BTreeSet::new();
+        for id in std::iter::once(&e.subject).chain(e.refs.values()) {
+            if let Some(d) = leads.get(id.as_str()) {
+                downstream.extend(d);
             }
         }
         out.push(RevocationNote {
@@ -1810,7 +1937,7 @@ fn revocations(j: &Job<'_>) -> Vec<RevocationNote> {
             kind: e.kind.clone(),
             subject: e.subject.clone(),
             at: e.at,
-            downstream,
+            downstream: downstream.into_iter().map(str::to_owned).collect(),
         });
     }
     out
@@ -1832,6 +1959,11 @@ fn row_audit(j: &Job<'_>, as_of: u64) -> (GovernanceRow, Vec<String>) {
         }
         AuditState::Verified => {
             t.present = true;
+            if !a.members_pinned {
+                t.unanchored(
+                    "the project's members are not pinned: who must witness cannot be checked against the exporter's list".into(),
+                );
+            }
             if !a.complete {
                 t.unanchored(
                     "the run of events does not reach back to the issuance of every authorization: sign a fresh revocation head to make this bundle checkable".into(),

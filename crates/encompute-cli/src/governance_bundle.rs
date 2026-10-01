@@ -252,6 +252,7 @@ fn summary(v: &Verified, code: u8, pins: &Pins) -> Value {
         "pins": {
             "organizations": pins.organizations.iter().map(|(o, p)| (o.clone(), json!({"key": p.identity_key, "obtained": p.obtained}))).collect::<serde_json::Map<_, _>>(),
             "control_plane": pins.control_plane,
+            "project_members": pins.project_members,
             "evaluators": pins.evaluators,
             "digest": pins.digest().ok(),
         },
@@ -327,6 +328,12 @@ pub fn report(a: VerifyArgs) -> Result<ExitCode> {
                 "  control plane: key {}..., obtained: {}",
                 &p.key[..16],
                 tty(&p.obtained)
+            );
+        }
+        if !pins.project_members.is_empty() {
+            println!(
+                "  project members (pinned): {}",
+                tty(&pins.project_members.join(", "))
             );
         }
         for p in &pins.evaluators {

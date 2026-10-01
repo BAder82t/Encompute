@@ -28,7 +28,7 @@ pub use bundle::{
 pub use governance::{
     check_audit, AuditEntry, AuditEvidence, AuditFindings, AuditState, AuthorizationCard,
     AuthorizationEntry, GovernanceAnchors, GovernanceEvidence, GovernanceOptions, GovernanceReport,
-    GovernanceRow, HeadFinding, RevocationNote, SharedApproval, Verdict,
+    GovernanceRow, HeadFinding, PreRun, RevocationNote, SharedApproval, Verdict,
     GOVERNANCE_EVIDENCE_VERSION, GOVERNANCE_ROWS, LEGAL_BOUNDARY, LEGAL_BOUNDARY_ID,
 };
 pub use graph::{node_id, Edge, EdgeKind, Evidence, Node, NodeKind, TrustGraph};

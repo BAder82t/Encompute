@@ -692,6 +692,10 @@ pub struct Pins {
     pub organizations: BTreeMap<String, OrganizationPin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_plane: Option<Pin>,
+    /// The project's member organizations, if the verifier knows them: all
+    /// of them must witness the log's checkpoint. Optional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_members: Vec<String>,
     #[serde(default)]
     pub evaluators: Vec<Pin>,
     #[serde(default)]
@@ -733,6 +737,12 @@ impl Pins {
     }
 
     pub fn check(&self) -> Result<()> {
+        for m in &self.project_members {
+            check_ident("a project member", m)?;
+        }
+        if self.project_members.len() > MAX_ITEMS {
+            return Err(too_big("too many project members in the pins"));
+        }
         for (o, p) in &self.organizations {
             check_ident("a pinned organization", o)?;
             check_key(o, &p.identity_key)?;
@@ -795,6 +805,7 @@ impl Pins {
             GovernanceAnchors {
                 organizations: orgs.clone(),
                 control_plane: self.control_plane.as_ref().map(|p| p.key.clone()),
+                project_members: self.project_members.iter().cloned().collect(),
             },
             Anchors {
                 parties: BTreeMap::new(),

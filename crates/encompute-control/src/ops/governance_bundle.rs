@@ -114,6 +114,7 @@ struct Parts {
     witnesses: Vec<SignedCheckpointWitness>,
     events: Vec<AuditEntry>,
     heads: Vec<SignedRevocationHead>,
+    head_leaves: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 fn limit(m: impl Into<String>) -> Error {
@@ -288,6 +289,7 @@ impl Control {
         let partition = Partition::Project(j.project.clone()).to_string();
         let checkpoint = govlog::latest_checkpoint(t, &partition)?;
         let (mut events, mut witnesses, mut members) = (vec![], vec![], vec![]);
+        let mut head_leaves = std::collections::BTreeMap::new();
         if let Some(cp) = &checkpoint {
             // The contiguous run of the project's events from where this job's
             // authorizations and its owners' heads need it to the checkpoint:
@@ -296,7 +298,8 @@ impl Control {
             let owners: Vec<String> = g_owners.iter().cloned().collect();
             let max = self
                 .bundle_max_events
-                .load(std::sync::atomic::Ordering::Relaxed);
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .min(MAX_BUNDLE_EVENTS);
             if max == 0 {
                 return Err(limit("this control plane exports no governance events"));
             }
@@ -319,6 +322,16 @@ impl Control {
                         .map(|(event, _, proof)| AuditEntry { event, proof }),
                 );
                 after = last;
+            }
+            // A run that does not begin at the log's first event cannot show
+            // what the owners' heads cover before it: the leaves, to be checked
+            // against each head's signed root.
+            if start > 1 {
+                for o in &owners {
+                    if let Some(l) = govlog::head_leaves(t, &partition, o, cp.body.size)? {
+                        head_leaves.insert(o.clone(), l);
+                    }
+                }
             }
             witnesses = govlog::witnesses_at(t, &partition, cp.body.size)?;
             members = govlog::members_at(t, &j.project, cp.body.size)?;
@@ -354,6 +367,7 @@ impl Control {
             witnesses,
             events,
             heads,
+            head_leaves,
             governance: g,
             job: j,
         })
@@ -420,6 +434,7 @@ impl Control {
             witnesses: p.witnesses,
             events: p.events,
             revocation_heads: p.heads,
+            head_leaves: p.head_leaves,
         };
         let _: &BTreeMap<String, String> = &p.governance.authorizations;
         // The exporter's own check: what cannot be verified (digests, the

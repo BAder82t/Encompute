@@ -69,6 +69,9 @@ pub fn pk(k: &SigningKey) -> String {
     hex(&k.verifying_key().to_bytes())
 }
 
+/// An event before the issuances: (organization, kind, subject, references).
+pub type EarlyEvent = (String, String, String, Vec<(String, String)>);
+
 /// What a test may change before the evidence is signed.
 #[derive(Clone, Debug)]
 pub struct Knobs {
@@ -97,6 +100,9 @@ pub struct Knobs {
     pub late: Vec<(String, String, String)>,
     /// Whether the owners sign a head.
     pub heads: bool,
+    /// Events before the authorizations were issued: (organization, kind,
+    /// subject, references).
+    pub early: Vec<EarlyEvent>,
 }
 
 impl Default for Knobs {
@@ -117,6 +123,7 @@ impl Default for Knobs {
             filler: 0,
             late: vec![],
             heads: true,
+            early: vec![],
         }
     }
 }
@@ -453,6 +460,7 @@ impl Fixture {
                     (OTHER.to_owned(), pk(&other)),
                 ]),
                 control_plane: Some(control.public_key_hex()),
+                project_members: Default::default(),
             },
             evaluator,
             control,
@@ -506,6 +514,18 @@ impl Fixture {
                 TAX,
                 T0 - 100,
                 &[],
+            ));
+        }
+        for (org, kind_, subject, refs) in &k.early {
+            let refs: Vec<(&str, &str)> =
+                refs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+            events.push(Self::event(
+                events.len() as u64 + 1,
+                kind_,
+                subject,
+                org,
+                T0 - 1000,
+                &refs,
             ));
         }
         // Each authorization's issuance, in the project's log.
@@ -606,6 +626,7 @@ impl Fixture {
                 })
                 .collect(),
             revocation_heads: heads,
+            head_leaves: Default::default(),
         }
     }
 

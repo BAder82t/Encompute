@@ -836,6 +836,17 @@ fn with_audit(
         .unwrap()
 }
 
+fn with_pinned_members(
+    f: &Fixture,
+    edit: impl FnOnce(&mut encompute_trust::AuditEvidence),
+) -> GovernanceReport {
+    let mut a = f.audit.clone();
+    edit(&mut a);
+    let mut o = f.options();
+    o.anchors.project_members = [TAX, BEN, OTHER].map(String::from).into();
+    f.graph.governance_report(&f.evidence, &a, &o).unwrap()
+}
+
 /// A late event: after the owners' heads, so only the tail shows it.
 fn late(kind_: &str, subject: &str) -> Knobs {
     Knobs {
@@ -927,9 +938,13 @@ fn run_from_the_latest_head_is_sufficient() {
     });
     assert_eq!(status(&show(&f), "Audit chain"), Status::Satisfied);
     // The run may begin at the first issuance: nothing about the
-    // authorizations can precede it, and the heads cover what came before.
-    let r = with_audit(&f, |a| {
+    // authorizations can precede it, and the heads cover what came before
+    // (the verifier pins the project's members, which a partial run cannot
+    // show).
+    let r = with_pinned_members(&f, |a| {
         a.events.drain(..20);
+        a.head_leaves.insert(TAX.into(), leaves_of(&f, TAX));
+        a.head_leaves.insert(BEN.into(), leaves_of(&f, BEN));
     });
     assert_eq!(
         status(&r, "Audit chain"),
@@ -986,4 +1001,184 @@ fn membership_event_omission_cannot_drop_a_witness_requirement() {
     assert_eq!(status(&r, "Audit chain"), Status::Unchecked);
     // Whole and honest it is fine.
     assert_eq!(status(&show(&f), "Audit chain"), Status::Satisfied);
+}
+
+/// The leaves an owner's latest head covers, from the whole log.
+fn leaves_of(f: &Fixture, org: &str) -> Vec<String> {
+    let events: Vec<_> = f.audit.events.iter().map(|e| e.event.clone()).collect();
+    let head = events
+        .iter()
+        .rposition(|e| e.kind == kind::REVOCATION_HEAD_SIGNED && e.org.as_deref() == Some(org))
+        .unwrap();
+    encompute_trust::govlog::revocation_leaves(&events[..head], org)
+}
+
+fn key_revoked_early(filler: usize) -> Fixture {
+    let probe = Fixture::build();
+    let kid = encompute_trust::authz::governance_key_id(&pk(&probe.tax));
+    Fixture::with(Knobs {
+        filler,
+        early: vec![(
+            TAX.to_owned(),
+            kind::GOVERNANCE_KEY_REVOKED.to_owned(),
+            "gk_1".to_owned(),
+            vec![("key_id".to_owned(), kid)],
+        )],
+        ..Knobs::default()
+    })
+}
+
+#[test]
+fn key_revoked_before_a_partial_run_start_is_detected_with_the_leaf_list() {
+    let f = key_revoked_early(2);
+    // The whole log shows a key revoked before its authorization was issued.
+    assert_eq!(status(&show(&f), "Authorization window"), Status::Failed);
+    // A run that starts at the issuances hides it: with the head's leaf list
+    // (checked against its signed root) it is seen, and what cannot be told
+    // is UNCHECKED, never a pass.
+    let cut = 3; // 2 filler + the early key revocation
+    let r = with_pinned_members(&f, |a| {
+        a.events.drain(..cut);
+        a.head_leaves.insert(TAX.into(), leaves_of(&f, TAX));
+        a.head_leaves.insert(BEN.into(), leaves_of(&f, BEN));
+    });
+    assert_eq!(status(&r, "Authorization window"), Status::Unchecked);
+    assert!(
+        details(&r, "Authorization window").contains("key"),
+        "{}",
+        details(&r, "Authorization window")
+    );
+    // A leaf list that is not the one the head covers is not believed.
+    let r = with_pinned_members(&f, |a| {
+        a.events.drain(..cut);
+        a.head_leaves.insert(TAX.into(), vec![]);
+        a.head_leaves.insert(BEN.into(), vec![]);
+    });
+    assert_eq!(status(&r, "Authorization window"), Status::Unchecked);
+    assert!(details(&r, "Authorization window").contains("not the ones"));
+    // With nothing revoked, the same partial run is checkable.
+    let g = Fixture::with(Knobs {
+        filler: 2,
+        ..Knobs::default()
+    });
+    let r = with_pinned_members(&g, |a| {
+        a.events.drain(..2);
+        a.head_leaves.insert(TAX.into(), leaves_of(&g, TAX));
+        a.head_leaves.insert(BEN.into(), leaves_of(&g, BEN));
+    });
+    assert_eq!(
+        status(&r, "Authorization window"),
+        Status::Satisfied,
+        "{}",
+        details(&r, "Authorization window")
+    );
+}
+
+#[test]
+fn partial_run_without_leaf_list_is_unchecked() {
+    let g = Fixture::with(Knobs {
+        filler: 2,
+        ..Knobs::default()
+    });
+    let r = with_pinned_members(&g, |a| {
+        a.events.drain(..2);
+    });
+    assert_eq!(status(&r, "Authorization window"), Status::Unchecked);
+    assert!(details(&r, "Authorization window").contains("leaves"));
+}
+
+#[test]
+fn omitted_member_cannot_shrink_the_required_set() {
+    let f = Fixture::with(Knobs {
+        filler: 3,
+        ..Knobs::default()
+    });
+    // A partial run with the project's members not pinned: the exporter's
+    // own list cannot make the quorum pass.
+    let r = with_audit(&f, |a| {
+        a.events.drain(..3);
+    });
+    assert_eq!(status(&r, "Audit chain"), Status::Unchecked);
+    assert!(details(&r, "Audit chain").contains("not pinned"));
+    // Whole, the log shows the members: no pin needed.
+    assert_eq!(status(&show(&f), "Audit chain"), Status::Satisfied);
+}
+
+#[test]
+fn pinned_members_must_all_witness() {
+    let f = Fixture::with(Knobs {
+        filler: 3,
+        ..Knobs::default()
+    });
+    let pinned = |members: &[&str]| {
+        let mut a = f.audit.clone();
+        a.events.drain(..3);
+        let mut o = f.options();
+        o.anchors.project_members = members.iter().map(|m| (*m).to_owned()).collect();
+        f.graph.governance_report(&f.evidence, &a, &o).unwrap()
+    };
+    assert_eq!(
+        status(&pinned(&[TAX, BEN, OTHER]), "Audit chain"),
+        Status::Satisfied
+    );
+    // A member the verifier knows, who never witnessed.
+    let r = pinned(&[TAX, BEN, OTHER, "org-z"]);
+    assert_eq!(status(&r, "Audit chain"), Status::Unchecked);
+    assert!(details(&r, "Audit chain").contains("witnessed"));
+}
+
+#[test]
+fn an_empty_authorization_set_is_never_complete() {
+    let f = Fixture::build();
+    let owners: std::collections::BTreeSet<String> = [TAX, BEN].map(String::from).into();
+    let found = encompute_trust::check_audit(
+        &f.audit,
+        &f.anchors,
+        &owners,
+        &owners,
+        &Default::default(),
+        T0,
+    );
+    assert!(!found.complete);
+}
+
+#[test]
+fn a_stale_older_checkpoint_hides_what_came_after_it() {
+    use encompute_trust::govlog::{hash_hex, root, InclusionProof, ProjectCheckpoint};
+    let f = Fixture::build();
+    // The control plane's older, validly signed checkpoint over the first
+    // events only (before the heads): its proofs verify, and the run is
+    // contiguous to it. Nothing after it, the heads included, is shown.
+    let events: Vec<_> = f.audit.events.iter().map(|e| e.event.clone()).collect();
+    let m = events
+        .iter()
+        .position(|e| e.kind == kind::REVOCATION_HEAD_SIGNED)
+        .unwrap();
+    let leaves: Vec<_> = events[..m].iter().map(|e| e.leaf_hash().unwrap()).collect();
+    let cp = ProjectCheckpoint {
+        version: 1,
+        partition: format!("p:{PROJECT}"),
+        size: m as u64,
+        root: hash_hex(&root(&leaves)),
+        gseq: m as u64,
+        at: T0 + 30,
+    }
+    .sign(&f.control)
+    .unwrap();
+    let r = with_audit(&f, |a| {
+        a.checkpoint = Some(cp.clone());
+        a.events = events[..m]
+            .iter()
+            .enumerate()
+            .map(|(i, e)| encompute_trust::AuditEntry {
+                event: e.clone(),
+                proof: InclusionProof::from_leaves(&format!("p:{PROJECT}"), &leaves, i as u64)
+                    .unwrap(),
+            })
+            .collect();
+        a.witnesses.clear();
+        a.revocation_heads.clear();
+    });
+    assert_ne!(status(&r, "Audit chain"), Status::Satisfied);
+    assert_ne!(r.verdict, Verdict::Satisfied);
 }

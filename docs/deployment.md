@@ -771,7 +771,7 @@ auditor and verify offline. Everything below is `encompute governance`
   verifier checks the run: a gap, a duplicate or an end short of the
   checkpoint is refused, and a run that does not reach back far enough
   leaves the revocation rows UNCHECKED ("sign a fresh revocation head":
-  owners who sign heads periodically keep their bundles checkable). A file is at most 32 MiB, and its counts of witnesses, heads,
+  owners who sign heads periodically keep their bundles checkable). When the run does not begin at the log's first event, the bundle also carries each owner's head leaf list (checked against the head's signed root; a governance-key revocation in it leaves the window UNCHECKED, an authorization revocation fails it), and the project's members can only be checked against `project_members` in your pins file (optional, all of them must witness; without it the witness row is UNCHECKED for a partial run). A file is at most 32 MiB, and its counts of witnesses, heads,
   members, authorizations and signatures are bounded (ENC2730). Every
   identifier in it is `[A-Za-z0-9._-]{1,200}` (ENC2727): the default file
   name is built from them and is never a path. The route is limited to 12
