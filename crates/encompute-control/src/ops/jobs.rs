@@ -13,6 +13,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use postgres::{GenericClient, Transaction};
+
+// A governed job's evidence bundle (child module: it reads the job rows).
+#[path = "governance_bundle.rs"]
+pub(crate) mod governance_bundle;
 use serde_json::{json, Value};
 
 use encompute_evaluator::{compile_program, execution_spec, transcript_for, CompiledProgram, Ids};

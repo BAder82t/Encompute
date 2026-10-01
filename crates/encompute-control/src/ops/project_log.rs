@@ -53,6 +53,13 @@ impl Default for RateLimit {
 }
 
 impl RateLimit {
+    /// A limit of `per_minute` requests per caller per minute.
+    pub fn limited(per_minute: u32) -> Self {
+        let l = Self::default();
+        l.set(per_minute);
+        l
+    }
+
     /// Changes the limit (requests per caller per minute).
     pub fn set(&self, per_minute: u32) {
         self.per_minute

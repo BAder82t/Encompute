@@ -75,6 +75,10 @@ pub struct Control {
     pub node_cache: crate::govlog::NodeCache,
     /// The project log routes' per-caller limit.
     pub project_log_limit: crate::ops::RateLimit,
+    /// The governance bundle route's per-caller limit.
+    pub bundle_limit: crate::ops::RateLimit,
+    /// The most events of a project's log one bundle carries.
+    pub bundle_max_events: std::sync::atomic::AtomicU64,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -210,6 +214,8 @@ impl Control {
             mirror: Default::default(),
             node_cache: Default::default(),
             project_log_limit: Default::default(),
+            bundle_limit: crate::ops::RateLimit::limited(crate::ops::BUNDLE_RATE),
+            bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
         };
         c.ensure_self_registered()?;
         let existed = match opened {
@@ -374,6 +380,8 @@ impl Control {
             mirror: Default::default(),
             node_cache: Default::default(),
             project_log_limit: Default::default(),
+            bundle_limit: crate::ops::RateLimit::limited(crate::ops::BUNDLE_RATE),
+            bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
         })
     }
 

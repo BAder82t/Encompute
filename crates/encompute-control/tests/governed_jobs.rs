@@ -5374,3 +5374,372 @@ fn source_expiry_appears_likewise() {
     assert!(!got.contains(&format!("p:{p3}")));
     encompute_control::govlog::verify_chain(&mut *g.t.control.db.conn().unwrap()).unwrap();
 }
+
+// --- the governance evidence bundle -------------------------------------------------
+
+use encompute_trust::authz::SignedAuthorizationV2;
+use encompute_trust::bundle::OrganizationPin;
+use encompute_trust::{
+    GovernanceBundle, Outcome, Pin, Pins, ReportOptions, Status as RowStatus, VerifyOptions,
+};
+
+const KEY_REF_CANARY: &str = "canary-key-ref-7f3a91";
+const STORAGE_CANARY: &str = "s3://canary-bucket-7f3a91/income.bin";
+const KMS_CANARY: &str = "vault:transit/governance";
+
+/// A governed job that ran to the end, with its source registered under
+/// private canaries (a key reference, a storage location).
+fn finished_job(g: &G, label: &str) -> (Version, Auth, String, String) {
+    let v = g.version(
+        label,
+        json!({"storage_uri": STORAGE_CANARY, "size_bytes": 4242,
+               "key_ref": {"broker": "tax-broker", "provider": "openbao-transit",
+                           "key_ref": KEY_REF_CANARY, "key_version": 1}}),
+    );
+    let program = program(&[&v.asset], PURPOSE, BEN);
+    let a = g.authorize(g.body(&v, &program));
+    let plan = g.plan(&g.ben_dev, &program);
+    let (s, j) = g.submit(
+        &g.ben_dev,
+        g.request(&plan, &[&v.asset], &[BEN]),
+        &format!("k-{label}"),
+    );
+    assert_eq!(s, 201, "{j}");
+    let job = id(&j);
+    let grant = g.grant(&job);
+    let gov = grant.governance.clone().unwrap();
+    let s = g.start(&job);
+    assert_eq!(s.0, 200, "{:?}", s.1);
+    let spec = base_spec(&program).governed(&gov.binding);
+    let r = g.receipt(&program, &spec, Some(grant.digest()));
+    let msg = serde_json::to_value(
+        encompute_control::transport::seal(
+            &g.evaluator.signer,
+            "job.completed",
+            "control-plane",
+            encompute_control::transport::Scope {
+                job: Some(job.clone()),
+                ..Default::default()
+            },
+            &json!({"receipt": r}),
+            300,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    g.t.ok(&g.evaluator.service, "POST", "/v1/messages", Some(msg));
+    let (s, done) = g.complete(&job, &r);
+    assert_eq!(s, 200, "{done}");
+    (v, a, program, job)
+}
+
+fn bundle_url(job: &str, q: &str) -> String {
+    format!("/v1/jobs/{job}/governance-bundle{q}")
+}
+
+fn canonical_bytes(v: &Value) -> Vec<u8> {
+    encompute_verification::canonical::canonical_json(v).unwrap()
+}
+
+fn pins(g: &G) -> Pins {
+    let from = "this test";
+    let o = |k: &SigningKey| OrganizationPin {
+        identity_key: pk(k),
+        obtained: from.into(),
+    };
+    Pins {
+        organizations: [
+            (TAX.to_owned(), o(&g.tax_key)),
+            (BEN.to_owned(), o(&key(8))),
+        ]
+        .into(),
+        control_plane: Some(Pin {
+            key: g.t.control.signer.public_key_hex(),
+            obtained: from.into(),
+        }),
+        evaluators: vec![Pin {
+            key: g.evaluator.receipt.identity().public_key_hex(),
+            obtained: from.into(),
+        }],
+        ..Pins::default()
+    }
+}
+
+/// The owner's signed document, as the owner may fetch it.
+fn signed_document(g: &G, row: &str) -> SignedAuthorizationV2 {
+    let v = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/authorizations/{row}"),
+        None,
+    );
+    serde_json::from_value(v["signed"].clone()).unwrap()
+}
+
+#[test]
+fn a_governed_jobs_bundle_verifies_offline_against_pinned_keys() {
+    let Some(g) = world() else { return };
+    let (_v, a, _program, job) = finished_job(&g, "2026-q1");
+    // The log has a checkpoint and tax's revocation head.
+    g.t.control.checkpoint_log().unwrap();
+    let p = g.project.clone();
+    let draft = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/projects/{p}/revocation-heads/{TAX}/draft"),
+        None,
+    );
+    let head = encompute_trust::govlog::RevocationHead {
+        version: 1,
+        organization: TAX.into(),
+        project: p.clone(),
+        seq: draft["seq"].as_u64().unwrap(),
+        root: draft["root"].as_str().unwrap().into(),
+        at: now(),
+    }
+    .sign(&g.tax_key)
+    .unwrap();
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/projects/{p}/revocation-heads"),
+        Some(serde_json::to_value(&head).unwrap()),
+    );
+    g.t.control.checkpoint_log().unwrap();
+
+    let shared =
+        g.t.ok(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
+    let b = GovernanceBundle::from_bytes(&canonical_bytes(&shared)).unwrap();
+    assert_eq!(b.manifest.view, "shared");
+    assert_eq!(b.manifest.job_ids, vec![job.clone()]);
+    let pins = pins(&g);
+    let opts = |disclosures| VerifyOptions {
+        pins: &pins,
+        base: ReportOptions::default(),
+        disclosures,
+        as_of: None,
+        now: None,
+    };
+    // Verified offline: the pinned keys and the bundle alone. The shared
+    // view's card cannot be checked until the owner discloses the signed
+    // document it names.
+    let v = b.verify(&opts(vec![])).unwrap();
+    assert_eq!(v.outcome, Outcome::Unchecked, "{}", v.report);
+    let row = |v: &encompute_trust::Verified, n: &str| v.report.row(n).unwrap().status;
+    assert_eq!(
+        row(&v, "Source assets"),
+        RowStatus::Unchecked,
+        "{}",
+        v.report
+    );
+    let v = b.verify(&opts(vec![signed_document(&g, &a.row)])).unwrap();
+    for n in [
+        "Source assets",
+        "Authorization window",
+        "Approvals",
+        "Execution evidence",
+        "Purpose",
+        "Project",
+        "Ownership retained",
+    ] {
+        assert_eq!(row(&v, n), RowStatus::Satisfied, "{n}\n{}", v.report);
+    }
+    // What this run cannot show is never claimed: nothing was released as
+    // a derived result yet, nobody witnessed the checkpoint but the owner.
+    assert_ne!(row(&v, "Unauthorized releases"), RowStatus::Satisfied);
+    assert_ne!(row(&v, "Audit chain"), RowStatus::Satisfied);
+    assert_ne!(v.outcome, Outcome::Satisfied);
+    // The bundle is the same bytes for every member and auditor.
+    let again = |who: &As| g.t.ok(who, "GET", &bundle_url(&job, ""), None);
+    let tax_admin = g.tax_admin.clone();
+    for who in [&g.tax_sec1, &tax_admin, &As::User("o-admin".into())] {
+        assert_eq!(canonical_bytes(&again(who)), canonical_bytes(&shared));
+    }
+    // A pin that is not the control plane's makes the grant fail.
+    let mut wrong = pins.clone();
+    wrong.control_plane = Some(Pin {
+        key: pk(&key(99)),
+        obtained: "somewhere else".into(),
+    });
+    let bad = b
+        .verify(&VerifyOptions {
+            pins: &wrong,
+            base: ReportOptions::default(),
+            disclosures: vec![],
+            as_of: None,
+            now: None,
+        })
+        .unwrap();
+    assert_eq!(bad.outcome, Outcome::NotSatisfied);
+}
+
+impl G {
+    /// An organization admin of the benefits agency (reads the project's
+    /// log; the developer account may not).
+    fn ben_dev_admin(&self) -> As {
+        As::User("b-admin".into())
+    }
+}
+
+#[test]
+fn the_shared_bundle_leaks_no_other_organizations_private_metadata() {
+    let Some(g) = world() else { return };
+    let (_v, a, _program, job) = finished_job(&g, "2026-q2");
+    g.t.control.checkpoint_log().unwrap();
+    let doc = signed_document(&g, &a.row);
+    let approver_subjects: Vec<String> = doc
+        .body
+        .approvals
+        .iter()
+        .map(|x| x.approver_subject.clone())
+        .collect();
+    assert!(!approver_subjects.is_empty());
+    let ben = g.ben_dev_admin();
+    let shared = g.t.ok(&ben, "GET", &bundle_url(&job, "?view=shared"), None);
+    let text = String::from_utf8(canonical_bytes(&shared)).unwrap();
+    // Neither benefits' bundle nor any other member's names tax's
+    // storage, key references, KMS references, approvers or signed
+    // documents.
+    for canary in [
+        KEY_REF_CANARY,
+        STORAGE_CANARY,
+        KMS_CANARY,
+        "transit/tax",
+        "\"form\":\"signed\"",
+    ] {
+        assert!(
+            !text.contains(canary),
+            "the shared bundle contains {canary}"
+        );
+    }
+    for s in &approver_subjects {
+        assert!(
+            !text.contains(s.as_str()),
+            "the shared bundle names approver {s}"
+        );
+    }
+    assert!(text.contains("psn_"), "approvers appear as pseudonyms");
+    // Tax's own view carries its own signed document, and still no key
+    // reference or storage location.
+    let own = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &bundle_url(&job, &format!("?view=org&organization={TAX}")),
+        None,
+    );
+    let own_text = String::from_utf8(canonical_bytes(&own)).unwrap();
+    assert!(own_text.contains("\"form\":\"signed\""));
+    for canary in [KEY_REF_CANARY, STORAGE_CANARY, KMS_CANARY] {
+        assert!(
+            !own_text.contains(canary),
+            "tax's own bundle contains {canary}"
+        );
+    }
+    let own_b = GovernanceBundle::from_bytes(&canonical_bytes(&own)).unwrap();
+    assert_eq!(own_b.manifest.view, format!("organization:{TAX}"));
+    // Another organization's view is not for anyone else, and the shared
+    // view is not an organization's.
+    let (s, v) = g.t.call(
+        &ben,
+        "GET",
+        &bundle_url(&job, &format!("?view=org&organization={TAX}")),
+        None,
+    );
+    assert_eq!(s, 404, "{v}");
+    let (s, _) = g.t.call(
+        &ben,
+        "GET",
+        &bundle_url(&job, &format!("?view=shared&organization={TAX}")),
+        None,
+    );
+    assert_eq!(s, 400);
+    let (s, _) =
+        g.t.call(&ben, "GET", &bundle_url(&job, "?view=everything"), None);
+    assert_eq!(s, 400);
+    let (s, _) = g.t.call(&ben, "GET", &bundle_url(&job, "?view=org"), None);
+    assert_eq!(s, 400);
+    // The evaluator's service account, a developer without a reading role,
+    // and a stranger get nothing.
+    let (s, _) =
+        g.t.call(&g.evaluator.service, "GET", &bundle_url(&job, ""), None);
+    assert_eq!(s, 404);
+    let (s, _) = g.t.call(&g.ben_dev, "GET", &bundle_url(&job, ""), None);
+    assert!(s == 403 || s == 404, "{s}");
+    let (s, _) = g.t.call(&ben, "GET", &bundle_url("job_nope", ""), None);
+    assert_eq!(s, 404);
+}
+
+#[test]
+fn a_standard_job_has_no_governance_bundle_and_its_trust_report_is_unchanged() {
+    let Some(g) = world() else { return };
+    let p = g.t.ok(
+        &g.tax_admin,
+        "POST",
+        "/v1/projects",
+        Some(json!({"organization": TAX, "name": "statistics"})),
+    );
+    let standard = id(&p);
+    let plan = g.t.ok(
+        &g.tax_dev,
+        "POST",
+        "/v1/plans",
+        Some(json!({"project": standard, "program": EXACT})),
+    );
+    let (s, j) = g.submit(
+        &g.tax_dev,
+        json!({"project": standard, "plan": plan["id"], "purpose": "statistics",
+               "source_assets": [], "requested_output": "out"}),
+        "std-bundle",
+    );
+    assert_eq!(s, 201, "{j}");
+    let job = id(&j);
+    let before = g.t.ok(&g.tax_dev, "GET", &format!("/v1/trust/{job}"), None);
+    // No bundle: the job is not governed (a refusal of the request, not a
+    // missing record).
+    let (s, v) = g.t.call(&g.tax_admin, "GET", &bundle_url(&job, ""), None);
+    assert!(s == 400 || s == 403, "{s} {v}");
+    // Asking never changes the standard report.
+    let after = g.t.ok(&g.tax_dev, "GET", &format!("/v1/trust/{job}"), None);
+    assert_eq!(before, after);
+    assert!(before.get("governance").is_none(), "{before}");
+    assert!(
+        before["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["check"] != "governance"),
+        "{before}"
+    );
+}
+
+#[test]
+fn the_log_is_never_partially_exported_and_the_route_is_rate_limited() {
+    let Some(g) = world() else { return };
+    let (_v, _a, _program, job) = finished_job(&g, "2026-q3");
+    g.t.control.checkpoint_log().unwrap();
+    // The bundle carries every event of the log up to its checkpoint.
+    let b =
+        g.t.ok(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
+    let b = GovernanceBundle::from_bytes(&canonical_bytes(&b)).unwrap();
+    let cp = b.audit.checkpoint.as_ref().unwrap();
+    assert_eq!(b.audit.events.len() as u64, cp.body.size);
+    // A log over the cap is refused whole (ENC2730), never truncated.
+    g.t.control
+        .bundle_max_events
+        .store(cp.body.size - 1, std::sync::atomic::Ordering::Relaxed);
+    let (st, v) =
+        g.t.call(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
+    assert_eq!((st, code(&v)), (422, "ENC2730"), "{v}");
+    g.t.control
+        .bundle_max_events
+        .store(cp.body.size, std::sync::atomic::Ordering::Relaxed);
+    g.t.ok(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
+    // A caller is rate limited: the dearest read there is.
+    g.t.control.bundle_limit.set(2);
+    let who = g.tax_sec1.clone();
+    let mut last = 0;
+    for _ in 0..4 {
+        last = g.t.call(&who, "GET", &bundle_url(&job, ""), None).0;
+    }
+    assert_eq!(last, 503);
+}

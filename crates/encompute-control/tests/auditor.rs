@@ -733,6 +733,12 @@ impl W {
             "/v1/privacy/{}" => vec![format!("/v1/privacy/{v}")],
             "/v1/privacy/{}/ledger" => vec![format!("/v1/privacy/{v}/ledger")],
             "/v1/trust/{}" => vec![format!("/v1/trust/{j}")],
+            "/v1/jobs/{}/governance-bundle" => vec![
+                format!("/v1/jobs/{j}/governance-bundle"),
+                format!("/v1/jobs/{j}/governance-bundle?view=shared"),
+                format!("/v1/jobs/{j}/governance-bundle?view=org&organization={BEN}"),
+                format!("/v1/jobs/{j}/governance-bundle?view=org&organization={TAX}"),
+            ],
             "/v1/audit" => vec![
                 "/v1/audit".into(),
                 format!("/v1/audit?project={p}"),
@@ -1367,6 +1373,33 @@ fn shared_view_identical_for_members() {
     let own =
         w.t.ok(&w.ben_dev, "GET", &format!("/v1/jobs/{}", w.job), None);
     assert_eq!(own["initiated_by"], w.ben_user.as_str(), "{own}");
+    // The governance evidence bundle: the same bytes for every member and
+    // auditor organization, auditors included (they read, never write),
+    // with no signed authorization (it names the approvers) and no
+    // principal, key reference or storage location of anyone.
+    let bundle = same(
+        &format!("/v1/jobs/{}/governance-bundle", w.job),
+        &[
+            &w.tax_admin,
+            &w.tax_sec1,
+            &w.ben_admin,
+            &w.other_admin,
+            &w.aud_auditor,
+            &w.aud_admin,
+            &w.ben_auditor,
+        ],
+    );
+    let text = String::from_utf8(bundle).unwrap();
+    assert!(!text.contains("\"form\":\"signed\""), "{text}");
+    assert!(text.contains("psn_"), "{text}");
+    for c in [
+        STORAGE_CANARY,
+        KEY_REF_CANARY,
+        SUBJECT_CANARY,
+        w.ben_user.as_str(),
+    ] {
+        assert!(!text.contains(c), "the shared bundle leaks {c:?}");
+    }
     // The project's audit events, to every reader of a trail.
     let e = same(
         &format!("/v1/audit?project={p}"),
