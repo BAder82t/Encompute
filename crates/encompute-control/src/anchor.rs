@@ -1,23 +1,24 @@
-//! The state anchor: the latest privacy-ledger roots, the audit root and
-//! the governance event log's head, signed by the control plane and kept
-//! **outside** the database.
+//! The state anchor: the audit root and the governance event log's head,
+//! signed by the control plane and kept **outside** the database.
 //!
 //! Restoring an older database backup rewinds the database, not the
-//! anchor. At startup the database must extend the anchor: every ledger
-//! must contain the anchored entry, the audit chain the anchored event, and
-//! the governance event log the anchored head at the anchored size. If not,
-//! the control plane refuses to start (PRIVACY, AUDIT or GOVERNANCE LOG
-//! STATE ROLLBACK) until an operator restores the missing entries from a
-//! newer export; it never silently accepts forgotten spending or a
-//! forgotten revocation.
+//! anchor. At startup the database must extend the anchor: the audit chain
+//! must contain the anchored event and the governance event log the
+//! anchored head at the anchored size; and because the log holds every
+//! privacy ledger's latest checkpoint, each ledger must then contain the
+//! entry its checkpoint names. If not, the control plane refuses to start
+//! (PRIVACY, AUDIT or GOVERNANCE LOG STATE ROLLBACK) until an operator
+//! restores the missing entries from a newer export; it never silently
+//! accepts forgotten spending or a forgotten revocation.
 //!
 //! The anchor is updated after each privacy spend commits (synchronously,
-//! before the spend is acknowledged), at each audit checkpoint and after
-//! each security-negative transition (the log's checkpoint). A crash
-//! between the two leaves the database *ahead* of the anchor, which is
-//! allowed; only *behind* is a rollback. The anchor only ever moves
-//! forward along the same chains: a ledger checkpoint, audit root or log
-//! head that does not extend the anchored one is refused, while the
+//! before the spend is acknowledged: the spend's ledger checkpoint is a
+//! log event, and the log is checkpointed), at each audit checkpoint and
+//! after each security-negative transition. A crash between the two leaves
+//! the database *ahead* of the anchor, which is allowed; only *behind* is a
+//! rollback. The anchor only ever moves forward along the same chains: a
+//! ledger that does not extend its latest checkpoint, an audit root or a
+//! log head that does not extend the anchored one is refused, while the
 //! service runs as well as at startup.
 //!
 //! Security-negative transitions (revoked or expired assets, frozen
@@ -25,11 +26,12 @@
 //! jobs, withdrawn asset approvals, removed project memberships and
 //! organization roles, revoked owner authorizations, retired purposes,
 //! revoked governance keys) are events of the governance log
-//! (`crate::govlog`); the anchor holds only the log's size and head, so
-//! its size does not grow with them. (Version 1 held them as sets of IDs;
-//! [`StateAnchorV1`] is read only to migrate it, once, see
-//! `Control::with_parts`.) The privacy ledgers' checkpoints are still
-//! carried here, one per asset, until they move into the log as well.
+//! (`crate::govlog`), and so are the privacy ledgers' checkpoints
+//! (`privacy.ledger_checkpoint`); the anchor holds only the log's size and
+//! head, so its size is constant: it does not grow with assets,
+//! revocations or spends. (Version 1 held all of it as sets of IDs and one
+//! checkpoint per ledger; [`StateAnchorV1`] is read only to migrate it,
+//! once, see `Control::with_parts`.)
 //!
 //! One control plane process per anchor: updates are compare-and-set on the
 //! counter, and a process whose update lost the race reloads the stored
@@ -57,12 +59,11 @@ pub const ANCHOR_VERSION: u32 = 2;
 pub const ANCHOR_V1_VERSION: u32 = 1;
 
 /// Serialized anchor size above which every anchor write (and the start)
-/// logs an `anchor_size_warning`. The anchor no longer grows with
-/// security-negative transitions (they are governance log events); it
-/// still holds one checkpoint per privacy ledger, and each write re-signs
-/// all of it. An OpenBao KV entry is limited by the raft `max_entry_size`
-/// (1 MiB by default), past which anchor writes fail and the control plane
-/// fails closed. Half of that leaves time to act.
+/// logs an `anchor_size_warning`. The anchor is constant in size (its
+/// fields are fixed: security-negative transitions and privacy ledger
+/// checkpoints are governance log events), far below any anchor store's
+/// entry limit (OpenBao's raft `max_entry_size`, 1 MiB by default); the
+/// warning and the `encompute_anchor_bytes` gauge stay as a tripwire.
 pub const ANCHOR_WARN_BYTES: u64 = 512 * 1024;
 
 /// The anchor's size as written: its compact JSON serialization (what the
@@ -81,7 +82,7 @@ pub fn warn_if_large(service: &str, when: &str, bytes: u64) {
             .field("threshold_bytes", ANCHOR_WARN_BYTES)
             .field(
                 "action",
-                "the state anchor is growing towards the anchor store's entry size limit (OpenBao raft max_entry_size, 1 MiB by default), past which anchor writes fail and the control plane refuses privacy spends and other anchored operations; it holds one checkpoint per privacy ledger: raise max_entry_size (see docs/deployment.md)",
+                "the state anchor is growing towards the anchor store's entry size limit (OpenBao raft max_entry_size, 1 MiB by default), past which anchor writes fail and the control plane refuses privacy spends and other anchored operations; its size should be constant: investigate (see docs/deployment.md)",
             )
             .emit();
     }
@@ -106,8 +107,7 @@ pub struct MigratedFrom {
     pub digest: String,
 }
 
-/// The state anchor (version 2): constant size apart from the privacy
-/// ledgers' checkpoints.
+/// The state anchor (version 2): constant size.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateAnchor {
@@ -121,9 +121,6 @@ pub struct StateAnchor {
     /// event at this position.
     pub glog_size: i64,
     pub glog_head: String,
-    /// Asset ID → the ledger's checkpoint (entry count and root). (These
-    /// move into the governance log in a later version.)
-    pub ledgers: BTreeMap<String, Checkpoint>,
     /// Set once, when a version-1 anchor was migrated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migrated_from: Option<MigratedFrom>,
@@ -142,7 +139,6 @@ impl StateAnchor {
             audit_root: crate::audit::GENESIS.into(),
             glog_size: 0,
             glog_head: empty_log_head(),
-            ledgers: BTreeMap::new(),
             migrated_from: None,
             signer: signer.id().into(),
             signer_public_key: signer.public_key_hex(),
@@ -296,6 +292,9 @@ impl StateAnchorV1 {
 
 /// An anchor as stored: this release's, or one of 0.3.0 to migrate.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// One value per load or store, never in bulk: the version-1 variant is the
+// large one, and is read only to migrate it.
+#[allow(clippy::large_enum_variant)]
 pub enum StoredAnchor {
     V1(StateAnchorV1),
     V2(StateAnchor),
@@ -801,8 +800,8 @@ pub enum Opened {
     /// This release's anchor.
     Existing,
     /// A version-1 anchor (verified): the control plane migrates it before
-    /// anything else; until then the anchor in memory carries its counter,
-    /// audit root and ledgers, and an empty log.
+    /// anything else; until then the anchor in memory carries its counter and
+    /// audit root, and an empty log.
     V1(Box<StateAnchorV1>),
 }
 
@@ -833,7 +832,6 @@ impl Anchor {
                 a.counter = v1.counter;
                 a.audit_seq = v1.audit_seq;
                 a.audit_root = v1.audit_root.clone();
-                a.ledgers = v1.ledgers.clone();
                 (a, Opened::V1(Box::new(v1)))
             }
             None => (StateAnchor::empty(signer), Opened::Fresh),
@@ -1066,24 +1064,10 @@ mod tests {
         let (a2, opened) =
             Anchor::open(Box::new(DirAnchor::new(dir.clone()).unwrap()), &s).unwrap();
         assert!(matches!(opened, Opened::Existing));
-        let cp = |seq| Checkpoint {
-            seq,
-            root: "00".repeat(32),
-        };
-        a1.update(&s, |x| {
-            x.ledgers.insert("ast_a".into(), cp(1));
-        })
-        .unwrap();
-        let after = a2
-            .update(&s, |x| {
-                x.ledgers.insert("ast_b".into(), cp(2));
-            })
-            .unwrap();
-        assert!(
-            after.ledgers.contains_key("ast_a"),
-            "the other process's change is kept"
-        );
-        assert!(after.ledgers.contains_key("ast_b"));
+        a1.update(&s, |x| x.audit_seq = 1).unwrap();
+        let after = a2.update(&s, |x| x.glog_size = 2).unwrap();
+        assert_eq!(after.audit_seq, 1, "the other process's change is kept");
+        assert_eq!(after.glog_size, 2);
         let stored = match DirAnchor::new(dir).unwrap().load().unwrap().unwrap() {
             StoredAnchor::V2(a) => a,
             other => panic!("{other:?}"),

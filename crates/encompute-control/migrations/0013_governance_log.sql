@@ -77,6 +77,13 @@ CREATE INDEX governance_events_revocations ON governance_events (partition, org_
 CREATE INDEX governance_events_authorization ON governance_events ((body #>> '{refs,authorization_id}'))
     WHERE body #>> '{refs,authorization_id}' IS NOT NULL;
 
+-- Privacy ledger checkpoints are governance log events
+-- (`privacy.ledger_checkpoint`, subject = the asset). The latest one of an
+-- asset is its floor at startup and on every spend: one index probe, newest
+-- first, never a scan or a sort of the asset's checkpoints.
+CREATE INDEX governance_events_ledger_checkpoint ON governance_events (subject_id, gseq DESC)
+    WHERE kind = 'privacy.ledger_checkpoint';
+
 -- Single-row lock serializing appends to the chain.
 CREATE TABLE governance_head (
     id   BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),

@@ -39,20 +39,28 @@ pub const DEFAULT_RATE: u32 = 120;
 /// A fixed-window limit per caller on the project log routes (a page of
 /// proofs is the dearest read the API has).
 pub struct RateLimit {
+    what: &'static str,
     per_minute: std::sync::atomic::AtomicU32,
     windows: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u32)>>,
 }
 
 impl Default for RateLimit {
     fn default() -> Self {
-        Self {
-            per_minute: DEFAULT_RATE.into(),
-            windows: Default::default(),
-        }
+        Self::new("project log", DEFAULT_RATE)
     }
 }
 
 impl RateLimit {
+    /// A limit of `per_minute` requests per caller, for requests called
+    /// `what` in its refusal.
+    pub fn new(what: &'static str, per_minute: u32) -> Self {
+        Self {
+            what,
+            per_minute: per_minute.into(),
+            windows: Default::default(),
+        }
+    }
+
     /// Changes the limit (requests per caller per minute).
     pub fn set(&self, per_minute: u32) {
         self.per_minute
@@ -75,7 +83,10 @@ impl RateLimit {
         if e.1 > limit {
             return Err(Error::new(
                 Code::Scheduling,
-                format!("more than {limit} project log requests a minute: retry shortly"),
+                format!(
+                    "more than {limit} {} requests a minute: retry shortly",
+                    self.what
+                ),
             ));
         }
         Ok(())

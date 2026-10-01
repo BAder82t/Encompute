@@ -364,7 +364,10 @@ The state anchor of 0.3.0 (version 1) held the sets of every revoked,
 disabled, ended, withdrawn, removed and expired ID, and grew with each.
 This release keeps them in the governance event log (one event per
 transition, written in the same transaction) and anchors only the log's
-size and head, so the anchor no longer grows with them.
+size and head, so the anchor no longer grows with them. The version-1
+anchor's ledger checkpoints become log events as well: the version-2
+anchor is constant in size, whatever the number of assets, revocations and
+spends.
 
 - **Migration, at the first start.** Nothing to run by hand. The control
   plane first makes every check 0.3.0 made at its start; if the database
@@ -374,7 +377,9 @@ size and head, so the anchor no longer grows with them.
   digest; the signed anchor itself is kept beside the log) and one event
   per ID of its sets (`migrated.<set>`, in the project's or
   organization's partition where the database knows it; `ledger.frozen`
-  for a frozen ledger; `row.lost` for a row recovery recorded lost), then
+  for a frozen ledger; `row.lost` for a row recovery recorded lost) and one
+  `privacy.ledger_checkpoint` event per ledger checkpoint (each ledger's
+  floor from then on), then
   the log's mirror is written into the anchor store and the anchor is
   replaced by version 2, compare-and-set on its counter. The checks, the
   gathering and the events share one snapshot under the log's lock: a
@@ -406,9 +411,13 @@ a budget. A duplicate delivery of the same event is charged once.
 
 The control plane signs into the **state anchor**:
 
-- the ledgers' latest roots, after every spend;
 - the audit chain's root, at each checkpoint;
-- the governance event log's size and head, after every
+- the governance event log's size and head. Each privacy spend appends its
+  ledger's checkpoint (`privacy.ledger_checkpoint`: the asset, the entry
+  count and the root, in the platform partition, nothing more) to the log
+  and checkpoints the log before the spend is acknowledged; a spend that
+  finds its event anchored already (a concurrent spend checkpointed past
+  it) waits for nothing more. The log's head is also anchored after every
   security-negative transition and before it is acknowledged: revoked
   assets, frozen ledgers, disabled service accounts and users, cancelled
   and failed jobs, withdrawn asset approvals (including the grants an
@@ -417,8 +426,14 @@ The control plane signs into the **state anchor**:
   owner authorizations of governed projects, retired purposes, revoked
   governance keys and expired assets. Each is an event of the log,
   written in the same transaction; the anchor holds only where the log
-  stands, so its size does not grow with them. A key broker is told of a
-  revocation or an expiry only once its event is anchored.
+  stands. A key broker is told of a revocation or an expiry only once its
+  event is anchored.
+
+The anchor is therefore constant in size (a few hundred bytes: a counter,
+the audit root, the log's size and head, and the migration's record):
+nothing in it grows with assets, revocations or spends, and no vault entry
+limit applies to it. What grows is the governance log in the database and
+its mirror in the anchor store (below).
 
 The anchor is kept outside the database: on its own volume, or in the
 customer's vault (OpenBao or Vault KV). It only moves forward along the
@@ -431,8 +446,14 @@ AUDIT STATE ROLLBACK), and so is a governance log checkpoint over a log
 that does not extend the anchored head (GOVERNANCE LOG STATE ROLLBACK).
 None is written into the anchor. Each raises an
 alarm: a `state_rollback_detected` log line and the
-`encompute_state_rollback_total` metric. A ledger frozen in the anchor is
-refused for spending whatever the database says (ENC2201).
+`encompute_state_rollback_total` metric. A ledger frozen in the governance
+log is refused for spending whatever the database says (ENC2201). The
+floor a ledger must extend is the latest `privacy.ledger_checkpoint` event
+of its asset in the log, which is itself checked against the anchored
+head: restoring an older ledger together with an older log is refused as a
+GOVERNANCE LOG rollback, and an older ledger under the current log as a
+PRIVACY rollback; recovery freezes it either way and moves its floor to
+what the database holds.
 
 At every start, the database must extend the anchor. If it does not, the
 control plane refuses to start:
@@ -497,10 +518,23 @@ success only after the mirror and the anchor are durable, and a failed
 checkpoint fails the call. The change may already be committed to the
 database, which enforces it; retrying the call is idempotent and anchors
 it, and the background task anchors it otherwise. Ordinary events are
-batched by the background checkpoint.
+batched by the background checkpoint; a privacy spend checkpoints
+synchronously, like a deny event (concurrent spends share one checkpoint).
 
 Size and pruning: about 300 bytes per event, so 100,000 events are about
-30 MB in about 200 segments. The mirror is never pruned below the anchored head. Segments may be
+30 MB in about 200 segments. Every privacy spend is one event, so a
+deployment's mirror and log grow with its spending as well as its
+transitions; budget the anchor store accordingly (10 million spends are
+about 3 GB), and the startup check, which recomputes the whole log, grows
+with it. Spends are limited per actor and asset to 1,200 a minute (a
+refused spend is retried later; ENC2606, the
+message names "privacy spend"), and a reservation must charge at least a
+zCDP cost of 1e-9 (a noise multiplier of about 22,000 at sensitivity 1;
+ENC2204), so a caller cannot grow the log faster than that for free. A
+real deployment spends far less: a training run reserves and commits once
+per round, so a hundred rounds a day across ten datasets are about 2,000
+events a day, under 1 MB of mirror a day. Measured here: one event and
+about 350 bytes of mirror per spend. The mirror is never pruned below the anchored head. Segments may be
 compacted (rewritten as fewer, larger segments starting at event 1) only
 when the result still chains to the anchored head. Keep the anchor store
 backed up with the anchor.
@@ -557,8 +591,8 @@ is named by its number in write order and the events it holds
   mirror included; `restore.sh` restores both only into an empty volume).
 
 It **freezes** every rolled-back ledger: the ledger is treated as exhausted,
-so budget the database forgot is never spent again. Ledgers the anchor had
-frozen are frozen again. It re-applies every anchored revocation the
+so budget the database forgot is never spent again. Ledgers the governance log
+records as frozen are frozen again. It re-applies every anchored revocation the
 database forgot: the asset is revoked again, jobs that had not started
 fail, and its key broker is told again. Disabled service accounts and users
 are disabled again, and cancelled or failed jobs end again (never run
@@ -606,12 +640,17 @@ the control plane signs a checkpoint of it (its size and Merkle root) each
 time the log is checkpointed:
 
 - **Cadence.** A security deny event (a revocation, expiry, withdrawal,
-  disable, removal, key revocation, purpose retirement, job end) is
-  checkpointed before its call returns. Everything else (an issued
-  authorization, a member joining) is checkpointed by the background pass,
-  which runs every two seconds while there are new events. So a checkpoint
-  is never more than one background pass behind the log, and a member can
-  witness any state of it.
+  disable, removal, key revocation, purpose retirement, job end, ledger
+  freeze) is checkpointed before its call returns, and so is a privacy
+  spend (its ledger checkpoint is a platform event, never a project's).
+  Everything else (an issued authorization, a member joining) is
+  checkpointed by the background pass, which runs every two seconds while
+  there are new events. So a checkpoint is never more than one background
+  pass behind the log, and a member can witness any state of it. In short:
+  the control plane checkpoints before it acknowledges anything that
+  denies or spends, and within seconds otherwise; each member witnesses
+  every few minutes (hourly where the log is quiet); the label is
+  advisory and never blocks.
 - **Witnessing.** Each member organization runs `encompute governance
   witness` on a schedule (every few minutes, or hourly where the log is
   quiet) with its governance key file and the credentials of a person who
@@ -844,16 +883,14 @@ Every refusal is ENC2605.
   - service accounts still holding `security_admin`
     (`encompute_legacy_service_admins`, a gauge that should be 0);
   - the size of the signed state anchor in bytes
-    (`encompute_anchor_bytes`, a gauge). Security-negative transitions no
-    longer grow it (they are governance log events); it keeps one
-    checkpoint per privacy ledger and is rewritten whole on each update.
-    OpenBao's KV store refuses an entry larger than its raft
-    `max_entry_size` (1 MiB by default); from then on anchor writes fail
-    and the control plane fails closed (privacy spends, cancellations and
-    revocation acknowledgements stop). Above 512 KiB every start and every anchor write logs an
-    `anchor_size_warning` line. Alert on `encompute_anchor_bytes >
-    524288`, and raise `max_entry_size` on the vault before the limit is
-    reached.
+    (`encompute_anchor_bytes`, a gauge). It is constant: security-negative
+    transitions and privacy ledger checkpoints are governance log events,
+    so nothing in the anchor grows with assets, revocations or spends. The
+    gauge is a tripwire: a few hundred bytes is normal, and above 512 KiB
+    every start and every anchor write logs an `anchor_size_warning`
+    line, which should never happen. What to watch instead is the log's
+    mirror in the anchor store (about 300 bytes per event, one per spend
+    and per transition) against the store's capacity.
 
   Labels are closed sets: never identifiers or values.
 - **Evaluator metrics.** Evaluators also serve `GET /metrics`: requests,

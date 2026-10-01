@@ -22,7 +22,11 @@ fn spend(t: &T, who: &As, d: &str, ev: &str, sigma2: u64) -> (u16, Value) {
 }
 
 fn anchored_seq(t: &T, d: &str) -> u64 {
-    t.control.anchor.snapshot().ledgers[d].seq
+    t.control
+        .ledger_floor(d)
+        .unwrap()
+        .expect("a ledger checkpoint")
+        .seq
 }
 
 fn rollbacks_counted(t: &T, what: &str) -> bool {

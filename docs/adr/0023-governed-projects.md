@@ -642,9 +642,8 @@ As built (event log, schema version 13; its head anchored in place of the sets):
   first, so the two are always locked in that order. The database's
   refusals do not stop a database superuser (as with the audit chain).
 - The state anchor (version 2) holds the log's size and chain head in
-  place of the sets of IDs, so it no longer grows with them (it still
-  carries one checkpoint per privacy ledger; those move into the log
-  later). Each security-negative transition checkpoints the log before it
+  place of the sets of IDs and of the privacy ledgers' checkpoints, so it
+  is constant in size (see "Phase 4 complete" below). Each security-negative transition checkpoints the log before it
   is acknowledged: the events after the anchored head must link and hash
   correctly, each partition they touched gets a signed checkpoint, and
   the anchor records the new head. A key broker hears of a revocation or
@@ -943,3 +942,44 @@ Planned changes touch:
 - `crates/encompute-protocol/src/lib.rs` (envelope header)
 - `crates/encompute-keybroker` (authorization install and verification)
 - `crates/encompute-assurance/src/catalog.rs` (INV-218 onward)
+
+As built (phase 4 complete; privacy ledger checkpoints in the log, a
+constant-size anchor):
+
+- A privacy ledger's checkpoint is an event of the platform partition:
+  `privacy.ledger_checkpoint`, subject the asset, with the entry count
+  (`seq`) and the root, which is what the version-1 anchor held per ledger
+  and no more: no amount, no event ID. It is not a deny event. Spend
+  amounts stay in the database and the ledger; only the checkpoint root
+  the owners could already verify is shared.
+- `anchor_ledger` (after each spend, and when a ledger is created)
+  verifies the ledger outside any lock, then takes the log's head lock,
+  reads the asset's latest checkpoint event (one probe of a partial
+  index on subject, newest first) and requires the ledger to extend it:
+  one that does not is refused (ENC2202, PRIVACY STATE ROLLBACK) and
+  nothing is appended; one that is no further appends nothing. Otherwise
+  it appends the checkpoint, then checkpoints the log (mirror, anchor)
+  before returning, skipping the checkpoint when a concurrent spend's
+  already covers its event. The spend's own transaction is unchanged; it
+  reads the latest checkpoint event inside it (without the head lock) to
+  refuse a rolled-back ledger at once.
+- Startup takes each ledger's floor from the latest checkpoint event of
+  each asset the log names, after the log has been checked against the
+  anchored head; so a ledger restored behind it, or a missing ledger, is
+  refused as before, and recovery freezes it and appends a checkpoint at
+  what the database holds (the floor moves forward along the log; the
+  freeze is a deny event, checkpointed before recovery returns).
+- The anchor therefore carries no `ledgers` and no `frozen` field: it is
+  the counter, the audit root and seq, the log's size and head, the
+  migration record and the signature, constant in size. A version-1
+  anchor's ledger checkpoints become `privacy.ledger_checkpoint` events
+  after the genesis in the migration transaction (its frozen ledgers
+  `ledger.frozen`, as before). Version 2 had not been released, so it
+  stays version 2; earlier releases still refuse it.
+- Cost: one event (about 300 bytes) per spend in the log and its mirror,
+  one more durable write per spend (the mirror's open segment) beside the
+  anchor's, and a startup that recomputes the whole log. Snapshots of the
+  log's frontier for startup, and compaction of the mirror, are not built
+  (the chain is always recomputed in full).
+- Lock order: the log's head lock before the audit head, as everywhere;
+  the anchor's lock is never waited for while a database lock is held.

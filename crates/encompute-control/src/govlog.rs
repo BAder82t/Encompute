@@ -199,6 +199,7 @@ fn is_deny(kind: &str) -> bool {
         && kind != kind::MEMBERSHIP_ADDED
         && kind != kind::REVOCATION_HEAD_SIGNED
         && kind != extra_kind::ANCHOR_GENESIS
+        && kind != extra_kind::LEDGER_CHECKPOINT
         && !kind.starts_with(extra_kind::MIGRATED)
 }
 
@@ -600,6 +601,11 @@ pub fn latest_checkpoints(
 pub mod extra_kind {
     /// The migration's first event: the version-1 anchor's digest.
     pub const ANCHOR_GENESIS: &str = "anchor.genesis";
+    /// A privacy ledger's checkpoint (`refs.seq`: its entry count,
+    /// `refs.root`: its root, the subject its asset). The latest one of an
+    /// asset is the entry count its ledger must still hold. Not a deny
+    /// event: a freeze is.
+    pub const LEDGER_CHECKPOINT: &str = "privacy.ledger_checkpoint";
     /// A privacy ledger frozen after a detected rollback.
     pub const LEDGER_FROZEN: &str = "ledger.frozen";
     /// A row of a security-negative set the database lost, acknowledged by
@@ -1164,6 +1170,98 @@ impl Importer {
         self.added += 1;
         Ok(())
     }
+}
+
+// --- privacy ledger checkpoints ---------------------------------------------------
+
+/// Records `cp` as the checkpoint of `asset`'s privacy ledger in the
+/// platform partition: the entry count and the root (what the version-1
+/// anchor held per ledger, no more). Not a deny event: the caller
+/// checkpoints the log afterwards (see `Control::anchor_ledger`).
+pub fn append_ledger_checkpoint(
+    t: &mut impl GenericClient,
+    asset: &str,
+    cp: &encompute_privacy::Checkpoint,
+) -> Result<Recorded> {
+    append(
+        t,
+        Draft::new(Partition::Platform, extra_kind::LEDGER_CHECKPOINT, asset)
+            .r#ref("seq", cp.seq.to_string())
+            .r#ref("root", cp.root.clone()),
+    )
+}
+
+fn checkpoint_of(refs: serde_json::Value) -> Result<encompute_privacy::Checkpoint> {
+    let bad = || log_err("a privacy ledger checkpoint event without its seq and root");
+    Ok(encompute_privacy::Checkpoint {
+        seq: refs
+            .get("seq")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(bad)?,
+        root: refs
+            .get("root")
+            .and_then(|v| v.as_str())
+            .ok_or_else(bad)?
+            .to_owned(),
+    })
+}
+
+/// The latest checkpoint event of `asset`'s ledger, if any: one probe of
+/// the partial index (subject, newest first), whatever the number of
+/// checkpoints. (The kind is written into the statement: the index's
+/// predicate must be provable whatever plan the server picks.)
+pub fn latest_ledger_checkpoint(
+    c: &mut impl GenericClient,
+    asset: &str,
+) -> Result<Option<encompute_privacy::Checkpoint>> {
+    c.query_opt(
+        &format!(
+            "SELECT body -> 'refs' FROM governance_events
+              WHERE kind = '{}' AND subject_id = $1 ORDER BY gseq DESC LIMIT 1",
+            extra_kind::LEDGER_CHECKPOINT
+        ),
+        &[&asset],
+    )
+    .map_err(db_err)?
+    .map(|r| checkpoint_of(r.get(0)))
+    .transpose()
+}
+
+/// The latest checkpoint of every ledger the log holds one for: (asset,
+/// checkpoint), in order of asset. A skip scan over the partial index: one
+/// probe for the next asset and one for its latest checkpoint, so the cost
+/// follows the number of assets, not of checkpoints.
+pub fn ledger_floors(
+    c: &mut impl GenericClient,
+) -> Result<Vec<(String, encompute_privacy::Checkpoint)>> {
+    c.query(&ledger_floors_sql(), &[])
+        .map_err(db_err)?
+        .iter()
+        .map(|r| Ok((r.get(0), checkpoint_of(r.get(1))?)))
+        .collect()
+}
+
+/// The statement of [`ledger_floors`] (tests read its plan).
+#[doc(hidden)]
+pub fn ledger_floors_sql() -> String {
+    let k = extra_kind::LEDGER_CHECKPOINT;
+    format!(
+        "WITH RECURSIVE a(subject_id) AS (
+                 (SELECT subject_id FROM governance_events WHERE kind = '{k}'
+                   ORDER BY subject_id LIMIT 1)
+                 UNION ALL
+                 SELECT (SELECT e.subject_id FROM governance_events e
+                          WHERE e.kind = '{k}' AND e.subject_id > a.subject_id
+                          ORDER BY e.subject_id LIMIT 1)
+                   FROM a WHERE a.subject_id IS NOT NULL)
+             SELECT a.subject_id, l.refs
+               FROM a CROSS JOIN LATERAL (SELECT e.body -> 'refs' AS refs FROM governance_events e
+                                           WHERE e.kind = '{k}' AND e.subject_id = a.subject_id
+                                           ORDER BY e.gseq DESC LIMIT 1) l
+              WHERE a.subject_id IS NOT NULL
+              ORDER BY 1"
+    )
 }
 
 /// The subjects of every event of `kind` (for example the revoked

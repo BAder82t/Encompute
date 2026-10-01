@@ -460,9 +460,8 @@ fn connection_loss_mid_transaction_neither_loses_nor_duplicates() {
     verify_no_loss_no_duplicates(&w, &acked, 4 * per.div_ceil(4));
     // The control plane restarts: the database still extends the anchor.
     let w = restart_world(w);
-    let a = w.t.control.anchor.snapshot();
     assert_eq!(
-        a.ledgers[&w.dataset_a].seq as usize,
+        w.t.control.ledger_floor(&w.dataset_a).unwrap().unwrap().seq as usize,
         2 * acked.reserves.len(),
         "every acknowledged spend was anchored"
     );

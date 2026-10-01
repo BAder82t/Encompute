@@ -21,11 +21,12 @@
 //!    negative state the anchor had not caught up with yet:
 //!    `migrated.<set>` (in the project's or organization's partition where
 //!    the database knows it, the platform's otherwise), `ledger.frozen` for
-//!    a frozen ledger, `row.lost` for a lost row.
+//!    a frozen ledger, `row.lost` for a lost row, and
+//!    `privacy.ledger_checkpoint` for each ledger's checkpoint (its floor).
 //! 3. The log's mirror in the anchor store is written, then the anchor is
 //!    replaced, compare-and-set on its counter, by version 2
 //!    holding the log's size and head and the version-1 anchor's counter
-//!    and digest.
+//!    and digest (and nothing per ledger or per ID).
 //!
 //! A crash between 2 and 3 leaves the version-1 anchor and the migrated
 //! log: the next start finds the genesis event with the stored anchor's
@@ -90,11 +91,12 @@ impl Control {
                     let later: i64 = t
                         .query_one(
                             "SELECT count(*) FROM governance_events
-                              WHERE gseq > $1 AND kind NOT LIKE 'migrated.%' AND kind NOT IN ($2, $3)",
+                              WHERE gseq > $1 AND kind NOT LIKE 'migrated.%' AND kind NOT IN ($2, $3, $4)",
                             &[
                                 &g,
                                 &govlog::extra_kind::LEDGER_FROZEN,
                                 &govlog::extra_kind::ROW_LOST,
+                                &govlog::extra_kind::LEDGER_CHECKPOINT,
                             ],
                         )
                         .map_err(db_err)?
@@ -127,6 +129,11 @@ impl Control {
                             govlog::append_routed(t, *set, &kind, id, &[])?;
                         }
                     }
+                    // The version-1 anchor's ledger checkpoints: the floor
+                    // each ledger must still extend.
+                    for (asset, cp) in &v1.ledgers {
+                        govlog::append_ledger_checkpoint(t, asset, cp)?;
+                    }
                     for key in &v1.lost {
                         let (state, id) = key.split_once(':').ok_or_else(|| {
                             rollback("ANCHOR", format!("lost row {key:?} of the version-1 anchor"))
@@ -139,7 +146,9 @@ impl Control {
                             })?;
                         govlog::append_lost(t, set, id)?;
                     }
-                    Ok(sets.iter().map(|(_, ids)| ids.len()).sum::<usize>() + v1.lost.len())
+                    Ok(sets.iter().map(|(_, ids)| ids.len()).sum::<usize>()
+                        + v1.ledgers.len()
+                        + v1.lost.len())
                 }
             }?;
             // The head this transaction leaves (it holds the head's lock):

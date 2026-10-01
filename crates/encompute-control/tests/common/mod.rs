@@ -408,14 +408,47 @@ impl Env0 {
     }
 }
 
+/// Removes the scratch directories of the test that made them when it
+/// ends (a directory left behind, and found again under a reused process
+/// ID, would hand a later test somebody else's anchor).
+struct ScratchDirs(Vec<PathBuf>);
+
+impl Drop for ScratchDirs {
+    fn drop(&mut self) {
+        for d in &self.0 {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<ScratchDirs> = const { std::cell::RefCell::new(ScratchDirs(vec![])) };
+}
+
+/// A new, empty directory: its name carries the process ID, a counter and
+/// the time, it is created exclusively (one that exists is never reused:
+/// process IDs wrap around, and earlier runs left directories behind), and
+/// it is removed when the test ends.
 pub fn tmp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "encompute-control-{tag}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    loop {
+        let d = std::env::temp_dir().join(format!(
+            "encompute-control-{tag}-{}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        match std::fs::create_dir(&d) {
+            Ok(()) => {
+                SCRATCH.with(|s| s.borrow_mut().0.push(d.clone()));
+                return d;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("{}: {e}", d.display()),
+        }
+    }
 }
 
 pub struct Env0 {

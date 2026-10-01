@@ -148,10 +148,11 @@ fn restart_keeps_spending_and_restoring_an_older_backup_is_refused() {
         .start()
         .err()
         .expect("an older backup started silently");
-    assert!(
-        e.message.contains("PRIVACY STATE ROLLBACK") || e.message.contains("AUDIT STATE ROLLBACK"),
-        "{e}"
-    );
+    // A spend's ledger checkpoint is a governance log event, so the
+    // restored database's log is behind the anchored head: that is what
+    // refuses the start (the ledger's own rollback is then found through
+    // the log's events once they are back, in recovery below).
+    assert!(e.message.contains("GOVERNANCE LOG STATE ROLLBACK"), "{e}");
     assert!(e.message.contains("STARTUP REFUSED"), "{e}");
 
     // Explicit recovery: the rolled-back ledger is frozen (exhausted), so
@@ -247,7 +248,7 @@ fn truncated_audit_and_tampered_or_missing_anchor_are_refused() {
     drop(w.t.control);
     let p = env0.anchor_dir.join("state-anchor.json");
     let mut a: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-    a["ledgers"] = json!({});
+    a["counter"] = json!(a["counter"].as_u64().unwrap() + 1_000_000);
     std::fs::write(&p, serde_json::to_vec(&a).unwrap()).unwrap();
     let e = env0.start().err().expect("a tampered anchor was accepted");
     assert!(e.message.contains("signature"), "{e}");

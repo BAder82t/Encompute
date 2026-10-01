@@ -19,6 +19,10 @@ pub(crate) use custody::require_own_broker;
 pub use derived::onward_policy_id;
 pub use jobs::{estimated_ms, job_profile, GovernedStage, GATE_MS, HEARTBEAT_TIMEOUT_SECS};
 pub use project_log::{RateLimit, MAX_PAGE as PROJECT_LOG_MAX_PAGE};
+
+/// Privacy spends per actor and asset a minute by default (an event of the
+/// governance log each; a training round is two).
+pub const SPEND_RATE: u32 = 1200;
 pub use tenancy::{legacy_service_admins, LEGACY_SERVICE_ADMINS_REFUSED_FROM};
 
 /// Takes the transaction-scoped advisory lock of service ID `broker` as a

@@ -527,7 +527,10 @@ fn v1_of(t: &T, frozen: &[String], lost: &[(&str, &str)]) -> StateAnchorV1 {
     v1.counter = a.counter;
     v1.audit_seq = a.audit_seq;
     v1.audit_root = a.audit_root.clone();
-    v1.ledgers = a.ledgers.clone();
+    v1.ledgers = encompute_control::govlog::ledger_floors(&mut *t.control.db.conn().unwrap())
+        .unwrap()
+        .into_iter()
+        .collect();
     v1.frozen = frozen.iter().cloned().collect();
     let mut c = t.control.db.conn().unwrap();
     let mut ids = |sql: &str| -> BTreeSet<String> {
@@ -720,7 +723,13 @@ fn a_version_1_anchor_with_every_set_migrates() {
     assert_eq!(from.digest, v1.digest().unwrap());
     assert_eq!(a.counter, v1.counter + 1);
     assert_eq!(a.audit_seq, v1.audit_seq);
-    assert_eq!(a.ledgers, v1.ledgers);
+    // Each ledger's checkpoint became a log event, the latest its floor.
+    let floors: std::collections::BTreeMap<_, _> =
+        encompute_control::govlog::ledger_floors(&mut *t.control.db.conn().unwrap())
+            .unwrap()
+            .into_iter()
+            .collect();
+    assert_eq!(floors, v1.ledgers);
     for set in NegSet::ALL {
         let logged: BTreeSet<String> = log_set(&t, set).into_iter().collect();
         assert_eq!(logged, v1_set(&v1, set), "{set:?}");
@@ -763,6 +772,66 @@ fn a_version_1_anchor_with_every_set_migrates() {
     let t = env0.started();
     assert_eq!(v2(&env0), a);
     drop(t);
+}
+
+/// Each ledger checkpoint of a version-1 anchor becomes a
+/// `privacy.ledger_checkpoint` event after the genesis (platform partition,
+/// the entry count and root, nothing else), the ledger's floor from then on;
+/// the version-2 anchor holds none of them, and a ledger restored behind its
+/// migrated floor is refused at the next start.
+#[test]
+fn v1_anchor_ledgers_migrate_to_log_events() {
+    let Some(w) = world() else { return };
+    let d = w.dataset_a.clone();
+    for i in 0..2 {
+        let (s, _) = w.t.call(
+            &w.a_owner,
+            "POST",
+            &format!("/v1/privacy/{d}/events"),
+            Some(reserve(&format!("s-{i}"), 200)),
+        );
+        assert_eq!(s, 200);
+    }
+    let v1 = v1_of(&w.t, &[], &[]);
+    assert_eq!(v1.ledgers[&d].seq, 2);
+    let env0 = stop(w.t);
+    as_version_1(&env0, &v1);
+    let t = env0.started();
+    let mut c = t.control.db.conn().unwrap();
+    let events = c
+        .query(
+            "SELECT subject_id, body -> 'refs', body ->> 'partition', gseq FROM governance_events
+              WHERE kind = $1 ORDER BY gseq",
+            &[&extra_kind::LEDGER_CHECKPOINT],
+        )
+        .unwrap();
+    assert_eq!(events.len(), v1.ledgers.len());
+    for r in &events {
+        let asset: String = r.get(0);
+        let refs: serde_json::Value = r.get(1);
+        let cp = &v1.ledgers[&asset];
+        assert_eq!(refs["seq"], json!(cp.seq.to_string()), "{asset}");
+        assert_eq!(refs["root"], json!(cp.root), "{asset}");
+        assert_eq!(refs.as_object().unwrap().len(), 2);
+        assert_eq!(r.get::<_, String>(2), "platform");
+        assert!(r.get::<_, i64>(3) > 1, "after the genesis");
+    }
+    let floor = t.control.ledger_floor(&d).unwrap().unwrap();
+    assert_eq!(floor, v1.ledgers[&d]);
+    drop(c);
+    // The anchor holds none of it, and records where it came from.
+    let a = v2(&env0);
+    assert_eq!(a.migrated_from.unwrap().counter, v1.counter);
+    let stored = std::fs::read_to_string(env0.anchor_dir.join("state-anchor.json")).unwrap();
+    assert!(!stored.contains("ledgers") && !stored.contains(&d));
+    // The ledger restored behind the migrated floor is refused.
+    let env0 = stop(t);
+    attacker(
+        &env0.url,
+        &["privacy_entries"],
+        &format!("DELETE FROM privacy_entries WHERE asset_id = '{d}' AND seq = 2"),
+    );
+    refused_start(&env0, "PRIVACY STATE ROLLBACK");
 }
 
 /// A crash between the genesis transaction and the anchor's replacement

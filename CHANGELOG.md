@@ -297,6 +297,30 @@ Work toward confidential cross-agency computation
   equivocation, `verify-audit` exits 3 on any UNCHECKED organization
   unless `--allow-unchecked`, and `sign --expect-leaves` checks the draft
   against the owner's own records.
+- **Governance event log and a constant-size state anchor (phase 4).**
+  Every security-negative transition (an asset revoked or expired, a
+  service account or user disabled, a job cancelled or failed, an approval
+  withdrawn, a membership or role removed, an owner authorization revoked,
+  a purpose retired, a governance key revoked, a ledger frozen) and every
+  privacy ledger checkpoint is an event of one hash-chained, Merkle-tree
+  governance log in the database (migration 0013), written in the same
+  transaction. The state anchor (version 2) holds only the audit root and
+  the log's size and head: its size no longer grows with assets,
+  revocations or spends, and the `anchor_size_warning` is now a tripwire.
+  A ledger's floor is the latest `privacy.ledger_checkpoint` event of its
+  asset (its asset, entry count and root, in the platform partition),
+  read through an index: a spend appends it and checkpoints the log before
+  it is acknowledged (concurrent spends share a checkpoint), and a ledger
+  restored behind its floor is refused and frozen as before. Every start
+  recomputes the log and refuses a database that does not hold the
+  anchored head (GOVERNANCE LOG STATE ROLLBACK, ENC2202); the anchor store
+  mirrors the log so recovery can rebuild an older database's missing
+  events. A version-1 anchor (0.3.0) migrates once, at the first start,
+  into genesis events (its sets and its ledger checkpoints); there is no
+  downgrade. Sequential spend latency rises by about 25 ms on a local
+  PostgreSQL and a directory anchor (two durable writes instead of one),
+  and is unchanged with eight concurrent spenders. INV-160, INV-192,
+  INV-193 and INV-226 evidence extended. A spend is also refused before it commits when the log no longer holds the anchored head, spends are limited to 1,200 a minute per actor and asset, and a reservation must charge at least a zCDP cost of 1e-9.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
   INV-236 (the control plane can only deny; broker state cannot be
   rolled back), INV-223 (auditors), INV-229 (cross-organization

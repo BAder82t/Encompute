@@ -75,6 +75,9 @@ pub struct Control {
     pub node_cache: crate::govlog::NodeCache,
     /// The project log routes' per-caller limit.
     pub project_log_limit: crate::ops::RateLimit,
+    /// Privacy spends per actor and asset a minute (each is an event of
+    /// the governance log and its mirror).
+    pub spend_limit: crate::ops::RateLimit,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -210,6 +213,7 @@ impl Control {
             mirror: Default::default(),
             node_cache: Default::default(),
             project_log_limit: Default::default(),
+            spend_limit: crate::ops::RateLimit::new("privacy spend", crate::ops::SPEND_RATE),
         };
         c.ensure_self_registered()?;
         let existed = match opened {
@@ -374,6 +378,7 @@ impl Control {
             mirror: Default::default(),
             node_cache: Default::default(),
             project_log_limit: Default::default(),
+            spend_limit: crate::ops::RateLimit::new("privacy spend", crate::ops::SPEND_RATE),
         })
     }
 
@@ -464,8 +469,10 @@ impl Control {
                 ),
             ));
         }
+        // Each ledger's floor is its latest checkpoint event in the log
+        // (which the checks above showed extends the anchored head).
         let frozen = govlog::negative_set(&mut *c, govlog::NegSet::FrozenLedgers)?;
-        for (asset, cp) in &a.ledgers {
+        for (asset, cp) in &govlog::ledger_floors(&mut *c)? {
             let Some(view) = load_ledger(&mut *c, asset)? else {
                 // A frozen ledger whose asset the database does not hold
                 // either cannot be spent (asset IDs are never reissued).
@@ -592,7 +599,8 @@ impl Control {
         let mut frozen = vec![];
         {
             let mut c = self.db.conn()?;
-            for (asset, cp) in &a.ledgers {
+            let floors = govlog::ledger_floors(&mut *c)?;
+            for (asset, cp) in &floors {
                 let behind = match load_ledger(&mut *c, asset)? {
                     None => true,
                     Some(v) => v.extends(cp).is_err(),
@@ -617,14 +625,14 @@ impl Control {
                     .map_err(db_err)?
                     .is_some();
                 if unfrozen {
-                    let cp =
-                        a.ledgers
-                            .get(asset)
-                            .cloned()
-                            .unwrap_or(encompute_privacy::Checkpoint {
-                                seq: 0,
-                                root: String::new(),
-                            });
+                    let cp = floors
+                        .iter()
+                        .find(|(x, _)| x == asset)
+                        .map(|(_, cp)| cp.clone())
+                        .unwrap_or(encompute_privacy::Checkpoint {
+                            seq: 0,
+                            root: String::new(),
+                        });
                     frozen.push((
                         asset.clone(),
                         cp,
@@ -1084,62 +1092,93 @@ impl Control {
                 ));
             }
         }
-        let (seq, root, ledgers) = {
+        // The frozen ledgers' floors move to where the database holds them
+        // now (a forward step along the log, like every checkpoint), so the
+        // next start accepts the recovered database.
+        let (seq, root) = {
             let mut c = self.db.conn()?;
-            let (seq, root) = audit::verify_chain(&mut *c)?;
-            let mut ledgers = a.ledgers.clone();
-            for (asset, _, _) in &frozen {
-                if let Some(v) = load_ledger(&mut *c, asset)? {
-                    ledgers.insert(asset.clone(), v.checkpoint()?);
-                }
-            }
-            (seq, root, ledgers)
+            audit::verify_chain(&mut *c)?
         };
+        if !frozen.is_empty() {
+            self.db.tx(|t| {
+                govlog::lock_head(t)?;
+                for (asset, _, _) in &frozen {
+                    if let Some(v) = load_ledger(t, asset)? {
+                        govlog::append_ledger_checkpoint(t, asset, &v.checkpoint()?)?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
         self.anchor.update(&self.signer, |x| {
             x.audit_seq = seq;
             x.audit_root = root.clone();
-            x.ledgers = ledgers.clone();
         })?;
         self.checkpoint_log()?;
         Ok(notes)
     }
 
-    /// Anchors the privacy ledger of `asset` as the database now holds it.
-    /// Under the anchor's lock, the ledger must extend the anchored
-    /// checkpoint: one that does not (rolled back, reset or rewritten while
-    /// the service runs) is refused and never anchored, so the anchor only
-    /// moves forward along the same chain.
+    /// Anchors the privacy ledger of `asset` as the database now holds it:
+    /// its checkpoint is appended to the governance log
+    /// (`privacy.ledger_checkpoint`, platform partition) and the log is
+    /// checkpointed (mirror, then anchor) before this returns. Under the
+    /// log's head lock, the ledger must extend the latest checkpoint of
+    /// it: one that does not (rolled back, reset or rewritten while the
+    /// service runs) is refused and never recorded, so the floor only
+    /// moves forward along the same chain. A ledger no further than its
+    /// latest checkpoint appends nothing (a retry), but still settles the
+    /// log's checkpoint. Concurrent spends batch: the appends do not wait
+    /// for the anchor, and whoever checkpoints first covers the others'
+    /// events (the rest find theirs anchored already).
     pub fn anchor_ledger(&self, asset: &str) -> Result<()> {
-        self.anchor
-            .try_update(&self.signer, |a| {
-                let view = {
-                    let mut c = self.db.conn()?;
-                    load_ledger(&mut *c, asset)?
-                }
-                .ok_or_else(|| {
-                    runtime_rollback(
-                        "PRIVACY",
-                        format!("the privacy ledger of {asset} is missing"),
-                    )
-                })?;
-                view.verify()?;
-                let cp = view.checkpoint()?;
-                if let Some(anchored) = a.ledgers.get(asset) {
-                    view.extends(anchored).map_err(|e| {
+        let missing = || {
+            runtime_rollback(
+                "PRIVACY",
+                format!("the privacy ledger of {asset} is missing"),
+            )
+        };
+        // The ledger is read and verified before the log's head is locked
+        // (verifying walks every entry; appends elsewhere must not wait
+        // for it).
+        let mut view = {
+            let mut c = self.db.conn()?;
+            load_ledger(&mut *c, asset)?.ok_or_else(missing)?
+        };
+        view.verify()?;
+        let appended = self.db.tx(|t| {
+            govlog::lock_head(t)?;
+            let mut cp = view.checkpoint()?;
+            if let Some(floor) = govlog::latest_ledger_checkpoint(t, asset)? {
+                if view.extends(&floor).is_err() {
+                    // Behind the floor or forked: or another spend moved
+                    // the ledger on since it was read? Read it again, under
+                    // the lock.
+                    view = load_ledger(t, asset)?.ok_or_else(missing)?;
+                    view.verify()?;
+                    cp = view.checkpoint()?;
+                    view.extends(&floor).map_err(|e| {
                         self.rollback_alarm("privacy", asset);
                         runtime_rollback(
                             "PRIVACY",
                             format!("the privacy ledger of {asset}: {}", e.message),
                         )
                     })?;
-                    if anchored.seq >= cp.seq {
-                        return Ok(false);
-                    }
                 }
-                a.ledgers.insert(asset.to_owned(), cp);
-                Ok(true)
-            })
-            .map(|_| ())
+                if floor.seq >= cp.seq {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(govlog::append_ledger_checkpoint(t, asset, &cp)?.gseq))
+        })?;
+        // Whoever checkpointed past this event already anchored it.
+        self.retry_concurrent_mirror(|| self.checkpoint_log_once(appended))
+    }
+
+    /// The latest checkpoint of `asset`'s privacy ledger the governance log
+    /// holds (the floor the ledger must still extend).
+    pub fn ledger_floor(&self, asset: &str) -> Result<Option<encompute_privacy::Checkpoint>> {
+        let mut c = self.db.conn()?;
+        govlog::latest_ledger_checkpoint(&mut *c, asset)
     }
 
     /// Runs `f` in a transaction like `self.db.tx`; if any security deny
@@ -1181,11 +1220,16 @@ impl Control {
     /// told) and in the background (a crash between a commit and its
     /// checkpoint is caught up here).
     pub fn checkpoint_log(&self) -> Result<()> {
-        // A mirror segment another writer took first is retried like an
-        // anchor update that lost its compare-and-set (a few times at most).
+        self.retry_concurrent_mirror(|| self.checkpoint_log_once(None))
+    }
+
+    /// Runs `f` again (a few times at most) when a mirror segment another
+    /// writer took first made it fail, like an anchor update that lost its
+    /// compare-and-set.
+    fn retry_concurrent_mirror(&self, f: impl Fn() -> Result<()>) -> Result<()> {
         let mut attempt = 0;
         loop {
-            match self.checkpoint_log_once() {
+            match f() {
                 Err(e) if attempt < 3 && e.message.contains("written concurrently") => {
                     attempt += 1;
                     // A little jitter, so two writers do not collide again.
@@ -1199,38 +1243,57 @@ impl Control {
         }
     }
 
-    fn checkpoint_log_once(&self) -> Result<()> {
+    /// A log that does not extend the anchored head is a rollback found
+    /// while the service runs; any other error passes.
+    fn log_rollback(&self, a: &crate::anchor::StateAnchor, e: Error) -> Error {
+        if e.code == Code::TrustEvidence {
+            self.rollback_alarm("governance", "log");
+            runtime_rollback(
+                "GOVERNANCE LOG",
+                format!(
+                    "the log does not extend anchored governance event {}: {}",
+                    a.glog_size, e.message
+                ),
+            )
+        } else {
+            e
+        }
+    }
+
+    /// Moves the anchor's log head forward to (`size`, `head`) once the
+    /// mirror holds it; `false` (nothing to store) when it is no further.
+    fn advance_log(
+        &self,
+        a: &mut crate::anchor::StateAnchor,
+        size: i64,
+        head: String,
+    ) -> Result<bool> {
+        if size <= a.glog_size {
+            return Ok(false);
+        }
+        // The mirror first: the anchor's compare-and-set is the commit
+        // point, and the anchor store must then hold every anchored event.
+        self.mirror_through(a.glog_size, size)?;
+        a.glog_size = size;
+        a.glog_head = head;
+        Ok(true)
+    }
+
+    /// One checkpoint of the log. With `covered`, the event that needs
+    /// anchoring: nothing is done when the anchor already holds it.
+    fn checkpoint_log_once(&self, covered: Option<i64>) -> Result<()> {
         self.anchor
             .try_update(&self.signer, |a| {
+                if covered.is_some_and(|g| g <= a.glog_size) {
+                    return Ok(false);
+                }
                 let (size, head) = self
                     .db
                     .tx(|t| {
                         govlog::checkpoint_extending(t, &self.signer, a.glog_size, &a.glog_head)
                     })
-                    .map_err(|e| {
-                        if e.code == Code::TrustEvidence {
-                            self.rollback_alarm("governance", "log");
-                            runtime_rollback(
-                                "GOVERNANCE LOG",
-                                format!(
-                                    "the log does not extend anchored governance event {}: {}",
-                                    a.glog_size, e.message
-                                ),
-                            )
-                        } else {
-                            e
-                        }
-                    })?;
-                if size <= a.glog_size {
-                    return Ok(false);
-                }
-                // The mirror first: the anchor's compare-and-set below is
-                // the commit point, and the anchor store must then hold
-                // every anchored event.
-                self.mirror_through(a.glog_size, size)?;
-                a.glog_size = size;
-                a.glog_head = head;
-                Ok(true)
+                    .map_err(|e| self.log_rollback(a, e))?;
+                self.advance_log(a, size, head)
             })
             .map(|_| ())
     }

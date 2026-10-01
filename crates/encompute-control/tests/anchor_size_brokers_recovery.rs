@@ -19,9 +19,8 @@ fn anchor_bytes_metric(rendered: &str) -> u64 {
         .unwrap()
 }
 
-/// The anchor is re-signed whole on every write and an OpenBao KV entry is
-/// limited in size (1 MiB by default), so its serialized size is measured
-/// on every write and at startup and exported as `encompute_anchor_bytes`.
+/// The anchor's serialized size is measured on every write and at startup
+/// and exported as `encompute_anchor_bytes` (a tripwire: it is constant).
 #[test]
 fn the_anchor_size_is_measured_on_every_write_and_exported() {
     let Some(w) = world() else { return };
@@ -36,9 +35,9 @@ fn the_anchor_size_is_measured_on_every_write_and_exported() {
     let now = t.control.anchor.bytes();
     assert_eq!(now, serialized_len(&t.control.anchor.snapshot()));
     assert_eq!(anchor_bytes_metric(&t.control.render_metrics()), now);
-    // Every write measures it again. (Only the privacy ledgers' checkpoints
-    // grow it now: here 100 frozen ledgers of assets the database does not
-    // hold, which the start check accepts.)
+    // Every write measures it again; the anchor is constant in size, so
+    // 100 governance events (here frozen ledgers of assets the database
+    // does not hold, which the start check accepts) do not grow it.
     use encompute_control::govlog::{self, extra_kind, Draft};
     use encompute_trust::govlog::Partition;
     let ids: Vec<String> = (0..100).map(|i| format!("ast_{i:032}")).collect();
@@ -55,27 +54,11 @@ fn the_anchor_size_is_measured_on_every_write_and_exported() {
         })
         .unwrap();
     t.control.checkpoint_log().unwrap();
-    let before = t.control.anchor.bytes();
-    t.control
-        .anchor
-        .update(&t.control.signer, |a| {
-            for id in &ids {
-                a.ledgers.insert(
-                    id.clone(),
-                    encompute_privacy::Checkpoint {
-                        seq: 0,
-                        root: "00".repeat(32),
-                    },
-                );
-            }
-        })
-        .unwrap();
-    assert!(
-        before < now + 64,
-        "the governance log's events did not grow it: {now} -> {before}"
-    );
     let grown = t.control.anchor.bytes();
-    assert!(grown > now + 100 * 36, "{now} -> {grown}");
+    assert!(
+        grown < now + 64,
+        "the governance log's events grew the anchor: {now} -> {grown}"
+    );
     assert_eq!(grown, serialized_len(&t.control.anchor.snapshot()));
     assert_eq!(anchor_bytes_metric(&t.control.render_metrics()), grown);
     // And after a restart, as loaded.
@@ -276,11 +259,11 @@ fn recovery_recreates_a_frozen_ledger_whose_row_was_lost() {
     drop(c);
 
     let t = env0.start().expect("starts after recovery");
-    let a = t.control.anchor.snapshot();
     assert!(anchored(&t, NegSet::FrozenLedgers, &d));
     assert_eq!(
-        a.ledgers[&d].seq, 0,
-        "the anchor follows the re-created ledger"
+        t.control.ledger_floor(&d).unwrap().unwrap().seq,
+        0,
+        "the log's checkpoint follows the re-created ledger"
     );
     let v = t.ok(&w.a_auditor, "GET", &format!("/v1/privacy/{d}"), None);
     assert!(v["frozen"].is_string(), "{v}");

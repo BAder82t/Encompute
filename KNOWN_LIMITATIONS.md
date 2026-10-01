@@ -154,7 +154,8 @@ Related: [support matrix](docs/support-matrix.md),
   the token.
 - **One control-plane process per state anchor.** A lost compare-and-set
   reloads and retries, but replicas sharing one anchor are not supported.
-  The whole anchor is rewritten on each update.
+  The anchor is rewritten on each update (it is constant in size: a few
+  hundred bytes).
 - **A job's sources are declarations, not data.** The control plane never
   sees inputs, so it cannot tell which data a client actually encrypts. It
   derives a job's sources from what its program declares: the purpose, and
@@ -166,21 +167,20 @@ Related: [support matrix](docs/support-matrix.md),
   are not compared with the registry; only the IDs are. Checking that a
   registered asset ID names a real asset also tells a submitter who
   already knows an ID that it exists.
-- **The anchor's sets of ended jobs, withdrawn approvals, removed
-  project memberships and removed roles grow without bound.** Every
-  spend, cancellation, withdrawal and removal rewrites and re-signs the
-  whole anchor. OpenBao's KV store refuses entries above its raft
-  `max_entry_size` (1 MiB by default), which is roughly 25,000 to 30,000
-  ended jobs; past it anchor writes fail, and the control plane fails
-  closed: privacy spends, cancellations and revocation acknowledgements
-  stop. Watch the `encompute_anchor_bytes` gauge (the control plane also
-  logs `anchor_size_warning` above 512 KiB) and raise `max_entry_size` before it is
-  reached. The anchoring cost also grows with the deployment's age: each
-  privacy spend re-loads and re-verifies the whole ledger to anchor it
-  (besides verifying it inside the spend), and every revocation, disable,
-  cancellation, withdrawal or removal rescans all the anchored-state
-  tables. Both fail closed. A hash-chained governance event log will
-  replace these sets, and these costs, before general availability.
+- **The governance log and its mirror grow without bound.** The state
+  anchor is constant in size, but every security-negative transition and
+  every privacy spend is an event of the governance log (about 300 bytes),
+  kept in the database and mirrored into the anchor store; nothing is
+  pruned below the anchored head. 10 million spends are about 3 GB of
+  mirror, and the start check, which recomputes the whole log (about 1.6
+  seconds for 100,000 events), grows with it. A spend adds one append and
+  one checkpoint to its latency (concurrent spends share a checkpoint),
+  and still re-loads and re-verifies the whole ledger to checkpoint it
+  (besides verifying it inside the spend), so its cost grows with the
+  ledger's age. Size the anchor store for the mirror (the vault's entry
+  limit applies to each segment, which is at most 256 KiB, not to the
+  mirror as a whole). Compacting the mirror and snapshotting the log's
+  frontier for startup are not built.
 - **An anchor restored from the same backup forgets later spend.** When
   the database and the anchor are restored together, privacy spend rolls
   back to the backup. Keep the anchor outside the backup set, in the

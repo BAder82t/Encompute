@@ -1187,9 +1187,13 @@ impl Control {
     /// same event again returns the stored entry), and anchored before it
     /// returns: committed spending is never forgotten.
     pub fn privacy_spend(&self, ctx: &Ctx, asset: &str, event: PrivacyEvent) -> Result<Value> {
-        // Read before the transaction: it takes the ledger's lock, and the
-        // anchor's lock is outermost (see `Anchor::counter`). (What was
-        // anchored by the time the ledger lock is held is at least this.)
+        // Every spend is an event of the log and its mirror: bounded per
+        // actor and asset (a duplicate delivery counts too).
+        self.spend_limit.hit(&format!("{}:{asset}", ctx.actor()))?;
+        // What the anchor holds, read before the transaction takes the
+        // ledger's lock (the anchor's lock is outermost; see
+        // `Anchor::counter`). By the time the lock is held, the log holds
+        // at least this.
         let anchored = self.anchor.snapshot();
         let res = self.tx_anchored(|t| {
             let row = t
@@ -1227,14 +1231,31 @@ impl Control {
                 return Err(conflict(format!("asset {asset} is revoked")));
             }
             let view = load_ledger(t, asset)?.ok_or_else(|| not_found("privacy ledger for asset", asset))?;
-            // The database must still extend the anchored ledger: one rolled
-            // back, reset or rewritten while the service runs is refused now,
-            // not only at the next start. (Everything anchored committed
-            // before this transaction took the ledger's lock, and so is
-            // this snapshot's checkpoint, which an extended ledger
-            // extends.)
-            if let Some(cp) = anchored.ledgers.get(asset) {
-                view.extends(cp).map_err(|e| {
+            // The log must still hold the anchored head: a database rewound
+            // together with its log (ledger entries and checkpoint events
+            // alike) passes the ledger's floor below, and is refused here,
+            // before anything is written. One probe of the log's key.
+            if crate::govlog::hash_at(t, anchored.glog_size)?.as_deref()
+                != Some(anchored.glog_head.as_str())
+            {
+                self.rollback_alarm("governance", "log");
+                return Err(runtime_rollback(
+                    "GOVERNANCE LOG",
+                    format!(
+                        "the log does not hold anchored governance event {}",
+                        anchored.glog_size
+                    ),
+                ));
+            }
+            // The database must still extend the ledger's latest checkpoint
+            // in the governance log: one rolled back, reset or rewritten
+            // while the service runs is refused now, not only at the next
+            // start. (Every checkpoint committed after the spend it covers,
+            // which committed before this transaction took the ledger's
+            // lock, so a ledger that was not rewound extends it. One indexed
+            // read; the log's head is not locked.)
+            if let Some(cp) = crate::govlog::latest_ledger_checkpoint(t, asset)? {
+                view.extends(&cp).map_err(|e| {
                     self.rollback_alarm("privacy", asset);
                     runtime_rollback("PRIVACY", format!("the privacy ledger of {asset}: {}", e.message))
                 })?;
@@ -1348,6 +1369,9 @@ pub fn least_sensitivity(
 /// randomness in production mode, and a declared sensitivity no smaller
 /// than its own noise implies ([`least_sensitivity`]). A spender that
 /// under-declares its sensitivity to be charged less is refused (ENC2204).
+/// The least zCDP cost one reservation may have.
+pub const MIN_RESERVATION_RHO: f64 = 1e-9;
+
 pub fn check_reservation(
     genesis: &encompute_privacy::Genesis,
     event: &PrivacyEvent,
@@ -1375,6 +1399,14 @@ pub fn check_reservation(
         return refused(format!(
             "production mode charges only releases drawn with {}",
             encompute_privacy::CSPRNG
+        ));
+    }
+    // A reservation that costs next to nothing still costs the log an
+    // event: each must charge at least a floor (no honest release is that
+    // noisy: this is a noise multiplier of over 20,000 at sensitivity 1).
+    if event.rho()? < MIN_RESERVATION_RHO {
+        return refused(format!(
+            "a reservation must charge at least rho {MIN_RESERVATION_RHO} (its noise variance {sigma2} at sensitivity {sensitivity} charges less)"
         ));
     }
     let least = least_sensitivity(&genesis.budget.unit, mechanism, *sigma2, *vector_len);

@@ -245,6 +245,15 @@ anything derived from it again, its key broker is told, and the evidence
 stays verifiable. Deleting the data itself is the institution's own
 storage's job.
 
+**Phase 4, a governance log and verifiable audit (complete).**
+Every security-negative transition and every privacy ledger checkpoint
+is an event of one tamper-evident log, and the state anchor holds only
+where it stands, so it stays a constant size however many assets,
+revocations and spends there are. A governed project's own events are
+readable by its members and auditors with proofs, members countersign
+its checkpoints, and each owner signs the revocations it made, so an
+evidence bundle cannot silently omit one.
+
 Not yet built: placement and operator rules (a broker refuses any
 execution that declares placement until placement can be attested),
 record linkage, the governance report and evidence bundle. The limits of
