@@ -8,6 +8,7 @@ pub(crate) mod derived;
 mod governance;
 mod jobs;
 mod policies;
+mod project_log;
 mod retention;
 mod tenancy;
 
@@ -16,6 +17,7 @@ pub use assets::{asset_json, check_reservation, least_sensitivity, shared_asset_
 pub(crate) use custody::require_own_broker;
 pub use derived::onward_policy_id;
 pub use jobs::{estimated_ms, job_profile, GovernedStage, GATE_MS, HEARTBEAT_TIMEOUT_SECS};
+pub use project_log::{RateLimit, MAX_PAGE as PROJECT_LOG_MAX_PAGE};
 pub use tenancy::{legacy_service_admins, LEGACY_SERVICE_ADMINS_REFUSED_FROM};
 
 /// Takes the transaction-scoped advisory lock of service ID `broker` as a

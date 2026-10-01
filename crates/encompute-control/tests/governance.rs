@@ -1118,7 +1118,9 @@ fn log_matches_database(t: &T) {
 /// partition or the organization's; a governance-key revocation writes one
 /// for the organization and one for each governed project it takes part
 /// in. Transitions that are not security-negative (a key's or purpose's
-/// approval, an acceptance, a version) write none.
+/// approval, an acceptance, a version) write none; a member joining a
+/// governed project writes `membership.added`, so the members at any size
+/// of its log come from the log.
 #[test]
 fn every_governance_transition_writes_exactly_one_event() {
     use encompute_control::govlog::kind;
@@ -1128,7 +1130,7 @@ fn every_governance_transition_writes_exactly_one_event() {
     let o = format!("o:{TAX}");
     let k = key(1);
     let (purpose, version) = g.ready(&k);
-    assert!(glog(t).is_empty(), "{:?}", glog(t));
+    one_event(t, 0, &p, kind::MEMBERSHIP_ADDED, &glog(t)[0].2.clone());
 
     let n = glog(t).len();
     let (auth, _) = g.activated(&purpose, &version, &k);
@@ -1310,7 +1312,8 @@ fn purpose_retirement_is_logged() {
     use encompute_control::govlog::kind;
     let Some(g) = gov_world() else { return };
     let purpose = g.active_purpose("benefits-eligibility");
-    assert!(glog(&g.t).is_empty());
+    // (Benefits joining the project is the log's one event so far.)
+    assert_eq!(glog(&g.t).len(), 1);
     g.t.ok(
         &g.tax_sec1,
         "POST",
@@ -1319,12 +1322,12 @@ fn purpose_retirement_is_logged() {
     );
     one_event(
         &g.t,
-        0,
+        1,
         &format!("p:{}", g.project),
         kind::PURPOSE_RETIRED,
         &purpose,
     );
-    let body = &glog(&g.t)[0].3;
+    let body = &glog(&g.t)[1].3;
     assert_eq!(body["org"], TAX, "{body}");
     assert_eq!(body["refs"]["project"], g.project.as_str(), "{body}");
     // Retired once: retiring again records nothing.
@@ -1334,7 +1337,7 @@ fn purpose_retirement_is_logged() {
         &format!("/v1/purposes/{purpose}/retire"),
         None,
     );
-    assert_eq!(glog(&g.t).len(), 1);
+    assert_eq!(glog(&g.t).len(), 2);
     log_matches_database(&g.t);
 }
 
@@ -1389,14 +1392,28 @@ fn governance_key_revocation_appends_to_every_project() {
         .to_owned();
     let k = key(1);
     let key_row = g.register_key(TAX, &g.tax_admin, &g.tax_sec1, &k);
-    assert!(glog(t).is_empty());
+    // Only the joins so far: benefits in the world's project, tax in
+    // benefits' own.
+    assert!(
+        glog(t).iter().all(|e| e.1 == kind::MEMBERSHIP_ADDED) && glog(t).len() == 2,
+        "{:?}",
+        glog(t)
+    );
     t.ok(
         &g.tax_sec2,
         "POST",
         &format!("/v1/organizations/{TAX}/governance-keys/{key_row}/revoke"),
         None,
     );
-    let events = glog(t);
+    // The whole log: the two joins, then exactly one revocation per
+    // partition, and nothing else.
+    let all = glog(t);
+    assert_eq!(all.len(), 6, "{all:?}");
+    assert!(
+        all[..2].iter().all(|e| e.1 == kind::MEMBERSHIP_ADDED),
+        "{all:?}"
+    );
+    let events: Vec<_> = all[2..].to_vec();
     let partitions: std::collections::BTreeSet<String> =
         events.iter().map(|(p, _, _, _)| p.clone()).collect();
     let want: std::collections::BTreeSet<String> = [
@@ -1426,7 +1443,7 @@ fn governance_key_revocation_appends_to_every_project() {
         &format!("/v1/organizations/{BEN}/governance-keys/{ben_row}/revoke"),
         None,
     );
-    let ben: Vec<String> = glog_since(t, 4).into_iter().map(|e| e.0).collect();
+    let ben: Vec<String> = glog_since(t, 6).into_iter().map(|e| e.0).collect();
     assert!(ben.contains(&format!("o:{BEN}")), "{ben:?}");
     assert!(!ben.contains(&format!("o:{TAX}")), "{ben:?}");
     log_matches_database(t);
@@ -1650,10 +1667,12 @@ fn leaves_are_shared_safe() {
         "covered_organization",
         "governance_key",
         "key_id",
+        "participation",
         "project",
         "reason",
         "revocation_id",
         "role",
+        "status",
         "withdrawn",
     ];
     for (p, _, _, body) in &events {
@@ -1674,6 +1693,16 @@ fn leaves_are_shared_safe() {
             assert!(refs.contains(&k.as_str()), "reference {k} in {text}");
         }
         assert!(p.starts_with("p:") || p.starts_with("o:") || p == "platform");
+        // The values of what a removal says are a closed set.
+        if let Some(v) = body["refs"]["status"].as_str() {
+            assert!(["active", "invited"].contains(&v), "status {v} in {text}");
+        }
+        if let Some(v) = body["refs"]["participation"].as_str() {
+            assert!(
+                ["member", "auditor"].contains(&v),
+                "participation {v} in {text}"
+            );
+        }
     }
     log_matches_database(t);
 }
@@ -1707,7 +1736,8 @@ fn checkpoints_and_proofs_from_the_database() {
     }
     let cp1 = checkpoint();
     cp1.verify(&ck).unwrap();
-    assert_eq!(cp1.body.size, 3);
+    // (Benefits' join is the first event.)
+    assert_eq!(cp1.body.size, 4);
     assert_eq!(checkpoint(), cp1, "the same size is the same checkpoint");
     for name in ["d", "e", "f", "g"] {
         let p = g.active_purpose(name);
@@ -1719,21 +1749,21 @@ fn checkpoints_and_proofs_from_the_database() {
         );
     }
     let cp2 = checkpoint();
-    assert_eq!(cp2.body.size, 7);
+    assert_eq!(cp2.body.size, 8);
     let mut c = t.control.db.conn().unwrap();
     for (i, e) in govlog::events(&mut *c, &part, 0, 100)
         .unwrap()
         .iter()
         .enumerate()
     {
-        let proof = govlog::prove(&mut *c, &part, i as u64 + 1, 7).unwrap();
+        let proof = govlog::prove(&mut *c, &part, i as u64 + 1, 8).unwrap();
         cp2.includes(e, &proof).unwrap();
-        if i < 3 {
-            let proof = govlog::prove(&mut *c, &part, i as u64 + 1, 3).unwrap();
+        if i < 4 {
+            let proof = govlog::prove(&mut *c, &part, i as u64 + 1, 4).unwrap();
             cp1.includes(e, &proof).unwrap();
         }
     }
-    let cons = govlog::prove_consistency(&mut *c, &part, 3, 7).unwrap();
+    let cons = govlog::prove_consistency(&mut *c, &part, 4, 8).unwrap();
     assert_eq!(cons.first_root, cp1.body.root);
     assert_eq!(cons.second_root, cp2.body.root);
     cons.verify().unwrap();

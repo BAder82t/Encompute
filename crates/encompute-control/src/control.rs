@@ -70,6 +70,11 @@ pub struct Control {
     pub pseudonyms: crate::views::PseudonymKey,
     /// The governance log mirror's end as written last.
     pub mirror: crate::mirror::TailCache,
+    /// Complete subtrees of the governance log's trees read before (they
+    /// never change), for the project log routes.
+    pub node_cache: crate::govlog::NodeCache,
+    /// The project log routes' per-caller limit.
+    pub project_log_limit: crate::ops::RateLimit,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -203,6 +208,8 @@ impl Control {
             plan_specs: Default::default(),
             pseudonyms,
             mirror: Default::default(),
+            node_cache: Default::default(),
+            project_log_limit: Default::default(),
         };
         c.ensure_self_registered()?;
         let existed = match opened {
@@ -365,6 +372,8 @@ impl Control {
             plan_specs: Default::default(),
             pseudonyms,
             mirror: Default::default(),
+            node_cache: Default::default(),
+            project_log_limit: Default::default(),
         })
     }
 

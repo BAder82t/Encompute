@@ -163,6 +163,35 @@ pub fn legacy_service_admins(
         .collect())
 }
 
+/// A governed project's reader: someone who takes part in it (a member
+/// organization or an accepted auditor organization; anyone else gets 404)
+/// holding auditor, organization_admin or security_admin there. Standard
+/// projects have no shared audit view.
+pub(crate) fn project_reader(
+    c: &mut impl postgres::GenericClient,
+    principal: &crate::authn::Principal,
+    id: &str,
+) -> Result<crate::authz::ProjectRow> {
+    let p = project_visible(c, principal, id)?;
+    if !p.governed() {
+        return Err(bad(
+            "a project's shared audit view belongs to governed projects: read your organization's trail",
+        ));
+    }
+    let readers = [Role::Auditor, Role::OrganizationAdmin, Role::SecurityAdmin];
+    if !p
+        .members
+        .iter()
+        .chain(&p.auditors)
+        .any(|o| principal.any_role(o, &readers))
+    {
+        return Err(forbidden(
+            "reading a project's audit events needs auditor, organization_admin or security_admin in an organization taking part",
+        ));
+    }
+    Ok(p)
+}
+
 impl Control {
     /// First start: the platform organization and its first admin (an OIDC
     /// identity). Refused once any organization exists.
@@ -884,23 +913,7 @@ impl Control {
     /// own trail stays `GET /v1/audit?organization=`.
     pub fn project_audit(&self, ctx: &Ctx, id: &str, after: i64, limit: i64) -> Result<Value> {
         let mut c = self.db.conn()?;
-        let p = project_visible(&mut *c, &ctx.principal, id)?;
-        if !p.governed() {
-            return Err(bad(
-                "a project's shared audit view belongs to governed projects: read your organization's trail",
-            ));
-        }
-        let readers = [Role::Auditor, Role::OrganizationAdmin, Role::SecurityAdmin];
-        if !p
-            .members
-            .iter()
-            .chain(&p.auditors)
-            .any(|o| ctx.principal.any_role(o, &readers))
-        {
-            return Err(forbidden(
-                "reading a project's audit events needs auditor, organization_admin or security_admin in an organization taking part",
-            ));
-        }
+        project_reader(&mut *c, &ctx.principal, id)?;
         let mut labels = crate::views::Labels::default();
         let mut out = vec![];
         for e in audit::list_project(&mut *c, id, after, limit)? {
@@ -1067,6 +1080,28 @@ impl Control {
             added = added.r#ref("participation", participation.as_str());
             joined = joined.r#ref("participation", participation.as_str());
         }
+        // A member joining a governed project is recorded in its log, so
+        // the members at any checkpoint can be derived from the log.
+        if participation == Participation::Member {
+            let partition = govlog::for_project(t, project, Some(owner))?;
+            if matches!(partition, encompute_trust::govlog::Partition::Project(_)) {
+                let membership: String = t
+                    .query_one(
+                        "SELECT membership_id FROM project_members
+                          WHERE project_id = $1 AND organization_id = $2",
+                        &[&project, &member],
+                    )
+                    .map_err(db_err)?
+                    .get(0);
+                govlog::append(
+                    t,
+                    govlog::Draft::new(partition, govlog::kind::MEMBERSHIP_ADDED, &membership)
+                        .org(member)
+                        .r#ref("project", project)
+                        .r#ref("participation", "member"),
+                )?;
+            }
+        }
         audit::append(t, added)?;
         // The added organization's own trail records it too.
         audit::append(t, joined)?;
@@ -1129,12 +1164,23 @@ impl Control {
                 .map_err(db_err)?;
             if n == 1 {
                 let partition = govlog::for_project(t, project, Some(&p.organization))?;
-                govlog::append(
-                    t,
-                    govlog::Draft::new(partition, govlog::kind::MEMBERSHIP_REMOVED, &removed)
-                        .org(&r.organization)
-                        .r#ref("project", project),
-                )?;
+                let mut d = govlog::Draft::new(partition.clone(), govlog::kind::MEMBERSHIP_REMOVED, &removed)
+                    .org(&r.organization)
+                    .r#ref("project", project);
+                // A governed project's log says what was removed (a member,
+                // an auditor organization or an invitation), so the members
+                // at any checkpoint can be derived from it.
+                if matches!(partition, encompute_trust::govlog::Partition::Project(_)) {
+                    let participation = if p.members.contains(&r.organization) || p.invited.contains(&r.organization) {
+                        "member"
+                    } else {
+                        "auditor"
+                    };
+                    d = d
+                        .r#ref("participation", participation)
+                        .r#ref("status", if taking_part { "active" } else { "invited" });
+                }
+                govlog::append(t, d)?;
             }
             // Its grants in the project end, and so do the approvals of its
             // own assets there: recorded as withdrawn (and anchored), so a

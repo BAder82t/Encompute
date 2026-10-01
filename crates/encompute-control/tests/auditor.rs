@@ -560,6 +560,13 @@ impl W {
                 format!("/v1/authorizations/{a}/revoke"),
                 Some(json!({"reason": "audit"})),
             ),
+            "/v1/projects/{}/checkpoints/{}/witnesses" => (
+                format!("/v1/projects/{p}/checkpoints/1/witnesses"),
+                Some(json!({
+                    "body": {"version": 1, "organization": BEN, "partition": format!("p:{p}"),
+                             "size": 1, "root": "0".repeat(64), "at": now()},
+                    "public_key": "0".repeat(64), "signature": "0".repeat(128)})),
+            ),
             "/v1/organizations/{}/key-brokers" => (
                 format!("/v1/organizations/{BEN}/key-brokers"),
                 Some(json!({"id": "ben-broker", "grant_public_key": pk(&key(42)),
@@ -693,6 +700,14 @@ impl W {
                 )]
             }
             "/v1/projects/{}/purposes" => vec![format!("/v1/projects/{p}/purposes")],
+            "/v1/projects/{}/audit" => vec![
+                format!("/v1/projects/{p}/audit"),
+                format!("/v1/projects/{p}/audit?after=1&limit=2"),
+            ],
+            "/v1/projects/{}/checkpoints/latest" => vec![
+                format!("/v1/projects/{p}/checkpoints/latest"),
+                format!("/v1/projects/{p}/checkpoints/latest?since=1"),
+            ],
             "/v1/purposes/{}" => vec![format!("/v1/purposes/{pu}")],
             "/v1/authorizations/{}" => vec![format!("/v1/authorizations/{a}")],
             "/v1/organizations/{}/key-brokers" => {

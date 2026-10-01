@@ -49,6 +49,9 @@
 //! | POST | `/v1/authorizations` | owner authorizations (v2), proposed without approvals |
 //! | GET | `/v1/authorizations/{id}` | to the owner's members: the document to sign |
 //! | POST | `/v1/authorizations/{id}/approve`, `/signature`, `/revoke` | four eyes, then the owner's governance-key signature |
+//! | GET | `/v1/projects/{id}/audit?after=&limit=` | a governed project's shared log: events with inclusion proofs against the latest signed checkpoint, the checkpoint and its witnesses (members and auditors) |
+//! | GET | `/v1/projects/{id}/checkpoints/latest?since=` | the latest signed checkpoint, its witnesses and, from `since`, the control plane's signed consistency proof |
+//! | POST | `/v1/projects/{id}/checkpoints/{size}/witnesses` | a member organization's security admin countersigns a checkpoint with the organization's governance key |
 //! | POST, GET | `/v1/organizations/{id}/key-brokers` | an organization's own key brokers (sovereign custody); a security admin registers |
 //! | POST | `/v1/jobs/{id}/release-ticket` | governed projects: the scheduled evaluator asks for a key-release ticket |
 //! | POST | `/v1/jobs/{id}/derived-assets` | governed projects: a person of a recipient records a succeeded job's result as a derived asset |
@@ -130,7 +133,7 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceCustody
         | Code::GovernanceAuditorSeparation => 403,
         Code::NotFound => 404,
-        Code::Conflict | Code::PrivacyBudgetExceeded => 409,
+        Code::Conflict | Code::PrivacyBudgetExceeded | Code::GovernanceCheckpointWitness => 409,
         Code::PlanningFailed | Code::PlanInvalid => 422,
         Code::Scheduling => 503,
         Code::Remote | Code::InsecureConfiguration | Code::PrivacyLedger => 500,
@@ -403,6 +406,31 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "authorizations", id, "revoke"]) => {
             ok(control.revoke_authorization(ctx, id, parse(&r.body)?)?)
         }
+        ("GET", ["v1", "projects", id, "audit"]) => {
+            let q = query(&r.url);
+            let after = number(&q, "after")?.unwrap_or(0);
+            let limit = number(&q, "limit")?.unwrap_or(100);
+            if limit == 0 {
+                return Err(bad("limit is a whole number from 1"));
+            }
+            let limit = limit.min(crate::ops::PROJECT_LOG_MAX_PAGE as u64) as i64;
+            ok(control.project_audit_log(ctx, id, after, limit)?)
+        }
+        ("GET", ["v1", "projects", id, "checkpoints", "latest"]) => {
+            let since = number(&query(&r.url), "since")?;
+            ok(control.project_checkpoint_latest(ctx, id, since)?)
+        }
+        ("POST", ["v1", "projects", id, "checkpoints", size, "witnesses"]) => {
+            let size: u64 = size
+                .parse()
+                .map_err(|_| bad("a checkpoint is named by its size (a whole number)"))?;
+            let (new, v) = control.submit_checkpoint_witness(ctx, id, size, parse(&r.body)?)?;
+            if new {
+                created(v)
+            } else {
+                ok(v)
+            }
+        }
         ("POST", ["v1", "organizations", id, "key-brokers"]) => {
             created(control.register_key_broker(ctx, id, parse(&r.body)?)?)
         }
@@ -562,6 +590,17 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
     }
 }
 
+/// A whole-number query parameter: absent is `None`, anything else that
+/// does not parse is a refusal (never a silent default).
+fn number(q: &BTreeMap<String, String>, name: &str) -> Result<Option<u64>> {
+    q.get(name)
+        .map(|v| {
+            v.parse()
+                .map_err(|_| bad(format!("{name} is a whole number")))
+        })
+        .transpose()
+}
+
 /// Every authenticated route of [`route`], as (method, path with `{}` for
 /// each ID). Tests enumerate it: every `POST` is a mutation an auditor is
 /// refused (`every_mutating_route_refuses_an_auditor`), every `GET` is
@@ -600,6 +639,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/authorizations/{}/approve"),
     ("POST", "/v1/authorizations/{}/signature"),
     ("POST", "/v1/authorizations/{}/revoke"),
+    ("GET", "/v1/projects/{}/audit"),
+    ("GET", "/v1/projects/{}/checkpoints/latest"),
+    ("POST", "/v1/projects/{}/checkpoints/{}/witnesses"),
     ("POST", "/v1/organizations/{}/key-brokers"),
     ("GET", "/v1/organizations/{}/key-brokers"),
     ("POST", "/v1/projects/{}/policies"),

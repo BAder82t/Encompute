@@ -10,9 +10,10 @@ use proptest::prelude::*;
 use sha2::{Digest, Sha256};
 
 use encompute_trust::govlog::{
-    chain_hash, completed_nodes, empty_root, hash_hex, kind, rfc6962_leaf, root, root_with,
-    CheckpointWitness, ConsistencyProof, Equivocation, EquivocationProof, GovEvent, Hash,
-    InclusionProof, Nodes, Partition, ProjectCheckpoint, RevocationHead, SignedProjectCheckpoint,
+    chain_hash, check_extension, completed_nodes, empty_root, hash_hex, kind, members_at,
+    rfc6962_leaf, root, root_with, CheckpointWitness, ConsistencyProof, Equivocation,
+    EquivocationProof, Extension, GovEvent, Hash, InclusionProof, Nodes, Partition,
+    ProjectCheckpoint, RevocationHead, RollbackProof, SignedProjectCheckpoint, Verdict,
     CHAIN_GENESIS, GOVLOG_VERSION,
 };
 use encompute_verification::service::ServiceSigner;
@@ -522,6 +523,251 @@ fn equivocation_detected_in_both_shapes() {
         consistency: None,
     };
     assert!(d.check(&ck).is_err());
+}
+
+/// What a member concludes from the latest checkpoint and the proof the
+/// control plane served: consistent, equivocation (with evidence that
+/// checks), rollback, or an error that is no evidence.
+#[test]
+fn a_member_checks_that_the_latest_checkpoint_extends_the_witnessed_one() {
+    let ck = signer().public_key_hex();
+    let (_, ls, mut s) = tree(P, 9);
+    let honest_7 = checkpoint(P, &ls[..7], 18);
+    let honest_9 = checkpoint(P, &ls, 20);
+    let proof = ConsistencyProof::build(P, 7, 9, &mut s)
+        .unwrap()
+        .sign(&signer())
+        .unwrap();
+    assert_eq!(
+        check_extension(&ck, &honest_7, &honest_9, Some(&proof)).unwrap(),
+        Extension::Consistent
+    );
+    assert_eq!(
+        check_extension(&ck, &honest_9, &honest_9, None).unwrap(),
+        Extension::Consistent
+    );
+    // No proof for a larger tree: an error, not evidence.
+    assert!(check_extension(&ck, &honest_7, &honest_9, None).is_err());
+    // A proof between other checkpoints: an error.
+    let other = ConsistencyProof::build(P, 5, 9, &mut s)
+        .unwrap()
+        .sign(&signer())
+        .unwrap();
+    assert!(check_extension(&ck, &honest_7, &honest_9, Some(&other)).is_err());
+
+    // A fork at the same size.
+    let mut forked = ls.clone();
+    forked[6] = ref_leaf(b"fork");
+    let forked_9 = checkpoint(P, &forked, 20);
+    let Extension::Equivocation(e) = check_extension(&ck, &honest_9, &forked_9, None).unwrap()
+    else {
+        panic!("a fork at one size is equivocation")
+    };
+    assert_eq!(e.check(&ck).unwrap(), Equivocation::SameSizeDifferentRoots);
+
+    // A larger tree that does not extend the witnessed one, with the
+    // control plane's own failing proof.
+    let forked_7 = checkpoint(P, &forked[..7], 18);
+    let mut served = ConsistencyProof::build(P, 7, 9, &mut s).unwrap();
+    served.first_root = forked_7.body.root.clone();
+    let served = served.sign(&signer()).unwrap();
+    let Extension::Equivocation(e) =
+        check_extension(&ck, &forked_7, &honest_9, Some(&served)).unwrap()
+    else {
+        panic!("an inconsistent proof is equivocation")
+    };
+    assert_eq!(e.check(&ck).unwrap(), Equivocation::Inconsistent);
+
+    // A smaller tree than the one witnessed.
+    assert!(matches!(
+        check_extension(&ck, &honest_9, &honest_7, None).unwrap(),
+        Extension::Rollback(_)
+    ));
+
+    // Not the control plane's: no evidence, an error.
+    let stranger = ServiceSigner::from_seed("encompute-control", &[8u8; 32]).unwrap();
+    let fake = forked_9.body.clone().sign(&stranger).unwrap();
+    assert!(check_extension(&ck, &honest_9, &fake, None).is_err());
+    // Another partition.
+    let elsewhere = checkpoint("p:prj_b", &ls, 20);
+    assert!(check_extension(&ck, &honest_9, &elsewhere, None).is_err());
+}
+
+fn at(cp: &SignedProjectCheckpoint, at: u64) -> SignedProjectCheckpoint {
+    let mut b = cp.body.clone();
+    b.at = at;
+    b.sign(&signer()).unwrap()
+}
+
+/// A control plane that signs a smaller checkpoint after a larger one lost
+/// events: provable by anyone with its key. An older one served again is
+/// stale, not evidence.
+#[test]
+fn control_plane_rollback_is_detected_and_provable() {
+    let ck = signer().public_key_hex();
+    let (_, ls, _) = tree(P, 9);
+    let big = at(&checkpoint(P, &ls, 20), 1_000);
+    let small = at(&checkpoint(P, &ls[..5], 14), 2_000);
+    let Extension::Rollback(r) = check_extension(&ck, &big, &small, None).unwrap() else {
+        panic!("a smaller checkpoint signed later is a rollback")
+    };
+    r.check(&ck).unwrap();
+    assert_eq!(r.previous, big);
+    // Signed earlier than the larger: stale, no evidence.
+    let old = at(&checkpoint(P, &ls[..5], 14), 500);
+    assert_eq!(
+        check_extension(&ck, &big, &old, None).unwrap(),
+        Extension::Stale
+    );
+    assert!(RollbackProof {
+        previous: big.clone(),
+        latest: old
+    }
+    .check(&ck)
+    .is_err());
+}
+
+#[test]
+fn forged_rollback_evidence_refused() {
+    let ck = signer().public_key_hex();
+    let (_, ls, _) = tree(P, 9);
+    let big = at(&checkpoint(P, &ls, 20), 1_000);
+    let small = at(&checkpoint(P, &ls[..5], 14), 2_000);
+    let ok = RollbackProof {
+        previous: big.clone(),
+        latest: small.clone(),
+    };
+    ok.check(&ck).unwrap();
+    // Wrong key, edited body, swapped order, same size, other partition.
+    assert!(ok.check(&"0".repeat(64)).is_err());
+    let stranger = ServiceSigner::from_seed("encompute-control", &[9u8; 32]).unwrap();
+    let forged = small.body.clone().sign(&stranger).unwrap();
+    assert!(RollbackProof {
+        previous: big.clone(),
+        latest: forged
+    }
+    .check(&ck)
+    .is_err());
+    let mut edited = small.clone();
+    edited.body.size = 4;
+    assert!(RollbackProof {
+        previous: big.clone(),
+        latest: edited
+    }
+    .check(&ck)
+    .is_err());
+    assert!(RollbackProof {
+        previous: small.clone(),
+        latest: big.clone()
+    }
+    .check(&ck)
+    .is_err());
+    assert!(RollbackProof {
+        previous: big.clone(),
+        latest: big.clone()
+    }
+    .check(&ck)
+    .is_err());
+    let elsewhere = at(&checkpoint("p:prj_b", &ls[..5], 14), 2_000);
+    assert!(RollbackProof {
+        previous: big,
+        latest: elsewhere
+    }
+    .check(&ck)
+    .is_err());
+}
+
+#[test]
+fn assess_gives_a_typed_verdict() {
+    let ck = signer().public_key_hex();
+    let (_, ls, _) = tree(P, 4);
+    let a = checkpoint(P, &ls, 9);
+    let same = EquivocationProof {
+        a: a.clone(),
+        b: a.clone(),
+        consistency: None,
+    };
+    assert_eq!(same.assess(&ck).unwrap(), Verdict::Consistent);
+    assert!(same.check(&ck).is_err());
+    let mut f = ls.clone();
+    f[3] = ref_leaf(b"x");
+    let fork = EquivocationProof {
+        a,
+        b: checkpoint(P, &f, 9),
+        consistency: None,
+    };
+    assert_eq!(
+        fork.assess(&ck).unwrap(),
+        Verdict::Equivocation(Equivocation::SameSizeDifferentRoots)
+    );
+    assert!(fork.assess(&"0".repeat(64)).is_err());
+}
+
+fn membership(pseq: u64, kind: &str, org: &str, refs: &[(&str, &str)]) -> GovEvent {
+    GovEvent {
+        v: GOVLOG_VERSION,
+        partition: P.into(),
+        pseq,
+        kind: kind.into(),
+        subject: format!("pmb_{pseq}"),
+        org: Some(org.into()),
+        at: 1_800_000_000 + pseq,
+        refs: refs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    }
+}
+
+#[test]
+fn members_at_follows_the_membership_events() {
+    let owner = vec!["tax".to_string()];
+    let es = vec![
+        membership(
+            1,
+            kind::MEMBERSHIP_ADDED,
+            "ben",
+            &[("participation", "member")],
+        ),
+        membership(
+            3,
+            kind::MEMBERSHIP_ADDED,
+            "other",
+            &[("participation", "member")],
+        ),
+        membership(
+            4,
+            kind::MEMBERSHIP_REMOVED,
+            "other",
+            &[("participation", "member"), ("status", "active")],
+        ),
+        // An invitation withdrawn, an auditor organization removed.
+        membership(
+            5,
+            kind::MEMBERSHIP_REMOVED,
+            "guest",
+            &[("participation", "member"), ("status", "invited")],
+        ),
+        membership(
+            6,
+            kind::MEMBERSHIP_REMOVED,
+            "audit",
+            &[("participation", "auditor"), ("status", "active")],
+        ),
+        // Joined before the events existed, removed later.
+        membership(
+            7,
+            kind::MEMBERSHIP_REMOVED,
+            "old",
+            &[("participation", "member"), ("status", "active")],
+        ),
+    ];
+    assert_eq!(members_at(&es, 0, &owner), ["old", "tax"]);
+    assert_eq!(members_at(&es, 1, &owner), ["ben", "old", "tax"]);
+    assert_eq!(members_at(&es, 3, &owner), ["ben", "old", "other", "tax"]);
+    assert_eq!(members_at(&es, 4, &owner), ["ben", "old", "tax"]);
+    assert_eq!(members_at(&es, 7, &owner), ["ben", "tax"]);
+    assert_eq!(members_at(&[], 9, &owner), ["tax"]);
 }
 
 // --- witnesses and revocation heads -------------------------------------------

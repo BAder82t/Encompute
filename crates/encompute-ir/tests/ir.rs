@@ -285,6 +285,7 @@ fn every_code_round_trips_and_is_unique() {
 
 /// The governance block from ENC2701 (public-sector governed projects) is
 /// complete, in order, and each code is documented in docs/errors.md.
+/// ENC2717 (revocation heads) is reserved and not yet a code.
 #[test]
 fn the_governance_codes_are_the_2701_block() {
     let block: Vec<&str> = Code::ALL
@@ -292,7 +293,10 @@ fn the_governance_codes_are_the_2701_block() {
         .map(|c| c.as_str())
         .filter(|s| s.starts_with("ENC27"))
         .collect();
-    let expected: Vec<String> = (2701..=2716).map(|n| format!("ENC{n}")).collect();
+    let expected: Vec<String> = (2701..=2716)
+        .chain([2718])
+        .map(|n| format!("ENC{n}"))
+        .collect();
     assert_eq!(block, expected);
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/errors.md"),
@@ -310,6 +314,7 @@ fn the_governance_codes_are_the_2701_block() {
     assert_eq!(Code::GovernanceAuthorizationLimit.as_str(), "ENC2714");
     assert_eq!(Code::GovernanceCustody.as_str(), "ENC2715");
     assert_eq!(Code::GovernanceAuditorSeparation.as_str(), "ENC2716");
+    assert_eq!(Code::GovernanceCheckpointWitness.as_str(), "ENC2718");
 }
 
 fn with_forms(forms: &str) -> String {

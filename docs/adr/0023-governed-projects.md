@@ -681,8 +681,73 @@ As built (event log, schema version 13; its head anchored in place of the sets):
   version-1 anchor stored again after the log moved on, or another one
   than the migrated, is refused. Earlier releases refuse a version-2
   anchor: there is no downgrade.
-- The project audit route with proofs, witnessing and revocation heads
-  follow.
+- Project audit and witnessing (as built):
+  - `GET /v1/projects/{id}/audit?after=&limit=` returns the events of
+    `p:<id>` after position `after` (at most 500 per page) up to the latest
+    signed checkpoint, each with its leaf hash and inclusion proof against
+    that checkpoint, with the checkpoint and its witnesses. The route
+    reads that partition only. Readers are the project's members and
+    appointed auditors, by the roles of the shared audit view (auditor,
+    organization admin, security admin); anyone else gets not found.
+    Events are the shared-safe leaves, so the answer is the same bytes for
+    every reader. `GET /v1/projects/{id}/checkpoints/latest?since=` adds
+    the control plane's signed consistency proof from `since`.
+  - A member organization countersigns a checkpoint with
+    `POST /v1/projects/{id}/checkpoints/{size}/witnesses`. The caller is a
+    human security admin of that organization (never a service account or
+    an auditor); the signature verifies under the organization's active
+    governance key (ENC2708 when revoked, ENC2701 when not its key); the
+    organization was a member when the log had `size` events; the
+    partition, size and root are the stored checkpoint's (ENC2718). A
+    checkpoint is `witnessed` when every member of that size signed it and
+    `unwitnessed` otherwise. The label is advisory and gates nothing (G-2).
+  - The members at a size come from the log: a member joining a governed
+    project is a `membership.added` event of the project's partition (not
+    a deny event, so no forced checkpoint), and a removal records whether
+    a member, an auditor organization or an invitation left. A project that
+    predates the event counts its current members as members from the
+    start. The project's owner is a member from the start.
+  - Cadence: deny events are checkpointed before their call returns, the
+    rest by the background pass (two seconds), so every state of the log
+    is soon a checkpoint a member can witness; the checkpoint is stored
+    once per size and never replaced.
+  - `encompute governance witness` fetches the latest checkpoint and the
+    consistency proof from the last witnessed one (kept in a state file
+    that pins the control plane's public key), signs only if the new
+    checkpoint extends it, and otherwise exits 1 with an equivocation
+    proof written beside the state file; `check-equivocation` verifies two
+    signed checkpoints (the same size with different roots, or a larger
+    tree that does not extend a smaller one by the control plane's own
+    signed consistency proof). A rollback is a typed `RollbackProof`: a
+    checkpoint the member holds, and the control plane's signed latest
+    one of the same partition that has fewer events and was signed no
+    earlier; both signatures are the control plane's, the verifier is in
+    the trust crate and `check-equivocation` accepts it. A smaller
+    checkpoint signed earlier is a stale answer: refused, no evidence.
+    When `since` is larger than the latest checkpoint the control plane
+    answers 200 with the checkpoint and no proof.
+  - What witnessing does and does not detect, stated plainly. Split views
+    are detected only when members exchange checkpoint files and run
+    `check-equivocation`: there is no gossip. A control plane that
+    freezes, withholds or serves an old checkpoint cannot be told from a
+    network failure. A control plane that shows every member the same
+    history, or that no member witnesses, is not caught. The `witnessed`
+    label in an answer is the control plane's computation: `encompute
+    governance verify-audit` recomputes it, verifying every inclusion
+    proof, the members from the verified membership events (the owner,
+    and members that predate the events, are on the control plane's word
+    and listed as such) and each witness under the organizations' pinned
+    governance keys; without pins it reports that witness signatures
+    were not verified.
+  - A former member may countersign the sizes at which it was a member
+    (the witness route only; every read stays closed to it).
+  - Cost: a page (200 events at most) of proofs reads its tree nodes in
+    one range statement, complete subtrees are cached in memory (they
+    never change), the membership events are read through a partial
+    index, and a caller is limited to 120 requests a minute on the three
+    routes (503). `after`, `limit` and `since` that are not whole numbers
+    are 400.
+- Revocation heads follow.
 
 ### 13. Error codes (D13)
 

@@ -190,6 +190,8 @@ pub enum Code {
     GovernanceCustody,
     /// Auditor separation: an auditor is read-only and exclusive of every other role in an organization taking part in a governed project, and an auditor organization never owns, submits, receives, approves or holds keys there (ENC2716).
     GovernanceAuditorSeparation,
+    /// A checkpoint witness refused: it does not witness the control plane's stored checkpoint of the project at that size (another size, partition or root), so it cannot count towards it (ENC2718). ENC2717 is reserved for revocation heads.
+    GovernanceCheckpointWitness,
 }
 
 impl Code {
@@ -272,13 +274,14 @@ impl Code {
             Code::GovernanceAuthorizationLimit => "ENC2714",
             Code::GovernanceCustody => "ENC2715",
             Code::GovernanceAuditorSeparation => "ENC2716",
+            Code::GovernanceCheckpointWitness => "ENC2718",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 77] = [
+    pub const ALL: [Code; 78] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -356,6 +359,7 @@ impl Code {
         Code::GovernanceAuthorizationLimit,
         Code::GovernanceCustody,
         Code::GovernanceAuditorSeparation,
+        Code::GovernanceCheckpointWitness,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

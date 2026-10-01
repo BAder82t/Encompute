@@ -599,6 +599,73 @@ For production, keep the anchor in the customer's vault
 (`ENCOMPUTE_ANCHOR_BAO_ADDR`, which must be https) rather than on a volume
 that could be restored together with the database.
 
+### Project checkpoints and witnessing
+
+Every governed project has its own partition of the governance log, and
+the control plane signs a checkpoint of it (its size and Merkle root) each
+time the log is checkpointed:
+
+- **Cadence.** A security deny event (a revocation, expiry, withdrawal,
+  disable, removal, key revocation, purpose retirement, job end) is
+  checkpointed before its call returns. Everything else (an issued
+  authorization, a member joining) is checkpointed by the background pass,
+  which runs every two seconds while there are new events. So a checkpoint
+  is never more than one background pass behind the log, and a member can
+  witness any state of it.
+- **Witnessing.** Each member organization runs `encompute governance
+  witness` on a schedule (every few minutes, or hourly where the log is
+  quiet) with its governance key file and the credentials of a person who
+  is a security admin of the organization (a token; a service account
+  cannot witness):
+
+  ```
+  encompute governance witness --project PRJ --organization ORG \
+      --key governance.key --state witness-PRJ.json --url https://control.example
+  ```
+
+  It fetches the latest checkpoint with the control plane's signed
+  consistency proof from the one it witnessed last (kept in `--state`,
+  which also pins the control plane's public key on first use; pass
+  `--control-key` to pin it yourself), signs a witness and submits it. Exit
+  0 means witnessed or nothing new; exit 1 means the control plane showed
+  a history that does not extend the last one: nothing was signed and an
+  equivocation proof was written beside the state file. Alert on a
+  non-zero exit. Two members that suspect a split view compare what they
+  hold with `encompute governance check-equivocation --state STATE A.json
+  B.json`.
+- **The label.** A checkpoint every member organization of that size
+  signed is `witnessed`; any other is `unwitnessed`. It is advisory: it
+  never blocks a job, an authorization or an export, and an organization
+  that stops witnessing only leaves later checkpoints unwitnessed. A
+  member that leaves a project can still countersign the checkpoints of
+  sizes at which it was a member (a person with security_admin of that
+  organization, over the witness route only; it reads nothing of the
+  project), so a checkpoint is not left unwitnessed by a departure.
+- **Reading.** `GET /v1/projects/{id}/audit` pages through the project's
+  events with inclusion proofs (at most 200 per page; a caller may make
+  120 requests a minute on the project log routes). `encompute governance
+  verify-audit --project P --control-key K --pins pins.json` does the
+  whole check without trusting the control plane's label: every inclusion
+  proof against the checkpoint's signature, the members at that size from
+  the verified membership events, each witness signature under the
+  organizations' pinned governance keys (`pins.json`: organization to
+  public key), and the `witnessed` label computed locally. It exits 1 when
+  the control plane's label or members differ, and without `--pins` it
+  says the witness signatures were not verified.
+- **What witnessing detects, and what it does not.** The control plane
+  signs the checkpoints, so a member that checks nothing only has the
+  control plane's word. Witnessing detects a control plane that shows
+  different members different histories only when the members compare
+  what they hold (exchange the checkpoint files or evidence and run
+  `check-equivocation`): there is no gossip between members and nothing
+  runs that comparison for them. It detects a rollback (a smaller
+  checkpoint signed after a larger one) from the member's own stored
+  checkpoint. It cannot tell a control plane that freezes or withholds
+  checkpoints, or serves an old one, from a network failure (the tool
+  reports a stale answer without evidence). The `witnessed` label on an
+  answer is the control plane's own computation; it is a fact only to a
+  reader who runs `verify-audit` with the organizations' keys.
+
 ## Audit
 
 Every security-sensitive state transition writes an audit event in the same

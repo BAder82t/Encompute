@@ -80,6 +80,10 @@ pub mod kind {
     pub const JOB_FAILED: &str = "job.failed";
     pub const GRANT_WITHDRAWN: &str = "grant.withdrawn";
     pub const MEMBERSHIP_REMOVED: &str = "membership.removed";
+    /// A member organization joined a governed project (not a deny event:
+    /// it exists so the members at any size of a project's log can be
+    /// derived from the log).
+    pub const MEMBERSHIP_ADDED: &str = "membership.added";
     pub const ROLE_REMOVED: &str = "role.removed";
     pub const AUTHORIZATION_ISSUED: &str = "authorization.issued";
     pub const AUTHORIZATION_REVOKED: &str = "authorization.revoked";
@@ -96,6 +100,7 @@ pub mod kind {
         JOB_FAILED,
         GRANT_WITHDRAWN,
         MEMBERSHIP_REMOVED,
+        MEMBERSHIP_ADDED,
         ROLE_REMOVED,
         AUTHORIZATION_ISSUED,
         AUTHORIZATION_REVOKED,
@@ -782,6 +787,87 @@ impl SignedRevocationHead {
     }
 }
 
+/// What a member found when it compared the control plane's latest
+/// checkpoint with the one it witnessed last.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Extension {
+    /// The latest checkpoint extends the last witnessed one (or is it).
+    Consistent,
+    /// The control plane signed two statements that cannot both be true:
+    /// evidence anyone holding its public key can check.
+    Equivocation(Box<EquivocationProof>),
+    /// The latest checkpoint is smaller than the last witnessed one and
+    /// signed no earlier: the control plane lost events it had signed.
+    Rollback(Box<RollbackProof>),
+    /// The latest checkpoint is smaller than the last witnessed one and
+    /// signed earlier: an old checkpoint served again. Not evidence of
+    /// anything the control plane signed (a stale answer cannot be told
+    /// from a network fault), but not an extension either.
+    Stale,
+}
+
+/// Whether `new` extends `old` (the checkpoint a member witnessed last),
+/// given the control plane's signed consistency proof from `old`'s size
+/// to `new`'s (needed when `new` is larger). Both checkpoints and the
+/// proof must be signed by `control_key` (hex) and belong to one
+/// partition, otherwise the answer is an error and no evidence: a
+/// checkpoint or proof that is not the control plane's own proves nothing
+/// against it.
+pub fn check_extension(
+    control_key: &str,
+    old: &SignedProjectCheckpoint,
+    new: &SignedProjectCheckpoint,
+    proof: Option<&SignedConsistencyProof>,
+) -> Result<Extension> {
+    old.verify(control_key)?;
+    new.verify(control_key)?;
+    let (o, n) = (&old.body, &new.body);
+    if o.partition != n.partition {
+        return Err(err("the checkpoints are of different partitions"));
+    }
+    let evidence = |consistency: Option<SignedConsistencyProof>| EquivocationProof {
+        a: old.clone(),
+        b: new.clone(),
+        consistency,
+    };
+    if n.size < o.size {
+        return Ok(if n.at >= o.at {
+            Extension::Rollback(Box::new(RollbackProof {
+                previous: old.clone(),
+                latest: new.clone(),
+            }))
+        } else {
+            Extension::Stale
+        });
+    }
+    if n.size == o.size {
+        return Ok(if n.root == o.root {
+            Extension::Consistent
+        } else {
+            Extension::Equivocation(Box::new(evidence(None)))
+        });
+    }
+    let p = proof.ok_or_else(|| {
+        err("the control plane gave no consistency proof from the last witnessed checkpoint")
+    })?;
+    p.verify_signature(control_key)?;
+    let b = &p.body;
+    if b.partition != o.partition
+        || b.first != o.size
+        || b.second != n.size
+        || b.first_root != o.root
+        || b.second_root != n.root
+    {
+        return Err(err(
+            "the consistency proof is not between the two checkpoints",
+        ));
+    }
+    Ok(match b.verify() {
+        Ok(()) => Extension::Consistent,
+        Err(_) => Extension::Equivocation(Box::new(evidence(Some(p.clone())))),
+    })
+}
+
 /// How two checkpoints contradict each other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Equivocation {
@@ -805,11 +891,67 @@ pub struct EquivocationProof {
     pub consistency: Option<SignedConsistencyProof>,
 }
 
+/// What a pair of checkpoints (and a consistency proof) shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The control plane equivocated.
+    Equivocation(Equivocation),
+    /// The checkpoints agree, or the control plane's own consistency proof
+    /// between them verifies: no evidence.
+    Consistent,
+}
+
+/// A rollback: the control plane signed a checkpoint of `previous.size`
+/// events and, no earlier, signed one of fewer events of the same
+/// partition. Both signatures are the control plane's own, so anyone
+/// holding its public key can check it; the member's copy of `previous`
+/// is what a rollback is measured against.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackProof {
+    pub previous: SignedProjectCheckpoint,
+    pub latest: SignedProjectCheckpoint,
+}
+
+impl RollbackProof {
+    /// `Ok` when both checkpoints are signed by `control_key` (hex), are of
+    /// one partition, and the later-signed one is the smaller.
+    pub fn check(&self, control_key: &str) -> Result<()> {
+        self.previous.verify(control_key)?;
+        self.latest.verify(control_key)?;
+        let (p, l) = (&self.previous.body, &self.latest.body);
+        if p.partition != l.partition {
+            return Err(err("the checkpoints are of different partitions"));
+        }
+        if l.size >= p.size {
+            return Err(err(
+                "the latest checkpoint is not smaller than the previous",
+            ));
+        }
+        if l.at < p.at {
+            return Err(err(
+                "the smaller checkpoint was signed before the larger: not a rollback",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl EquivocationProof {
     /// `Ok` when the proof shows the control plane (`control_key`, hex)
     /// equivocated; an error otherwise (forged, unrelated or consistent
     /// checkpoints).
     pub fn check(&self, control_key: &str) -> Result<Equivocation> {
+        match self.assess(control_key)? {
+            Verdict::Equivocation(e) => Ok(e),
+            Verdict::Consistent => Err(err("the checkpoints are consistent")),
+        }
+    }
+
+    /// Like [`Self::check`], with the absence of evidence as a value:
+    /// `Err` is for inputs that are not the control plane's (forged,
+    /// edited, of different partitions, a missing or unrelated proof).
+    pub fn assess(&self, control_key: &str) -> Result<Verdict> {
         self.a.verify(control_key)?;
         self.b.verify(control_key)?;
         let (s, l) = if self.a.body.size <= self.b.body.size {
@@ -821,11 +963,11 @@ impl EquivocationProof {
             return Err(err("the checkpoints are of different partitions"));
         }
         if s.size == l.size {
-            return if s.root != l.root {
-                Ok(Equivocation::SameSizeDifferentRoots)
+            return Ok(if s.root != l.root {
+                Verdict::Equivocation(Equivocation::SameSizeDifferentRoots)
             } else {
-                Err(err("the checkpoints agree"))
-            };
+                Verdict::Consistent
+            });
         }
         let p = self.consistency.as_ref().ok_or_else(|| {
             err("checkpoints of different sizes need the control plane's consistency proof between them")
@@ -840,9 +982,47 @@ impl EquivocationProof {
         {
             return Err(err("the consistency proof is for other checkpoints"));
         }
-        match b.verify() {
-            Ok(()) => Err(err("the checkpoints are consistent")),
-            Err(_) => Ok(Equivocation::Inconsistent),
+        Ok(match b.verify() {
+            Ok(()) => Verdict::Consistent,
+            Err(_) => Verdict::Equivocation(Equivocation::Inconsistent),
+        })
+    }
+}
+
+/// The member organizations of a governed project when its log had `size`
+/// events, from the project's membership events (`membership.added` and
+/// `membership.removed`, in order; others are ignored) and `baseline`, the
+/// organizations that are members now (the owner, and members of a project
+/// that predates the events, have no event of their own and are members
+/// from the start). An organization is a member from its `membership.added`
+/// event (as a member, never an auditor organization) until its
+/// `membership.removed` event; an invitation removed before it was
+/// accepted never counts. Sorted.
+pub fn members_at(events: &[GovEvent], size: u64, baseline: &[String]) -> Vec<String> {
+    // Per organization: whether it was a member before its first event,
+    // and whether it is one after its events up to `size`.
+    let mut state: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for e in events {
+        let Some(org) = e.org.clone() else { continue };
+        let added = match e.kind.as_str() {
+            kind::MEMBERSHIP_ADDED => true,
+            kind::MEMBERSHIP_REMOVED => false,
+            _ => continue,
+        };
+        let counts = e.refs.get("participation").is_none_or(|p| p == "member");
+        let active = e.refs.get("status").is_none_or(|s| s == "active");
+        let initial = !added && counts && active;
+        let entry = state.entry(org).or_insert((initial, initial));
+        if e.pseq <= size {
+            entry.1 = added && counts;
         }
     }
+    for o in baseline {
+        state.entry(o.clone()).or_insert((true, true));
+    }
+    state
+        .into_iter()
+        .filter(|(_, (_, at))| *at)
+        .map(|(o, _)| o)
+        .collect()
 }

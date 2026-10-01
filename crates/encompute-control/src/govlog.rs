@@ -35,7 +35,8 @@ use postgres::GenericClient;
 use encompute_ir::{Code, Error, Result};
 use encompute_trust::govlog::{
     chain_hash, completed_nodes, hash_hex, parse_hash, root_with, ConsistencyProof, GovEvent, Hash,
-    InclusionProof, Nodes, Partition, ProjectCheckpoint, SignedProjectCheckpoint, GOVLOG_VERSION,
+    InclusionProof, Nodes, Partition, ProjectCheckpoint, SignedCheckpointWitness,
+    SignedProjectCheckpoint, GOVLOG_VERSION,
 };
 use encompute_verification::service::ServiceSigner;
 
@@ -195,6 +196,7 @@ thread_local! {
 
 fn is_deny(kind: &str) -> bool {
     kind != kind::AUTHORIZATION_ISSUED
+        && kind != kind::MEMBERSHIP_ADDED
         && kind != extra_kind::ANCHOR_GENESIS
         && !kind.starts_with(extra_kind::MIGRATED)
 }
@@ -1293,4 +1295,241 @@ pub fn events(
     .iter()
     .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
     .collect()
+}
+
+// --- a project's audit, checkpoints and witnesses ----------------------------------
+
+/// The stored, signed checkpoint of `partition` at exactly `size`.
+pub fn checkpoint_at(
+    c: &mut impl GenericClient,
+    partition: &str,
+    size: u64,
+) -> Result<Option<SignedProjectCheckpoint>> {
+    c.query_opt(
+        "SELECT signed FROM governance_checkpoints WHERE partition = $1 AND size = $2",
+        &[&partition, &(size as i64)],
+    )
+    .map_err(db_err)?
+    .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
+    .transpose()
+}
+
+/// The latest stored, signed checkpoint of `partition`.
+pub fn latest_checkpoint(
+    c: &mut impl GenericClient,
+    partition: &str,
+) -> Result<Option<SignedProjectCheckpoint>> {
+    c.query_opt(
+        "SELECT signed FROM governance_checkpoints WHERE partition = $1 ORDER BY size DESC LIMIT 1",
+        &[&partition],
+    )
+    .map_err(db_err)?
+    .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
+    .transpose()
+}
+
+/// The organizations that countersigned the checkpoint of `partition` at
+/// `size`, in order.
+pub fn witnesses_at(
+    c: &mut impl GenericClient,
+    partition: &str,
+    size: u64,
+) -> Result<Vec<SignedCheckpointWitness>> {
+    c.query(
+        "SELECT signed FROM checkpoint_witnesses WHERE partition = $1 AND size = $2
+          ORDER BY organization_id",
+        &[&partition, &(size as i64)],
+    )
+    .map_err(db_err)?
+    .iter()
+    .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
+    .collect()
+}
+
+/// The member organizations of governed project `project` when its log had
+/// `size` events, derived from the log (see
+/// [`encompute_trust::govlog::members_at`]): the project's membership
+/// events, read through an index on them, and the organizations that are
+/// members now and have no event of their own (the owner, and members of a
+/// project that predates the events).
+pub fn members_at(c: &mut impl GenericClient, project: &str, size: u64) -> Result<Vec<String>> {
+    let partition = Partition::Project(project.to_owned()).to_string();
+    let events: Vec<GovEvent> = c
+        .query(
+            "SELECT body FROM governance_events
+              WHERE partition = $1 AND kind IN ('membership.added', 'membership.removed')
+              ORDER BY pseq",
+            &[&partition],
+        )
+        .map_err(db_err)?
+        .iter()
+        .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
+        .collect::<Result<_>>()?;
+    let now: Vec<String> = c
+        .query(
+            "SELECT organization_id FROM project_members
+              WHERE project_id = $1 AND status = 'active' AND participation = 'member'",
+            &[&project],
+        )
+        .map_err(db_err)?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    Ok(encompute_trust::govlog::members_at(&events, size, &now))
+}
+
+/// Who witnessed a checkpoint, of those who had to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WitnessState {
+    /// The member organizations when the checkpoint was made.
+    pub required: Vec<String>,
+    /// Those that countersigned it.
+    pub witnessed_by: Vec<String>,
+    /// Those that have not.
+    pub missing: Vec<String>,
+}
+
+impl WitnessState {
+    /// Every member organization signed (and there is at least one).
+    pub fn witnessed(&self) -> bool {
+        !self.required.is_empty() && self.missing.is_empty()
+    }
+
+    /// `witnessed`, or `unwitnessed`: a label, never a gate.
+    pub fn label(&self) -> &'static str {
+        if self.witnessed() {
+            "witnessed"
+        } else {
+            "unwitnessed"
+        }
+    }
+}
+
+/// The witness state of `cp` (a checkpoint of project `project`), with the
+/// stored witnesses.
+pub fn witness_state(
+    c: &mut impl GenericClient,
+    project: &str,
+    cp: &ProjectCheckpoint,
+) -> Result<(WitnessState, Vec<SignedCheckpointWitness>)> {
+    let witnesses = witnesses_at(c, &cp.partition, cp.size)?;
+    let required = members_at(c, project, cp.size)?;
+    let signed: Vec<&str> = witnesses
+        .iter()
+        .map(|w| w.body.organization.as_str())
+        .collect();
+    let (witnessed_by, missing) = required
+        .iter()
+        .cloned()
+        .partition(|o| signed.contains(&o.as_str()));
+    Ok((
+        WitnessState {
+            required,
+            witnessed_by,
+            missing,
+        },
+        witnesses,
+    ))
+}
+
+/// Complete subtrees read from the database before. They never change
+/// once written, so entries are never stale; the cache is emptied when it
+/// reaches [`NODE_CACHE_MAX`] entries.
+#[derive(Default)]
+pub struct NodeCache(std::sync::Mutex<HashMap<(String, u32, u64), Hash>>);
+
+/// The most subtrees [`NodeCache`] holds.
+pub const NODE_CACHE_MAX: usize = 50_000;
+
+/// Statements that read tree nodes for inclusion proofs (a page of them is
+/// one, however many events it holds).
+pub static NODE_QUERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The events of `partition` in `(after, size]` (at most `limit`), each
+/// with its leaf hash and its inclusion proof in the first `size` events.
+/// Two statements at most for a page: the events, and every tree node
+/// their proofs need that the cache does not hold, read in one range
+/// fetch.
+pub fn leaves(
+    c: &mut impl GenericClient,
+    cache: &NodeCache,
+    partition: &str,
+    after: u64,
+    size: u64,
+    limit: i64,
+) -> Result<Vec<(GovEvent, String, InclusionProof)>> {
+    let rows = c
+        .query(
+            "SELECT body FROM governance_events
+              WHERE partition = $1 AND pseq > $2 AND pseq <= $3 ORDER BY pseq LIMIT $4",
+            &[&partition, &(after as i64), &(size as i64), &limit],
+        )
+        .map_err(db_err)?;
+    let events: Vec<GovEvent> = rows
+        .iter()
+        .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
+        .collect::<Result<_>>()?;
+    // Which nodes the proofs read depends on the sizes only, so a dry run
+    // with placeholder hashes names them.
+    let mut needed = std::collections::BTreeSet::new();
+    for e in &events {
+        InclusionProof::build(partition, e.leaf_index(), size, &mut |l: u32, i: u64| {
+            needed.insert((l, i));
+            Ok([0u8; 32])
+        })?;
+    }
+    let mut known: HashMap<(u32, u64), Hash> = HashMap::new();
+    let mut missing = vec![];
+    {
+        let held = cache.0.lock().unwrap_or_else(|e| e.into_inner());
+        for (l, i) in &needed {
+            match held.get(&(partition.to_owned(), *l, *i)) {
+                Some(h) => {
+                    known.insert((*l, *i), *h);
+                }
+                None => missing.push((*l, *i)),
+            }
+        }
+    }
+    if !missing.is_empty() {
+        NODE_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let levels: Vec<i32> = missing.iter().map(|(l, _)| *l as i32).collect();
+        let idxs: Vec<i64> = missing.iter().map(|(_, i)| *i as i64).collect();
+        for r in c
+            .query(
+                "SELECT n.level, n.idx, n.hash FROM governance_tree_nodes n
+                   JOIN unnest($2::int4[], $3::int8[]) AS w(level, idx)
+                     ON w.level = n.level AND w.idx = n.idx
+                  WHERE n.partition = $1",
+                &[&partition, &levels, &idxs],
+            )
+            .map_err(db_err)?
+        {
+            let (l, i, h): (i32, i64, String) = (r.get(0), r.get(1), r.get(2));
+            known.insert((l as u32, i as u64), parse_hash("tree node", &h)?);
+        }
+        let mut held = cache.0.lock().unwrap_or_else(|e| e.into_inner());
+        if held.len() + missing.len() > NODE_CACHE_MAX {
+            held.clear();
+        }
+        for (l, i) in &missing {
+            if let Some(h) = known.get(&(*l, *i)) {
+                held.insert((partition.to_owned(), *l, *i), *h);
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(events.len());
+    for e in events {
+        let leaf = hash_hex(&e.leaf_hash()?);
+        let proof =
+            InclusionProof::build(partition, e.leaf_index(), size, &mut |l: u32, i: u64| {
+                known.get(&(l, i)).copied().ok_or_else(|| {
+                    log_err(format!(
+                        "the governance log's tree node {l}/{i} of {partition} is missing"
+                    ))
+                })
+            })?;
+        out.push((e, leaf, proof));
+    }
+    Ok(out)
 }

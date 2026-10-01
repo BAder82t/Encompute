@@ -248,6 +248,26 @@ Work toward confidential cross-agency computation
   verifiable after the data is deleted, and the trust report notes the
   expiry without failing. Deleting the data itself is the owner's
   storage's job. Migration 0012.
+- **Project audit with proofs and checkpoint witnessing.** A governed
+  project's log is readable by its members and auditors:
+  `GET /v1/projects/{id}/audit` returns the project's own events, each with
+  an inclusion proof against the control plane's latest signed checkpoint,
+  in bounded pages, and `GET /v1/projects/{id}/checkpoints/latest?since=`
+  the checkpoint with a signed consistency proof from the size the caller
+  last saw. Each member organization countersigns checkpoints
+  (`POST /v1/projects/{id}/checkpoints/{size}/witnesses`, a human security
+  admin, under the organization's active governance key, for a member at
+  that size; ENC2718 for another size or root). A checkpoint every member
+  signed is labelled `witnessed`, any other `unwitnessed`; the label never
+  blocks a job. A member joining a governed project is now an event of its
+  log (`membership.added`), so the members at any size come from the log.
+  `encompute governance witness` signs only a checkpoint that extends the
+  last one that member witnessed and otherwise writes an equivocation
+  proof and exits 1; `encompute governance check-equivocation` verifies
+  two signed checkpoints or a rollback proof, and `encompute governance
+  verify-audit` recomputes the whole check (every proof, the members, the
+  witnesses under pinned keys) without trusting the control plane's label.
+  ENC2718; INV-247.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
   INV-236 (the control plane can only deny; broker state cannot be
   rolled back), INV-223 (auditors), INV-229 (cross-organization
