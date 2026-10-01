@@ -225,6 +225,16 @@ pub fn render(b: &GovernanceBundle, v: &Verified) -> String {
                 "  No placement constraint was declared; where it ran is not shown."
             );
         }
+        _ if passes(loc.status) => {
+            // Every line of a passing location row carries its own
+            // "assuming an honest control plane".
+            if let Some(v) = &loc.value {
+                let _ = writeln!(o, "  Placement: {v}");
+            }
+            for d in &loc.details {
+                let _ = writeln!(o, "  {d}");
+            }
+        }
         _ => {
             let _ = writeln!(o, "  {}", why(loc));
         }

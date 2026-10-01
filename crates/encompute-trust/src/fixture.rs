@@ -91,6 +91,12 @@ pub struct Knobs {
     pub head_at: u64,
     pub linkage: bool,
     pub placement: bool,
+    /// The placement the control plane signs into the grant.
+    pub grant_placement: Option<encompute_verification::placement::GrantPlacement>,
+    /// Each owner's own signed placement constraints.
+    pub owner_placement: Option<encompute_verification::placement::PlacementConstraints>,
+    /// The project constraint digest each owner's authorization pins.
+    pub owner_project_pin: Option<String>,
     pub privacy_policy: bool,
     /// The submitting organization.
     pub submitter: &'static str,
@@ -118,6 +124,9 @@ impl Default for Knobs {
             head_at: T0 + 50,
             linkage: false,
             placement: false,
+            grant_placement: None,
+            owner_placement: None,
+            owner_project_pin: None,
             privacy_policy: false,
             submitter: OTHER,
             filler: 0,
@@ -309,6 +318,8 @@ impl Fixture {
                 limits: AuthorizationLimits {
                     max_executions: Some(10),
                     max_releases: Some(10),
+                    placement: k.owner_placement.clone(),
+                    project_placement_digest: k.owner_project_pin.clone(),
                     ..AuthorizationLimits::default()
                 },
                 per_job_four_eyes: false,
@@ -334,7 +345,7 @@ impl Fixture {
             binding: binding.clone(),
             authorization_set_id: set_id,
             not_after,
-            placement: None,
+            placement: k.grant_placement.clone(),
         };
         let spec = ExecutionSpec {
             version: SPEC_VERSION,

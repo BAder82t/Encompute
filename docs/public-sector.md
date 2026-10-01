@@ -270,8 +270,9 @@ discloses it), and any edit, omission or reordering fails. The report
 shows "raw data centralized", "ownership retained" and "unauthorized
 releases" only with signed backing, judges authorizations at the time
 the job ran, and cannot yet read SATISFIED: who can decrypt a result is
-not recorded in signed evidence yet, and residency and record linkage
-are not evidenced until they are built.
+not recorded in signed evidence yet, and record linkage is not evidenced
+until it is built. Residency is shown only from the placement the control
+plane signed into the grant and always "assuming an honest control plane".
 
 **Phase 6, residency and operators (complete).** An institution's rules about
 where its data may be handled and who may run the machines now decide

@@ -474,7 +474,11 @@ these limits:
   operator is the control plane's record of its service account; no
   signature of the operator binds an evaluator, its URL and its key to it,
   so a compromised control plane could misname one. The governance report
-  (a later phase) must say so wherever it reports operator separation.
+  says so wherever it reports operator separation or where an evaluator
+  ran ("assuming an honest control plane"), and a test fails if it does
+  not; it reads placement only from the grant the control plane signed, and
+  shows the project's own constraints as unchecked, because the bundle
+  carries only their digest.
 - **The project's constraints are the control plane's unless an owner pins
   them.** An owner's signed authorization may pin the digest of the project
   constraints it accepts (`limits.project_placement_digest`); its broker
@@ -486,11 +490,6 @@ these limits:
   job is refused with "the project's placement constraints changed since the
   owner pinned them; the owner must re-authorize" (ENC2710), and the owner's
   broker refuses likewise.
-- **Merge task for the governance report.** The report is not in this
-  branch. Wherever it reports operator separation it must carry the
-  qualifier "assuming an honest control plane" (see above), and a test must
-  fail if it claims separation without it. To be added when the report
-  merges.
 - **Running jobs are not re-checked.** Placement is judged at submission,
   scheduling, start and every release ticket; a job already running is not
   stopped when its evaluator moves or constraints tighten (its receipt

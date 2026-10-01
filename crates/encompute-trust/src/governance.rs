@@ -20,10 +20,15 @@
 //!   be checked against a pin is UNCHECKED, evidence that contradicts is
 //!   FAILED. The verdict is SATISFIED only if no row is any of these.
 //! - **Not applicable only with backing.** A feature this release cannot
-//!   evidence (residency, linkage, privacy scopes, the result-key model, a
+//!   evidence (linkage, privacy scopes, the result-key model, a
 //!   project charter) is NOT APPLICABLE only when the signed binding or
 //!   authorizations show it is not declared, and NOT PRESENT when they
 //!   declare it. Never a pass.
+//! - **Operator separation and placement assume an honest control plane.**
+//!   Where the evaluator ran and who operated it are the control plane's
+//!   signed record of its own scheduling, not something the operator signed;
+//!   every row that states either carries [`HONEST_CONTROL_PLANE`], and a
+//!   location is shown as declared or attested, never more.
 //! - **Validity at execution time.** An authorization is judged at the
 //!   grant's signed issue time, never at the time of verification. What it
 //!   says now is shown apart and never fails a historical audit.
@@ -44,6 +49,7 @@ use encompute_planner::{
 use encompute_verification::governance::{
     GovernanceBinding, GrantGovernance, Purpose, PurposeMode, ReleaseClass,
 };
+use encompute_verification::placement::{LocationEvidence, Refused, Scope};
 use encompute_verification::service::{verify_signed, JOB_GRANT, JOB_GRANT_V2};
 use encompute_verification::{ExecutionSpec, JobGrant, PolicyId};
 
@@ -1439,23 +1445,151 @@ fn row_ownership(j: &Job<'_>) -> GovernanceRow {
     r
 }
 
+/// The qualifier every operator-separation or evaluator-placement claim
+/// carries: an evaluator's operator and location are the control plane's
+/// signed record, not something the operator signed, so a compromised
+/// control plane could misname them (INV-234).
+pub const HONEST_CONTROL_PLANE: &str = "assuming an honest control plane";
+
+/// A statement about operator separation or where the evaluator ran, with
+/// the qualifier it must carry.
+fn qualified(statement: String) -> String {
+    format!("{statement}, {HONEST_CONTROL_PLANE}")
+}
+
 fn row_location(j: &Job<'_>) -> GovernanceRow {
     let planned = j.plan.is_some_and(|p| {
         p.requirements
             .iter()
             .any(|r| matches!(r, TrustRequirement::ExecutionRegion { .. }))
     });
-    if j.binding.placement_digest.is_some() || planned {
-        not_present(
+    let owner_rules: Vec<&Auth<'_>> = j
+        .auths
+        .iter()
+        .filter(|a| a.body.limits.placement.is_some())
+        .collect();
+    let owner_pins: Vec<&Auth<'_>> = j
+        .auths
+        .iter()
+        .filter(|a| a.body.limits.project_placement_digest.is_some())
+        .collect();
+    let project_declared = j.binding.placement_digest.is_some() || planned;
+    if !project_declared && owner_rules.is_empty() && owner_pins.is_empty() {
+        return not_applicable(
             "Location",
-            "a placement constraint is declared; evidence of where the job ran is not available in this release",
-        )
-    } else {
-        not_applicable(
-            "Location",
-            "no placement constraint in the signed binding or the plan",
-        )
+            "no placement constraint in the signed binding, the plan or the owners' authorizations",
+        );
     }
+    // Where the job ran comes only from the placement the control plane
+    // signed into the grant; without it nothing is claimed.
+    let Some(p) = &j.gg.placement else {
+        return not_present(
+            "Location",
+            "a placement constraint is declared; the signed grant records no placement of the job's evaluator, so where it ran is not evidenced",
+        );
+    };
+    let mut t = Tally {
+        present: true,
+        ..Tally::default()
+    };
+    let place = p
+        .location
+        .as_ref()
+        .map_or("an unknown location".to_owned(), |l| {
+            format!("{} ({})", l.display(), l.jurisdiction)
+        });
+    let label = p.evidence.label();
+    if p.evidence == LocationEvidence::SelfDeclared {
+        t.unanchored(qualified(format!(
+            "the grant's location rests on the evaluator's own word, not on its operator's declaration or an attestation (placement {place})"
+        )));
+    }
+    for a in &owner_rules {
+        match &a.sig {
+            Sig::Verified => {}
+            Sig::Bad(m) => {
+                t.fail(format!("{}: {m}", j.describe_card(a)));
+                continue;
+            }
+            _ => {
+                t.unanchored(format!(
+                    "{} sets placement constraints, but its signature is not checked",
+                    j.describe_card(a)
+                ));
+                continue;
+            }
+        }
+        let Some(c) = &a.body.limits.placement else {
+            continue;
+        };
+        if !c.applies(&[Scope::Ciphertext]) {
+            continue;
+        }
+        let mut why: Vec<&str> = c
+            .location_refusals(p.location.as_ref(), p.evidence)
+            .iter()
+            .map(Refused::field)
+            .collect();
+        if c.allowed_operators
+            .as_ref()
+            .is_some_and(|ops| !ops.contains(&p.operator))
+        {
+            why.push("allowed_operators");
+        }
+        if !why.is_empty() {
+            t.fail(qualified(format!(
+                "{}: the grant's placement is outside the owner's signed placement constraints ({})",
+                j.describe_card(a),
+                why.join(", ")
+            )));
+        }
+    }
+    for a in &owner_pins {
+        if !matches!(a.sig, Sig::Verified) {
+            continue;
+        }
+        if a.body.limits.project_placement_digest != j.binding.placement_digest {
+            t.fail(format!(
+                "{} pins project placement constraints that are not the ones the job was bound to",
+                j.describe_card(a)
+            ));
+        }
+    }
+    if project_declared {
+        t.unanchored(
+            "the project's placement constraints are known here only by their digest: whether the placement meets them cannot be checked from this evidence"
+                .into(),
+        );
+    }
+    let owners: BTreeSet<&str> = j
+        .binding
+        .inputs
+        .values()
+        .map(|i| i.organization.as_str())
+        .collect();
+    let recipients = j.recipients();
+    if owners.contains(p.operator.as_str()) || recipients.contains(&p.operator) {
+        t.fail(qualified(format!(
+            "operator separation is broken: the evaluator's operator {} owns a source or receives an output",
+            p.operator
+        )));
+    } else {
+        t.note(qualified(format!(
+            "operator separation: the evaluator's operator {} owns no source and receives no output",
+            p.operator
+        )));
+    }
+    t.note(qualified(format!(
+        "placement {place}, known by the operator's declaration or an attestation as the grant records it ({label})"
+    )));
+    let value = qualified(format!("{place}, {label}"));
+    grow(
+        t,
+        "Location",
+        Status::Satisfied,
+        Some(&value),
+        Some("UNKNOWN"),
+    )
 }
 
 fn row_approvals(j: &Job<'_>) -> GovernanceRow {

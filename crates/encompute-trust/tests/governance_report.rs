@@ -1182,3 +1182,207 @@ fn a_stale_older_checkpoint_hides_what_came_after_it() {
     assert_ne!(status(&r, "Audit chain"), Status::Satisfied);
     assert_ne!(r.verdict, Verdict::Satisfied);
 }
+
+// --- placement and operator separation (INV-233, INV-234, INV-244) -----------
+
+use encompute_trust::governance::HONEST_CONTROL_PLANE;
+use encompute_verification::placement::{
+    GrantPlacement, Location, LocationEvidence, LocationPattern, PlacementConstraints,
+};
+
+fn grant_at(operator: &str, region: &str, evidence: LocationEvidence) -> GrantPlacement {
+    GrantPlacement {
+        operator: operator.into(),
+        location: Some(Location::resolve("gcp", region, None).unwrap()),
+        evidence,
+        evidence_digest: None,
+        endpoint_digest: None,
+    }
+}
+
+fn owners_want(region: &str) -> PlacementConstraints {
+    PlacementConstraints {
+        allowed_regions: Some(BTreeSet::from([LocationPattern::region("gcp", region)])),
+        ..PlacementConstraints::default()
+    }
+}
+
+/// The text of a row that says anything about operators, separation or
+/// where the evaluator ran.
+fn placement_texts(r: &GovernanceReport) -> Vec<String> {
+    let mut out = vec![];
+    for row in &r.rows {
+        let mut texts: Vec<&str> = row.details.iter().map(String::as_str).collect();
+        texts.extend(row.value.as_deref());
+        for t in texts {
+            let low = t.to_lowercase();
+            if low.contains("operator") || low.contains("separation") {
+                out.push(format!("{}: {t}", row.name));
+            }
+        }
+        if row.name == "Location"
+            && row
+                .value
+                .as_deref()
+                .is_some_and(|v| v.contains("declared") || v.contains("attested"))
+        {
+            out.push(format!("{}: {}", row.name, row.value.clone().unwrap()));
+        }
+    }
+    out
+}
+
+#[test]
+fn report_operator_separation_carries_the_honest_control_plane_qualifier() {
+    let variants = [
+        // Separated, owners' rules met.
+        Knobs {
+            owner_placement: Some(owners_want("europe-west3")),
+            grant_placement: Some(grant_at(OTHER, "europe-west3", LocationEvidence::Attested)),
+            ..Knobs::default()
+        },
+        // The operator owns a source.
+        Knobs {
+            owner_placement: Some(owners_want("europe-west3")),
+            grant_placement: Some(grant_at(TAX, "europe-west3", LocationEvidence::Attested)),
+            ..Knobs::default()
+        },
+        // The operator receives the output.
+        Knobs {
+            placement: true,
+            grant_placement: Some(grant_at(
+                TAX,
+                "europe-west3",
+                LocationEvidence::OperatorDeclared,
+            )),
+            ..Knobs::default()
+        },
+    ];
+    let mut claims = 0;
+    for k in variants {
+        let r = show(&Fixture::with(k));
+        for t in placement_texts(&r) {
+            claims += 1;
+            assert!(
+                t.contains(HONEST_CONTROL_PLANE),
+                "a statement about operators or placement lacks {HONEST_CONTROL_PLANE:?}: {t}"
+            );
+        }
+    }
+    assert!(claims >= 6, "the report said too little to check: {claims}");
+
+    // It does say that operators are separated, and says so with the
+    // qualifier.
+    let r = show(&Fixture::with(Knobs {
+        owner_placement: Some(owners_want("europe-west3")),
+        grant_placement: Some(grant_at(OTHER, "europe-west3", LocationEvidence::Attested)),
+        ..Knobs::default()
+    }));
+    let loc = r.row("Location").unwrap();
+    assert!(loc
+        .details
+        .iter()
+        .any(|d| d.starts_with("operator separation:") && d.ends_with(HONEST_CONTROL_PLANE)));
+    // Separation is never claimed when the operator is an owner or a
+    // recipient: the row fails and says why.
+    let r = show(&Fixture::with(Knobs {
+        grant_placement: Some(grant_at(TAX, "europe-west3", LocationEvidence::Attested)),
+        placement: true,
+        ..Knobs::default()
+    }));
+    let loc = r.row("Location").unwrap();
+    assert_eq!(loc.status, Status::Failed);
+    assert!(!loc
+        .details
+        .iter()
+        .any(|d| d.starts_with("operator separation:")));
+}
+
+#[test]
+fn report_location_row_uses_signed_grant_placement_only_when_present() {
+    // Declared by an owner, but the grant records no placement: nothing is
+    // evidenced, however plausible.
+    let r = show(&Fixture::with(Knobs {
+        owner_placement: Some(owners_want("europe-west3")),
+        ..Knobs::default()
+    }));
+    let loc = r.row("Location").unwrap();
+    assert_eq!(loc.status, Status::NotPresent);
+    assert_eq!(loc.value.as_deref(), Some("NOT EVIDENCED"));
+
+    // The grant's placement inside the owners' signed rules: satisfied, as
+    // declared or attested (never more) and with the qualifier.
+    let ok = |evidence| {
+        show(&Fixture::with(Knobs {
+            owner_placement: Some(owners_want("europe-west3")),
+            grant_placement: Some(grant_at(OTHER, "europe-west3", evidence)),
+            ..Knobs::default()
+        }))
+    };
+    let r = ok(LocationEvidence::OperatorDeclared);
+    let loc = r.row("Location").unwrap();
+    assert_eq!(loc.status, Status::Satisfied);
+    let v = loc.value.clone().unwrap();
+    assert!(v.contains("declared") && !v.contains("attested"), "{v}");
+    assert!(v.contains(HONEST_CONTROL_PLANE));
+    assert!(ok(LocationEvidence::Attested)
+        .row("Location")
+        .unwrap()
+        .value
+        .clone()
+        .unwrap()
+        .contains("attested"));
+
+    // Another region than the owners' signed rule allows: failed.
+    let r = show(&Fixture::with(Knobs {
+        owner_placement: Some(owners_want("europe-west3")),
+        grant_placement: Some(grant_at(OTHER, "europe-west4", LocationEvidence::Attested)),
+        ..Knobs::default()
+    }));
+    assert_eq!(status(&r, "Location"), Status::Failed);
+
+    // An owner that wants better evidence than the grant records.
+    let mut want = owners_want("europe-west3");
+    want.min_evidence = LocationEvidence::Attested;
+    let r = show(&Fixture::with(Knobs {
+        owner_placement: Some(want),
+        grant_placement: Some(grant_at(
+            OTHER,
+            "europe-west3",
+            LocationEvidence::OperatorDeclared,
+        )),
+        ..Knobs::default()
+    }));
+    assert_eq!(status(&r, "Location"), Status::Failed);
+
+    // The evaluator's own word is not evidence.
+    let r = ok(LocationEvidence::SelfDeclared);
+    assert_eq!(status(&r, "Location"), Status::Unchecked);
+
+    // The project's constraints are only a digest here: never satisfied.
+    let r = show(&Fixture::with(Knobs {
+        placement: true,
+        owner_placement: Some(owners_want("europe-west3")),
+        grant_placement: Some(grant_at(OTHER, "europe-west3", LocationEvidence::Attested)),
+        ..Knobs::default()
+    }));
+    assert_eq!(status(&r, "Location"), Status::Unchecked);
+    assert_ne!(r.verdict, Verdict::Satisfied);
+
+    // An owner's pin of other project constraints than the job's binding.
+    let r = show(&Fixture::with(Knobs {
+        placement: true,
+        owner_project_pin: Some("9".repeat(64)),
+        grant_placement: Some(grant_at(OTHER, "europe-west3", LocationEvidence::Attested)),
+        ..Knobs::default()
+    }));
+    assert_eq!(status(&r, "Location"), Status::Failed);
+
+    // A placement in the grant that nobody declared a rule for is not a
+    // claim: nothing is declared, so the row stays not applicable.
+    let r = show(&Fixture::with(Knobs {
+        grant_placement: Some(grant_at(OTHER, "europe-west3", LocationEvidence::Attested)),
+        ..Knobs::default()
+    }));
+    assert_eq!(status(&r, "Location"), Status::NotApplicable);
+}
