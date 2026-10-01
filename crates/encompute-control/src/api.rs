@@ -139,7 +139,7 @@ pub fn status_of(code: Code) -> u16 {
         | Code::PrivacyBudgetExceeded
         | Code::GovernanceRevocationHead
         | Code::GovernanceCheckpointWitness => 409,
-        Code::PlanningFailed | Code::PlanInvalid => 422,
+        Code::PlanningFailed | Code::PlanInvalid | Code::GovernanceBundleLimit => 422,
         Code::Scheduling => 503,
         Code::Remote | Code::InsecureConfiguration | Code::PrivacyLedger => 500,
         _ => 400,

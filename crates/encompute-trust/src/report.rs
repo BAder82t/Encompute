@@ -36,6 +36,9 @@ pub enum Status {
     Authorized,
     Attested,
     Complete,
+    /// Not applicable, with signed backing: the signed evidence shows the
+    /// feature is not declared (cross-agency governance rows only).
+    NotApplicable,
     /// Present, but not checked against a trust anchor.
     Unchecked,
     NotPresent,
@@ -50,6 +53,7 @@ impl fmt::Display for Status {
             Status::Authorized => "AUTHORIZED",
             Status::Attested => "ATTESTED",
             Status::Complete => "COMPLETE",
+            Status::NotApplicable => "NOT APPLICABLE",
             Status::Unchecked => "PRESENT (not checked)",
             Status::NotPresent => "NOT PRESENT",
             Status::Failed => "FAILED",
@@ -101,6 +105,11 @@ pub struct Anchors {
     /// Evaluators' receipt-signing keys (hex). An evaluator bound by an
     /// attestation that verifies needs no anchor.
     pub evaluators: BTreeSet<String>,
+    /// Organization → its governance public key (hex), pinned by the
+    /// caller. These override any governance key a bundle anchors itself:
+    /// a bundle that brings its own anchor, and a signature made with it,
+    /// must not verify a v2 authorization.
+    pub governance_keys: BTreeMap<String, String>,
 }
 
 /// Computes a program's facts with the caller's own compiler.
@@ -139,27 +148,27 @@ pub struct ReportOptions<'a> {
 /// Collects a row's problems, the evidence it could not anchor, and
 /// evidence it ignored (reported whatever the row's status).
 #[derive(Default)]
-struct Tally {
-    problems: Vec<String>,
-    unchecked: Vec<String>,
-    notes: Vec<String>,
-    present: bool,
+pub(crate) struct Tally {
+    pub(crate) problems: Vec<String>,
+    pub(crate) unchecked: Vec<String>,
+    pub(crate) notes: Vec<String>,
+    pub(crate) present: bool,
 }
 
 impl Tally {
-    fn fail(&mut self, m: String) {
+    pub(crate) fn fail(&mut self, m: String) {
         self.problems.push(m);
     }
 
-    fn unanchored(&mut self, m: String) {
+    pub(crate) fn unanchored(&mut self, m: String) {
         self.unchecked.push(m);
     }
 
-    fn note(&mut self, m: String) {
+    pub(crate) fn note(&mut self, m: String) {
         self.notes.push(m);
     }
 
-    fn row(self, name: &'static str, ok: Status) -> Row {
+    pub(crate) fn row(self, name: &'static str, ok: Status) -> Row {
         let (status, mut details) = if !self.problems.is_empty() {
             (Status::Failed, self.problems)
         } else if !self.unchecked.is_empty() {
@@ -185,16 +194,31 @@ fn finite(s: &str) -> Option<f64> {
 
 impl TrustGraph {
     pub fn report(&self, opts: &ReportOptions<'_>) -> Result<TrustReport> {
+        self.report_with(opts, &opts.anchors)
+    }
+
+    /// [`Self::report`] with `a` as the anchors (the options' own are
+    /// ignored): the cross-agency report adds the organizations' pinned
+    /// governance keys to them.
+    pub(crate) fn report_with(&self, opts: &ReportOptions<'_>, a: &Anchors) -> Result<TrustReport> {
         let now = opts.now.unwrap_or_else(encompute_attestation::unix_now);
-        let a = &opts.anchors;
         let mut rows = vec![];
 
-        // Evidence: the graph is exactly what its evidence implies.
+        // Evidence: the graph is exactly what its evidence implies. A
+        // governance key the caller pinned replaces what the bundle
+        // anchors for that organization.
+        let pinned;
+        let me: &TrustGraph = if a.governance_keys.is_empty() {
+            self
+        } else {
+            pinned = self.with_pinned_governance_keys(&a.governance_keys);
+            &pinned
+        };
         let crate::Rebuilt {
             graph: g,
             problems: link_problems,
             historical_only,
-        } = self.rebuild();
+        } = me.rebuild();
         let mut t = Tally {
             present: !self.nodes.is_empty(),
             ..Tally::default()

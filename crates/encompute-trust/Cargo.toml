@@ -20,8 +20,13 @@ serde_json.workspace = true
 sha2 = "0.10"
 ed25519-dalek = "2.2"
 
+[features]
+# Test fixtures (a whole signed governed job); never enabled in a release.
+fixtures = []
+
 [dev-dependencies]
 proptest.workspace = true
+encompute-trust = { path = ".", features = ["fixtures"] }
 
 [lints]
 workspace = true

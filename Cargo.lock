@@ -1127,6 +1127,7 @@ dependencies = [
  "encompute-privacy",
  "encompute-secagg",
  "encompute-training",
+ "encompute-trust",
  "encompute-verification",
  "proptest",
  "serde",
