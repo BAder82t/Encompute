@@ -1424,6 +1424,20 @@ impl Control {
                     // waits for that approval.
                     match covers(&signed, &spec, &purpose.linkage_policy_id, outputs) {
                         Ok(()) => {
+                            // Two usable authorizations of one source that
+                            // pin different privacy scopes (or only one of
+                            // them does) are refused, never resolved by
+                            // the order of their IDs.
+                            if let Some((other, c)) = chosen.get(&key) {
+                                if c.body.privacy_scope_id != signed.body.privacy_scope_id {
+                                    return Err(gov(
+                                        Code::GovernancePrivacyScope,
+                                        format!(
+                                            "authorizations {other} and {row} of the same source pin different privacy scopes (or only one does): refused, not resolved by chance"
+                                        ),
+                                    ));
+                                }
+                            }
                             let take = chosen.get(&key).is_none_or(|(_, c)| {
                                 signed.body.per_job_four_eyes && !c.body.per_job_four_eyes
                             });
@@ -1684,13 +1698,17 @@ impl Control {
     /// 5. per-job four eyes (except when approving): an owner whose
     ///    authorization asks for it without its quorum of distinct people
     ///    approving this job's spec and authorization set (ENC2707);
-    /// 6. the privacy budget ([`Control::governed_privacy_budget`], a hook
-    ///    for now), and (except when approving) each authorization's
-    ///    `max_executions`, counting every job under it through derived
-    ///    results (ENC2714);
+    /// 6. (except when approving) each authorization's `max_executions`,
+    ///    counting every job under it through derived results (ENC2714);
     /// 7. `at` at or after `not_after`, the strict end of every
     ///    authorization, purpose and source window, deletion dates
-    ///    included (ENC2705).
+    ///    included (ENC2705);
+    /// 8. (except when approving) placement: the project's and the owners'
+    ///    constraints and the separation of operators (ENC2710, ENC2725);
+    /// 9. last, the privacy budget ([`Control::governed_privacy_budget`],
+    ///    read-only: a scope that can pay, ENC2719, ENC2201), so a job
+    ///    refused for authorization, placement or its window never reaches
+    ///    the scopes. Starting reserves only after every check here passed.
     ///
     /// Returns `not_after`.
     fn revalidate_governed(
@@ -1872,10 +1890,9 @@ impl Control {
             let owners = four_eyes_owners(t, g)?;
             job_quorums(t, j, g, &owners)?;
         }
-        // 6. The privacy budget, and the owners' execution limits, counted
-        //    through derived results (every job reading one released under
-        //    an authorization counts against it).
-        self.governed_privacy_budget(t, j, stage)?;
+        // 6. The owners' execution limits, counted through derived results
+        //    (every job reading one released under an authorization counts
+        //    against it).
         if stage != GovernedStage::Approve {
             let mut counted =
                 super::derived::lineage_authorizations(t, std::slice::from_ref(&j.id))?;
@@ -1912,6 +1929,12 @@ impl Control {
                 "the job's governed window ended at {not_after}"
             )));
         }
+        // 9. The privacy budget, last of the checks: authorization,
+        //    placement and the window refuse first (with their own codes),
+        //    and only a job that passed them all is judged against, and at
+        //    start reserves in, its scopes (read-only here: reserving is
+        //    the last step of start itself).
+        self.governed_privacy_budget(t, j, stage)?;
         Ok(not_after)
     }
 

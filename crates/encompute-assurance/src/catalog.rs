@@ -1355,6 +1355,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:crates/encompute-control/tests/privacy_scopes.rs::a_project_scope_list_is_rate_limited"),
         (Adversarial, "test:crates/encompute-privacy/tests/scoped.rs::a_release_checks_the_population_first"),
         (Adversarial, "test:crates/encompute-control/tests/auditor.rs::auditor_org_reads_scope_entries_without_the_population"),
+        (EndToEnd, "test:crates/encompute-control/tests/privacy_scopes.rs::a_governed_dp_job_runs_under_placement_scope_and_authorization"),
     ]),
     inv!("INV-231", "public-sector", "Dataset versions are immutable: one series and version label maps to one AssetVersionId and one digest, re-registration with another digest is refused, and the database refuses to change, delete or revive a registered version.", [
         (Positive, "test:crates/encompute-verification/tests/governance.rs::every_asset_version_field_changes_its_id"),

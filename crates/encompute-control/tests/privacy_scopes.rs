@@ -1977,9 +1977,10 @@ fn two_authorizations_that_pin_different_scopes_are_refused() {
     g.authorize_in(&g.main, &g.a, &va, &[&prog], Some(&any_a));
     g.authorize_in(&g.main, &g.a, &va, &[&prog], Some(&other));
     g.authorize_in(&g.main, &g.b, &vb, &[&prog], Some(&any_b));
-    let job = id(&g.job(&[va, vb], &prog, "k1").1);
-    assert_eq!(g.state(&job), "failed");
-    assert_eq!(g.failure(&job), "ENC2719");
+    // Refused at submission, whatever the order of the authorizations' IDs.
+    let (s, v) = g.job(&[va, vb], &prog, "k1");
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(v["code"], "ENC2719", "{v}");
 }
 
 #[test]
@@ -2085,4 +2086,190 @@ fn a_project_scope_list_is_rate_limited() {
         assert_eq!(g.t.call(&g.dev, "GET", &url, None).0, 200);
     }
     assert_eq!(g.t.call(&g.dev, "GET", &url, None).0, 503);
+}
+
+// --- a governed DP job under placement, scope and authorization checks -------------------------
+
+/// The execution transcript of `program` under `spec`.
+fn transcript(program: &str, spec: &ExecutionSpec) -> Option<String> {
+    let p = encompute_ir::parse(program).unwrap();
+    let c = encompute_evaluator::compile_program(&p).unwrap();
+    encompute_evaluator::transcript_for(&c, spec).map(|t| t.id().hex())
+}
+
+/// A governed DP job on a placement-constrained project with a scope runs
+/// submit, approve, schedule, start (reserving), report, complete; and the
+/// order of the checks is coherent: a job that violates the project's
+/// placement, an owner's authorization or the scope's cap is refused with
+/// that rule's own code, whatever else is also wrong, and reserves nothing.
+/// Placement and authorization are judged before the scope, and the
+/// reservation is last.
+#[test]
+fn a_governed_dp_job_runs_under_placement_scope_and_authorization() {
+    let Some(g) = world() else { return };
+    // The evaluator is the platform's, in Germany by its operator's declaration.
+    let plat_sec = user(&g.t, &g.platform, "platform", "p-sec", &["security_admin"]);
+    let (st, v) = g.t.call(
+        &plat_sec,
+        "POST",
+        "/v1/evaluators/evaluator-1/location-declarations",
+        Some(json!({"provider": "gcp", "region": "europe-west3"})),
+    );
+    assert_eq!(st, 201, "{v}");
+    // The project may run only in Germany.
+    let url = format!("/v1/projects/{}/placement", g.main.id);
+    g.t.ok(
+        &g.a.sec1,
+        "POST",
+        &url,
+        Some(json!({"constraints": {"allowed_regions": [{"jurisdiction": "DE"}]}, "base_version": 0})),
+    );
+    // A scope pays for one release (about 0.43 of epsilon each) and not two.
+    let (sa, sb) = (g.scope(&g.a, "0.6", None), g.scope(&g.b, "0.6", None));
+    // Four weeks of the same program; each is submitted (approved and
+    // scheduled where the evaluator is admitted) before any starts, so
+    // every scheduling check passes while the scopes are full.
+    let mut weeks = vec![];
+    for w in 1..=4 {
+        let (v, prog) = g.week(&format!("2027-w0{w}"), DP);
+        let (s, j) = g.job(&v, &prog, &format!("k{w}"));
+        assert_eq!(s, 201, "{j}");
+        let job = id(&j);
+        assert_eq!(g.state(&job), "queued", "{j}");
+        weeks.push((job, prog, v));
+    }
+    let (good, bad_placement, bad_authorization, last) = (
+        weeks[0].0.clone(),
+        weeks[1].0.clone(),
+        weeks[2].0.clone(),
+        weeks[3].0.clone(),
+    );
+
+    // Start reserves, in each source's scope and population, once.
+    let (s, started) = g.start(&good);
+    assert_eq!(s, 200, "{started}");
+    assert_eq!(started["state"], "running");
+    for r in [&g.a, &g.b] {
+        assert_eq!(G::reserves(&g.pop_ledger(r)), 1);
+    }
+    // The grant records where it was placed; the job is the one the scope pays for.
+    let grant: encompute_verification::service::JobGrant =
+        serde_json::from_value(started["grant"].clone()).unwrap();
+    let gov = grant.governance.clone().unwrap();
+    assert!(gov.placement.is_some(), "the grant records its placement");
+    // Report: each source's coordinator commits the release in its scope.
+    for scope in [&sa, &sb] {
+        let svc = g.secagg_spender(scope);
+        let e = reported(&g, scope, &good)["event_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (s, r) = g.t.call(
+            &svc,
+            "POST",
+            &format!("/v1/privacy/scopes/{scope}/events"),
+            Some(json!({"kind": "commit", "event_id": e, "output_commitment": "cd".repeat(32)})),
+        );
+        assert_eq!(s, 200, "{r}");
+    }
+    // Complete: the evaluator's receipt for the governed spec.
+    let prog = &weeks[0].1;
+    let spec = base_spec(prog).governed(&gov.binding);
+    let receipt = encompute_verification::ExecutionReceipt::new(
+        &spec,
+        transcript(prog, &spec).as_deref(),
+        &"5e".repeat(32),
+        b"request",
+        b"response",
+        &g.evaluator.receipt.identity(),
+    )
+    .unwrap()
+    .with_grant(Some(grant.digest()))
+    .sign(&g.evaluator.receipt)
+    .unwrap();
+    let (s, done) = g.t.call(
+        &g.dev,
+        "POST",
+        &format!("/v1/jobs/{good}/complete"),
+        Some(json!({"receipt": receipt,
+                    "request_commitment": encompute_verification::request_commitment(b"request"),
+                    "output_commitment": encompute_verification::output_commitment(b"response"),
+                    "key_id": "5e".repeat(32)})),
+    );
+    assert_eq!(s, 200, "{done}");
+    assert_eq!(done["state"], "succeeded");
+
+    let reserved = |g: &G| {
+        (
+            G::reserves(&g.pop_ledger(&g.a)),
+            G::reserves(&g.pop_ledger(&g.b)),
+        )
+    };
+    assert_eq!(reserved(&g), (1, 1));
+    // The scope is spent: the next job is refused for its budget (ENC2201)
+    // and reserves nothing.
+    let (s, v) = g.start(&last);
+    assert!(s >= 400, "{v}");
+    assert_eq!(g.state(&last), "failed");
+    assert_eq!(g.failure(&last), "ENC2201");
+    assert_eq!(v["code"], "ENC2201", "{v}");
+    assert_eq!(reserved(&g), (1, 1));
+
+    // The budget is still spent, but a project's placement is judged first.
+    // Region-a tightens the constraints so the evaluator's region is
+    // prohibited: the queued job is refused for placement (ENC2710), not for
+    // its budget.
+    let url = format!("/v1/projects/{}/placement", g.main.id);
+    g.t.ok(
+        &g.a.sec1,
+        "POST",
+        &url,
+        Some(json!({"constraints": {"allowed_regions": [{"jurisdiction": "DE"}],
+                                     "prohibited_locations": [{"provider": "gcp", "region": "europe-west3"}]},
+                    "base_version": 1})),
+    );
+    let (s, v) = g.start(&bad_placement);
+    assert!(s >= 400, "{v}");
+    assert_eq!(g.state(&bad_placement), "failed");
+    assert_eq!(g.failure(&bad_placement), "ENC2710");
+    assert_eq!(v["code"], "ENC2710", "{v}");
+    assert_eq!(reserved(&g), (1, 1));
+
+    // An owner withdraws its authorization: refused for the authorization
+    // (not the budget), and reserves nothing.
+    let row: String =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT id FROM authorizations WHERE asset_version_id = $1 AND status = 'active'",
+                &[&weeks[2].2[0].1],
+            )
+            .unwrap()
+            .get(0);
+    g.t.ok(
+        &g.a.sec1,
+        "POST",
+        &format!("/v1/authorizations/{row}/revoke"),
+        Some(json!({"reason": "withdrawn"})),
+    );
+    let (s, v) = g.start(&bad_authorization);
+    assert!(s >= 400, "{v}");
+    assert_eq!(g.state(&bad_authorization), "failed");
+    // The revocation failed the job on the spot, naming the authorization.
+    let named: i64 =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT count(*) FROM audit_events WHERE action = 'job.failed' AND resource_id = $1
+               AND refs->>'revoked_authorization' IS NOT NULL",
+                &[&bad_authorization],
+            )
+            .unwrap()
+            .get(0);
+    assert_eq!(named, 1);
+    assert_eq!(reserved(&g), (1, 1));
 }
