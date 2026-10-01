@@ -139,7 +139,7 @@ pub fn status_of(code: Code) -> u16 {
         | Code::PrivacyBudgetExceeded
         | Code::GovernanceRevocationHead
         | Code::GovernanceCheckpointWitness => 409,
-        Code::PlanningFailed | Code::PlanInvalid => 422,
+        Code::PlanningFailed | Code::PlanInvalid | Code::GovernanceBundleLimit => 422,
         Code::Scheduling => 503,
         Code::Remote | Code::InsecureConfiguration | Code::PrivacyLedger => 500,
         _ => 400,
@@ -563,6 +563,15 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         }
 
         ("GET", ["v1", "trust", job]) => ok(control.trust_report(ctx, job)?),
+        ("GET", ["v1", "jobs", id, "governance-bundle"]) => {
+            let q = query(&r.url);
+            ok(control.governance_bundle(
+                ctx,
+                id,
+                q.get("view").map(String::as_str),
+                q.get("organization").map(String::as_str),
+            )?)
+        }
 
         ("GET", ["v1", "audit"]) => {
             let q = query(&r.url);
@@ -711,6 +720,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/privacy/{}/events"),
     ("POST", "/v1/privacy/{}/spenders"),
     ("GET", "/v1/trust/{}"),
+    ("GET", "/v1/jobs/{}/governance-bundle"),
     ("GET", "/v1/audit"),
     ("POST", "/v1/audit/checkpoints"),
     ("POST", "/v1/messages"),

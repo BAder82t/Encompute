@@ -194,6 +194,14 @@ pub enum Code {
     GovernanceRevocationHead,
     /// A checkpoint witness refused: it does not witness the control plane's stored checkpoint of the project at that size (another size, partition or root), so it cannot count towards it (ENC2718).
     GovernanceCheckpointWitness,
+    /// A governance evidence bundle is malformed: an unknown format version, section or field, a section digest that does not match its manifest, a manifest or graph root that is not the content's, a missing section, or edited, reordered or omitted content (ENC2727).
+    GovernanceBundleMalformed,
+    /// A governance evidence bundle was refused for what it cannot prove: the exporter could not verify what it was about to write, a signature does not verify under the pinned key, or a pin is missing for a key the bundle's conclusion rests on (ENC2728).
+    GovernanceBundleUnverified,
+    /// A governance evidence bundle would carry what it must not: a string over the length cap outside the allowlisted text fields, or other organizations' private metadata in a shared view (ENC2729).
+    GovernanceBundlePlaintext,
+    /// A governance evidence bundle is over its limits: the project's log has more events than one bundle carries, or the view asked for does not exist (ENC2730).
+    GovernanceBundleLimit,
 }
 
 impl Code {
@@ -278,13 +286,17 @@ impl Code {
             Code::GovernanceAuditorSeparation => "ENC2716",
             Code::GovernanceRevocationHead => "ENC2717",
             Code::GovernanceCheckpointWitness => "ENC2718",
+            Code::GovernanceBundleMalformed => "ENC2727",
+            Code::GovernanceBundleUnverified => "ENC2728",
+            Code::GovernanceBundlePlaintext => "ENC2729",
+            Code::GovernanceBundleLimit => "ENC2730",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 79] = [
+    pub const ALL: [Code; 83] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -364,6 +376,10 @@ impl Code {
         Code::GovernanceAuditorSeparation,
         Code::GovernanceRevocationHead,
         Code::GovernanceCheckpointWitness,
+        Code::GovernanceBundleMalformed,
+        Code::GovernanceBundleUnverified,
+        Code::GovernanceBundlePlaintext,
+        Code::GovernanceBundleLimit,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

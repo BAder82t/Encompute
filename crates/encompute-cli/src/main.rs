@@ -4,6 +4,8 @@ mod aggregate;
 mod attest;
 mod control;
 mod governance;
+mod governance_bundle;
+mod governance_explain;
 mod launcher_sim;
 mod migrate;
 mod plan;
@@ -317,9 +319,36 @@ enum Cmd {
         #[command(flatten)]
         args: migrate::MigrateArgs,
     },
-    /// Show the execution plan, parameters and precision.
+    /// Show the execution plan, parameters and precision. With
+    /// `--governance`, explain a governed cross-agency computation in
+    /// words instead (see below).
     Explain {
-        model: PathBuf,
+        /// The model (not with `--governance`).
+        model: Option<PathBuf>,
+        /// Explain a governed job's computation for a non-specialist, from
+        /// its governance evidence bundle, verified here against your own
+        /// pins (`--pins`), never on the server's word. Online:
+        /// `--governance JOB` fetches the bundle (`GET
+        /// /v1/jobs/{id}/governance-bundle`); offline: `--governance
+        /// --bundle FILE.encgov.json`. Sections that did not verify print
+        /// `not verified: <why>`. Exit codes as `encompute governance
+        /// verify`.
+        #[arg(long, num_args = 0..=1, value_name = "JOB")]
+        governance: Option<Option<String>>,
+        /// `--governance`: a bundle file, to explain offline.
+        #[arg(long, requires = "governance")]
+        bundle: Option<PathBuf>,
+        /// `--governance JOB`: `shared` or `org`.
+        #[arg(long, default_value = "shared", value_parser = ["shared", "org"], requires = "governance")]
+        view: String,
+        /// `--governance JOB --view org`: your organization.
+        #[arg(long, requires = "governance")]
+        organization: Option<String>,
+        /// `--governance JOB`: the control plane's URL.
+        #[arg(long, requires = "governance")]
+        url: Option<String>,
+        #[command(flatten)]
+        checks: governance_bundle::Checks,
         /// Also show the planner's candidates, rejected alternatives,
         /// assumptions and estimated costs.
         #[arg(long)]
@@ -820,11 +849,39 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Explain {
             model,
+            governance,
+            bundle,
+            view,
+            organization,
+            url,
+            checks,
             deep,
             measure,
             mode,
             ledger,
         } => {
+            if let Some(job) = governance {
+                if model.is_some() {
+                    return Err(Error::new(
+                        Code::Artifact,
+                        "explain --governance takes a job or a bundle, not a model",
+                    ));
+                }
+                return governance_bundle::explain(
+                    job.as_deref(),
+                    bundle.as_deref(),
+                    &view,
+                    organization.as_deref(),
+                    url.as_deref(),
+                    &checks,
+                );
+            }
+            let Some(model) = model else {
+                return Err(Error::new(
+                    Code::Artifact,
+                    "explain needs a model (or --governance JOB, or --governance --bundle FILE)",
+                ));
+            };
             let m = load(&model)?;
             let measured = match measure {
                 Some(n) => Some(m.measure(mode.parse()?, n, 3)?),

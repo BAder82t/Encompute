@@ -181,6 +181,23 @@ pub enum GovernanceCmd {
         #[arg(long)]
         url: Option<String>,
     },
+    /// Export a governed job's evidence bundle (one signed
+    /// `<project>-<job>.encgov.json`): fetched from the control plane,
+    /// checked here (digests, the view's rules, no plaintext, and against
+    /// `--pins`) and written only if it verifies as far as this machine can
+    /// tell. Exit codes: see `encompute governance verify`.
+    Export(crate::governance_bundle::ExportArgs),
+    /// Verify a bundle offline against your own pins file and print the
+    /// result as JSON. Exit codes: 0 every row satisfied (or accepted with
+    /// --allow-unchecked/--allow-unpinned); 1 not satisfied; 2 malformed,
+    /// forged or refused; 3 unchecked, not evidenced or unpinned.
+    Verify(crate::governance_bundle::VerifyArgs),
+    /// The cross-agency trust report of a bundle, in words, verified
+    /// offline against your pins (same exit codes as `verify`).
+    Report(crate::governance_bundle::VerifyArgs),
+    /// Add your organization's signature to a bundle (attribution: you
+    /// vouch for this package; it adds no trust to the evidence inside).
+    Countersign(crate::governance_bundle::CountersignArgs),
     /// Check two signed checkpoints (each a checkpoint or the answer of
     /// `GET /v1/projects/{id}/checkpoints/latest`, which may carry the
     /// control plane's consistency proof; or one equivocation proof file
@@ -1007,6 +1024,10 @@ pub fn governance(cmd: GovernanceCmd) -> Result<ExitCode> {
             }
             check_equivocation_cmd(control_key.as_deref(), state.as_deref(), &a, b.as_deref())
         }
+        GovernanceCmd::Export(a) => crate::governance_bundle::export(a),
+        GovernanceCmd::Verify(a) => crate::governance_bundle::verify(a),
+        GovernanceCmd::Report(a) => crate::governance_bundle::report(a),
+        GovernanceCmd::Countersign(a) => crate::governance_bundle::countersign(a),
         GovernanceCmd::Keygen { out } => {
             let mut seed = zeroize::Zeroizing::new([0u8; 32]);
             getrandom::getrandom(&mut *seed).map_err(|e| err(format!("no randomness: {e}")))?;

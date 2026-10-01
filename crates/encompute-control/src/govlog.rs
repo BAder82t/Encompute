@@ -1568,6 +1568,99 @@ pub fn leaves(
         .iter()
         .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
         .collect::<Result<_>>()?;
+    prove_events(c, cache, partition, size, events)
+}
+
+/// The revocation leaves `org`'s latest head in `partition` covers (the
+/// revocations recorded before the head's event), sorted: what a bundle
+/// whose run starts after them carries so a reader can recompute the head's
+/// root. `None` when the organization has no head.
+pub fn head_leaves(
+    c: &mut impl GenericClient,
+    partition: &str,
+    org: &str,
+    size: u64,
+) -> Result<Option<Vec<String>>> {
+    let head: Option<i64> = c
+        .query_one(
+            "SELECT max(pseq) FROM governance_events
+              WHERE partition = $1 AND kind = 'revocation_head.signed' AND org_id = $2 AND pseq <= $3",
+            &[&partition, &org, &(size as i64)],
+        )
+        .map_err(db_err)?
+        .get(0);
+    let Some(head) = head else { return Ok(None) };
+    let kinds: Vec<String> = encompute_trust::govlog::kind::REVOCATIONS
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect();
+    let events: Vec<GovEvent> = c
+        .query(
+            "SELECT body FROM governance_events
+              WHERE partition = $1 AND org_id = $2 AND kind = ANY($3) AND pseq < $4 ORDER BY pseq",
+            &[&partition, &org, &kinds, &head],
+        )
+        .map_err(db_err)?
+        .iter()
+        .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
+        .collect::<Result<_>>()?;
+    Ok(Some(encompute_trust::govlog::revocation_leaves(
+        &events, org,
+    )))
+}
+
+/// Where a bundle's run of a project's events starts: the earliest of the
+/// issuance of each of `authorizations` and each of `owners`' latest head
+/// (the first event when any has none), so that nothing that can bear on
+/// them is left before it. A run longer than `max` is cut to its last `max`
+/// events: the verifier then finds it does not reach back far enough.
+pub fn run_start(
+    c: &mut impl GenericClient,
+    partition: &str,
+    size: u64,
+    authorizations: &[String],
+    owners: &[String],
+    max: u64,
+) -> Result<u64> {
+    let mut start = size;
+    let n = |r: Option<postgres::Row>| r.and_then(|r| r.get::<_, Option<i64>>(0));
+    // One indexed (by kind) read for every authorization's issuance; one
+    // missing from the log starts the run at the first event.
+    let found: std::collections::BTreeMap<String, i64> = c
+        .query(
+            "SELECT body->'refs'->>'authorization_id', min(pseq) FROM governance_events
+              WHERE partition = $1 AND kind = 'authorization.issued' AND pseq <= $2
+                AND body->'refs'->>'authorization_id' = ANY($3)
+              GROUP BY 1",
+            &[&partition, &(size as i64), &authorizations],
+        )
+        .map_err(db_err)?
+        .iter()
+        .filter_map(|r| Some((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1))))
+        .collect();
+    for a in authorizations {
+        start = start.min(found.get(a).map_or(1, |x| (*x).max(1) as u64));
+    }
+    for o in owners {
+        let at = n(c
+            .query_opt(
+                "SELECT max(pseq) FROM governance_events
+                  WHERE partition = $1 AND kind = 'revocation_head.signed' AND org_id = $2 AND pseq <= $3",
+                &[&partition, o, &(size as i64)],
+            )
+            .map_err(db_err)?);
+        start = start.min(at.map_or(1, |x| x.max(1) as u64));
+    }
+    Ok(start.max((size + 1).saturating_sub(max).max(1)))
+}
+
+fn prove_events(
+    c: &mut impl GenericClient,
+    cache: &NodeCache,
+    partition: &str,
+    size: u64,
+    events: Vec<GovEvent>,
+) -> Result<Vec<(GovEvent, String, InclusionProof)>> {
     // Which nodes the proofs read depends on the sizes only, so a dry run
     // with placeholder hashes names them.
     let mut needed = std::collections::BTreeSet::new();

@@ -4,6 +4,10 @@
 //! evidence for each, and one trust report over all of it.
 
 pub mod authz;
+pub mod bundle;
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixture;
+pub mod governance;
 pub mod govlog;
 pub mod graph;
 mod ingest;
@@ -15,6 +19,17 @@ pub use authz::{
     RevocationV2, SignedAuthorization, SignedAuthorizationV2, SignedReleaseRecord,
     SignedRevocation, SignedRevocationV2, AUTHORIZATION_V2_VERSION, AUTHORIZATION_VERSION,
     RELEASE_RECORD_VERSION,
+};
+pub use bundle::{
+    check_no_plaintext, GovernanceBundle, Manifest, Outcome, Pin, Pins, Provenance,
+    SignatureFinding, SignatureStatement, SignatureStatus, StatementVerdict, Verified,
+    VerifyOptions, BUNDLE_FORMAT, EXIT_CODES, MAX_STRING,
+};
+pub use governance::{
+    check_audit, AuditEntry, AuditEvidence, AuditFindings, AuditState, AuthorizationCard,
+    AuthorizationEntry, GovernanceAnchors, GovernanceEvidence, GovernanceOptions, GovernanceReport,
+    GovernanceRow, HeadFinding, PreRun, RevocationNote, SharedApproval, Verdict,
+    GOVERNANCE_EVIDENCE_VERSION, GOVERNANCE_ROWS, LEGAL_BOUNDARY, LEGAL_BOUNDARY_ID,
 };
 pub use graph::{node_id, Edge, EdgeKind, Evidence, Node, NodeKind, TrustGraph};
 pub use ingest::{program_id, Rebuilt};

@@ -465,6 +465,33 @@ these limits:
 - **Standard key brokers may run without a generation mark** (see "A key
   broker without a generation mark" above).
 
+- **A governed job's report cannot read SATISFIED yet.** The cross-agency
+  report shows "Decryption control" as NOT EVIDENCED: who holds the key to
+  a result is not recorded in signed evidence in this release (the key
+  model is an open decision), and the report never claims one. The verdict
+  is then "not fully evidenced" and `verify` exits 3 (`--allow-unchecked`
+  accepts that). Rows for residency, record linkage and privacy scopes
+  read NOT APPLICABLE only when the signed binding shows they are not
+  declared, and NOT EVIDENCED when they are declared. There is no separate
+  project charter: the Project row shows each data owner's signed
+  acceptance of the purpose.
+- **A shared view's authorizations are cards.** The signed document of
+  another organization names its approvers, so the shared bundle shows a
+  card (approvers as pseudonyms). What rests on a card is UNCHECKED until
+  its owner discloses the signed document. Per-job approvals are the
+  control plane's own record, not signed, and are not counted.
+- **Bundles are not signed by the control plane,** and carry no software
+  provenance (release manifest, Sigstore bundle, evaluator image) yet; the
+  report says so. A bundle holds at most 5,000 of the log events that
+  concern its job, each proven against the checkpoint; a run that does not begin at the log's first event cannot show who
+  joined before it, so the control plane's (unsigned) member list stays
+  required to witness, never dropped. Only events of the project's own
+  log are in the run: a user or service-account disable (organization or
+  platform log) is not, which is why per-job approvals are not counted.
+  The job's owners and its submitter must witness the checkpoint;
+  recipients that are neither need not. `exported_at` is the time of the log
+  state, not of the request. The plaintext guard is a heuristic.
+
 ## Compatibility and upgrades
 
 - **Every format reader accepts exactly one version.** There is no

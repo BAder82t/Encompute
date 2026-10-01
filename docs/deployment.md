@@ -752,6 +752,80 @@ time the log is checkpointed:
   answer is the control plane's own computation; it is a fact only to a
   reader who runs `verify-audit` with the organizations' keys.
 
+### Governance evidence bundles
+
+A governed job's evidence leaves the platform as one file,
+`<project>-<job>.encgov.json`, that its institution can give to its own
+auditor and verify offline. Everything below is `encompute governance`
+(`export`, `verify`, `report`, `countersign`) and `encompute explain
+--governance`; none of it needs the control plane after the export.
+
+- **Export.** `encompute governance export JOB --pins pins.json --out
+  FILE` fetches `GET /v1/jobs/{id}/governance-bundle` (`--view shared`, the
+  same bytes for every member, or `--view org --organization ORG`),
+  checks it before writing anything (format, section digests, the graph
+  root, the view's rules, the plaintext guard, and everything this machine
+  can verify against the pins) and writes it only if that passes. An
+  existing file is never overwritten. `--sign-key KEY --sign-as ORG` adds
+  the organization's signature (attribution: who vouches for this package;
+  it adds no trust to the evidence inside). `countersign` adds another.
+- **Pins file.** The verifier's own keys, never taken from the bundle or
+  the control plane: `{"organizations": {"tax-agency": {"identity_key":
+  "<64 hex>", "obtained": "published at ..."}}, "control_plane": {"key":
+  "...", "obtained": "..."}, "evaluators": [{"key": "...", "obtained":
+  "..."}]}` (`coordinators`, `linkage_authorities` and `release_signers`
+  are accepted and reserved). `obtained` is required: it records where each
+  key came from, so an auditor can see what a conclusion rests on. Trust
+  in a report is exactly trust in these pins; agencies should publish their
+  governance keys through official channels. Two organizations on one key
+  are refused.
+- **Exit codes** (one table, for `verify`, `report`, `explain
+  --governance` and the check `export` and `countersign` run first):
+
+  | code | meaning |
+  |---|---|
+  | 0 | every row satisfied, or accepted with `--allow-unchecked` / `--allow-unpinned` |
+  | 1 | not satisfied: a row failed, or a pinned key contradicts the evidence; no flag accepts this |
+  | 2 | malformed, forged or refused: not a bundle, an edit, an omission, a reordering, an unknown field, a forged signature, a leak, a bad pins file (ENC2727 to ENC2729) |
+  | 3 | something is unchecked, not evidenced or unpinned (no `--pins`; a key not pinned; a shared view's cards without the owners' disclosures; evidence this release does not have) |
+
+  `--allow-unchecked` accepts unchecked and not-evidenced rows; without
+  `--pins`, `--allow-unpinned` is needed as well. The report always says
+  what was accepted.
+- **Shared views and disclosures.** A shared bundle shows another
+  organization's authorization as a card. Its owner's signature cannot be
+  checked from a card, so everything that rests on it is UNCHECKED until
+  the owner discloses the signed document (`GET /v1/authorizations/{id}`
+  as the owner, then `--disclosure FILE` on `verify`): a disclosed
+  document replaces a card only if it is exactly the document the card
+  names.
+- **Stale revocation heads.** A revocation head says what was revoked as
+  of its own date. By default a bundle is checked for the time of the run
+  (the grant's signed time); `--as-of T` checks it for a later use, and a
+  head dated before `T` is UNCHECKED, never covered.
+- **Limits.** One bundle carries a contiguous run of at most 5,000 of the project's
+  log events, ending at the signed checkpoint and starting at the earliest
+  of the issuance of the job's authorizations and each owner's latest
+  revocation head (the log's first event for an owner with none). The
+  verifier checks the run: a gap, a duplicate or an end short of the
+  checkpoint is refused, and a run that does not reach back far enough
+  leaves the revocation rows UNCHECKED ("sign a fresh revocation head":
+  owners who sign heads periodically keep their bundles checkable). When the run does not begin at the log's first event, the bundle also carries each owner's head leaf list (checked against the head's signed root; a governance-key revocation in it leaves the window UNCHECKED, an authorization revocation fails it), and the project's members can only be checked against `project_members` in your pins file (optional, all of them must witness; without it the witness row is UNCHECKED for a partial run). A file is at most 32 MiB, and its counts of witnesses, heads,
+  members, authorizations and signatures are bounded (ENC2730). Every
+  identifier in it is `[A-Za-z0-9._-]{1,200}` (ENC2727): the default file
+  name is built from them and is never a path. The route is limited to 12
+  requests a minute per caller and four builds at once.
+- **Countersigning states what was verified.** A signature signs a
+  statement: the BundleId, the verdict this machine reached, a digest of
+  the pins used, and whether it accepted unchecked rows or no pins.
+  `countersign` refuses an unchecked or unpinned bundle (exit 3) unless
+  `--i-accept-unchecked` is given, and records that in the statement. A
+  signature by an organization nobody pinned must still verify under the
+  key it carries (reported as unpinned, attribution unchecked).
+- **"Valid at grant".** A receipt carries no run time, so the report
+  says the authorizations were valid when the grant was issued, and a
+  revocation between the grant and its expiry is UNCHECKED.
+
 ## Audit
 
 Every security-sensitive state transition writes an audit event in the same

@@ -78,6 +78,12 @@ pub struct Control {
     /// Privacy spends per actor and asset a minute (each is an event of
     /// the governance log and its mirror).
     pub spend_limit: crate::ops::RateLimit,
+    /// The governance bundle route's per-caller limit.
+    pub bundle_limit: crate::ops::RateLimit,
+    /// The most events of a project's log one bundle carries.
+    pub bundle_max_events: std::sync::atomic::AtomicU64,
+    /// Bundles being built now.
+    pub bundle_slots: std::sync::atomic::AtomicUsize,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -214,6 +220,9 @@ impl Control {
             node_cache: Default::default(),
             project_log_limit: Default::default(),
             spend_limit: crate::ops::RateLimit::new("privacy spend", crate::ops::SPEND_RATE),
+            bundle_limit: crate::ops::RateLimit::new("governance bundle", crate::ops::BUNDLE_RATE),
+            bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
+            bundle_slots: 0.into(),
         };
         c.ensure_self_registered()?;
         let existed = match opened {
@@ -379,6 +388,9 @@ impl Control {
             node_cache: Default::default(),
             project_log_limit: Default::default(),
             spend_limit: crate::ops::RateLimit::new("privacy spend", crate::ops::SPEND_RATE),
+            bundle_limit: crate::ops::RateLimit::new("governance bundle", crate::ops::BUNDLE_RATE),
+            bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
+            bundle_slots: 0.into(),
         })
     }
 
