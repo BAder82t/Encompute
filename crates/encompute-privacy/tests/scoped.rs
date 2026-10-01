@@ -354,6 +354,19 @@ fn a_ledger_of_one_kind_refuses_the_other_kinds_events() {
     assert!(empty(&other).append_event(e).is_err());
     sc.verify().unwrap();
     assert_eq!(pop.version, LEDGER_VERSION_SCOPED);
+    // Whatever wrote it, a ledger holding a reservation that links records
+    // or spans no source does not verify.
+    for edit in [
+        &(|r: &mut ScopeRef| r.linkage = "hmac-sha256-v1".into()) as &dyn Fn(&mut ScopeRef),
+        &(|r: &mut ScopeRef| r.max_sources_per_unit = 0),
+    ] {
+        let mut e = reserve("z", &s, &pop);
+        if let PrivacyEvent::Reserve { scope: Some(r), .. } = &mut e {
+            edit(r);
+        }
+        assert!(empty(&s).append_event(e.clone()).is_err());
+        assert!(empty(&pop).append_event(e).is_err());
+    }
 }
 
 // --- files: releases through population and scope ledgers ------------------------

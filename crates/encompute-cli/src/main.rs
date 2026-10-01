@@ -424,6 +424,17 @@ enum PrivacyCmd {
     /// the population, and must fit in both. Prints the entry for the
     /// `--scoping` file of the aggregation's asset.
     Scope(Box<ScopeArgs>),
+    /// Create the local ledgers of the populations and scopes a `--scoping`
+    /// file names (a coordinator's, or a party's own copy to check what it
+    /// is shown): idempotent, and refused when a ledger already there is
+    /// another one.
+    Seed {
+        /// The `--scoping` file every party approved.
+        #[arg(long)]
+        scoping: PathBuf,
+        #[arg(long)]
+        ledger: PathBuf,
+    },
     /// Differential-privacy budgets: spent, remaining, and every release,
     /// from the privacy ledgers.
     Budget {
@@ -631,6 +642,35 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Privacy {
+            cmd: PrivacyCmd::Seed { scoping, ledger },
+        } => {
+            let all: std::collections::BTreeMap<String, encompute_runtime::secagg::ScopedBudget> =
+                serde_json::from_slice(&std::fs::read(&scoping).map_err(|e| {
+                    Error::new(Code::Artifact, format!("{}: {e}", scoping.display()))
+                })?)
+                .map_err(|e| Error::new(Code::BadInput, format!("{}: {e}", scoping.display())))?;
+            std::fs::create_dir_all(&ledger).map_err(|e| {
+                Error::new(Code::PrivacyLedger, format!("{}: {e}", ledger.display()))
+            })?;
+            for (asset, sb) in &all {
+                encompute_runtime::dp::scoped::check_genesis_pair(&sb.population, &sb.scope)?;
+                for g in [&sb.population, &sb.scope] {
+                    encompute_runtime::dp::check_asset_file_name(&g.asset_id)?;
+                    // Created when missing; an existing ledger must be this
+                    // genesis's own (open checks it).
+                    drop(encompute_runtime::dp::Ledger::open(
+                        &ledger.join(format!("{}.ledger", g.asset_id)),
+                        g,
+                    )?);
+                }
+                println!(
+                    "SEEDED {asset}: population {} and scope {}",
+                    sb.population.asset_id, sb.scope.asset_id
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Privacy {
             cmd: PrivacyCmd::Scope(args),
         } => {
             let ScopeArgs {
@@ -734,7 +774,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     let out = m.privacy_dot()?;
                     (m, out)
                 }
-                PrivacyCmd::Budget { .. } | PrivacyCmd::Population(_) | PrivacyCmd::Scope(_) => {
+                PrivacyCmd::Budget { .. }
+                | PrivacyCmd::Population(_)
+                | PrivacyCmd::Scope(_)
+                | PrivacyCmd::Seed { .. } => {
                     unreachable!("handled above")
                 }
             };

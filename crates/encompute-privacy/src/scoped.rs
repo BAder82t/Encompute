@@ -38,8 +38,7 @@ use crate::tagged;
 pub use crate::accountant::rho_cap as population_rho_cap;
 
 const POLICY: &str = "encompute.privacy-population.v1";
-/// The only record linkage an aggregate performs.
-pub const LINKAGE_NONE: &str = "none";
+pub use crate::ledger::LINKAGE_NONE;
 
 fn alloc_err(m: impl Into<String>) -> Error {
     Error::new(Code::GovernancePrivacyAllocation, m)

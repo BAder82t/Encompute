@@ -373,6 +373,42 @@ impl G {
         )
     }
 
+    /// An active purpose `name` of `proj`, accepted by both owners.
+    fn add_purpose(&self, proj: &Proj, name: &str) {
+        let v = self.t.ok(
+            &self.a.sec1,
+            "POST",
+            &format!("/v1/projects/{}/purposes", proj.id),
+            Some(json!({"organization": A, "name": name, "description": "Another purpose",
+                        "modes": ["aggregate"], "allowed_release_classes": ["dp-aggregate-only"],
+                        "recipients": [MIN], "valid_from": now() - 60, "valid_until": now() + 20_000})),
+        );
+        let purpose = id(&v);
+        self.t.ok(
+            &self.a.sec2,
+            "POST",
+            &format!("/v1/purposes/{purpose}/approve"),
+            None,
+        );
+        for r in [&self.a, &self.b] {
+            let acceptance = PurposeAcceptance {
+                version: 1,
+                organization: r.org.into(),
+                project: proj.id.clone(),
+                purpose_id: purpose.clone(),
+                accepted_at: now(),
+            }
+            .sign(&r.key)
+            .unwrap();
+            self.t.ok(
+                &r.sec2,
+                "POST",
+                &format!("/v1/purposes/{purpose}/accept"),
+                Some(json!({"acceptance": acceptance})),
+            );
+        }
+    }
+
     fn scope(&self, r: &Region, eps: &str, program: Option<&str>) -> String {
         self.scope_in(&self.main, r, eps, program)
     }
@@ -1595,6 +1631,7 @@ fn scope_views_do_not_cross_organizations() {
         format!("/v1/privacy/populations/{}", g.a.population),
         format!("/v1/projects/{}/privacy-scopes", g.main.id),
         format!("/v1/projects/{}/audit?limit=200", g.main.id),
+        format!("/v1/audit?project={}", g.main.id),
     ];
     let viewers: Vec<(&str, &As)> = vec![
         ("ministry developer", &g.dev),
@@ -1747,4 +1784,60 @@ fn standard_projects_and_unscoped_assets_are_unchanged() {
             &[&A],
         )
         .is_err());
+}
+
+#[test]
+fn a_scope_of_another_purpose_is_not_the_jobs() {
+    let Some(g) = world() else { return };
+    let other = "other-surveillance-2027";
+    g.add_purpose(&g.main, other);
+    // The owners allocate the project scopes for the *other* purpose only.
+    let mut scopes = vec![];
+    for r in [&g.a, &g.b] {
+        let v = g.t.ok(
+            &r.sec1,
+            "POST",
+            "/v1/privacy/scopes",
+            Some(json!({"population": r.population, "project": g.main.id,
+                        "purpose": other, "epsilon": 1.0})),
+        );
+        let scope = id(&v);
+        g.t.ok(
+            &r.sec2,
+            "POST",
+            &format!("/v1/privacy/scopes/{scope}/approve"),
+            None,
+        );
+        scopes.push(scope);
+    }
+    // A job of the project's other purpose (the program and the purpose
+    // object say so) has no scope: it cannot spend what was allocated to
+    // another purpose.
+    let (v, prog) = g.week("2027-w01", DP);
+    let (_, j) = g.job(&v, &prog, "k1");
+    let job = id(&j);
+    assert_eq!(g.state(&job), "failed");
+    assert_eq!(g.failure(&job), "ENC2719");
+    // Nor can an authorized coordinator charge that job to the other
+    // purpose's scope.
+    let svc = g.secagg_spender(&scopes[0]);
+    let ev = json!({"kind": "reserve", "event_id": "wrong-purpose", "policy_id": null,
+        "execution_spec_id": null, "round_id": job, "output": "counts",
+        "mechanism": {"kind": "discrete_gaussian", "clip_norm": "1.0", "noise_multiplier": "40.0"},
+        "sensitivity": 16388, "sigma2": 26_843_545_600u64, "vector_len": 4, "rng": "csprng",
+        "scope": {"scope_id": scopes[0], "population_id": g.a.population, "job_id": job,
+                  "max_sources_per_unit": 2, "linkage": "none"}});
+    refused(
+        g.t.call(
+            &svc,
+            "POST",
+            &format!("/v1/privacy/scopes/{}/events", scopes[0]),
+            Some(ev),
+        ),
+        "ENC2719",
+    );
+    for s in &scopes {
+        assert_eq!(G::reserves(&g.scope_ledger(s)), 0);
+    }
+    assert_eq!(G::reserves(&g.pop_ledger(&g.a)), 0);
 }

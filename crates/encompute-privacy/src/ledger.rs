@@ -31,6 +31,9 @@ pub const LEDGER_VERSION: u32 = 1;
 /// hashes change; a version 2 genesis always carries its scoping, and a
 /// version 1 never does.
 pub const LEDGER_VERSION_SCOPED: u32 = 2;
+/// The only record linkage an aggregate performs: none, stated in every
+/// scoped reservation.
+pub const LINKAGE_NONE: &str = "none";
 const ENTRY: &str = "encompute.privacy-ledger.v1";
 /// Largest ledger accepted (entries are ~1 KiB).
 const MAX_LEDGER_BYTES: u64 = 64 << 20;
@@ -271,6 +274,23 @@ impl LedgerView {
         Ok(())
     }
 
+    /// What every scoped reservation declares: at least one source per
+    /// privacy unit, and no record linkage. A ledger holding anything else
+    /// does not verify, wherever it was written.
+    fn check_declarations(r: &ScopeRef, bad: &dyn Fn(&str) -> Error) -> Result<()> {
+        if r.max_sources_per_unit == 0 {
+            return Err(bad(
+                "a scoped reservation declares at least one source per privacy unit",
+            ));
+        }
+        if r.linkage != LINKAGE_NONE {
+            return Err(bad(
+                "an aggregate performs no record linkage: its linkage is `none`",
+            ));
+        }
+        Ok(())
+    }
+
     /// A reservation's scope reference must fit the ledger it is in: none in
     /// a plain asset ledger, this scope's (and its population's) in a
     /// scope, and one of its own scopes in a population.
@@ -287,13 +307,13 @@ impl LedgerView {
                 if r.population_id != g.asset_id {
                     return Err(bad("the reservation is for another population"));
                 }
-                Ok(())
+                Self::check_declarations(r, &bad)
             }
             (Some(Scoping::Scope { population_id, .. }), Some(r)) => {
                 if r.scope_id != g.asset_id || &r.population_id != population_id {
                     return Err(bad("the reservation is for another scope"));
                 }
-                Ok(())
+                Self::check_declarations(r, &bad)
             }
         }
     }
