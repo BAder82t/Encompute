@@ -332,7 +332,7 @@ them:
 | writeable | 0.6.4 | Unicode-3.0 |
 | x25519-dalek | 3.0.0 | BSD-3-Clause |
 | yoke | 0.8.3 | Unicode-3.0 |
-| yoke-derive | 0.8.3 | Unicode-3.0 |
+| yoke-derive | 0.8.4 | Unicode-3.0 |
 | zerocopy | 0.8.58 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | zerocopy-derive | 0.8.58 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | zerofrom | 0.1.8 | Unicode-3.0 |
@@ -4132,7 +4132,7 @@ OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-#### 18 file(s): icu_collections 2.3.0 (LICENSE), icu_locale_core 2.3.0 (LICENSE), icu_normalizer 2.3.0 (LICENSE), icu_normalizer_data 2.3.0 (LICENSE), icu_properties 2.3.0 (LICENSE), icu_properties_data 2.3.0 (LICENSE), icu_provider 2.3.1 (LICENSE), litemap 0.8.3 (LICENSE), potential_utf 0.1.6 (LICENSE), tinystr 0.8.4 (LICENSE), writeable 0.6.4 (LICENSE), yoke 0.8.3 (LICENSE), yoke-derive 0.8.3 (LICENSE), zerofrom 0.1.8 (LICENSE), zerofrom-derive 0.1.8 (LICENSE), zerotrie 0.2.5 (LICENSE), zerovec 0.11.8 (LICENSE), zerovec-derive 0.11.6 (LICENSE)
+#### 18 file(s): icu_collections 2.3.0 (LICENSE), icu_locale_core 2.3.0 (LICENSE), icu_normalizer 2.3.0 (LICENSE), icu_normalizer_data 2.3.0 (LICENSE), icu_properties 2.3.0 (LICENSE), icu_properties_data 2.3.0 (LICENSE), icu_provider 2.3.1 (LICENSE), litemap 0.8.3 (LICENSE), potential_utf 0.1.6 (LICENSE), tinystr 0.8.4 (LICENSE), writeable 0.6.4 (LICENSE), yoke 0.8.3 (LICENSE), yoke-derive 0.8.4 (LICENSE), zerofrom 0.1.8 (LICENSE), zerofrom-derive 0.1.8 (LICENSE), zerotrie 0.2.5 (LICENSE), zerovec 0.11.8 (LICENSE), zerovec-derive 0.11.6 (LICENSE)
 
 ```
 UNICODE LICENSE V3
