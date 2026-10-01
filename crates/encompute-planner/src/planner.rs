@@ -63,6 +63,26 @@ pub fn tee_unusable(offer: &TeeOffer, ctx: &PlanningContext) -> Option<String> {
     None
 }
 
+/// Why no TEE can host a step under placement constraints, if the plan has
+/// any. A TEE offer carries no attested location in this build, so it can
+/// never satisfy a constraint: it is refused rather than assumed.
+fn tee_placement_unusable(ctx: &PlanningContext) -> Option<String> {
+    ctx.placement.as_ref().map(|_| {
+        "placement constraints apply and a TEE offer carries no attested location".to_owned()
+    })
+}
+
+/// Why no evaluator can run `backend`'s ciphertext steps here: capability,
+/// location, operator and evidence judged together; `None` when one can,
+/// or when the plan has no placement.
+fn evaluator_placement_unusable(ctx: &PlanningContext, backend: &str) -> Option<String> {
+    ctx.placement.as_ref()?;
+    let a = crate::placement::admission(ctx, Some(backend), &[], &Default::default());
+    a.admitted
+        .is_empty()
+        .then(|| format!("no admissible evaluator: {}", a.why_none()))
+}
+
 fn host_unusable(ctx: &PlanningContext) -> Option<String> {
     if ctx.preferences.local_only && ctx.infrastructure.host_cloud {
         return Some("ordinary hosts are in the cloud; local-only was required".into());
@@ -130,14 +150,79 @@ fn estimate(
     ms
 }
 
-fn score(c: &Candidate, ctx: &PlanningContext) -> u64 {
+/// What a plan releases, whatever mechanism runs it: the narrowness rank
+/// of the program's outputs and the principals its outputs go to.
+struct Release {
+    /// 0 never, 1 boolean, 2 bounded category, 3 DP aggregate, 4
+    /// aggregate, 5 value: the widest of the program's outputs.
+    rank: u64,
+    /// The parties its outputs are revealed to (a public output counts as
+    /// one more, "anyone").
+    recipients: BTreeSet<String>,
+}
+
+fn release_of(program: &Program, c: Option<&Confidentiality>) -> Release {
+    let mut rank = 0;
+    let mut recipients = BTreeSet::new();
+    for o in program.outputs() {
+        use encompute_ir::confidentiality::OutputRelease;
+        let to = c.map(|c| c.output(&o.name).clone()).unwrap_or_default();
+        match &to {
+            OutputRelease::Sealed => continue,
+            OutputRelease::Party(p) => {
+                recipients.insert(p.to_string());
+            }
+            OutputRelease::Public => {
+                recipients.insert("anyone".to_owned());
+            }
+        }
+        let aggregate = c.and_then(|c| c.aggregation(&o.name));
+        let ty = program.node(o.value).ty;
+        let this = match aggregate {
+            Some(a) if a.dp.is_some() => 3,
+            Some(_) => 4,
+            None if ty.elem == encompute_ir::Elem::Bool => 1,
+            None => 5,
+        };
+        rank = rank.max(this);
+    }
+    Release { rank, recipients }
+}
+
+/// The best candidate so far: its ordering key, the candidate and what
+/// it satisfies.
+type Best = ((u64, u64, u64), Candidate, Vec<RequirementSatisfaction>);
+
+/// A candidate's ordering key (smaller wins): `(latency, 0, 0)` or
+/// `(cost, 0, 0)`; for minimization `(release rank, principals who learn
+/// plaintext, latency)`.
+fn score(c: &Candidate, ctx: &PlanningContext, release: &Release) -> (u64, u64, u64) {
     match ctx.preferences.objective {
-        Objective::Latency => c.estimated_ms,
+        Objective::Latency => (c.estimated_ms, 0, 0),
         // Confidential hardware costs more per hour than ordinary hosts.
-        Objective::Cost => match c.placement {
-            Placement::Tee(_) => c.estimated_ms.saturating_mul(3),
-            _ => c.estimated_ms,
-        },
+        Objective::Cost => (
+            match c.placement {
+                Placement::Tee(_) => c.estimated_ms.saturating_mul(3),
+                _ => c.estimated_ms,
+            },
+            0,
+            0,
+        ),
+        Objective::Minimize => {
+            let mut learners = release.recipients.clone();
+            match &c.placement {
+                // Plaintext inside the attested workload: one more.
+                Placement::Tee(_) => {
+                    learners.insert("the attested workload".into());
+                }
+                // The party running the step sees what it reads.
+                Placement::Party(p) => {
+                    learners.insert(p.clone());
+                }
+                Placement::UntrustedHost | Placement::Parties => {}
+            }
+            (release.rank, learners.len() as u64, c.estimated_ms)
+        }
     }
 }
 
@@ -194,7 +279,12 @@ fn options(
                 out.push(Option_ {
                     placement: Placement::Party(p.clone()),
                     mechanisms: vec![Mechanism::LocalExecution { party: p.clone() }],
-                    unavailable: None,
+                    // A governed job is executed by an evaluator the control
+                    // plane schedules: running it at a party would route
+                    // around the placement constraints (training, which
+                    // runs at the parties by design, is unaffected).
+                    unavailable: (ctx.placement.is_some() && !training)
+                        .then(|| "a governed job runs on an evaluator, not at a party".to_owned()),
                 });
             }
             let fhe_unsupported = if training {
@@ -227,7 +317,8 @@ fn options(
                 let why = fhe_unsupported
                     .clone()
                     .or_else(|| (!built).then(|| format!("{} is not available", fhe.name())))
-                    .or_else(|| host.clone());
+                    .or_else(|| host.clone())
+                    .or_else(|| evaluator_placement_unusable(ctx, backend));
                 let facts = &ctx.facts;
                 match scheme {
                     // Every exact program BinFHE can lower to gates.
@@ -292,10 +383,13 @@ fn options(
                 }
             }
             for t in tees() {
-                let why = tee_unusable(&t, ctx).or_else(|| {
-                    (!ctx.infrastructure.key_broker)
-                        .then(|| "no key broker to release keys to the attested workload".into())
-                });
+                let why = tee_unusable(&t, ctx)
+                    .or_else(|| tee_placement_unusable(ctx))
+                    .or_else(|| {
+                        (!ctx.infrastructure.key_broker).then(|| {
+                            "no key broker to release keys to the attested workload".into()
+                        })
+                    });
                 out.push(Option_ {
                     placement: Placement::Tee(t.clone()),
                     mechanisms: attested(&t),
@@ -319,7 +413,7 @@ fn options(
             out.push(Option_ {
                 placement: Placement::Parties,
                 mechanisms: base.clone(),
-                unavailable: None,
+                unavailable: crate::placement::coordinator_conflict(ctx),
             });
             for t in tees() {
                 let mut m = base.clone();
@@ -330,6 +424,8 @@ fn options(
                     placement: Placement::Parties,
                     mechanisms: m,
                     unavailable: tee_unusable(&t, ctx)
+                        .or_else(|| tee_placement_unusable(ctx))
+                        .or_else(|| crate::placement::coordinator_conflict(ctx))
                         .map(|w| format!("an attested coordinator: {w}")),
                 });
             }
@@ -507,6 +603,19 @@ fn global_satisfaction(req: &TrustRequirement) -> Option<RequirementSatisfaction
                  is released only there, under {organization}'s authorization"
             ),
         ),
+        TrustRequirement::Placement => (
+            vec![Mechanism::PolicyEnforcement],
+            "ciphertext steps run only on evaluators the effective placement constraints admit; \
+             the plan records the admissible set, and each job is scheduled and started only \
+             where the constraints and the evaluator's evidence still admit it"
+                .into(),
+        ),
+        TrustRequirement::OperatorSeparation => (
+            vec![Mechanism::PolicyEnforcement],
+            "the evaluator's operator is neither a source owner nor a decryptor of the output, \
+             and no SecAgg coordinator contributes to its own round"
+                .into(),
+        ),
         _ => return None,
     };
     let evidence = by.iter().flat_map(Mechanism::evidence).collect();
@@ -536,7 +645,9 @@ fn touches(req: &TrustRequirement, step: &StepShape) -> bool {
         TrustRequirement::ExecutionRegion { .. } => true,
         TrustRequirement::Purpose { .. }
         | TrustRequirement::SignedEvidence
-        | TrustRequirement::KeyCustody { .. } => false,
+        | TrustRequirement::KeyCustody { .. }
+        | TrustRequirement::Placement
+        | TrustRequirement::OperatorSeparation => false,
     }
 }
 
@@ -556,6 +667,7 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
     let c = program.confidentiality();
     let requirements = derive(program, ctx)?;
     let shapes = steps(program, report.as_ref(), ctx)?;
+    let released = release_of(program, c);
     let mut candidates = vec![];
     let mut failures = vec![];
     let mut chosen: Vec<(ExecutionStep, Vec<RequirementSatisfaction>)> = vec![];
@@ -567,7 +679,7 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
             _ => None,
         };
         let n = boundary.map_or(0, |b| b.contributions.len() as u64);
-        let mut best: Option<(u64, Candidate, Vec<RequirementSatisfaction>)> = None;
+        let mut best: Option<Best> = None;
         let mut reasons = vec![];
         let mut here = vec![];
         let correctness = requirements.iter().any(
@@ -612,7 +724,7 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
                     describe(&cand.placement, &cand.mechanisms)
                 )),
                 None => {
-                    let s = score(&cand, ctx);
+                    let s = score(&cand, ctx, &released);
                     let key = serde_json::to_string(&cand.mechanisms).expect("JSON");
                     let better = match &best {
                         None => true,
@@ -685,7 +797,9 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
     let evidence_required: BTreeSet<EvidenceKind> =
         selected.iter().flat_map(Mechanism::evidence).collect();
     let estimated_ms = steps_out.iter().map(|s| s.estimated_ms).sum();
+    let placement = crate::placement::plan_placement(ctx, &steps_out);
     let plan = ConfidentialExecutionPlan {
+        placement,
         governance_id: None,
         version: PLAN_VERSION,
         program_id: program_id(program),
@@ -760,9 +874,10 @@ pub fn by_subject(reqs: &[TrustRequirement]) -> BTreeMap<String, Vec<&TrustRequi
             TrustRequirement::RequireAttestation { step }
             | TrustRequirement::RequireCorrectness { step } => step.clone(),
             TrustRequirement::MinimumParticipants { output, .. } => output.clone(),
-            TrustRequirement::ExecutionRegion { .. } | TrustRequirement::SignedEvidence => {
-                "everything".into()
-            }
+            TrustRequirement::ExecutionRegion { .. }
+            | TrustRequirement::SignedEvidence
+            | TrustRequirement::Placement
+            | TrustRequirement::OperatorSeparation => "everything".into(),
         };
         m.entry(k).or_default().push(r);
     }

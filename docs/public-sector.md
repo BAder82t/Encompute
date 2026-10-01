@@ -165,7 +165,9 @@ Every governance report ends with a one-line form of this boundary.
   per job, and the audit trail, bound this; they do not prevent it.
 - **Declared locations are declarations.** A location declared by an
   operator is attributable, not proven. Only attested locations are
-  checked cryptographically, and reports label which is which.
+  checked cryptographically, and reports label which is which. Region is
+  not jurisdiction: a region says where a machine is, not whose law
+  reaches it, so constraints also name the operators they accept.
 - **Released results cannot be recalled.**
 
 ## Non-goals
@@ -271,10 +273,26 @@ the job ran, and cannot yet read SATISFIED: who can decrypt a result is
 not recorded in signed evidence yet, and residency and record linkage
 are not evidenced until they are built.
 
-Not yet built: placement and operator rules (a broker refuses any
-execution that declares placement until placement can be attested),
-record linkage. The limits of
-what exists are in [known limitations](../KNOWN_LIMITATIONS.md).
+**Phase 6, residency and operators (complete).** An institution's rules about
+where its data may be handled and who may run the machines now decide
+where a governed job runs. The project's own constraints (any member may
+tighten them, loosening needs every member) and each institution's own
+(in its signed authorization) combine so that adding a rule can only
+narrow what is allowed, and a prohibited place always wins. A location
+comes from a versioned table, never from whoever declares it. The
+institution that runs an evaluator is named and kept apart from the
+institutions that own a source or receive the result. The scheduler
+places a job only where all of it holds, and checks again when the job
+starts and when a key is asked for; a key broker also checks the cloud
+zone its attestation names; a client can refuse to send anything to an
+evaluator outside its own rules. A location an operator declares is
+labelled "declared", one the cloud attested "attested", and production
+never accepts a location the machine reported about itself. Evaluators
+and brokers of an institution's own can be registered, and a plan can
+prefer the way that releases least.
+
+Not yet built: record linkage. The limits of what exists are in
+[known limitations](../KNOWN_LIMITATIONS.md).
 
 ## Design records
 

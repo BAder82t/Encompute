@@ -31,6 +31,7 @@ pub mod views;
 #[doc(hidden)]
 pub use anchor_migration::set_migration_test_hook;
 pub use control::{Control, Ctx};
+pub use ops::placement;
 pub use ops::{
     asset_json, check_reservation, estimated_ms, job_profile, keybroker_lock, least_sensitivity,
     legacy_service_admins, onward_policy_id, shared_asset_json, GovernedStage, GATE_MS,

@@ -181,7 +181,8 @@ above, this section is what was built.
   not 2 as section 5 first said: version 2 was already taken by the
   governed job grant of phase 1. Version 2 grants are byte-identical to
   before.
-- **Placement in phase 2.** Check 7 cannot be met yet, because there is no
+- **Placement in phase 2** (superseded by phase 6: the broker now judges the
+  attested zone; see ADR-026, "As built"). Check 7 cannot be met yet, because there is no
   attested placement. The rule until it exists: a governed execution that
   declares placement is refused (ENC2710); one that declares none passes
   the check. Declared placement is never taken as evidence.

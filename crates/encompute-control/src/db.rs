@@ -75,6 +75,17 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "governance_log",
         include_str!("../migrations/0013_governance_log.sql"),
     ),
+    // 14-16 are the privacy-scope migrations of the parallel P5 work.
+    (
+        17,
+        "evaluator_placement",
+        include_str!("../migrations/0017_evaluator_placement.sql"),
+    ),
+    (
+        18,
+        "project_placement",
+        include_str!("../migrations/0018_project_placement.sql"),
+    ),
 ];
 
 /// Serializes migrations across control-plane replicas.

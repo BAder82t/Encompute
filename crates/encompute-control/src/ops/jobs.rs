@@ -23,7 +23,8 @@ use encompute_evaluator::{compile_program, execution_spec, transcript_for, Compi
 use encompute_ir::{Code, Error, Program, Result};
 use encompute_planner::{
     plan_or_fail, verify_plan, verify_plan_with, BackendCatalog, ConfidentialExecutionPlan,
-    Infrastructure, PlanFloor, PlanningContext, Preferences, Profile, ProgramFacts, SourceCustody,
+    Infrastructure, Origin, PlacementContext, PlacementSource, PlanFloor, PlanningContext,
+    Preferences, Profile, ProgramFacts, Roles, SourceCustody,
 };
 use encompute_trust::authz::{
     job_approval_statement, quorum_met, AuthorizationSetId, SignedAuthorizationV2,
@@ -498,14 +499,18 @@ fn actor_label(c: &mut impl GenericClient, ctx: &Ctx, actor: &str) -> Result<Str
 }
 
 impl Control {
-    fn catalog(&self, c: &mut impl GenericClient) -> Result<BackendCatalog> {
+    /// What the deployment offers. A standard project counts only the
+    /// platform's evaluators: an operator-owned one is scheduled for
+    /// governed jobs that admit it, never for a standard job.
+    fn catalog(&self, c: &mut impl GenericClient, governed: bool) -> Result<BackendCatalog> {
         let backends: Vec<String> = c
             .query(
-                // What the deployment offers (a draining or briefly silent
-                // evaluator does not change which plans are possible;
-                // scheduling checks health).
-                "SELECT DISTINCT jsonb_array_elements_text(backends) FROM evaluators",
-                &[],
+                // (A draining or briefly silent evaluator does not change
+                // which plans are possible; scheduling checks health.)
+                "SELECT DISTINCT jsonb_array_elements_text(e.backends)
+                   FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                  WHERE $1 OR s.organization_id IS NULL",
+                &[&governed],
             )
             .map_err(db_err)?
             .iter()
@@ -604,10 +609,60 @@ impl Control {
                 .is_some();
             (any, Vec::new())
         };
+        // A governed project's plan names where it may run: the project's
+        // constraints (which every member holds), the table they are read
+        // against, and the evaluators on offer now. An owner's own
+        // constraints are applied where the job is bound, never carried
+        // here.
+        let placement = if project.governed() {
+            Some(PlacementContext {
+                constraints: super::placement::project_placement(&mut *c, &r.project)?
+                    .map(|p| {
+                        vec![PlacementSource {
+                            origin: Origin::Project(r.project.clone()),
+                            constraints: p.constraints,
+                        }]
+                    })
+                    .unwrap_or_default(),
+                locations_digest: encompute_planner::locations::digest(),
+                production: self.env.is_production(),
+                roles: Roles {
+                    source_owners: custody.iter().map(|k| k.organization.clone()).collect(),
+                    participants: project.members.iter().cloned().collect(),
+                    ..Roles::default()
+                },
+            })
+        } else {
+            None
+        };
+        // Only evaluators this project may use are put in its plan: the
+        // platform's, its members' and those a constraint names. Another
+        // tenant's infrastructure is not shown to the project.
+        let evaluators = match &placement {
+            Some(pc) => super::placement::evaluator_offers(&mut *c)?
+                .into_iter()
+                .filter(|o| {
+                    o.operator == encompute_planner::placement::PLATFORM_OPERATOR
+                        || pc.roles.participants.contains(&o.operator)
+                        || pc.constraints.iter().any(|s| {
+                            s.constraints
+                                .allowed_operators
+                                .as_ref()
+                                .is_some_and(|x| x.contains(&o.operator))
+                                || s.constraints
+                                    .allowed_evaluators
+                                    .as_ref()
+                                    .is_some_and(|x| x.contains(&o.id))
+                        })
+                })
+                .collect(),
+            None => vec![],
+        };
         let pctx = PlanningContext {
             profile: Profile::Standard,
-            catalog: self.catalog(&mut *c)?,
+            catalog: self.catalog(&mut *c, project.governed())?,
             infrastructure: Infrastructure {
+                evaluators,
                 tees: vec![],
                 key_broker,
                 host_cloud: true,
@@ -617,6 +672,7 @@ impl Control {
             facts: facts(&program)?,
             training: None,
             custody,
+            placement,
         };
         drop(c);
         let plan = match plan_or_fail(&program, &pctx) {
@@ -1434,11 +1490,51 @@ impl Control {
             linkage_policy_id: purpose.linkage_policy_id.clone(),
             inputs,
             outputs: outputs.clone(),
-            placement_digest: None,
+            // The project's constraints at submission, by digest (none:
+            // absent, so a project without any keeps its IDs).
+            placement_digest: super::placement::project_placement(t, &r.project)?.map(|p| p.digest),
             project_policy_digest: None,
             asset_brokers,
         };
         binding.check()?;
+        // Placement: some evaluator is admissible for this job now, under
+        // the project's constraints, every owner's own, and the separation
+        // of operators (ENC2710, ENC2725). Nothing is bound that no
+        // machine could run.
+        let owners: Vec<PlacementSource> = chosen
+            .values()
+            .filter_map(|(_, x)| {
+                x.body.limits.placement.clone().map(|c| PlacementSource {
+                    origin: Origin::Organization(x.body.party.clone()),
+                    constraints: c,
+                })
+            })
+            .collect();
+        let admitted = self
+            .job_admission(
+                t,
+                &super::placement::JobPlacement {
+                    project: &r.project,
+                    plan: &r.plan,
+                    binding: &binding,
+                    backend: &s.doc.backend,
+                    owners,
+                    parties: chosen.values().map(|(_, x)| x.body.party.clone()).collect(),
+                    pins: chosen
+                        .values()
+                        .filter_map(|(_, x)| x.body.limits.project_placement_digest.clone())
+                        .collect(),
+                },
+            )
+            .map_err(|e| deny("plan", &r.plan, "placement", e))?;
+        if admitted.admitted.is_empty() {
+            return Err(deny(
+                "plan",
+                &r.plan,
+                "placement",
+                super::placement::placement_refused(&admitted),
+            ));
+        }
         let spec = spec.governed(&binding);
         let spec_id = spec.id().hex();
         // An authorization pinned to execution specs covers only those.
@@ -1775,6 +1871,30 @@ impl Control {
             counted.extend(super::derived::ancestor_authorizations(t, &j.sources)?);
             super::derived::check_executions(t, &counted, Some(&j.id))?;
         }
+        // 8. Placement. The plan names where it may run and the binding's
+        //    project constraints exist (scheduling, which then picks only
+        //    among the evaluators the constraints admit); at start the
+        //    scheduled evaluator is still admitted under the constraints,
+        //    the owners' and the separation of operators as they are now,
+        //    and is still the machine the grant recorded (ENC2710,
+        //    ENC2725).
+        if stage != GovernedStage::Approve {
+            let (evaluator, recorded) = if stage == GovernedStage::Start {
+                let ev = j.evaluator.as_deref().ok_or_else(|| {
+                    Error::new(Code::GovernanceResidency, "the job has no evaluator")
+                })?;
+                (
+                    Some(ev),
+                    j.grant
+                        .as_ref()
+                        .and_then(|x| x.governance.as_ref())
+                        .and_then(|x| x.placement.as_ref()),
+                )
+            } else {
+                (None, None)
+            };
+            self.check_job_placement(t, &j.id, &g.binding, evaluator, recorded)?;
+        }
         // 7. The window, strictly.
         if at >= not_after {
             return Err(expired(format!(
@@ -2024,6 +2144,32 @@ impl Control {
             transitions.push(t);
         }
         let initiated_by = label(&mut c, j.initiated_by.clone())?;
+        // Where the job was placed, as scheduling recorded it; or why it
+        // has not been placed.
+        let placement = j
+            .grant
+            .as_ref()
+            .and_then(|g| g.governance.as_ref())
+            .and_then(|g| g.placement.clone());
+        let placement_waiting = if j.governance.is_some() && j.state == JobState::Authorized {
+            match j
+                .governance
+                .as_ref()
+                .map(|g| self.admission_for_job(&mut *c, &j.id, &g.binding))
+                .expect("governed")
+            {
+                Ok(a) if a.admitted.is_empty() => {
+                    Some(format!("no admissible evaluator: {}", a.why_none()))
+                }
+                Ok(_) => None,
+                // A residency refusal says why; anything else (a database
+                // error) is not for a viewer.
+                Err(e) if e.code == Code::GovernanceResidency => Some(e.message),
+                Err(_) => Some("its placement cannot be judged now".to_owned()),
+            }
+        } else {
+            None
+        };
         // The grant goes only to the submitting organization.
         let grant = if submitter { j.grant.clone() } else { None };
         let v = JobView {
@@ -2052,6 +2198,8 @@ impl Control {
             evaluator_parallel_gates: parallel.map(|p| p.max(1) as u32),
             purpose_id: j.purpose_id,
             governance_id: j.governance.map(|g| g.governance_id),
+            placement,
+            placement_waiting,
         };
         Ok(serde_json::to_value(v).expect("serializable"))
     }
@@ -2401,6 +2549,20 @@ impl Control {
                     }
                 },
             };
+            // A governed job runs only where its placement admits it now:
+            // under the project's constraints, its owners' own, and the
+            // separation of operators, at the evidence the registry holds.
+            // With none admissible it waits (never another evaluator).
+            let admitted = match &governed {
+                Some((g, _)) => match self.admission_for_job(t, id, &g.binding) {
+                    Ok(a) => Some(a.admitted),
+                    Err(e) => {
+                        self.fail_governed(t, &self.service_id, "scheduler", &j, GovernedStage::Schedule, &e)?;
+                        return Ok((false, true));
+                    }
+                },
+                None => None,
+            };
             // Hard constraints first (backend, profile, health, freshness,
             // capacity); cost only orders what is left.
             let candidates = t
@@ -2410,17 +2572,25 @@ impl Control {
                             (SELECT COALESCE(sum(GREATEST(x.estimated_gates, 1)), 0)::bigint FROM jobs x
                               WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running')),
                             e.logical_cores, e.max_parallel_gates
-                       FROM evaluators e
-                      WHERE e.status = 'ready'
+                       FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                      WHERE e.status = 'ready' AND s.status = 'active'
+                        -- An operator's own evaluator runs only the governed
+                        -- jobs whose placement admits it (judged below).
+                        AND ($4 OR s.organization_id IS NULL)
                         AND e.backends ? $1 AND e.profiles ? $2
                         AND e.last_heartbeat > now() - make_interval(secs => $3)
                       ORDER BY e.id",
-                    &[&j.backend, &j.profile, &(HEARTBEAT_TIMEOUT_SECS as f64)],
+                    &[&j.backend, &j.profile, &(HEARTBEAT_TIMEOUT_SECS as f64), &governed.is_some()],
                 )
                 .map_err(db_err)?;
             let Some((estimate, evaluator)) = candidates
                 .iter()
                 .filter(|r| r.get::<_, i64>(2) < r.get::<_, i32>(1) as i64)
+                .filter(|r| {
+                    admitted
+                        .as_ref()
+                        .is_none_or(|a| a.iter().any(|x| x.id == r.get::<_, String>(0)))
+                })
                 .map(|r| {
                     let est = estimated_ms(
                         r.get::<_, i64>(3).max(0) as u64,
@@ -2446,6 +2616,12 @@ impl Control {
                         binding: g.binding.clone(),
                         authorization_set_id: g.authorization_set_id.clone(),
                         not_after,
+                        // Where the job is placed: its evaluator's
+                        // operator, location and evidence now.
+                        placement: admitted
+                            .as_ref()
+                            .and_then(|a| a.iter().find(|x| x.id == evaluator))
+                            .map(super::placement::grant_placement),
                     }),
                     (t0 + JOB_GRANT_TTL_SECS).min(not_after),
                 ),
@@ -3080,6 +3256,7 @@ impl Control {
             return Err(bad("memory_bytes must be positive"));
         }
         let out = self.tx_anchored(|t| {
+            let endpoint_before = super::placement::endpoint_of(t, &r.id)?;
             let status: String = t.query_one(
                 "INSERT INTO evaluators (id, service_account, url, receipt_key, backends, profiles, openfhe_version, capacity, status,
                                          cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates)
@@ -3104,6 +3281,13 @@ impl Control {
                 }
             })?
             .get(0);
+            // Its operator (the organization of its service account) and
+            // the location it reports: recorded as its own, self-declared
+            // claim, and a changed location loses any evidence.
+            let operator = super::placement::operator_of(t, &r.id)?
+                .unwrap_or_else(|| PLATFORM_ORG.to_owned());
+            self.endpoint_changed(t, ctx, &r.id, &operator, endpoint_before.clone())?;
+            self.register_location(t, ctx, &r.id, &operator, r.location.as_ref())?;
             // An evaluator registers when its process starts: a job it was
             // running and never reported died with the old process. It
             // fails now (never replayed) rather than staying "running"
@@ -3139,7 +3323,7 @@ impl Control {
             }
             let mut d = ctx
                 .draft("evaluator.registered", "evaluator", &r.id, Outcome::Succeeded)
-                .org(PLATFORM_ORG)
+                .org(&operator)
                 .r#ref("backends", r.backends.join("+"))
                 .r#ref("profiles", r.profiles.join("+"))
                 .r#ref("openfhe", r.openfhe_version.clone())
@@ -3218,20 +3402,60 @@ impl Control {
         }
     }
 
+    /// The platform's operators and admins list every evaluator; an
+    /// organization's admins and security admins list the ones it operates.
     pub fn list_evaluators(&self, ctx: &Ctx) -> Result<Value> {
-        require(
-            &ctx.principal,
-            PLATFORM_ORG,
-            &[Role::Operator, Role::OrganizationAdmin],
-            "listing evaluators",
-        )?;
+        let platform = ctx
+            .principal
+            .any_role(PLATFORM_ORG, &[Role::Operator, Role::OrganizationAdmin]);
+        let orgs: Vec<String> = ctx
+            .principal
+            .organizations()
+            .into_iter()
+            .filter(|o| {
+                ctx.principal
+                    .any_role(o, &[Role::OrganizationAdmin, Role::SecurityAdmin])
+            })
+            .collect();
+        // Anyone else is refused as ever: not found for a tenant, forbidden
+        // for a platform member without the role.
+        let refused = || {
+            require(
+                &ctx.principal,
+                PLATFORM_ORG,
+                &[Role::Operator, Role::OrganizationAdmin],
+                "listing evaluators",
+            )
+            .err()
+            .unwrap_or_else(|| forbidden("listing evaluators needs operator or organization_admin"))
+        };
+        if !platform && orgs.is_empty() {
+            return Err(refused());
+        }
         let mut c = self.db.conn()?;
+        if !platform {
+            let operates = c
+                .query_opt(
+                    "SELECT 1 FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                      WHERE s.organization_id = ANY($1) LIMIT 1",
+                    &[&orgs],
+                )
+                .map_err(db_err)?;
+            if operates.is_none() {
+                return Err(refused());
+            }
+        }
         Ok(Value::Array(
             c.query(
-                "SELECT id, url, backends, profiles, openfhe_version, capacity, status,
-                        cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates
-                   FROM evaluators ORDER BY id",
-                &[],
+                "SELECT e.id, e.url, e.backends, e.profiles, e.openfhe_version, e.capacity, e.status,
+                        e.cpu_model, e.logical_cores, e.memory_bytes, e.benchmark_profile, e.max_parallel_gates,
+                        s.organization_id, e.location, e.location_evidence,
+                        e.location_evidence_digest,
+                        floor(extract(epoch FROM e.location_valid_until))::bigint
+                   FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                  WHERE $1 OR s.organization_id = ANY($2)
+                  ORDER BY e.id",
+                &[&platform, &orgs],
             )
                 .map_err(db_err)?
                 .iter()
@@ -3243,7 +3467,12 @@ impl Control {
                            "logical_cores": r.get::<_, Option<i32>>(8),
                            "memory_bytes": r.get::<_, Option<i64>>(9),
                            "benchmark_profile": r.get::<_, Option<String>>(10),
-                           "max_parallel_gates": r.get::<_, Option<i32>>(11)})
+                           "max_parallel_gates": r.get::<_, Option<i32>>(11),
+                           "operator": r.get::<_, Option<String>>(12).unwrap_or_else(|| PLATFORM_ORG.to_owned()),
+                           "location": r.get::<_, Option<Value>>(13),
+                           "location_evidence": r.get::<_, String>(14),
+                           "location_evidence_digest": r.get::<_, Option<String>>(15),
+                           "location_valid_until": r.get::<_, Option<i64>>(16)})
                 })
                 .collect(),
         ))

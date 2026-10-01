@@ -309,6 +309,23 @@ pub struct AuthorizationLimits {
     /// Skipped when absent, so existing AuthorizationIds are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_outputs_per_job: Option<u64>,
+    /// Where work on this source may run and who may operate the machines
+    /// (the owner's own residency rule). It can only tighten what the
+    /// project's constraints allow, never loosen them; the control plane
+    /// applies it when it binds a job and when it schedules, and the key
+    /// broker checks it against the attested location of the session that
+    /// asks for the key. Skipped when absent, so existing AuthorizationIds
+    /// are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<encompute_verification::placement::PlacementConstraints>,
+    /// The digest of the project placement constraints the owner accepts
+    /// for this use. A job under this authorization is bound only to
+    /// exactly these constraints, and the owner's broker releases only if
+    /// the binding names this digest: the control plane cannot drop or
+    /// swap the project's constraints for this owner's data. Absent, the
+    /// project's constraints are enforced by the control plane only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_placement_digest: Option<String>,
 }
 
 /// Classes whose ceiling admits boolean-only releases (a boolean or a
@@ -393,7 +410,9 @@ impl AuthorizationV2 {
     /// admits boolean-only releases bounds how many jobs it runs and how
     /// many key releases it makes (`max_executions`, `max_releases`), so
     /// repeated yes/no questions about the same records are bounded. They
-    /// bound that channel; they do not close it (ENC2709).
+    /// bound that channel; they do not close it (ENC2709). The owner's
+    /// placement constraints, if any, are checked here too: every path that
+    /// proposes, signs or installs an authorization calls this.
     pub fn check_probing_limits(&self) -> Result<()> {
         if admits_probing(self.release_class)
             && (self.limits.max_executions.is_none() || self.limits.max_releases.is_none())
@@ -409,6 +428,12 @@ impl AuthorizationV2 {
         }
         if self.limits.max_outputs_per_job == Some(0) {
             return Err(err("max_outputs_per_job is at least 1"));
+        }
+        if let Some(p) = &self.limits.placement {
+            p.check().map_err(|e| err(e.message))?;
+        }
+        if let Some(d) = &self.limits.project_placement_digest {
+            check_hex32("project placement digest", d)?;
         }
         Ok(())
     }

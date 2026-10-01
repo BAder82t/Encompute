@@ -29,6 +29,18 @@ pub struct MockClaims {
     pub tcb: TcbStatus,
     pub issued_at: u64,
     pub expires_at: u64,
+    /// The zone the "platform" says it runs in (`provider/zone`), when
+    /// it does. Absent, and not serialized, otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<MockLocation>,
+}
+
+/// Where a mock platform says it runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MockLocation {
+    pub provider: String,
+    pub zone: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +80,7 @@ impl MockHardware {
             tcb: TcbStatus::Current,
             issued_at: None,
             lifetime: 3600,
+            location: None,
         }
     }
 
@@ -89,9 +102,20 @@ pub struct MockAttester {
     tcb: TcbStatus,
     issued_at: Option<u64>,
     lifetime: u64,
+    location: Option<MockLocation>,
 }
 
 impl MockAttester {
+    /// The platform says it runs in `zone` of `provider` (a Confidential
+    /// Space token names a Compute Engine zone the same way).
+    pub fn located(mut self, provider: &str, zone: &str) -> Self {
+        self.location = Some(MockLocation {
+            provider: provider.to_owned(),
+            zone: zone.to_owned(),
+        });
+        self
+    }
+
     pub fn debug(mut self, on: bool) -> Self {
         self.debug = on;
         self
@@ -135,6 +159,7 @@ impl Attester for MockAttester {
             tcb: self.tcb,
             issued_at,
             expires_at: issued_at.saturating_add(self.lifetime),
+            location: self.location.clone(),
         })?;
         Ok(AttestationEvidence {
             version: EVIDENCE_VERSION,
@@ -219,6 +244,10 @@ impl AttestationProvider for MockProvider {
             issued_at: Some(c.issued_at),
             expires_at: Some(c.expires_at),
             gpu: None,
+            location: c.location.as_ref().map(|l| crate::WorkloadLocation {
+                provider: l.provider.clone(),
+                zone: l.zone.clone(),
+            }),
         })
     }
 }

@@ -153,6 +153,7 @@ fn context() -> PlanningContext {
         },
         infrastructure: Infrastructure {
             tees: vec![],
+            evaluators: vec![],
             key_broker: true,
             host_cloud: true,
             host_region: Some("eu".into()),
@@ -179,6 +180,7 @@ fn context() -> PlanningContext {
                 broker: "ben-broker".into(),
             },
         ],
+        placement: None,
     }
 }
 
@@ -332,6 +334,7 @@ impl Fixture {
             binding: binding.clone(),
             authorization_set_id: set_id,
             not_after,
+            placement: None,
         };
         let spec = ExecutionSpec {
             version: SPEC_VERSION,

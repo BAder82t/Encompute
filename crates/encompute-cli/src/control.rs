@@ -378,6 +378,19 @@ pub enum JobsCmd {
         /// without a pin, accept the evaluator key the control plane names.
         #[arg(long)]
         allow_unpinned_evaluator: bool,
+        /// Your own placement constraints for the data this job sends (a
+        /// JSON file: `allowed_regions`, `prohibited_locations`,
+        /// `allowed_operators`, `min_evidence`, `applies_to`). With it,
+        /// the job is refused before anything is sent unless the evaluator
+        /// you pinned (`--evaluator-pins`) is inside them, whatever the
+        /// control plane says.
+        #[arg(long, value_name = "FILE")]
+        placement: Option<PathBuf>,
+        /// What you pin about evaluators' placement: a JSON list of
+        /// `{receipt_key, url, operator, location, evidence}` (the location as
+        /// the control plane lists it, its jurisdiction included).
+        #[arg(long, value_name = "FILE")]
+        evaluator_pins: Option<PathBuf>,
     },
 }
 
@@ -505,6 +518,8 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
             idempotency_key,
             trust_evaluators,
             allow_unpinned_evaluator,
+            placement,
+            evaluator_pins,
         } => {
             // Which evaluator keys to accept is the client's decision, not
             // the control plane's: settled before anything is submitted.
@@ -536,6 +551,12 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
             // receipt key must be pinned here (the control plane names it).
             let receipt_key = v["evaluator_receipt_key"].as_str().unwrap_or_default();
             Remote::check_trusted_evaluator(trusted.as_ref(), receipt_key)?;
+            // Your own residency rule, judged by what you pinned about the
+            // evaluator (never the control plane's word), before any
+            // ciphertext leaves.
+            if let Some(path) = &placement {
+                client_placement_check(path, evaluator_pins.as_deref(), receipt_key, &v)?;
+            }
             let grant: JobGrant = serde_json::from_value(v["grant"].clone())
                 .map_err(|e| Error::new(Code::Remote, format!("job grant: {e}")))?;
             let url = v["evaluator_url"].as_str().unwrap_or_default().to_owned();
@@ -584,6 +605,49 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The client-side placement check of `jobs run --placement`: `path` holds
+/// the client's constraints, `pins` what it pinned about evaluators, and
+/// `job` is the control plane's view (its recorded placement is compared
+/// with the pin, never preferred to it). ENC2726 when the evaluator is
+/// outside the constraints or nothing is pinned about it.
+fn client_placement_check(
+    path: &std::path::Path,
+    pins: Option<&std::path::Path>,
+    receipt_key: &str,
+    job: &serde_json::Value,
+) -> Result<()> {
+    use encompute_verification::placement::{
+        check_pinned_placement, EvaluatorPin, GrantPlacement, PlacementConstraints,
+    };
+    fn read<T: serde::de::DeserializeOwned>(p: &std::path::Path, what: &str) -> Result<T> {
+        let text = std::fs::read_to_string(p)
+            .map_err(|e| Error::new(Code::BadInput, format!("{what} {}: {e}", p.display())))?;
+        serde_json::from_str(&text)
+            .map_err(|e| Error::new(Code::BadInput, format!("{what} {}: {e}", p.display())))
+    }
+    let constraints: PlacementConstraints = read(path, "placement constraints")?;
+    let pins: Vec<EvaluatorPin> = match pins {
+        Some(p) => read(p, "evaluator pins")?,
+        None => vec![],
+    };
+    let recorded: Option<GrantPlacement> = match &job["placement"] {
+        serde_json::Value::Null => None,
+        v => Some(serde_json::from_value(v.clone()).map_err(|e| {
+            Error::new(
+                Code::GovernanceClientPlacement,
+                format!("the control plane's record of the job's placement is malformed: {e}"),
+            )
+        })?),
+    };
+    check_pinned_placement(
+        &constraints,
+        receipt_key,
+        job["evaluator_url"].as_str().unwrap_or_default(),
+        &pins,
+        recorded.as_ref(),
+    )
 }
 
 pub fn trust_report(job: &str, json_out: bool) -> Result<bool> {

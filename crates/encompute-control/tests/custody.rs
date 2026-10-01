@@ -468,6 +468,7 @@ impl C {
                     .hex()
                     .to_owned(),
                 not_after,
+                placement: None,
             }),
             signature: String::new(),
         };

@@ -328,6 +328,51 @@ revocation (its governance log event) first, then tells the organization's regis
 (`authorization.revoked`); the owner can always revoke at its own broker
 directly, without the control plane.
 
+### Residency and operators in a governed project
+
+A governed project may carry placement constraints: where its ciphertexts
+may be handled and which organizations may operate the machines.
+
+- **Evaluators and their operators.** An evaluator's operator is the
+  organization of its service account (`platform` for the platform's own).
+  An organization may hold evaluator accounts of its own
+  (`POST /v1/organizations/{id}/service-accounts` with `kind: evaluator`);
+  they run only the governed jobs whose placement admits them, never a
+  standard job, and never a job of a project where the organization owns a
+  source or receives the result.
+- **Locations.** An evaluator reports its location when it registers
+  (`location: {provider, region, zone?}`, from the table in
+  `encompute_verification::placement::locations`: Google Cloud, AWS and
+  Azure regions, and an organization's own premises by country). That is
+  self-declared. A person who is a security admin of the operator makes it
+  `operator_declared` with `POST /v1/evaluators/{id}/location-declarations`
+  (valid for at most 366 days, 90 by default; declare again to renew).
+  Production never accepts a self-declared location where a constraint
+  has a location rule. An evaluator that registers again with another
+  location loses its evidence, and a job already scheduled on it fails at
+  start.
+- **Constraints.** The project's are set with `POST
+  /v1/projects/{id}/placement` (a member's security admin tightens at
+  once; loosening needs every member to send the same constraints). An
+  owner's own are `limits.placement` in its signed authorization. A
+  constraint is JSON: `allowed_regions` and `prohibited_locations` (patterns
+  of `jurisdiction`, `provider`, `region`, `zone`; prohibited wins),
+  `allowed_operators`, `allowed_evaluators`, `min_evidence`
+  (`self_declared`, `operator_declared`, `attested`) and `applies_to`
+  (`plaintext`, `ciphertext`, `keys`, `evidence`; all four by default).
+- **Key brokers** judge the zone the workload's attestation names against
+  the project's constraints (the signed ticket carries the document) and
+  the owner's own; a Confidential Space token names a Compute Engine zone.
+  A broker cannot see operators or evaluator IDs: those constraints are
+  the control plane's to enforce.
+- **Clients** can add their own rule: `encompute jobs run --placement
+  constraints.json --evaluator-pins pins.json` sends nothing to an
+  evaluator the client has not pinned inside its constraints.
+- **Upgrading.** Migrations 0017 and 0018 add the evaluator location
+  columns and the project constraint tables. Governed plans made before
+  this release have no placement context: make them again (a job on such a
+  plan is refused, ENC2710). Standard projects are unchanged.
+
 ## Upgrading from 0.3.0-rc.3 or earlier
 
 - **Service accounts with `security_admin`.** Earlier releases let an

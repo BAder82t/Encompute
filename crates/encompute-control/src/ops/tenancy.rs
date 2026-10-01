@@ -385,10 +385,11 @@ impl Control {
         let platform = org == PLATFORM_ORG;
         match (r.kind, platform) {
             (ServiceKind::Control, _) => return Err(bad("the control plane registers itself")),
-            (ServiceKind::Evaluator | ServiceKind::Secagg, false) => {
-                return Err(bad(
-                    "evaluators and SecAgg coordinators are platform services",
-                ))
+            // An organization may operate evaluators of its own (it is
+            // then their operator); the platform's scheduler places only
+            // the governed jobs whose placement admits it on them.
+            (ServiceKind::Secagg, false) => {
+                return Err(bad("SecAgg coordinators are platform services"))
             }
             _ => {}
         }
@@ -948,6 +949,11 @@ impl Control {
             v
         };
         self.tx_anchored(|t| {
+            // The project's row first: a change of its placement reads the
+            // member list under the same lock, so a join and a loosening
+            // are ordered.
+            t.query_opt("SELECT 1 FROM projects WHERE id = $1 FOR UPDATE", &[&project])
+                .map_err(db_err)?;
             let p = project_row(t, project)?.ok_or_else(|| not_found("project", project))?;
             let current: Option<(String, Participation)> = t
                 .query_opt(

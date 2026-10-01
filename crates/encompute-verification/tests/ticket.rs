@@ -93,6 +93,7 @@ fn ticket() -> ReleaseTicket {
         workload_or_recipient: h('7'),
         recipient: None,
         placement_digest: None,
+        placement: None,
         execution_spec: s,
         binding: b,
         not_before: NOW,
@@ -160,6 +161,9 @@ fn ticket_every_field_changes_signature() {
             t.recipient = Some("benefits-agency".into())
         }),
         ("placement_digest", &|t| t.placement_digest = Some(h('2'))),
+        ("placement", &|t| {
+            t.placement = Some(encompute_verification::placement::PlacementConstraints::default())
+        }),
         ("execution_spec", &|t| {
             t.execution_spec.backend_version = "1.5.2".into()
         }),
@@ -178,6 +182,7 @@ fn ticket_every_field_changes_signature() {
     // Absent (not serialized) when the binding declares no placement, and
     // on a key-release ticket, which names no recipient.
     keys.insert("placement_digest");
+    keys.insert("placement");
     keys.insert("recipient");
     let covered: BTreeSet<&str> = changes.iter().map(|(k, _)| *k).collect();
     assert_eq!(keys, covered, "the sweep must change every field");
@@ -333,4 +338,45 @@ fn export_ticket_names_its_recipient() {
         k.check_consistent().unwrap_err().code,
         Code::GovernanceReleaseTicket
     );
+}
+
+/// The ticket's placement document is the one its binding's digest names:
+/// the broker judges the attested location by it, so it cannot be another.
+#[test]
+fn a_ticket_carries_the_placement_its_digest_names_or_none() {
+    use encompute_verification::placement::{LocationPattern, PlacementConstraints};
+    let c = PlacementConstraints {
+        allowed_regions: Some([LocationPattern::jurisdiction("DE")].into()),
+        ..PlacementConstraints::default()
+    };
+    let mut b = binding();
+    b.placement_digest = Some(c.digest());
+    let s = spec().governed(&b);
+    let mut t = ticket();
+    t.governance_id = b.id().hex();
+    t.execution_spec_id = s.id().hex();
+    t.execution_spec = s;
+    t.binding = b;
+    t.placement_digest = t.binding.placement_digest.clone();
+    // No document: consistent (the broker refuses the release itself).
+    t.check_consistent().unwrap();
+    // The document its digest names.
+    t.placement = Some(c.clone());
+    t.check_consistent().unwrap();
+    let signed = t.clone().sign(&control()).unwrap();
+    signed.verify(&control().public_key_hex(), NOW + 1).unwrap();
+    // Another document, or one with no digest to name it, or an invalid
+    // one, is no ticket.
+    let mut other = t.clone();
+    other.placement = Some(PlacementConstraints::default());
+    assert!(other.check_consistent().is_err());
+    let mut orphan = ticket();
+    orphan.placement = Some(c.clone());
+    assert!(orphan.check_consistent().is_err());
+    let mut bad = t.clone();
+    bad.placement = Some(PlacementConstraints {
+        allowed_regions: Some([LocationPattern::region("gcp", "europe-west99")].into()),
+        ..PlacementConstraints::default()
+    });
+    assert!(bad.check_consistent().is_err());
 }

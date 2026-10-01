@@ -447,9 +447,91 @@ these limits:
   auditor stays read-only in governed projects.
 - **Auditor organizations read no privacy ledgers yet.** A ledger is its
   asset owner's until privacy scopes give a project its own ledger.
-- **Declared placement is refused.** A governed broker releases no key
-  for an execution that declares placement until attested placement can
-  be checked.
+- **Residency (placement) is only as good as its evidence.** A location
+  an evaluator reports about itself is self-declared and never satisfies
+  a production deployment; one a person who is a security admin of its
+  operator declares is attributable, not proven (an operator can declare
+  falsely or move the machine afterwards, and the declaration lapses after
+  at most 366 days); only an attested zone is checked cryptographically,
+  and today the control plane obtains none from an evaluator: the attested
+  zone is the key broker's, taken from the Confidential Space token each
+  time a workload asks for a key. Grants and job views record each
+  location's evidence level, and a plan's text labels it "attested" or
+  "declared".
+- **A key broker judges the zone only.** It cannot see an operator or an
+  evaluator ID, so a constraint that names only those is enforced by the
+  control plane that issues the ticket, not by the broker; a compromised
+  control plane could therefore send a ticket to an evaluator of an
+  operator the owner excluded (never to a zone the owner excluded).
+- **The locations table is compiled in and reviewed in the repository.**
+  Version 1 covers Google Cloud, AWS and Azure regions and an
+  organization's own premises by country. An unknown provider, region or
+  zone is refused, never ignored; adding one is a code change, and a new
+  table version makes every governed plan made with the old one invalid
+  (plan again). Plans made before placement existed must also be made
+  again.
+- **Operator separation assumes an honest control plane.** An evaluator's
+  operator is the control plane's record of its service account; no
+  signature of the operator binds an evaluator, its URL and its key to it,
+  so a compromised control plane could misname one. The governance report
+  (a later phase) must say so wherever it reports operator separation.
+- **The project's constraints are the control plane's unless an owner pins
+  them.** An owner's signed authorization may pin the digest of the project
+  constraints it accepts (`limits.project_placement_digest`); its broker
+  then requires the binding to name it. Without a pin, a compromised
+  control plane could drop them for that owner's keys (never the owner's
+  own constraints, which the broker reads from the authorization).
+- **A changed project constraint stops an owner-pinned job.** When the
+  project's constraints change after an owner pinned their digest, a new
+  job is refused with "the project's placement constraints changed since the
+  owner pinned them; the owner must re-authorize" (ENC2710), and the owner's
+  broker refuses likewise.
+- **Merge task for the governance report.** The report is not in this
+  branch. Wherever it reports operator separation it must carry the
+  qualifier "assuming an honest control plane" (see above), and a test must
+  fail if it claims separation without it. To be added when the report
+  merges.
+- **Running jobs are not re-checked.** Placement is judged at submission,
+  scheduling, start and every release ticket; a job already running is not
+  stopped when its evaluator moves or constraints tighten (its receipt
+  records where it ran). Export and derived-result tickets carry no
+  placement: an export is a release to a named recipient's key, not a
+  placement.
+- **A TEE is never usable in a governed plan**, even without a location
+  rule: a TEE offer carries no attested location, and the control plane
+  offers none today. Declared locations rest on an authenticated session
+  of a security admin of the operator, not on a signature.
+- **Upgrading in-flight governed jobs.** Jobs planned before this release
+  have no placement context and fail at their next scheduling or start
+  (ENC2710); queued jobs fail at start. Plan and submit them again.
+- **Region is not jurisdiction.** A region says where a machine is, not
+  whose law reaches it; the legal assessment of a location stays with the
+  owner, which is why constraints also name allowed operators.
+- **Placement covers the machines Encompute schedules.** A governed job
+  runs on an evaluator, never at a party. A TEE offer carries no attested
+  location in a plan, so it never satisfies a constraint (the control
+  plane plans no TEE yet). Plaintext at an institution's own premises,
+  network routing, copies made outside Encompute and lawful access by the
+  state that hosts a machine are not controlled. Ciphertexts copied to a
+  prohibited place stay FHE-protected, which a stricter owner may still
+  not accept.
+- **The client's own placement check is in the CLI.** `jobs run
+  --placement` refuses before sending anything; the Python and native SDKs
+  do not carry it yet.
+- **An evaluator operator separate from the owners can still cheat by
+  one bit.** Operator separation keeps the machines' operator from being a
+  source owner or a decryptor; a malicious operator could return one bit
+  of an input attribute in place of the expected Boolean. The output-width
+  check and `max_releases` bound this; they do not prevent it. Verified
+  execution would close it and is out of scope.
+- **Loosening a project's constraints needs every member to propose the
+  same thing.** One member refusing, or gone, blocks it by design; a
+  member removed from the project stops counting. Tightening is
+  immediate and cannot be undone by one member.
+- **`Objective::Minimize` orders by release rank, principals who learn
+  plaintext and latency.** The bits a release carries are not told apart
+  yet, and the planner does not itself refuse an output wider than a
+  source's class: a governed submission does (ENC2709).
 - **A compromised control plane can still deny and delay.** It cannot
   release a key without an owner-signed authorization installed at the
   owner's broker, but it can withhold tickets and delay revocation

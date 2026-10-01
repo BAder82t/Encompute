@@ -10,12 +10,18 @@
 
 mod ids;
 pub mod model;
+pub mod placement;
 mod planner;
 pub mod render;
 mod requirements;
 mod validate;
 
 pub use ids::{program_id, PlanId};
+/// The versioned locations table (shared with the key broker and the
+/// control plane through the verification crate).
+pub mod locations {
+    pub use encompute_verification::placement::locations::*;
+}
 pub use model::*;
 pub use planner::{describe, plan, plan_or_fail, tee_unusable, Planned, PLAN_VERSION, PROVIDERS};
 pub use requirements::{derive as derive_requirements, input_asset};

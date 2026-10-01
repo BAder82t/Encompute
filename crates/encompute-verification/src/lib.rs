@@ -21,6 +21,7 @@ pub mod governance;
 mod hash;
 pub mod http;
 mod identity;
+pub mod placement;
 pub mod proof;
 mod receipt;
 mod reference;

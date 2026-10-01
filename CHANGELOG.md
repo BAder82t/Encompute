@@ -25,6 +25,32 @@ Work toward confidential cross-agency computation
   strict validity windows and non-retroactive revocation; migration 0005;
   ENC2701 to ENC2712; INV-218, INV-219, INV-220, INV-222, INV-228,
   INV-231.
+- **Residency and operators (phase 6).** Placement constraints decide
+  where governed work runs, and who may run the machines. The project's
+  constraints (`GET` and `POST /v1/projects/{id}/placement`: any member's
+  security admin tightens at once, loosening needs every member) and each
+  owner's own (`limits.placement` of its signed authorization) combine so
+  that adding a source only narrows what is admitted; prohibited locations
+  win. Locations come from a versioned table
+  (`encompute_verification::placement::locations`), never from whoever
+  declares them. Evaluators have an operator (the organization of their
+  service account; organizations may now hold evaluator accounts of their
+  own, which run only governed jobs that admit them) and a location with an
+  evidence level: self-declared (never accepted in production),
+  operator-declared (`POST /v1/evaluators/{id}/location-declarations` by a
+  security admin of the operator) or attested (the key broker takes the
+  Confidential Space zone from the token and judges it at every key
+  release, replacing the old refusal of any declared placement). The
+  planner records the admissible evaluators in the plan, refuses a plan
+  nothing admits, and keeps the evaluator's operator apart from source
+  owners and decryptors; submission, scheduling, start and release tickets
+  check again, and an evaluator that moved fails the job. `jobs run
+  --placement --evaluator-pins` lets a client refuse an evaluator outside
+  its own rules; `Objective::Minimize` (`plan --prefer minimize`) prefers
+  the plan that releases least. Another tenant's evaluator is admitted only
+  where its organization takes part in the project or a constraint names it;
+  an owner may pin the project's constraint digest in its authorization. Migrations 0017 and 0018; ENC2723 to
+  ENC2726; INV-233 and INV-234. Standard projects are unchanged.
 - **Two-part key release (phase 2).** A governed key broker releases a key
   only with an owner-signed authorization installed at the broker and a
   single-use, job-bound release ticket signed by the pinned control-plane
@@ -36,8 +62,8 @@ Work toward confidential cross-agency computation
   grants are unchanged); a `KeyRelease` receipt that never contains a
   key. Once a governance key is pinned, the plain release path refuses
   every key; releasing without a ticket needs a development broker with
-  `ENCOMPUTE_ENV=development`. Declared placement is refused until
-  attested placement exists.
+  `ENCOMPUTE_ENV=development`. Declared placement was refused until
+  attested placement existed (see residency, below).
 - **Broker state rollback guard.** A governed broker records its state
   generation and MAC in the organization's KMS (OpenBao or Vault KV-v2,
   compare-and-set) and refuses an older, forked or unchained state

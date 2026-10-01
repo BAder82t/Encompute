@@ -292,8 +292,11 @@ fn the_governance_codes_are_the_2701_block() {
         .map(|c| c.as_str())
         .filter(|s| s.starts_with("ENC27"))
         .collect();
-    // ENC2719-2726 belong to other phases of the milestone.
+    // The reserved ranges of the milestone: 2719..=2722 are the privacy-scope
+    // block of the parallel P5 work (P5 will add them here), 2723..=2726 are
+    // residency and operators (P6) and 2727..=2730 the evidence bundle (P8).
     let expected: Vec<String> = (2701..=2718)
+        .chain(2723..=2726)
         .chain(2727..=2730)
         .map(|n| format!("ENC{n}"))
         .collect();
@@ -316,6 +319,10 @@ fn the_governance_codes_are_the_2701_block() {
     assert_eq!(Code::GovernanceAuditorSeparation.as_str(), "ENC2716");
     assert_eq!(Code::GovernanceRevocationHead.as_str(), "ENC2717");
     assert_eq!(Code::GovernanceCheckpointWitness.as_str(), "ENC2718");
+    assert_eq!(Code::GovernanceLocationEvidence.as_str(), "ENC2723");
+    assert_eq!(Code::GovernancePlacementChange.as_str(), "ENC2724");
+    assert_eq!(Code::GovernanceOperatorSeparation.as_str(), "ENC2725");
+    assert_eq!(Code::GovernanceClientPlacement.as_str(), "ENC2726");
     assert_eq!(Code::GovernanceBundleMalformed.as_str(), "ENC2727");
     assert_eq!(Code::GovernanceBundleUnverified.as_str(), "ENC2728");
     assert_eq!(Code::GovernanceBundlePlaintext.as_str(), "ENC2729");

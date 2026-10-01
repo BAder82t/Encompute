@@ -519,6 +519,13 @@ impl W {
                 format!("/v1/projects/{p}/members/remove"),
                 Some(json!({"organization": OTHER})),
             ),
+            "/v1/projects/{}/placement" => (
+                format!("/v1/projects/{p}/placement"),
+                Some(
+                    json!({"constraints": {"allowed_regions": [{"jurisdiction": "DE"}]},
+                            "base_version": 0}),
+                ),
+            ),
             "/v1/organizations/{}/governance-keys" => (
                 format!("/v1/organizations/{BEN}/governance-keys"),
                 Some(json!({"public_key": pk(&key(14))})),
@@ -665,6 +672,10 @@ impl W {
                 format!("/v1/evaluators/{}/status", self.evaluator.id),
                 Some(json!({"status": "draining"})),
             ),
+            "/v1/evaluators/{}/location-declarations" => (
+                format!("/v1/evaluators/{}/location-declarations", self.evaluator.id),
+                Some(json!({"provider": "gcp", "region": "europe-west3"})),
+            ),
             "/v1/privacy/{}/events" => (
                 format!("/v1/privacy/{}/events", self.ben_asset),
                 Some(reserve("audit-1", 1_000_000)),
@@ -707,6 +718,7 @@ impl W {
                 )]
             }
             "/v1/projects/{}/purposes" => vec![format!("/v1/projects/{p}/purposes")],
+            "/v1/projects/{}/placement" => vec![format!("/v1/projects/{p}/placement")],
             "/v1/projects/{}/audit" => vec![
                 format!("/v1/projects/{p}/audit"),
                 format!("/v1/projects/{p}/audit?after=1&limit=2"),
@@ -790,6 +802,10 @@ const NOT_PROJECT_ROUTES: &[(&str, &str)] = &[
     ("/v1/jobs/{}/receipt", "the scheduled evaluator"),
     ("/v1/evaluators", "platform evaluators"),
     ("/v1/evaluators/{}/status", "platform evaluators"),
+    (
+        "/v1/evaluators/{}/location-declarations",
+        "the operator's security admins",
+    ),
     ("/v1/audit/checkpoints", "platform operators and auditors"),
     ("/v1/messages", "services"),
 ];

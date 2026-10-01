@@ -927,8 +927,13 @@ impl KeyBroker {
     ///    privacy policy, linkage, spec pin and releases;
     /// 6. `valid_from <= now < valid_until` on this broker's clock, and the
     ///    attestation was issued before `valid_until`;
-    /// 7. no placement is declared (attested placement cannot be verified
-    ///    yet, and missing evidence never passes);
+    /// 7. placement: the project's constraints (the document the binding's
+    ///    digest names, carried by the signed ticket) and the owner's own
+    ///    (in its authorization) hold for the zone the workload's
+    ///    attestation names; a workload whose attestation names no zone,
+    ///    or one the locations table does not know, is refused by any
+    ///    constraint with a location rule, and a digest with no document
+    ///    that matches it refuses everything (ENC2710);
     /// 8. the ticket is signed by the pinned control plane, consistent,
     ///    inside its window (skew toward denial), for this organization,
     ///    broker, version, authorization, evaluator and spec, a key-release
@@ -1082,15 +1087,17 @@ impl KeyBroker {
             (id, signed, key, revoked_at),
             now,
         )?;
-        // 7. Placement: declared placement needs attested evidence, which
-        // cannot be verified yet; missing evidence never passes.
-        if binding.placement_digest.is_some() {
-            return Err(err(
-                Code::GovernanceResidency,
-                "the execution declares placement constraints, and this broker cannot verify \
-                 attested placement yet: no key is released",
-            ));
-        }
+        // 7. Placement: the project's constraints (the document the
+        // binding's digest names) and the owner's own (in the authorization
+        // installed here) hold for the zone the workload's attestation
+        // names. Missing evidence never passes.
+        check_attested_placement(
+            &s.workload,
+            binding.placement_digest.as_deref(),
+            req.ticket.as_ref().and_then(|t| t.placement.as_ref()),
+            a.limits.placement.as_ref(),
+            a.limits.project_placement_digest.as_deref(),
+        )?;
         // 8. The ticket.
         match (&req.ticket, &self.governance) {
             (None, Some(g)) if !g.require_ticket => {}
@@ -1892,6 +1899,90 @@ impl KeyBroker {
         .sign(&self.grant_signer)?;
         Ok((grant, receipt))
     }
+}
+
+/// Check 7: the workload's attested location against the project's
+/// constraints (`digest` is the binding's; `document` the ticket's) and the
+/// owner's own. When the owner's authorization pins the project's digest
+/// (`limits.project_placement_digest`) the binding must name it, so a control
+/// plane cannot drop the project's constraints; otherwise they are enforced
+/// by the control plane alone. `Attested` is the evidence level of everything here, so
+/// `min_evidence` is always met; operators and evaluator IDs are not
+/// something a broker can see, and are enforced by the control plane that
+/// issues the ticket. Refused (ENC2710):
+/// - a digest the binding names with no document, or another document;
+/// - a location rule and no zone in the attestation, or a zone the table
+///   does not know;
+/// - the zone is outside an allowed region or inside a prohibited one.
+fn check_attested_placement(
+    workload: &encompute_attestation::VerifiedWorkload,
+    digest: Option<&str>,
+    document: Option<&encompute_verification::placement::PlacementConstraints>,
+    owner: Option<&encompute_verification::placement::PlacementConstraints>,
+    owner_pin: Option<&str>,
+) -> Result<()> {
+    use encompute_verification::placement::{LocationEvidence, Scope};
+    let residency = |m: String| err(Code::GovernanceResidency, m);
+    // The project's constraints the owner signed for: the binding must name
+    // exactly that digest. Without a pin the digest is the control plane's
+    // own choice, and the project's constraints are enforced by it alone.
+    if let Some(pin) = owner_pin {
+        if digest != Some(pin) {
+            return Err(residency(
+                "the project's placement constraints changed since the owner pinned them; the \
+                 owner must re-authorize: no key is released"
+                    .into(),
+            ));
+        }
+    }
+    let project =
+        match (digest, document) {
+            (None, _) => None,
+            (Some(d), Some(doc)) if doc.digest() == d => {
+                doc.check().map_err(|e| residency(e.message))?;
+                Some(doc)
+            }
+            (Some(_), _) => return Err(residency(
+                "the execution declares project placement constraints, and the release carries \
+                 no document the binding's digest names: no key is released"
+                    .into(),
+            )),
+        };
+    let constraints: Vec<&encompute_verification::placement::PlacementConstraints> = project
+        .into_iter()
+        .chain(owner)
+        .filter(|c| c.applies(&[Scope::Keys, Scope::Plaintext]))
+        .collect();
+    if constraints.is_empty() {
+        return Ok(());
+    }
+    // The workload's zone, in the table's terms. Not resolving it is not
+    // an error by itself: only a constraint that needs a location refuses.
+    let location = workload.location.as_ref().map(|l| l.resolve());
+    let known = match &location {
+        Some(Ok(l)) => Some(l),
+        _ => None,
+    };
+    for c in constraints {
+        let why = c.location_refusals(known, LocationEvidence::Attested);
+        if !why.is_empty() {
+            let fields: Vec<&str> = why.iter().map(|r| r.field()).collect();
+            return Err(residency(format!(
+                "the workload's attested location {} does not satisfy the placement constraints \
+                 ({}): no key is released",
+                match (&location, workload.location.as_ref()) {
+                    (Some(Ok(l)), _) => l.display(),
+                    (Some(Err(_)), Some(raw)) => format!(
+                        "{}/{} (unknown to the locations table)",
+                        raw.provider, raw.zone
+                    ),
+                    _ => "(none: the attestation names no zone)".to_owned(),
+                },
+                fields.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

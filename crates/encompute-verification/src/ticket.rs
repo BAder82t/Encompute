@@ -111,6 +111,15 @@ pub struct ReleaseTicket {
     /// The binding's placement digest, when it declares placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_digest: Option<String>,
+    /// The project's placement constraints that digest names. The broker
+    /// judges the workload's attested location against them; the digest is
+    /// in the binding the workload attested to, and must be this document's.
+    /// Which digest is the control plane's choice unless the owner's signed
+    /// authorization pins it (`limits.project_placement_digest`), which the
+    /// broker then requires: without that pin the project's constraints are
+    /// enforced by the control plane alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::placement::PlacementConstraints>,
     pub execution_spec: ExecutionSpec,
     pub binding: GovernanceBinding,
     pub not_before: u64,
@@ -258,6 +267,26 @@ impl ReleaseTicket {
         }
         if self.binding.placement_digest != self.placement_digest {
             return Err(refuse("the ticket's placement is not its binding's"));
+        }
+        match (&self.placement, &self.placement_digest) {
+            (Some(p), Some(d)) => {
+                p.check().map_err(|e| {
+                    refuse(format!("the ticket's placement constraints: {}", e.message))
+                })?;
+                if p.digest() != *d {
+                    return Err(refuse(
+                        "the ticket's placement constraints are not the ones its binding's \
+                         digest names",
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                return Err(refuse(
+                    "a ticket carries placement constraints only when its binding names their \
+                     digest",
+                ))
+            }
+            (None, _) => {}
         }
         match (self.kind, &self.recipient) {
             // An export is of a derived result, held by its custodian: the

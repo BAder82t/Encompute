@@ -426,6 +426,10 @@ impl Control {
                 )
             })?;
             g.check(&project)?;
+            // No key is released to an evaluator the job's placement does
+            // not admit now, or that is no longer the machine the grant
+            // recorded (ENC2710, ENC2725).
+            self.check_job_placement(t, id, &g.binding, Some(ctx.actor()), g.placement.as_ref())?;
             let at = now();
             if at >= grant.expires_at {
                 return Err(conflict("the job's grant expired"));
@@ -571,6 +575,20 @@ impl Control {
                 workload_or_recipient: receipt_key,
                 recipient: None,
                 placement_digest: g.binding.placement_digest.clone(),
+                // The constraints that digest names, so the owner's broker
+                // can judge the workload's attested location by them.
+                placement: match &g.binding.placement_digest {
+                    Some(d) => Some(
+                        crate::ops::placement::project_placement_by_digest(t, &project, d)?
+                            .ok_or_else(|| {
+                                Error::new(
+                                    Code::GovernanceResidency,
+                                    "the job's binding names project constraints the project never had",
+                                )
+                            })?,
+                    ),
+                    None => None,
+                },
                 execution_spec: spec,
                 binding: g.binding.clone(),
                 not_before: at,

@@ -23,6 +23,7 @@ fn context() -> PlanningContext {
             verified_execution: false,
         },
         infrastructure: Infrastructure {
+            evaluators: vec![],
             tees: vec![],
             key_broker: true,
             host_cloud: true,
@@ -39,6 +40,7 @@ fn context() -> PlanningContext {
         },
         training: None,
         custody: Vec::new(),
+        placement: None,
     }
 }
 

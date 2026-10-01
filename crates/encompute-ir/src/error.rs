@@ -194,6 +194,14 @@ pub enum Code {
     GovernanceRevocationHead,
     /// A checkpoint witness refused: it does not witness the control plane's stored checkpoint of the project at that size (another size, partition or root), so it cannot count towards it (ENC2718).
     GovernanceCheckpointWitness,
+    /// A location declaration or registration refused: the caller is not a person who is a security admin of the evaluator's operator organization, the location is not one the locations table knows (or its jurisdiction or zone is inconsistent), an attested location is not replaced by a declaration, or location evidence is stale or too weak for the claim (ENC2723).
+    GovernanceLocationEvidence,
+    /// A project's placement constraints were not changed: the constraints are invalid (an unknown region, an empty allow list), the change is not based on the current version, the project is not governed, or the change loosens them and not every member organization has proposed it yet (ENC2724).
+    GovernancePlacementChange,
+    /// Operator separation refused: every evaluator that could run the job is operated by a source owner or by an organization that holds a decryption key for the output, or a SecAgg coordinator is also a contributor (ENC2725).
+    GovernanceOperatorSeparation,
+    /// A client refused to send ciphertexts to an evaluator outside its own placement constraints: the evaluator it pinned is at a location, operated by an organization, or known by evidence the constraints do not admit, or the pin set says nothing about where it is (ENC2726).
+    GovernanceClientPlacement,
     /// A governance evidence bundle is malformed: an unknown format version, section or field, a section digest that does not match its manifest, a manifest or graph root that is not the content's, a missing section, or edited, reordered or omitted content (ENC2727).
     GovernanceBundleMalformed,
     /// A governance evidence bundle was refused for what it cannot prove: the exporter could not verify what it was about to write, a signature does not verify under the pinned key, or a pin is missing for a key the bundle's conclusion rests on (ENC2728).
@@ -286,6 +294,10 @@ impl Code {
             Code::GovernanceAuditorSeparation => "ENC2716",
             Code::GovernanceRevocationHead => "ENC2717",
             Code::GovernanceCheckpointWitness => "ENC2718",
+            Code::GovernanceLocationEvidence => "ENC2723",
+            Code::GovernancePlacementChange => "ENC2724",
+            Code::GovernanceOperatorSeparation => "ENC2725",
+            Code::GovernanceClientPlacement => "ENC2726",
             Code::GovernanceBundleMalformed => "ENC2727",
             Code::GovernanceBundleUnverified => "ENC2728",
             Code::GovernanceBundlePlaintext => "ENC2729",
@@ -296,7 +308,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 83] = [
+    pub const ALL: [Code; 87] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -376,6 +388,10 @@ impl Code {
         Code::GovernanceAuditorSeparation,
         Code::GovernanceRevocationHead,
         Code::GovernanceCheckpointWitness,
+        Code::GovernanceLocationEvidence,
+        Code::GovernancePlacementChange,
+        Code::GovernanceOperatorSeparation,
+        Code::GovernanceClientPlacement,
         Code::GovernanceBundleMalformed,
         Code::GovernanceBundleUnverified,
         Code::GovernanceBundlePlaintext,

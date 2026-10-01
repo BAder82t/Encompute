@@ -1137,6 +1137,9 @@ impl Control {
             workload_or_recipient: export_key,
             recipient: Some(recipient.to_owned()),
             placement_digest: j.binding.placement_digest.clone(),
+            // An export is not placed: the custodian's broker releases to
+            // a named recipient's key.
+            placement: None,
             execution_spec: spec,
             binding: j.binding.clone(),
             not_before: at,
