@@ -602,3 +602,30 @@ fn dp_receipts_require_bound_privacy_receipts() {
     let e = verify_aggregation_receipt(&t, &spec, None, Some(&other)).unwrap_err();
     assert_eq!(e.code, Code::PrivacyMechanism, "other aggregate: {e}");
 }
+
+/// An aggregate that declares no `max_sources_per_unit` is estimated at 1
+/// source per unit unscoped, with a warning, and at every participant for a
+/// governed project's scopes (as enforcement charges it).
+#[test]
+fn the_estimate_for_scopes_uses_every_participant_when_undeclared() {
+    let src = "encompute 0.1\nprogram p precision 0.001 purpose \"t\"\nparty \"m\" \"M\"\n\
+party \"a\" \"A\"\nparty \"b\" \"B\"\n\
+asset \"x\" dataset owners [\"a\"] readers [\"m\"] purposes [\"t\"] release aggregate_only privacy unit \"patient\" epsilon 3.0 delta 1e-6\n\
+asset \"y\" dataset owners [\"b\"] readers [\"m\"] purposes [\"t\"] release aggregate_only privacy unit \"patient\" epsilon 3.0 delta 1e-6\n\
+%0 = input \"i\" [-1.0, 1.0] asset \"x\" : secret vector<4>\n\
+%1 = input \"j\" [-1.0, 1.0] asset \"y\" : secret vector<4>\n\
+%2 = add %0, %1 : secret vector<4>\noutput \"o\" = %2 to \"m\"\n\
+aggregate \"o\" sum minimum 2 colluding 0 clip [-1.0, 1.0] scale 256 modulus 40 dp discrete_gaussian clip_norm 1.0 noise_multiplier 20.0\n";
+    let m = Model::compile(parse(src).unwrap()).unwrap();
+    let plain = m.privacy_projection(1).unwrap();
+    let scoped = m.privacy_projection_in(1, true).unwrap();
+    assert!(
+        scoped[0].epsilon > plain[0].epsilon,
+        "{} {}",
+        scoped[0].epsilon,
+        plain[0].epsilon
+    );
+    let text = m.privacy_explain().unwrap().unwrap();
+    assert!(text.contains("WARNING"), "{text}");
+    assert!(text.contains("governed project's scope (k = 2)"), "{text}");
+}

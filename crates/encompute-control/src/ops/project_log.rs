@@ -75,6 +75,17 @@ impl RateLimit {
         if w.len() > 10_000 {
             w.retain(|_, (t, _)| now.duration_since(*t).as_secs() < 60);
         }
+        // Keys can be chosen by callers (an ID in a path): the table is
+        // bounded, and a full one refuses new keys rather than growing.
+        if w.len() >= 100_000 && !w.contains_key(caller) {
+            return Err(Error::new(
+                Code::Scheduling,
+                format!(
+                    "too many callers of {} requests at once: retry shortly",
+                    self.what
+                ),
+            ));
+        }
         let e = w.entry(caller.to_owned()).or_insert((now, 0));
         if now.duration_since(e.0).as_secs() >= 60 {
             *e = (now, 0);

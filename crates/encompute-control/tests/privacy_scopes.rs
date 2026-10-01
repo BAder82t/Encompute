@@ -196,8 +196,10 @@ fn world() -> Option<G> {
         },
     };
     g.main = g.new_project("surveillance", PURPOSE);
-    // Each region's population: the hard cap on its series.
+    // Each region's population: the hard cap on its series (which must be
+    // one of its registered series), proposed and approved by two people.
     for org in [A, B] {
+        g.version(g.region(org), "2027-w00");
         let r = g.region(org);
         let v = g.t.ok(
             &r.sec1,
@@ -206,6 +208,13 @@ fn world() -> Option<G> {
             Some(json!({"organization": r.org, "series": SERIES, "budget": budget_json("1.0")})),
         );
         let pop = id(&v);
+        assert_eq!(v["status"], "proposed");
+        g.t.ok(
+            &r.sec2,
+            "POST",
+            &format!("/v1/privacy/populations/{pop}/approve"),
+            None,
+        );
         if org == A {
             g.a.population = pop;
         } else {
@@ -424,6 +433,19 @@ impl G {
         programs: &[&str],
         pin: Option<&str>,
     ) -> String {
+        self.authorize_full(proj, r, v, programs, pin, None)
+    }
+
+    /// [`Self::authorize_in`], also pinning `limits.max_sources_per_unit`.
+    fn authorize_full(
+        &self,
+        proj: &Proj,
+        r: &Region,
+        v: &Version,
+        programs: &[&str],
+        pin: Option<&str>,
+        sources: Option<u32>,
+    ) -> String {
         let specs: Vec<ExecutionSpec> = programs.iter().map(|p| base_spec(p)).collect();
         let program = if specs.len() == 1 {
             ProgramRef::Program {
@@ -454,7 +476,10 @@ impl G {
             recipients: [MIN.to_string()].into(),
             privacy_scope_id: pin.map(str::to_owned),
             execution_spec_ids: None,
-            limits: Default::default(),
+            limits: encompute_trust::authz::AuthorizationLimits {
+                max_sources_per_unit: sources,
+                ..Default::default()
+            },
             per_job_four_eyes: false,
             valid_from: now() - 30,
             valid_until: now() + 1800,
@@ -1535,7 +1560,9 @@ fn restored_scope_is_frozen() {
         &svc,
         "POST",
         &format!("/v1/privacy/scopes/{sa}/events"),
-        Some(commit_for("anything")),
+        Some(commit_for(
+            reported(&g, &sa, &job1)["event_id"].as_str().unwrap(),
+        )),
     );
     assert_eq!((s, code(&r)), (500, "ENC2202"), "{r}");
     // The next start refuses the database.
@@ -1840,4 +1867,222 @@ fn a_scope_of_another_purpose_is_not_the_jobs() {
         assert_eq!(G::reserves(&g.scope_ledger(s)), 0);
     }
     assert_eq!(G::reserves(&g.pop_ledger(&g.a)), 0);
+}
+
+// --- follow-ups: populations, declarations, accounting, anchoring ------------------------------
+
+#[test]
+fn a_population_needs_four_eyes_a_known_series_and_may_be_superseded() {
+    let Some(g) = world() else { return };
+    let r = &g.a;
+    let propose = |who: &As, series: &str, eps: &str, sup: Option<&str>| {
+        g.t.call(
+            who,
+            "POST",
+            "/v1/privacy/populations",
+            Some(json!({"organization": A, "series": series, "budget": budget_json(eps), "supersedes": sup})),
+        )
+    };
+    // A series the organization never registered: refused.
+    refused(propose(&r.sec1, "no-such-series", "1.0", None), "ENC2720");
+    // One population per series: another must name the active one.
+    refused(propose(&r.sec1, SERIES, "2.0", None), "ENC2720");
+    refused(propose(&r.sec1, SERIES, "2.0", Some("pop_nope")), "ENC2720");
+    // A superseding population: proposed, never approved by its proposer.
+    let (s, v) = propose(&r.sec1, SERIES, "0.8", Some(&r.population));
+    assert_eq!(s, 201, "{v}");
+    let new = id(&v);
+    let approve = |who: &As| {
+        g.t.call(
+            who,
+            "POST",
+            &format!("/v1/privacy/populations/{new}/approve"),
+            None,
+        )
+    };
+    refused(approve(&r.sec1), "ENC2707");
+    refused(approve(&r.auditor), "ENC2602");
+    refused(approve(&g.b.sec1), "ENC2603");
+    // Spend something under the old one first.
+    let _ = (g.scope(r, "1.0", None), g.scope(&g.b, "1.0", None));
+    let (v1, p1) = g.week("2027-w01", DP);
+    let job1 = id(&g.job(&v1, &p1, "k1").1);
+    assert_eq!(g.start(&job1).0, 200);
+    let old_spent = G::reserves(&g.pop_ledger(r));
+    assert_eq!(approve(&r.sec2).0, 200);
+    let old = g.t.ok(
+        &r.owner,
+        "GET",
+        &format!("/v1/privacy/populations/{}", r.population),
+        None,
+    );
+    assert_eq!(old["superseded_by"], new);
+    // The old one keeps its history; new scopes belong to the new one.
+    assert_eq!(G::reserves(&g.pop_ledger(r)), old_spent);
+    refused(g.try_scope(&g.main, r, "0.5", Some("another")), "ENC2720");
+    // Jobs now resolve the new population: with no scope of it yet, none runs.
+    let (v2, p2) = g.week("2027-w02", DP);
+    let job2 = id(&g.job(&v2, &p2, "k2").1);
+    assert_eq!(g.state(&job2), "failed");
+    assert_eq!(g.failure(&job2), "ENC2719");
+}
+
+#[test]
+fn a_declaration_below_the_participants_needs_every_owners_signature() {
+    let Some(g) = world() else { return };
+    let (sa, _sb) = (g.scope(&g.a, "1.0", None), g.scope(&g.b, "1.0", None));
+    let low = format!("{DP} max_sources_per_unit 1");
+    // Two participants, one source per unit declared, owners did not sign it.
+    let (v, prog) = g.week("2027-w01", &low);
+    let job = id(&g.job(&v, &prog, "k1").1);
+    assert_eq!(g.state(&job), "failed");
+    assert_eq!(g.failure(&job), "ENC2721");
+    // Only one owner signed it: still refused.
+    let va = g.version(&g.a, "2027-w02");
+    let vb = g.version(&g.b, "2027-w02");
+    let prog2 = program([&va.0, &vb.0], &low);
+    g.authorize_full(&g.main, &g.a, &va, &[&prog2], None, Some(1));
+    g.authorize_full(&g.main, &g.b, &vb, &[&prog2], None, None);
+    let job = id(&g.job(&[va, vb], &prog2, "k2").1);
+    assert_eq!(g.failure(&job), "ENC2721");
+    // Both signed the lower number: runs, charged for exactly one source.
+    let va = g.version(&g.a, "2027-w03");
+    let vb = g.version(&g.b, "2027-w03");
+    let prog3 = program([&va.0, &vb.0], &low);
+    g.authorize_full(&g.main, &g.a, &va, &[&prog3], None, Some(1));
+    g.authorize_full(&g.main, &g.b, &vb, &[&prog3], None, Some(1));
+    let job = id(&g.job(&[va, vb], &prog3, "k3").1);
+    assert_eq!(g.state(&job), "queued");
+    assert_eq!(g.start(&job).0, 200);
+    let l = g.scope_ledger(&sa);
+    let encompute_privacy::PrivacyEvent::Reserve {
+        sensitivity,
+        scope: Some(r),
+        ..
+    } = &l.entries[0].event
+    else {
+        panic!()
+    };
+    assert_eq!((*sensitivity, r.max_sources_per_unit), (2 * 4096 + 2, 1));
+}
+
+#[test]
+fn two_authorizations_that_pin_different_scopes_are_refused() {
+    let Some(g) = world() else { return };
+    let (any_a, any_b) = (g.scope(&g.a, "1.0", None), g.scope(&g.b, "1.0", None));
+    let other = g.scope(&g.a, "0.5", Some(&"22".repeat(32)));
+    let va = g.version(&g.a, "2027-w01");
+    let vb = g.version(&g.b, "2027-w01");
+    let prog = program([&va.0, &vb.0], DP);
+    g.authorize_in(&g.main, &g.a, &va, &[&prog], Some(&any_a));
+    g.authorize_in(&g.main, &g.a, &va, &[&prog], Some(&other));
+    g.authorize_in(&g.main, &g.b, &vb, &[&prog], Some(&any_b));
+    let job = id(&g.job(&[va, vb], &prog, "k1").1);
+    assert_eq!(g.state(&job), "failed");
+    assert_eq!(g.failure(&job), "ENC2719");
+}
+
+#[test]
+fn a_succeeded_job_needs_its_release_accounted() {
+    let Some(g) = world() else { return };
+    let (sa, sb) = (g.scope(&g.a, "1.0", None), g.scope(&g.b, "1.0", None));
+    let (v, prog) = g.week("2027-w01", DP);
+    let job = id(&g.job(&v, &prog, "k1").1);
+    assert_eq!(g.start(&job).0, 200);
+    let unaccounted = |g: &G| {
+        let c = &g.t.control;
+        c.db.tx(|t| c.unaccounted_reservations(t, &job)).unwrap()
+    };
+    let m = unaccounted(&g).expect("reserved but never reported committed");
+    assert!(m.contains("release not accounted"), "{m}");
+    // The coordinators report each commit; then it is accounted.
+    for scope in [&sa, &sb] {
+        let svc = g.secagg_spender(scope);
+        let e = reported(&g, scope, &job)["event_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (s, r) = g.t.call(
+            &svc,
+            "POST",
+            &format!("/v1/privacy/scopes/{scope}/events"),
+            Some(json!({"kind": "commit", "event_id": e, "output_commitment": "cd".repeat(32)})),
+        );
+        assert_eq!(s, 200, "{r}");
+    }
+    assert_eq!(unaccounted(&g), None);
+    // A commit of an event no job reserved in this scope is refused.
+    refused(
+        g.t.call(
+            &g.secagg_spender(&sa),
+            "POST",
+            &format!("/v1/privacy/scopes/{sa}/events"),
+            Some(json!({"kind": "commit", "event_id": "ff".repeat(32), "output_commitment": "cd".repeat(32)})),
+        ),
+        "ENC2719",
+    );
+}
+
+#[test]
+fn a_start_whose_anchor_failed_is_retried_and_swept() {
+    let Some(g) = world() else { return };
+    let (sa, _sb) = (g.scope(&g.a, "1.0", None), g.scope(&g.b, "1.0", None));
+    let (v, prog) = g.week("2027-w01", DP);
+    let job = id(&g.job(&v, &prog, "k1").1);
+    let (t2, fail) = g.t.env0.start_flaky();
+    let call = |t: &T, j: &str| {
+        t.call(
+            &g.evaluator.service,
+            "POST",
+            &format!("/v1/jobs/{j}/start"),
+            None,
+        )
+    };
+    let arm = |on: bool| fail.store(on, std::sync::atomic::Ordering::SeqCst);
+    // The reservation commits, then the anchor store fails: the call fails,
+    // the budget is reserved and not yet checkpointed.
+    arm(true);
+    let (s, _) = call(&t2, &job);
+    assert!(s >= 400, "{s}");
+    assert_eq!(G::reserves(&g.scope_ledger(&sa)), 1);
+    let key = format!("scope:{sa}");
+    assert_eq!(
+        g.t.control
+            .ledger_floor(&key)
+            .unwrap()
+            .map(|c| c.seq)
+            .unwrap_or(0),
+        0
+    );
+    // The store is back: the same evaluator starts again, idempotently: the
+    // ledgers are anchored, nothing is charged twice, and the answer is OK.
+    arm(false);
+    assert_eq!(call(&t2, &job).0, 200);
+    assert_eq!(G::reserves(&g.scope_ledger(&sa)), 1);
+    let cp = g.scope_ledger(&sa).checkpoint().unwrap();
+    assert_eq!(floor(&g, &key), Some((cp.seq, cp.root)));
+    // Once anchored, a start is a replay again.
+    assert_eq!(call(&t2, &job).0, 409);
+    // The background sweep anchors what a failed call left behind.
+    let (v2, prog2) = g.week("2027-w02", DP);
+    let job2 = id(&g.job(&v2, &prog2, "k2").1);
+    arm(true);
+    assert!(call(&t2, &job2).0 >= 400);
+    arm(false);
+    assert!(t2.control.anchor_pending_ledgers().unwrap() >= 2);
+    let cp = g.scope_ledger(&sa).checkpoint().unwrap();
+    assert_eq!(floor(&g, &key), Some((cp.seq, cp.root)));
+    assert_eq!(t2.control.anchor_pending_ledgers().unwrap(), 0);
+}
+
+#[test]
+fn a_project_scope_list_is_rate_limited() {
+    let Some(g) = world() else { return };
+    let _ = g.scope(&g.a, "1.0", None);
+    g.t.control.scope_limit.set(3);
+    let url = format!("/v1/projects/{}/privacy-scopes", g.main.id);
+    for _ in 0..3 {
+        assert_eq!(g.t.call(&g.dev, "GET", &url, None).0, 200);
+    }
+    assert_eq!(g.t.call(&g.dev, "GET", &url, None).0, 503);
 }

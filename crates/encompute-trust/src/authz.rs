@@ -309,6 +309,14 @@ pub struct AuthorizationLimits {
     /// Skipped when absent, so existing AuthorizationIds are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_outputs_per_job: Option<u64>,
+    /// For a differential-privacy aggregate: the number of sources one
+    /// privacy unit may span that the owner accepts being charged for. In a
+    /// governed project a program that declares fewer than its participants
+    /// runs only if every owner's authorization pins that declared value
+    /// (otherwise it is charged for every participant). Skipped when absent,
+    /// so existing AuthorizationIds are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sources_per_unit: Option<u32>,
 }
 
 /// Classes whose ceiling admits boolean-only releases (a boolean or a

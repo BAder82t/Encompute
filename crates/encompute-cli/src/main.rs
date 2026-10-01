@@ -407,6 +407,11 @@ enum PrivacyCmd {
         /// each budget, before anything runs; exits 1 if over budget.
         #[arg(long)]
         rounds: Option<u64>,
+        /// Estimate for a governed project's scopes: an aggregate that
+        /// declares no `max_sources_per_unit` is charged for every
+        /// participant, as enforcement does.
+        #[arg(long)]
+        scoped: bool,
     },
     /// The confidentiality graph (Graphviz DOT).
     Graph {
@@ -742,9 +747,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     model,
                     ledger,
                     rounds: Some(rounds),
+                    scoped,
                 } => {
                     let m = load(&model)?;
-                    let rows = m.privacy_projection(rounds)?;
+                    let rows = m.privacy_projection_in(rounds, scoped)?;
                     let mut out = m.privacy_explain()?.unwrap_or_default();
                     if let Some(dir) = ledger {
                         out.push('\n');

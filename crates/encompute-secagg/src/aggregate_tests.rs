@@ -136,6 +136,15 @@ fn round(
     coord: &mut RoundCoordinator,
     tamper: impl FnOnce(&mut [RoundParticipant], &mut RoundCoordinator),
 ) -> Result<(AggregateAsset, AggregationReceipt)> {
+    round_with(coord, None, tamper)
+}
+
+/// [`round`] with every party holding stratum `labels`.
+fn round_with(
+    coord: &mut RoundCoordinator,
+    labels: Option<Vec<String>>,
+    tamper: impl FnOnce(&mut [RoundParticipant], &mut RoundCoordinator),
+) -> Result<(AggregateAsset, AggregationReceipt)> {
     let approved = coord.spec.clone();
     let shown = coord.ledger_views()?;
     let mut ps = vec![];
@@ -148,6 +157,7 @@ fn round(
             key(i),
             &[0.25, -0.5, 0.125, 0.0],
             JoinOptions {
+                labels: labels.clone(),
                 all_ledgers: Some(&shown),
                 ..JoinOptions::default()
             },
@@ -535,13 +545,26 @@ fn layout_mismatch_refused() {
     // The layout must list as many strata as the aggregate has values.
     let e = try_plan(" layout [\"a\", \"b\"]").unwrap_err();
     assert_eq!(e.code, Code::AggregationPlan, "{e}");
-    // A party whose strata differ names another layout in its signed
-    // metadata: the coordinator refuses its contribution (ENC2722).
+    // A party derives its layout from ITS OWN labels: labels that digest to
+    // another layout (or none at all) are refused at join (ENC2722), never
+    // stamped with the plan's digest.
     let d = dir("layout-mismatch");
-    let mut coord = open(scoped(p, &d, 3.0, 3.0), &d, 1).unwrap();
-    let e = round(&mut coord, |ps, _| {
-        ps[1].spec.plan.layout_id =
-            Some(layout_id(&["5-17", "under-5", "18-64", "65-plus"].map(String::from)).unwrap());
+    let scoped_plan = scoped(p, &d, 3.0, 3.0);
+    let mut coord = open(scoped_plan.clone(), &d, 1).unwrap();
+    let ok_labels: Vec<String> = ["under-5", "5-17", "18-64", "65-plus"]
+        .map(String::from)
+        .to_vec();
+    let swapped: Vec<String> = ["5-17", "under-5", "18-64", "65-plus"]
+        .map(String::from)
+        .to_vec();
+    for labels in [Some(swapped.clone()), None] {
+        let e = round_with(&mut coord, labels, |_, _| {}).expect_err("joined with other strata");
+        assert_eq!(e.code, Code::GovernanceAggregateLayout, "{e}");
+    }
+    // And a coordinator still refuses a contribution whose signed metadata
+    // names another layout (a party that skipped its own check).
+    let e = round_with(&mut coord, Some(ok_labels), |ps, _| {
+        ps[1].layout_id = Some(layout_id(&swapped).unwrap());
     })
     .expect_err("a mismatched layout was summed");
     assert_eq!(e.code, Code::GovernanceAggregateLayout, "{e}");
@@ -556,7 +579,7 @@ fn layout_mismatch_refused() {
         3.0,
     );
     let mut coord = open(p, &d, 1).unwrap();
-    let (_asset, receipt) = round(&mut coord, |_, _| {}).unwrap();
+    let (_asset, receipt) = round_with(&mut coord, Some(layout.to_vec()), |_, _| {}).unwrap();
     let want = layout_id(&layout).unwrap();
     assert_eq!(receipt.manifest.metadata.len(), 3);
     assert!(receipt
@@ -570,4 +593,35 @@ fn layout_mismatch_refused() {
     let mut forged = spec.clone();
     forged.plan.layout_id = Some(layout_id(&["x".to_owned()]).unwrap());
     assert!(verify_aggregation_receipt(&receipt, &forged, None, None).is_err());
+}
+
+/// The declarations the owners approve are hashed: a changed
+/// `max_sources_per_unit` or layout changes the PolicyId (so the
+/// authorization, which names it, no longer covers the program) and the
+/// plan's ID, and the plan's bound is enforced like the IR's.
+#[test]
+fn a_changed_declaration_changes_the_ids_owners_approve() {
+    let pid = |extra: &str| {
+        let prog = encompute_ir::parse(&text(extra)).unwrap();
+        encompute_verification::PolicyId::of(prog.confidentiality().unwrap()).hex()
+    };
+    let base = pid("");
+    let two = pid(" max_sources_per_unit 2");
+    let three = pid(" max_sources_per_unit 3");
+    assert!(base != two && two != three && base != three);
+    assert_ne!(pid(" layout [\"a\", \"b\"]"), pid(" layout [\"b\", \"a\"]"));
+    assert_ne!(
+        plan("").id().unwrap(),
+        plan(" max_sources_per_unit 2").id().unwrap()
+    );
+    // A plan edited outside the IR (a --scoping or plan file) is held to the
+    // same bound: the spec is invalid.
+    let mut p = plan("");
+    p.max_sources_per_unit = Some(encompute_ir::confidentiality::MAX_SOURCES_PER_UNIT + 1);
+    assert_eq!(
+        AggregationSpec::new(p, identities())
+            .expect_err("accepted")
+            .code,
+        Code::AggregationPlan
+    );
 }

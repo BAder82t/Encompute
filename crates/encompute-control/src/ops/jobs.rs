@@ -2535,6 +2535,18 @@ impl Control {
                 return Err(not_found("job", id));
             }
             job_project(t, ctx, &j)?;
+            // A start whose reservations committed but were not yet
+            // anchored (the anchor store failed after the commit) is retried
+            // by the same evaluator: it anchors them and is acknowledged. A
+            // job whose ledgers are all anchored does not start again.
+            if j.state == JobState::Running && j.governance.is_some() {
+                let behind = self.unanchored_job_ledgers(t, &j.id)?;
+                if !behind.is_empty() {
+                    reserved.borrow_mut().extend(behind);
+                    let g = j.grant.clone().ok_or_else(|| conflict("no grant"))?;
+                    return Ok(Ok(json!({"id": id, "state": "running", "grant": g})));
+                }
+            }
             if j.state != JobState::Queued {
                 return Err(conflict(format!(
                     "job {id} is {}: it does not start (again)",
@@ -2791,8 +2803,12 @@ impl Control {
                 "output_commitment": r.output_commitment,
                 "key_id": r.key_id,
             });
+            // A governed job that reserved differential-privacy releases
+            // succeeds only if each was reported committed: a release that
+            // ran but was never accounted is a failure, not a success.
+            let unaccounted = self.unaccounted_reservations(t, id)?;
             match (check, evaluator_receipt_differs) {
-                (Ok(_), false) => {
+                (Ok(_), false) if unaccounted.is_none() => {
                     t.execute(
                         "UPDATE jobs SET receipt = $2, evidence = $3 WHERE id = $1",
                         &[&id, &r.receipt, &evidence],
@@ -2835,8 +2851,11 @@ impl Control {
                 (check, _) => {
                     let why = match check {
                         Err(e) => e.message,
-                        Ok(_) => "the client's receipt differs from the one the evaluator reported"
-                            .into(),
+                        Ok(_) if evaluator_receipt_differs => {
+                            "the client's receipt differs from the one the evaluator reported"
+                                .into()
+                        }
+                        Ok(_) => unaccounted.clone().unwrap_or_default(),
                     };
                     t.execute(
                         "UPDATE jobs SET evidence = $2 WHERE id = $1",

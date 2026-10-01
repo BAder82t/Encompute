@@ -673,6 +673,9 @@ pub struct CreatePopulation {
     pub organization: String,
     pub series: String,
     pub budget: encompute_ir::confidentiality::PrivacyBudget,
+    /// The active population of the series this one replaces for new scopes.
+    #[serde(default)]
+    pub supersedes: Option<String>,
 }
 
 /// A proposed privacy scope: a share of a population for one project,

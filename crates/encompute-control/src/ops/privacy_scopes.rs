@@ -177,76 +177,182 @@ fn totals(view: &LedgerView) -> Result<Value> {
 impl Control {
     // --- populations ---------------------------------------------------------------
 
-    /// A person of `organization` creates the privacy population of one of
+    /// A person of `organization` proposes the privacy population of one of
     /// its dataset series: the cap on everything released from any version
-    /// of it, in any project, at one privacy unit. Allocated once; it is
-    /// never raised, and a new version or project never resets it.
+    /// of it, in any project, at one privacy unit. A different security
+    /// admin approves it ([`Self::approve_population`]). The series must be
+    /// one of the organization's registered assets' (ENC2720). One is
+    /// active per series: another may only **supersede** it (`supersedes`),
+    /// for new scopes: the old one keeps its history and its spending.
     pub fn create_population(&self, ctx: &Ctx, r: CreatePopulation) -> Result<Value> {
         self.scope_limit
             .hit(&format!("population:{}", ctx.actor()))?;
         let id = new_id("pop");
-        let key = population_key(&id);
-        let genesis = population_genesis(&id, &r.organization, &r.series, r.budget.clone())?;
+        // Well formed now (the genesis is written at approval).
+        population_genesis(&id, &r.organization, &r.series, r.budget.clone())?;
         self.tx_anchored(|t| {
             deny_auditor_in(t, &ctx.principal, &r.organization)?;
             require_human(
                 &ctx.principal,
                 &r.organization,
                 &[Role::SecurityAdmin, Role::DataOwner],
-                "creating a privacy population",
+                "proposing a privacy population",
             )?;
+            let known = t
+                .query_opt(
+                    "SELECT 1 FROM assets WHERE organization_id = $1 AND series = $2 LIMIT 1",
+                    &[&r.organization, &r.series],
+                )
+                .map_err(db_err)?;
+            if known.is_none() {
+                return Err(allocation(format!(
+                    "{} has registered no dataset version of series {}: a population accounts for a series of its own assets",
+                    r.organization, r.series
+                )));
+            }
+            let active: Option<String> = t
+                .query_opt(
+                    "SELECT id FROM privacy_populations
+                      WHERE organization_id = $1 AND series = $2 AND status = 'active' AND superseded_by IS NULL",
+                    &[&r.organization, &r.series],
+                )
+                .map_err(db_err)?
+                .map(|x| x.get(0));
+            match (&active, &r.supersedes) {
+                (Some(a), None) => {
+                    return Err(allocation(format!(
+                        "{} already has privacy population {a} for series {}: a cap is allocated once; a new population must name it in `supersedes`, and then serves new scopes only",
+                        r.organization, r.series
+                    )))
+                }
+                (Some(a), Some(s)) if a != s => {
+                    return Err(allocation(format!("`supersedes` names {s}, not the series' active population {a}")))
+                }
+                (None, Some(s)) => {
+                    return Err(allocation(format!("population {s} is not the series' active population")))
+                }
+                _ => {}
+            }
             t.execute(
-                "INSERT INTO privacy_ledgers (asset_id, organization_id, genesis) VALUES ($1, $2, $3)",
+                "INSERT INTO privacy_populations (id, organization_id, series, status, unit, epsilon, delta, supersedes, proposed_by)
+                 VALUES ($1, $2, $3, 'proposed', $4, $5, $6, $7, $8)",
                 &[
-                    &key,
+                    &id,
                     &r.organization,
-                    &serde_json::to_value(&genesis).expect("serializable"),
+                    &r.series,
+                    &r.budget.unit.name(),
+                    &r.budget.epsilon,
+                    &r.budget.delta,
+                    &r.supersedes,
+                    &ctx.actor(),
                 ],
-            )
-            .map_err(db_err)?;
-            t.execute(
-                "INSERT INTO privacy_populations (id, organization_id, series, ledger_key, created_by)
-                 VALUES ($1, $2, $3, $4, $5)",
-                &[&id, &r.organization, &r.series, &key, &ctx.actor()],
             )
             .map_err(|e| {
                 if unique_violation(&e) {
-                    allocation(format!(
-                        "{} already has a privacy population for series {}: a cap is allocated once, and a new version never resets it",
-                        r.organization, r.series
-                    ))
+                    allocation("an active population exists for this series")
                 } else {
                     db_err(e)
                 }
             })?;
-            govlog::append(
-                t,
-                govlog::Draft::new(
-                    govlog::for_org(Some(&r.organization)),
-                    extra_kind::POPULATION_CREATED,
-                    &id,
-                )
-                .org(&r.organization),
-            )?;
             audit::append(
                 t,
-                ctx.draft("privacy.population.created", "population", &id, Outcome::Succeeded)
+                ctx.draft("privacy.population.proposed", "population", &id, Outcome::Succeeded)
                     .org(&r.organization)
                     .r#ref("series", r.series.clone())
                     .r#ref("unit", r.budget.unit.to_string()),
             )?;
             Ok(())
         })?;
-        // Its first checkpoint (entry count 0): from now on a database that
-        // lost it is refused.
-        self.anchor_ledger(&key)?;
         Ok(json!({
-            "id": id,
-            "organization": r.organization,
-            "series": r.series,
-            "budget": r.budget,
+            "id": id, "organization": r.organization, "series": r.series,
+            "budget": r.budget, "supersedes": r.supersedes, "status": "proposed",
             "rho_cap": encompute_privacy::accountant::rho_cap(&r.budget)?,
         }))
+    }
+
+    /// A different security admin of the owning organization approves the
+    /// population: its ledger is created and checkpointed, it supersedes the
+    /// one it names (which keeps its history and serves no new scope), and
+    /// the event is anchored before this returns.
+    pub fn approve_population(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        self.scope_limit
+            .hit(&format!("population:{}", ctx.actor()))?;
+        let key = population_key(id);
+        let out = self.tx_anchored(|t| {
+            let row = t
+                .query_opt(
+                    "SELECT organization_id, series, status, unit, epsilon, delta, supersedes, proposed_by
+                       FROM privacy_populations WHERE id = $1 FOR UPDATE",
+                    &[&id],
+                )
+                .map_err(db_err)?
+                .filter(|r| ctx.principal.member_of(&r.get::<_, String>(0)))
+                .ok_or_else(|| not_found("privacy population", id))?;
+            let (org, series, status, unit, eps, delta, supersedes, proposer): (
+                String, String, String, String, f64, f64, Option<String>, String,
+            ) = (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4), row.get(5), row.get(6), row.get(7));
+            deny_auditor_in(t, &ctx.principal, &org)?;
+            require_human(&ctx.principal, &org, &[Role::SecurityAdmin], "approving a privacy population")?;
+            require_other_person(ctx.actor(), &[proposer.as_str()], "approving a privacy population")?;
+            if status != "proposed" {
+                return Err(conflict(format!("privacy population {id} is {status}")));
+            }
+            let budget = PrivacyBudget {
+                unit: encompute_ir::confidentiality::PrivacyUnit::parse(&unit)?,
+                epsilon: eps,
+                delta,
+            };
+            let genesis = population_genesis(id, &org, &series, budget.clone())?;
+            if let Some(old) = &supersedes {
+                t.execute(
+                    "UPDATE privacy_populations SET superseded_by = $2 WHERE id = $1 AND superseded_by IS NULL",
+                    &[old, &id],
+                )
+                .map_err(db_err)?;
+            }
+            t.execute(
+                "INSERT INTO privacy_ledgers (asset_id, organization_id, genesis) VALUES ($1, $2, $3)",
+                &[&key, &org, &serde_json::to_value(&genesis).expect("serializable")],
+            )
+            .map_err(db_err)?;
+            t.execute(
+                "UPDATE privacy_populations SET status = 'active', approved_by = $2, approved_at = now(), ledger_key = $3
+                  WHERE id = $1",
+                &[&id, &ctx.actor(), &key],
+            )
+            .map_err(|e| {
+                if unique_violation(&e) {
+                    allocation("an active population exists for this series")
+                } else {
+                    db_err(e)
+                }
+            })?;
+            let mut d = govlog::Draft::new(
+                govlog::for_org(Some(&org)),
+                extra_kind::POPULATION_CREATED,
+                id,
+            )
+            .org(&org);
+            if let Some(o) = &supersedes {
+                d = d.r#ref("supersedes", o.clone());
+            }
+            govlog::append(t, d)?;
+            audit::append(
+                t,
+                ctx.draft("privacy.population.created", "population", id, Outcome::Succeeded)
+                    .org(&org)
+                    .r#ref("series", series.clone())
+                    .r#ref("unit", unit.clone()),
+            )?;
+            Ok(json!({
+                "id": id, "organization": org, "series": series, "budget": budget,
+                "supersedes": supersedes, "status": "active",
+                "rho_cap": encompute_privacy::accountant::rho_cap(&budget)?,
+            }))
+        })?;
+        // Its first checkpoint (entry count 0).
+        self.anchor_ledger(&key)?;
+        Ok(out)
     }
 
     /// A population, for its owner: its cap, what it has spent across every
@@ -255,12 +361,27 @@ impl Control {
         let mut c = self.db.conn()?;
         let row = c
             .query_opt(
-                "SELECT organization_id, series, ledger_key FROM privacy_populations WHERE id = $1",
+                "SELECT organization_id, series, ledger_key, status, superseded_by, supersedes
+                   FROM privacy_populations WHERE id = $1",
                 &[&id],
             )
             .map_err(db_err)?
             .ok_or_else(|| not_found("privacy population", id))?;
-        let (org, series, key): (String, String, String) = (row.get(0), row.get(1), row.get(2));
+        let (org, series, key, status, superseded_by, supersedes): (
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = (
+            row.get(0),
+            row.get(1),
+            row.get(2),
+            row.get(3),
+            row.get(4),
+            row.get(5),
+        );
         if !ctx.principal.member_of(&org) {
             return Err(not_found("privacy population", id));
         }
@@ -270,9 +391,6 @@ impl Control {
             LEDGER_READERS,
             "reading a privacy population",
         )?;
-        let view = load_ledger(&mut *c, &key)?
-            .ok_or_else(|| not_found("privacy population ledger", id))?;
-        view.verify()?;
         let scopes: Vec<String> = c
             .query(
                 "SELECT id FROM privacy_scopes WHERE population_id = $1 ORDER BY id",
@@ -282,14 +400,23 @@ impl Control {
             .iter()
             .map(|r| r.get(0))
             .collect();
-        let mut out = totals(&view)?;
+        let mut out = json!({"budget": null});
+        if let Some(key) = &key {
+            let view = load_ledger(&mut *c, key)?
+                .ok_or_else(|| not_found("privacy population ledger", id))?;
+            view.verify()?;
+            out = totals(&view)?;
+            out["rho_cap"] = json!(encompute_privacy::accountant::rho_cap(
+                &view.genesis.budget
+            )?);
+            out["frozen"] = json!(frozen(&mut *c, key)?);
+        }
         out["id"] = json!(id);
         out["organization"] = json!(org);
         out["series"] = json!(series);
-        out["rho_cap"] = json!(encompute_privacy::accountant::rho_cap(
-            &view.genesis.budget
-        )?);
-        out["frozen"] = json!(frozen(&mut *c, &key)?);
+        out["status"] = json!(status);
+        out["superseded_by"] = json!(superseded_by);
+        out["supersedes"] = json!(supersedes);
         out["scopes"] = json!(scopes);
         Ok(out)
     }
@@ -318,13 +445,21 @@ impl Control {
             deny_auditor(&ctx.principal, &project)?;
             let pop = t
                 .query_opt(
-                    "SELECT organization_id, ledger_key FROM privacy_populations WHERE id = $1",
+                    "SELECT organization_id, ledger_key, superseded_by FROM privacy_populations
+                      WHERE id = $1 AND status = 'active'",
                     &[&r.population],
                 )
                 .map_err(db_err)?
                 .filter(|p| ctx.principal.member_of(&p.get::<_, String>(0)))
                 .ok_or_else(|| not_found("privacy population", &r.population))?;
-            let (org, pop_key): (String, String) = (pop.get(0), pop.get(1));
+            let (org, pop_key, superseded): (String, String, Option<String>) =
+                (pop.get(0), pop.get(1), pop.get(2));
+            if let Some(n) = superseded {
+                return Err(allocation(format!(
+                    "population {} was superseded by {n}: new scopes belong to the new one",
+                    r.population
+                )));
+            }
             deny_auditor_in(t, &ctx.principal, &org)?;
             require_human(
                 &ctx.principal,
@@ -516,6 +651,12 @@ impl Control {
     /// members and its auditors its totals (cap, spent, remaining, entries,
     /// root); nobody else the scope exists.
     pub fn get_scope(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+        self.scope_view(ctx, id, true)
+    }
+
+    /// [`Self::get_scope`]; a list passes `verify = false` (a summary: the
+    /// totals of the stored ledger, without re-walking its chain).
+    fn scope_view(&self, ctx: &Ctx, id: &str, verify: bool) -> Result<Value> {
         let mut c = self.db.conn()?;
         let row = scope_row(&mut *c, id, false)?.ok_or_else(|| not_found("privacy scope", id))?;
         let project =
@@ -541,7 +682,9 @@ impl Control {
         });
         if let Some(key) = &row.ledger_key {
             let view = load_ledger(&mut *c, key)?.ok_or_else(|| not_found("privacy scope", id))?;
-            view.verify()?;
+            if verify {
+                view.verify()?;
+            }
             let t = totals(&view)?;
             for (k, v) in t.as_object().expect("an object") {
                 out[k] = v.clone();
@@ -581,11 +724,33 @@ impl Control {
             .ledger_key
             .ok_or_else(|| not_found("privacy scope", id))?;
         let view = load_ledger(&mut *c, &key)?.ok_or_else(|| not_found("privacy scope", id))?;
-        Ok(serde_json::to_value(&view).expect("serializable"))
+        let mut out = serde_json::to_value(&view).expect("serializable");
+        // The population is the owner's: an auditor organization of the
+        // project reads the scope, not which population (or its digest) it
+        // belongs to.
+        if !owner {
+            if let Some(sc) = out
+                .pointer_mut("/genesis/scoping")
+                .and_then(|v| v.as_object_mut())
+            {
+                sc.remove("population_id");
+                sc.remove("population_digest");
+            }
+            for e in out["entries"].as_array_mut().into_iter().flatten() {
+                if let Some(r) = e
+                    .pointer_mut("/event/scope")
+                    .and_then(|v| v.as_object_mut())
+                {
+                    r.remove("population_id");
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The scopes of a governed project its caller may see.
     pub fn list_project_scopes(&self, ctx: &Ctx, project: &str) -> Result<Value> {
+        self.scope_limit.hit(&format!("list:{}", ctx.actor()))?;
         let ids: Vec<String> = {
             let mut c = self.db.conn()?;
             let p = project_visible(&mut *c, &ctx.principal, project)?;
@@ -606,7 +771,7 @@ impl Control {
         let mut out = vec![];
         for id in ids {
             // Proposals are the owner's: others do not see them.
-            if let Ok(v) = self.get_scope(ctx, &id) {
+            if let Ok(v) = self.scope_view(ctx, &id, false) {
                 out.push(v);
             }
         }
@@ -743,6 +908,21 @@ impl Control {
                 }
                 PrivacyEvent::Commit { .. } => None,
             };
+            if let PrivacyEvent::Commit { event_id, .. } = &event {
+                // A commit completes some governed job's reservation in this
+                // scope: nothing else is committed here.
+                let owned = t
+                    .query_opt(
+                        "SELECT 1 FROM job_privacy_reservations WHERE scope_id = $1 AND event_id = $2",
+                        &[&scope, event_id],
+                    )
+                    .map_err(db_err)?;
+                if owned.is_none() {
+                    return Err(scope_refused(format!(
+                        "event {event_id} is no governed job's reservation in this scope: only the release of a job that reserved it is committed"
+                    )));
+                }
+            }
             let job_info = match &job {
                 Some(j) => Some(job_for_scope(t, j, &row)?),
                 None => None,
@@ -816,6 +996,14 @@ impl Control {
                 .map_err(db_err)?;
             }
             let _ = (pnext, snext);
+            if let (PrivacyEvent::Reserve { scope: Some(r), .. }, Some(j)) = (&event, &job) {
+                t.execute(
+                    "INSERT INTO job_privacy_reservations (job_id, scope_id, asset_id, event_id, scope_seq)
+                     VALUES ($1, $2, '', $3, $4) ON CONFLICT DO NOTHING",
+                    &[j, &r.scope_id, &event.event_id(), &(se.seq as i64)],
+                )
+                .map_err(db_err)?;
+            }
             let action = match &event {
                 PrivacyEvent::Reserve { .. } => "privacy.spent",
                 PrivacyEvent::Commit { .. } => "privacy.committed",
@@ -1049,6 +1237,41 @@ impl Control {
                 privacy_policy_id.as_deref(),
                 b,
             );
+            // A declaration below every participant is charged for fewer
+            // sources than a person may span: only if every owner's signed
+            // authorization pins exactly that number (otherwise it is the
+            // program's own claim, which the owners never approved).
+            if let Some(d) = b.max_sources_per_unit {
+                if (d as usize) < plan.participants.len() {
+                    for p in &plan.participants {
+                        let pinned: Vec<Option<String>> = t
+                            .query(
+                                "SELECT a.signed #>> '{body,limits,max_sources_per_unit}'
+                                   FROM job_authorizations ja JOIN authorizations a ON a.id = ja.authorization_row
+                                  WHERE ja.job_id = $1 AND a.asset_id = $2",
+                                &[&facts.job, &p.asset],
+                            )
+                            .map_err(db_err)?
+                            .iter()
+                            .map(|r| r.get(0))
+                            .collect();
+                        let ok = !pinned.is_empty()
+                            && pinned.iter().all(|x| {
+                                x.as_deref().and_then(|v| v.parse::<u32>().ok()) == Some(d)
+                            });
+                        if !ok {
+                            return Err(Error::new(
+                                Code::GovernanceAggregateDeclaration,
+                                format!(
+                                    "the program declares max_sources_per_unit {d}, fewer than its {} participants, but the owner's authorization of source {} does not pin limits.max_sources_per_unit {d}: a governed release is charged for every participant unless every owner signs the lower number",
+                                    plan.participants.len(),
+                                    p.asset
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
             let mut scopes = BTreeMap::new();
             let mut served = BTreeMap::new();
             for p in &plan.participants {
@@ -1118,7 +1341,8 @@ impl Control {
         })?;
         let pop = t
             .query_opt(
-                "SELECT id, ledger_key FROM privacy_populations WHERE organization_id = $1 AND series = $2",
+                "SELECT id, ledger_key FROM privacy_populations
+                  WHERE organization_id = $1 AND series = $2 AND status = 'active' AND superseded_by IS NULL",
                 &[&a.organization, &series],
             )
             .map_err(db_err)?
@@ -1132,15 +1356,26 @@ impl Control {
         // The scope the owner's authorization of this source pins, if it
         // names one: that scope or none. Otherwise a scope of the job's
         // program first, then one for any program.
-        let pinned: Option<String> = t
-            .query_opt(
+        // (Two authorizations of one source in a job: the pins must agree,
+        // otherwise the job is refused rather than resolved by chance.)
+        let pins: BTreeSet<Option<String>> = t
+            .query(
                 "SELECT a.signed #>> '{body,privacy_scope_id}'
                    FROM job_authorizations ja JOIN authorizations a ON a.id = ja.authorization_row
                   WHERE ja.job_id = $1 AND a.asset_id = $2",
                 &[&facts.job, &asset],
             )
             .map_err(db_err)?
-            .and_then(|r| r.get(0));
+            .iter()
+            .map(|r| r.get::<_, Option<String>>(0))
+            .collect();
+        if pins.len() > 1 {
+            return Err(scope_refused(format!(
+                "{}'s authorizations of source {asset} in this job pin different scopes (or only some do): refused, not resolved by chance",
+                a.organization
+            )));
+        }
+        let pinned: Option<String> = pins.into_iter().next().flatten();
         let sc = match &pinned {
             Some(pin) => t
                 .query_opt(
@@ -1341,6 +1576,121 @@ impl Control {
             )?;
         }
         Ok(Ok(prepared.keys))
+    }
+
+    /// What a governed job reserved that nobody reported committed: `None`
+    /// when every reserved release has its commit in its scope's ledger (or
+    /// the job reserved none). The control plane cannot see a release; a
+    /// coordinator that releases and never reports is the one case it does not
+    /// catch (it relies on the attested coordinator's behaviour), but it
+    /// does not mark a job whose release was never accounted a success.
+    #[doc(hidden)]
+    pub fn unaccounted_reservations(
+        &self,
+        t: &mut Transaction<'_>,
+        job: &str,
+    ) -> Result<Option<String>> {
+        let rows = t
+            .query(
+                "SELECT r.scope_id, r.event_id, 'scope:' || r.scope_id FROM job_privacy_reservations r WHERE r.job_id = $1",
+                &[&job],
+            )
+            .map_err(db_err)?;
+        let mut missing = vec![];
+        let mut views: BTreeMap<String, LedgerView> = BTreeMap::new();
+        for r in &rows {
+            let (scope, event, key): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+            if !views.contains_key(&key) {
+                let v = load_ledger(t, &key)?;
+                match v {
+                    Some(v) => views.insert(key.clone(), v),
+                    None => {
+                        missing.push(scope);
+                        continue;
+                    }
+                };
+            }
+            let committed = views[&key].entries.iter().any(
+                |e| matches!(&e.event, PrivacyEvent::Commit { event_id, .. } if *event_id == event),
+            );
+            if !committed {
+                missing.push(format!("{scope} ({event})"));
+            }
+        }
+        Ok((!missing.is_empty()).then(|| {
+            format!(
+                "release not accounted: the job reserved privacy releases that nobody reported committed ({}): the coordinator reports each commit to its scope before the job succeeds",
+                missing.join(", ")
+            )
+        }))
+    }
+
+    /// The ledgers of a job's reservations whose entries are ahead of their
+    /// latest checkpoint in the governance log (committed, never anchored).
+    pub(crate) fn unanchored_job_ledgers(
+        &self,
+        t: &mut Transaction<'_>,
+        job: &str,
+    ) -> Result<BTreeSet<String>> {
+        let rows = t
+            .query(
+                "SELECT DISTINCT 'scope:' || r.scope_id, p.ledger_key
+                   FROM job_privacy_reservations r
+                   JOIN privacy_scopes s ON s.id = r.scope_id
+                   JOIN privacy_populations p ON p.id = s.population_id
+                  WHERE r.job_id = $1",
+                &[&job],
+            )
+            .map_err(db_err)?;
+        let mut behind = BTreeSet::new();
+        for r in &rows {
+            for key in [r.get::<_, String>(0), r.get::<_, String>(1)] {
+                let n: i64 = t
+                    .query_one(
+                        "SELECT count(*) FROM privacy_entries WHERE asset_id = $1",
+                        &[&key],
+                    )
+                    .map_err(db_err)?
+                    .get(0);
+                let seq = govlog::latest_ledger_checkpoint(t, &key)?.map_or(0, |c| c.seq);
+                if (seq as i64) < n {
+                    behind.insert(key);
+                }
+            }
+        }
+        Ok(behind)
+    }
+
+    /// Anchors every privacy ledger whose entries are ahead of its latest
+    /// checkpoint (a spend or start that committed and then failed to
+    /// anchor): the background sweep, so nothing stays committed but
+    /// unanchored for longer than a pass.
+    pub fn anchor_pending_ledgers(&self) -> Result<usize> {
+        let (floors, counts) = {
+            let mut c = self.db.conn()?;
+            let floors: BTreeMap<String, u64> = govlog::ledger_floors(&mut *c)?
+                .into_iter()
+                .map(|(k, cp)| (k, cp.seq))
+                .collect();
+            let counts: Vec<(String, i64)> = c
+                .query(
+                    "SELECT asset_id, count(*) FROM privacy_entries GROUP BY asset_id",
+                    &[],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|r| (r.get(0), r.get(1)))
+                .collect();
+            (floors, counts)
+        };
+        let mut n = 0;
+        for (key, count) in counts {
+            if (floors.get(&key).copied().unwrap_or(0) as i64) < count {
+                self.anchor_ledger(&key)?;
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     /// Anchors the ledgers a job's start reserved in (after its

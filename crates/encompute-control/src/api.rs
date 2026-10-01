@@ -564,6 +564,9 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
             created(control.create_population(ctx, parse(&r.body)?)?)
         }
         ("GET", ["v1", "privacy", "populations", id]) => ok(control.get_population(ctx, id)?),
+        ("POST", ["v1", "privacy", "populations", id, "approve"]) => {
+            ok(control.approve_population(ctx, id)?)
+        }
         ("POST", ["v1", "privacy", "scopes"]) => {
             created(control.propose_scope(ctx, parse(&r.body)?)?)
         }
@@ -744,6 +747,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/evaluators/{}/status"),
     ("POST", "/v1/privacy/populations"),
     ("GET", "/v1/privacy/populations/{}"),
+    ("POST", "/v1/privacy/populations/{}/approve"),
     ("POST", "/v1/privacy/scopes"),
     ("GET", "/v1/privacy/scopes/{}"),
     ("GET", "/v1/privacy/scopes/{}/ledger"),

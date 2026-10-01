@@ -12,7 +12,7 @@ Week 4  RELEASED  epsilon this week 0.129, scope spent 0.906, population spent 0
 error[ENC2102]: round 20 is not newer than round 20 already joined (replay)
 error[ENC2103]: only 2 parties advertised keys; the round needs 3
 RELEASED nothing, and nothing was charged to any scope
-error[ENC2201]: RELEASE DENIED: scope scope-e has spent epsilon 0.9056 of 1
+error[ENC2201]: RELEASE DENIED: population residents-e has spent epsilon 0.9056 of 1
 AGGREGATION RECEIPT VERIFIED
 error[ENC2202]: asset residents-e's ledger: the ledger has 4 entries but 8 were already seen
 RELEASE DENIED: population residents-e has spent epsilon 0.9056 of 1

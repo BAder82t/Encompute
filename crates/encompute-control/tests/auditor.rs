@@ -413,6 +413,12 @@ fn world() -> Option<W> {
         "/v1/privacy/populations",
         Some(json!({"organization": TAX, "series": "income", "budget": budget(1.0)})),
     ));
+    t.ok(
+        &tax_sec2,
+        "POST",
+        &format!("/v1/privacy/populations/{population}/approve"),
+        None,
+    );
     let scope = id(&t.ok(
         &tax_sec1,
         "POST",
@@ -703,6 +709,10 @@ impl W {
                 s(pattern),
                 Some(json!({"organization": BEN, "series": "visits", "budget": budget(1.0)})),
             ),
+            "/v1/privacy/populations/{}/approve" => (
+                format!("/v1/privacy/populations/{}/approve", self.population),
+                None,
+            ),
             "/v1/privacy/scopes" => (
                 s(pattern),
                 Some(
@@ -844,6 +854,10 @@ const NOT_PROJECT_ROUTES: &[(&str, &str)] = &[
     ("/v1/evaluators/{}/status", "platform evaluators"),
     ("/v1/audit/checkpoints", "platform operators and auditors"),
     ("/v1/messages", "services"),
+    (
+        "/v1/privacy/populations/{}/approve",
+        "the population's organization (it is not a project's)",
+    ),
 ];
 
 // --- auditors are read-only -------------------------------------------------------
@@ -1703,4 +1717,25 @@ fn auditor_sees_audit_view() {
     );
     assert_eq!(s, 403);
     let _ = (&w.platform, &w.tax_sec2);
+}
+
+/// An auditor organization reads a scope's entries, never which population
+/// (or its digest) the scope belongs to: that is the owner's.
+#[test]
+fn auditor_org_reads_scope_entries_without_the_population() {
+    let Some(w) = world() else { return };
+    let url = format!("/v1/privacy/scopes/{}/ledger", w.scope);
+    let (s, v) = w.t.call(&w.aud_auditor, "GET", &url, None);
+    assert_eq!(s, 200, "{v}");
+    let text = v.to_string();
+    assert!(!text.contains(&w.population), "{text}");
+    assert!(
+        v.pointer("/genesis/scoping/population_digest").is_none(),
+        "{text}"
+    );
+    assert_eq!(v["genesis"]["scoping"]["kind"], "scope");
+    // The owner's own export names it.
+    let (s, v) = w.t.call(&w.tax_owner, "GET", &url, None);
+    assert_eq!(s, 200, "{v}");
+    assert!(v.to_string().contains(&w.population));
 }

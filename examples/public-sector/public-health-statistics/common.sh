@@ -62,7 +62,7 @@ join() {
   shift 3
   "$E" aggregate join "$program" --parties parties.json --scoping "$scoping" \
     --coordinator "$URL" --party "region-$x" --key "$x.key" \
-    --values "$HERE/data/region-$x.json" --state "$x.round" "$@"
+    --values "$HERE/data/region-$x.json" --labels "$HERE/data/strata.json" --state "$x.round" "$@"
 }
 
 # week N: the four authorities contribute to week N's round (sequence 10 x N,

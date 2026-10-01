@@ -1289,7 +1289,7 @@ impl Control {
                     .query_opt(
                         "SELECT p.id FROM privacy_populations p
                            JOIN assets a ON a.organization_id = p.organization_id AND a.series = p.series
-                          WHERE a.id = $1",
+                          WHERE a.id = $1 AND p.status = 'active'",
                         &[&asset],
                     )
                     .map_err(db_err)?

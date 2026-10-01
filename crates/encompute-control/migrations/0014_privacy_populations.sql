@@ -33,25 +33,63 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER privacy_ledgers_subject BEFORE INSERT ON privacy_ledgers
     FOR EACH ROW EXECUTE FUNCTION encompute_privacy_ledger_subject();
 
--- A population: one per organization and series. Its cap (the genesis in
--- `privacy_ledgers`) is fixed at creation.
+-- A population: proposed by one person of the owning organization and
+-- approved by a different one (four eyes; the database also refuses an
+-- approver who is the proposer), whose ledger is created at approval. At
+-- most one is active per organization and series: a later population may
+-- supersede it for NEW scopes (the old one keeps its history and its
+-- spending, and its scopes stay readable but serve no new job). Its cap (the
+-- genesis in `privacy_ledgers`) is fixed at creation.
 CREATE TABLE privacy_populations (
     id              TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL REFERENCES organizations(id),
     series          TEXT NOT NULL,
-    ledger_key      TEXT NOT NULL UNIQUE REFERENCES privacy_ledgers(asset_id),
-    created_by      TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('proposed', 'active')),
+    -- The proposal's cap (the genesis is written at approval).
+    unit            TEXT NOT NULL,
+    epsilon         DOUBLE PRECISION NOT NULL CHECK (epsilon > 0),
+    delta           DOUBLE PRECISION NOT NULL CHECK (delta > 0 AND delta < 1),
+    supersedes      TEXT REFERENCES privacy_populations(id),
+    superseded_by   TEXT REFERENCES privacy_populations(id),
+    ledger_key      TEXT UNIQUE REFERENCES privacy_ledgers(asset_id),
+    proposed_by     TEXT NOT NULL,
+    approved_by     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (organization_id, series),
-    CHECK (ledger_key = 'population:' || id)
+    approved_at     TIMESTAMPTZ,
+    CHECK ((status = 'active') = (ledger_key IS NOT NULL)),
+    CHECK ((status = 'active') = (approved_by IS NOT NULL)),
+    CHECK (approved_by IS NULL OR approved_by <> proposed_by),
+    CHECK (ledger_key IS NULL OR ledger_key = 'population:' || id)
 );
 
-CREATE FUNCTION encompute_privacy_allocation_immutable() RETURNS trigger AS $$
+CREATE UNIQUE INDEX privacy_populations_one_active
+    ON privacy_populations (organization_id, series)
+    WHERE status = 'active' AND superseded_by IS NULL;
+
+CREATE FUNCTION encompute_privacy_population_guard() RETURNS trigger AS $$
 BEGIN
-    RAISE EXCEPTION 'a privacy population is never changed or removed: its cap is allocated once (%)', TG_TABLE_NAME
-        USING ERRCODE = 'check_violation';
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'a privacy population is never removed' USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.organization_id IS DISTINCT FROM OLD.organization_id
+       OR NEW.series IS DISTINCT FROM OLD.series
+       OR NEW.unit IS DISTINCT FROM OLD.unit
+       OR NEW.epsilon IS DISTINCT FROM OLD.epsilon
+       OR NEW.delta IS DISTINCT FROM OLD.delta
+       OR NEW.supersedes IS DISTINCT FROM OLD.supersedes
+       OR NEW.proposed_by IS DISTINCT FROM OLD.proposed_by THEN
+        RAISE EXCEPTION 'a privacy population is immutable: its cap is allocated once' USING ERRCODE = 'check_violation';
+    END IF;
+    IF OLD.status = 'active' AND (NEW.status <> 'active'
+       OR NEW.approved_by IS DISTINCT FROM OLD.approved_by
+       OR NEW.ledger_key IS DISTINCT FROM OLD.ledger_key
+       OR (OLD.superseded_by IS NOT NULL AND NEW.superseded_by IS DISTINCT FROM OLD.superseded_by)) THEN
+        RAISE EXCEPTION 'an active privacy population stays as allocated' USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
 END
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER privacy_populations_immutable BEFORE UPDATE OR DELETE ON privacy_populations
-    FOR EACH ROW EXECUTE FUNCTION encompute_privacy_allocation_immutable();
+CREATE TRIGGER privacy_populations_guard BEFORE UPDATE OR DELETE ON privacy_populations
+    FOR EACH ROW EXECUTE FUNCTION encompute_privacy_population_guard();

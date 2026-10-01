@@ -70,7 +70,7 @@ region-n  region-s  region-e  region-w     the ministry
 | `surveillance.eir` | the program: four assets, the aggregation and its mechanism |
 | `surveillance-new-version.eir` | the same with new asset IDs (a new version) |
 | `raw-regional-release.eir` | the program of the last attack |
-| `data/` | each authority's synthetic weekly counts |
+| `data/` | each authority's synthetic weekly counts, and the strata labels it states (`strata.json`: its own layout, checked against the plan; a party never copies the plan's digest) |
 | `common.sh`, `run.sh`, `attack-*.sh`, `expected.txt` | the story, the attacks, the expected lines |
 
 ## Commands used
@@ -84,6 +84,6 @@ encompute privacy scope --ledger DIR --population residents-n --id scope-n \
 encompute aggregate serve surveillance.encompute --parties parties.json --scoping scoping.json \
     --key coordinator.key --ledger DIR --sequence 10
 encompute aggregate join surveillance.encompute --parties parties.json --scoping scoping.json \
-    --coordinator URL --party region-n --key n.key --values data/region-n.json --state n.round
+    --coordinator URL --party region-n --key n.key --values data/region-n.json --labels data/strata.json --state n.round
 encompute privacy budget --ledger DIR --asset residents-n
 ```

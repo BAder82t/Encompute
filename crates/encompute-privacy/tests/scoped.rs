@@ -588,3 +588,32 @@ fn a_restored_older_scope_is_refused_by_what_the_parties_saw() {
         })
         .unwrap_err();
 }
+
+/// The population is checked first, whatever the ledgers' IDs sort to: with
+/// both exhausted, the denial names the population.
+#[test]
+fn a_release_checks_the_population_first() {
+    let d = dir("pop-first");
+    let pop = population_genesis("zz-pop", "region-a", "residents", budget(1.0)).unwrap();
+    // The scope sorts BEFORE the population by ID.
+    let s = scope_genesis("aa-scope", &pop, "proj", "purpose", None, budget(1.0)).unwrap();
+    seed(&d, &pop);
+    seed(&d, &s);
+    let mut rng = Csprng::from_os().unwrap();
+    let mut n = 0;
+    let err = loop {
+        n += 1;
+        match release(
+            &spec(n, charges(&s, &pop), 1),
+            &d,
+            &[0; 8],
+            &mut rng,
+            &key(),
+        ) {
+            Ok(_) => assert!(n < 50),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(err.code, Code::PrivacyBudgetExceeded);
+    assert!(err.message.contains("population zz-pop"), "{err}");
+}

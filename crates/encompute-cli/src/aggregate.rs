@@ -395,6 +395,11 @@ pub enum AggregateCmd {
         attestation: Option<PathBuf>,
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        /// JSON array of this party's own stratum labels, in the order of
+        /// its values: needed when the plan declares a layout, and checked
+        /// against it (ENC2722).
+        #[arg(long)]
+        labels: Option<PathBuf>,
         /// Providers trusted for the coordinator's attestation.
         #[command(flatten)]
         trust: TrustArgs,
@@ -660,6 +665,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             state,
             attestation,
             timeout,
+            labels,
             trust,
         } => {
             let approved = spec.spec()?;
@@ -686,6 +692,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 None => None,
             };
             let identity = key_file(&key)?;
+            let labels_own: Option<Vec<String>> = labels.as_deref().map(json).transpose()?;
             let client = ParticipantClient::new(&coordinator, Duration::from_secs(timeout));
             // Checked and recorded under the state's lock: two concurrent
             // joins cannot both accept the same round (review finding
@@ -701,6 +708,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                     identity,
                     &values,
                     PartyState {
+                        labels: labels_own.clone(),
                         attestation,
                         last_sequence: st.last_sequence(&spec_id),
                         seen,

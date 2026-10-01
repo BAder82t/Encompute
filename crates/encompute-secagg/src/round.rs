@@ -673,6 +673,14 @@ impl AggregationSpec {
         }
         self.plan.check_release_privacy()?;
         self.plan.check_scopes()?;
+        if let Some(m) = self.plan.max_sources_per_unit {
+            if m == 0 || m > encompute_ir::confidentiality::MAX_SOURCES_PER_UNIT {
+                return bad(format!(
+                    "max_sources_per_unit must be 1 to {}, got {m}",
+                    encompute_ir::confidentiality::MAX_SOURCES_PER_UNIT
+                ));
+            }
+        }
 
         self.plan
             .codec
@@ -787,11 +795,18 @@ pub struct RoundParticipant {
     pub round: AggregationRound,
     identity: SigningKey,
     protocol: Participant,
+    /// The digest of the strata labels THIS party holds (from its own
+    /// values' manifest), never the plan's: what its metadata names.
+    layout_id: Option<String>,
 }
 
 /// What a party checks before contributing, beyond the spec.
 #[derive(Default)]
 pub struct JoinOptions<'a> {
+    /// The stratum labels of this party's own values, in order. A plan that
+    /// declares a layout needs them, and they must digest to its layout
+    /// (ENC2722): a party never copies the plan's digest.
+    pub labels: Option<Vec<String>>,
     /// The attestation of the workload holding this party's key.
     pub attestation: Option<AttestationRecord>,
     /// The last round sequence this party joined (replay protection).
@@ -884,11 +899,18 @@ impl RoundCoordinator {
         let all: Vec<PartyId> = plan.participants.iter().map(|p| p.party.clone()).collect();
         if let Some(r) = plan.release_spec(&self.round.id()?, None, &all)? {
             let views = self.views_in(dir)?;
-            for c in &r.charged {
-                let view = views
-                    .get(&c.asset_id)
-                    .expect("every charged ledger is shown");
-                r.check(c, view)?;
+            // The population (the authoritative cap) first, then the rest.
+            for populations in [true, false] {
+                for c in &r.charged {
+                    let is_population =
+                        c.scoped.as_ref().is_some_and(|s| s.genesis.is_population());
+                    if is_population == populations {
+                        let view = views
+                            .get(&c.asset_id)
+                            .expect("every charged ledger is shown");
+                        r.check(c, view)?;
+                    }
+                }
             }
         }
         self.ledger_dir = Some(dir.to_owned());
@@ -969,6 +991,7 @@ impl RoundParticipant {
         opts: JoinOptions<'_>,
     ) -> Result<Self> {
         let JoinOptions {
+            labels,
             attestation,
             last_sequence,
             ledger,
@@ -1030,6 +1053,17 @@ impl RoundParticipant {
             )));
         }
         approved.check_sampled_contributors()?;
+        let own_layout = labels.as_deref().map(layout_id).transpose()?;
+        if approved.plan.layout_id.is_some() && own_layout != approved.plan.layout_id {
+            return Err(Error::new(
+                Code::GovernanceAggregateLayout,
+                format!(
+                    "this party's strata are not the plan's layout: its own labels digest to {} but the plan declares {}; its values would be summed with another stratum's",
+                    own_layout.as_deref().unwrap_or("none (no labels given)"),
+                    approved.plan.layout_id.as_deref().unwrap_or("none")
+                ),
+            ));
+        }
         if approved.attestation.is_some() && attestation.is_none() {
             return Err(Error::new(
                 Code::AggregationUnauthorized,
@@ -1068,7 +1102,10 @@ impl RoundParticipant {
                 // asset's own, or its scope and its population (both must
                 // be shown, intact, extend what this party saw, and afford
                 // the round).
-                for c in &release.charged {
+                let mut charged: Vec<&Charged> = release.charged.iter().collect();
+                charged
+                    .sort_by_key(|c| !c.scoped.as_ref().is_some_and(|s| s.genesis.is_population()));
+                for c in charged {
                     let (shown, seen) = match &c.scoped {
                         None => (ledger, seen),
                         Some(_) => (
@@ -1125,6 +1162,7 @@ impl RoundParticipant {
             round: round.clone(),
             identity,
             protocol,
+            layout_id: own_layout,
         })
     }
 
@@ -1151,7 +1189,7 @@ impl RoundParticipant {
             vector_len: plan.vector_len,
             keys_digest: keys_digest(&advertise),
             attestation_id: advertise.signed.body.attestation_id.clone(),
-            layout_id: plan.layout_id.clone(),
+            layout_id: self.layout_id.clone(),
         };
         Ok(Join {
             metadata: Signed::new(&self.identity, METADATA_DOMAIN, metadata)?,

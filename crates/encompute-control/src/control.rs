@@ -1409,6 +1409,15 @@ impl Control {
         report("schedule", self.schedule_pending());
         report("retention", self.expire_assets().map(|_| ()));
         report("anchor", self.checkpoint_log());
+        // Spends and starts that committed but failed to anchor.
+        // (every fifth pass: it reads every ledger's entry count)
+        static PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if PASSES
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(5)
+        {
+            report("ledgers", self.anchor_pending_ledgers().map(|_| ()));
+        }
         report("outbox", self.deliver_outbox());
         report(
             "nonces",

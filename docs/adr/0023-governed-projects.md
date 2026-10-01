@@ -600,6 +600,13 @@ As built (retention, phase 3):
   default when scoped is every participant; the cost is quadratic in it),
   `layout` binds the strata into every contribution, and a reservation
   states linkage `none`. v1 uses secure aggregation, not CKKS.
+- *Review follow-ups.* A party's layout digest comes from its own labels. A
+  program declaring fewer sources per unit than participants needs every
+  owner's `limits.max_sources_per_unit` pin (an optional limit, absent from
+  existing AuthorizationIds). A population is proposed and approved by two
+  people for a registered series and may be superseded for new scopes; its
+  ledger is created at approval. A job succeeds only if each reserved
+  release has a reported commit; an unanchored start is retried and swept.
 - *Not built:* the SecAgg coordinator is not scheduled by the control plane
   (the control plane authorizes and accounts; the round runs off the
   platform), and a cap is allocated once and never changed.

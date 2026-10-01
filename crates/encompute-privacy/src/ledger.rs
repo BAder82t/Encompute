@@ -531,9 +531,13 @@ impl Ledger {
     /// Opens (creating with `genesis` if missing) and locks the ledger at
     /// `path`, then verifies it and that its genesis is `genesis`.
     pub fn open(path: &Path, genesis: &Genesis) -> Result<Self> {
+        Self::open_inner(path, genesis, true)
+    }
+
+    fn open_inner(path: &Path, genesis: &Genesis, create: bool) -> Result<Self> {
         let io = |e: std::io::Error| ledger_err(format!("{}: {e}", path.display()));
         let mut o = OpenOptions::new();
-        o.read(true).append(true).create(true);
+        o.read(true).append(true).create(create);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -598,21 +602,30 @@ impl Ledger {
     /// project's, a scope never allocated) is refused, not given a fresh
     /// budget (ENC2719).
     pub fn open_existing(path: &Path, genesis: &Genesis) -> Result<Self> {
-        match std::fs::metadata(path) {
-            Ok(m) if m.len() > 0 => {}
-            _ => {
-                return Err(Error::new(
-                    Code::GovernancePrivacyScope,
-                    format!(
-                        "no privacy {} {} at {}: it is allocated by its owners, never created by a release",
-                        if genesis.is_population() { "population" } else { "scope" },
-                        genesis.asset_id,
-                        path.display()
-                    ),
-                ))
+        let missing = || {
+            Error::new(
+                Code::GovernancePrivacyScope,
+                format!(
+                    "no privacy {} {} at {}: it is allocated by its owners, never created by a release",
+                    if genesis.is_population() { "population" } else { "scope" },
+                    genesis.asset_id,
+                    path.display()
+                ),
+            )
+        };
+        // Opened without create (no window between a check and the open in
+        // which a file could be made), and an empty one is not a ledger.
+        match Self::open_inner(path, genesis, false) {
+            Err(e) if e.code == Code::PrivacyLedger && !path.exists() => Err(missing()),
+            Err(e) => Err(e),
+            Ok(l)
+                if l.view.entries.is_empty()
+                    && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) == 0 =>
+            {
+                Err(missing())
             }
+            Ok(l) => Ok(l),
         }
-        Self::open(path, genesis)
     }
 
     pub fn view(&self) -> &LedgerView {

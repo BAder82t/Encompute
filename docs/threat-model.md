@@ -326,6 +326,7 @@ DP noise, the coordinator's attestation when the plan requires it.
   charge instead of recomputing it. The reservation's `noise_multiplier`
   and `sampling_rate` are the coordinator's own declaration. (A governed
   job's release is computed by the control plane from its program.)
+- **A coordinator that releases something larger and never reports it** is not caught by the control plane (it fails a job whose reserved release has no reported commit, but cannot see a release).
 - **A coordinator that releases without reporting.** The scopes bound what
   the platform records and authorizes; a coordinator that never reports a
   release is stopped only by the parties' own checks (its attestation, the

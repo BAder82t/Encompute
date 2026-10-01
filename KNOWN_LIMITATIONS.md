@@ -204,6 +204,28 @@ Related: [support matrix](docs/support-matrix.md),
   parties check themselves (a coordinator's attestation bound to the plan,
   and the privacy receipts naming the scope and population ledgers). The
   noise is central: the coordinator sees the sum before noise.
+- **A coordinator that releases something larger and never reports it is
+  not caught by the control plane.** It reserves the cost it computes from
+  the job's program and refuses a job as unaccounted if no commit is
+  reported, but it cannot see a release: what the coordinator actually
+  releases depends on the attested coordinator and the SecAgg parties'
+  checks.
+- **A population's exhaustion is visible through failure text.** A project
+  whose job fails with "population ... has spent" learns that other
+  projects (or versions) used the series' budget, though not how or which.
+  Totals of a scope are shared with the project's members by design.
+- **Creating a population changes asset-ledger behaviour for its series.**
+  Once an organization creates a population, a reservation against the
+  per-asset ledger of any asset of that series is refused (ENC2719, also
+  outside governed projects): a series is accounted by its population or by
+  its assets' own ledgers, never both. Series without a population are
+  unchanged.
+- **Four eyes means two principals, not two humans.** Scope and population
+  approvals compare principal IDs (like job approvals and ADR-023's
+  assumption of one identity per person): one person holding two accounts
+  passes. A superseding population gives a series a fresh cap by the
+  owners' deliberate, four-eyed act; the old population's spending stays on
+  record.
 - **A scope's `max_sources_per_unit` is the owners' claim.** The
   sensitivity is multiplied by the number of sources one privacy unit may
   appear in; the control plane does not know how many agencies a person

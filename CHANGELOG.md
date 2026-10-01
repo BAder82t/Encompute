@@ -352,7 +352,17 @@ Work toward confidential cross-agency computation
   ledgers. New routes under `/v1/privacy/populations` and
   `/v1/privacy/scopes`; migrations 0014 to 0016; ENC2719 to ENC2722;
   INV-230, INV-241. Standard projects and assets whose series has no
-  population are unchanged.
+  population are unchanged, but creating a population refuses
+  reservations against the per-asset ledgers of that series. Reviewed:
+  a party derives its layout digest from its own labels (`join
+  --labels`); a governed program declaring fewer sources per unit than
+  participants needs every owner's signed `limits.max_sources_per_unit`;
+  populations are proposed and approved by two people for a registered
+  series and may be superseded for new scopes; a governed job whose
+  reserved release has no reported commit does not succeed; a start whose
+  anchoring failed is retried and swept; estimates and `privacy explain
+  --scoped` show every participant for scoped aggregates, with a warning
+  where the default is 1.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
   INV-236 (the control plane can only deny; broker state cannot be
   rolled back), INV-223 (auditors), INV-229 (cross-organization

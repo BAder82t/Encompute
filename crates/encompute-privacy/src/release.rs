@@ -150,7 +150,9 @@ pub fn sensitivity_scaled(
     while r * r < d as u64 {
         r += 1;
     }
-    (clip + r).saturating_mul(u64::from(sources_per_unit.max(1)))
+    clip.checked_add(r)
+        .and_then(|b| b.checked_mul(u64::from(sources_per_unit.max(1))))
+        .unwrap_or(u64::MAX)
 }
 
 impl ReleaseSpec {
@@ -377,7 +379,8 @@ pub fn release(
     let mut charged = spec.charged.clone();
     charged.sort_by(|a, b| a.asset_id.cmp(&b.asset_id));
     // Lock every ledger (fixed order: no deadlock) and check every budget
-    // before reserving anything.
+    // before reserving anything. The checks run population first (the
+    // authoritative cap, whatever the ledgers' IDs sort to), then the rest.
     let mut ledgers = vec![];
     for c in &charged {
         crate::check_asset_file_name(&c.asset_id)?;
@@ -389,15 +392,27 @@ pub fn release(
         } else {
             Ledger::open(&path, &spec.genesis(c))?
         };
-        spec.check(c, l.view())?;
         ledgers.push(l);
         crate::failpoint("after-lock");
+    }
+    for populations in [true, false] {
+        for (l, c) in ledgers.iter().zip(&charged) {
+            let is_population = c.scoped.as_ref().is_some_and(|s| s.genesis.is_population());
+            if is_population == populations {
+                spec.check(c, l.view())?;
+            }
+        }
     }
     let mut before = vec![];
     for (l, c) in ledgers.iter_mut().zip(&charged) {
         before.push(l.view().cost()?);
         l.append(spec.reserve_event(c, rng.label())?)?;
     }
+    // A crash between the reservations above (some ledgers charged, others
+    // not) over-charges only: the charged ledgers keep the reservation, no
+    // noisy output exists, and the round cannot be retried under its ID (the
+    // event is already reserved there): a new round ID is needed. Budget is
+    // never under-charged.
     crate::failpoint("after-reserve");
     // Only now does a noisy output exist.
     let noisy = sum
