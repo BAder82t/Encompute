@@ -336,6 +336,15 @@ pub enum Objective {
     #[default]
     Latency,
     Cost,
+    /// Data minimization: among the candidates that satisfy every hard
+    /// requirement, prefer the one that releases least, lexicographically:
+    /// the release rank of the program's outputs (never, boolean, bounded
+    /// category, DP aggregate, aggregate, value: narrowest first), then
+    /// how many principals learn plaintext (an owner's client and the
+    /// recipients aside: a TEE counts one, a party running the step
+    /// itself counts it), then latency. Never trades a requirement for a
+    /// narrower release, and never rewrites the program.
+    Minimize,
 }
 
 /// Soft preferences, and the hard ones a user may add.

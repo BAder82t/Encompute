@@ -150,14 +150,79 @@ fn estimate(
     ms
 }
 
-fn score(c: &Candidate, ctx: &PlanningContext) -> u64 {
+/// What a plan releases, whatever mechanism runs it: the narrowness rank
+/// of the program's outputs and the principals its outputs go to.
+struct Release {
+    /// 0 never, 1 boolean, 2 bounded category, 3 DP aggregate, 4
+    /// aggregate, 5 value: the widest of the program's outputs.
+    rank: u64,
+    /// The parties its outputs are revealed to (a public output counts as
+    /// one more, "anyone").
+    recipients: BTreeSet<String>,
+}
+
+fn release_of(program: &Program, c: Option<&Confidentiality>) -> Release {
+    let mut rank = 0;
+    let mut recipients = BTreeSet::new();
+    for o in program.outputs() {
+        use encompute_ir::confidentiality::OutputRelease;
+        let to = c.map(|c| c.output(&o.name).clone()).unwrap_or_default();
+        match &to {
+            OutputRelease::Sealed => continue,
+            OutputRelease::Party(p) => {
+                recipients.insert(p.to_string());
+            }
+            OutputRelease::Public => {
+                recipients.insert("anyone".to_owned());
+            }
+        }
+        let aggregate = c.and_then(|c| c.aggregation(&o.name));
+        let ty = program.node(o.value).ty;
+        let this = match aggregate {
+            Some(a) if a.dp.is_some() => 3,
+            Some(_) => 4,
+            None if ty.elem == encompute_ir::Elem::Bool => 1,
+            None => 5,
+        };
+        rank = rank.max(this);
+    }
+    Release { rank, recipients }
+}
+
+/// The best candidate so far: its ordering key, the candidate and what
+/// it satisfies.
+type Best = ((u64, u64, u64), Candidate, Vec<RequirementSatisfaction>);
+
+/// A candidate's ordering key (smaller wins): `(latency, 0, 0)` or
+/// `(cost, 0, 0)`; for minimization `(release rank, principals who learn
+/// plaintext, latency)`.
+fn score(c: &Candidate, ctx: &PlanningContext, release: &Release) -> (u64, u64, u64) {
     match ctx.preferences.objective {
-        Objective::Latency => c.estimated_ms,
+        Objective::Latency => (c.estimated_ms, 0, 0),
         // Confidential hardware costs more per hour than ordinary hosts.
-        Objective::Cost => match c.placement {
-            Placement::Tee(_) => c.estimated_ms.saturating_mul(3),
-            _ => c.estimated_ms,
-        },
+        Objective::Cost => (
+            match c.placement {
+                Placement::Tee(_) => c.estimated_ms.saturating_mul(3),
+                _ => c.estimated_ms,
+            },
+            0,
+            0,
+        ),
+        Objective::Minimize => {
+            let mut learners = release.recipients.clone();
+            match &c.placement {
+                // Plaintext inside the attested workload: one more.
+                Placement::Tee(_) => {
+                    learners.insert("the attested workload".into());
+                }
+                // The party running the step sees what it reads.
+                Placement::Party(p) => {
+                    learners.insert(p.clone());
+                }
+                Placement::UntrustedHost | Placement::Parties => {}
+            }
+            (release.rank, learners.len() as u64, c.estimated_ms)
+        }
     }
 }
 
@@ -602,6 +667,7 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
     let c = program.confidentiality();
     let requirements = derive(program, ctx)?;
     let shapes = steps(program, report.as_ref(), ctx)?;
+    let released = release_of(program, c);
     let mut candidates = vec![];
     let mut failures = vec![];
     let mut chosen: Vec<(ExecutionStep, Vec<RequirementSatisfaction>)> = vec![];
@@ -613,7 +679,7 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
             _ => None,
         };
         let n = boundary.map_or(0, |b| b.contributions.len() as u64);
-        let mut best: Option<(u64, Candidate, Vec<RequirementSatisfaction>)> = None;
+        let mut best: Option<Best> = None;
         let mut reasons = vec![];
         let mut here = vec![];
         let correctness = requirements.iter().any(
@@ -658,7 +724,7 @@ pub fn plan(program: &Program, ctx: &PlanningContext) -> Result<Planned> {
                     describe(&cand.placement, &cand.mechanisms)
                 )),
                 None => {
-                    let s = score(&cand, ctx);
+                    let s = score(&cand, ctx, &released);
                     let key = serde_json::to_string(&cand.mechanisms).expect("JSON");
                     let better = match &best {
                         None => true,

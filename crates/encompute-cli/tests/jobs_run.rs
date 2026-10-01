@@ -289,3 +289,188 @@ fn a_pinned_key_proceeds_to_the_evaluator() {
     );
     assert!(!sent.lock().unwrap().is_empty(), "{err}");
 }
+
+// --- the client's own placement constraints (INV-233) ------------------------------
+
+/// A control plane that records `placement` for the job it schedules.
+fn control_plane_placed(
+    evaluator: &str,
+    receipt_key: &str,
+    placement: Option<serde_json::Value>,
+) -> (String, Log) {
+    let (evaluator, receipt_key) = (evaluator.to_owned(), receipt_key.to_owned());
+    stub(move |_, path| match path {
+        "/v1/plans" => (200, r#"{"id": "pln_1"}"#.into()),
+        "/v1/jobs" => {
+            let mut v = serde_json::json!({"id": "job_1", "state": "queued", "grant": grant(),
+                "evaluator_url": evaluator, "evaluator_receipt_key": receipt_key});
+            if let Some(p) = &placement {
+                v["placement"] = p.clone();
+            }
+            (200, v.to_string())
+        }
+        _ => (404, r#"{"code": "ENC2603", "message": "no"}"#.into()),
+    })
+}
+
+fn pin(key: &str, operator: &str, region: &str, jurisdiction: &str, evidence: &str) -> String {
+    serde_json::json!([{"receipt_key": key, "operator": operator, "evidence": evidence,
+        "location": {"jurisdiction": jurisdiction, "provider": "gcp", "region": region}}])
+    .to_string()
+}
+
+#[test]
+fn placement_violation_refused_before_send() {
+    let s = setup("placement");
+    let key = encompute_verification::EvaluatorSigner::generate()
+        .unwrap()
+        .identity()
+        .public_key_hex();
+    let write = |name: &str, text: &str| {
+        let p = s.dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        p.display().to_string()
+    };
+    let de_only = write(
+        "de.json",
+        r#"{"allowed_regions": [{"jurisdiction": "DE"}]}"#,
+    );
+    let run = |pins: &str, constraints: &str, placement: Option<serde_json::Value>| {
+        let (evaluator, sent) = stub(|_, _| (500, "{}".into()));
+        let (control, _) = control_plane_placed(&evaluator, &key, placement);
+        let pins = write("pins.json", pins);
+        let (code, err) = jobs_run(
+            &s,
+            &control,
+            &[
+                "--trust-evaluator",
+                &key,
+                "--placement",
+                constraints,
+                "--evaluator-pins",
+                &pins,
+            ],
+            &[],
+        );
+        let n = sent.lock().unwrap().len();
+        (code, err, n)
+    };
+    // The evaluator the client pinned is in the United States: refused,
+    // and nothing reaches it, whatever the control plane says.
+    let (code, err, sent) = run(
+        &pin(&key, "platform", "us-central1", "US", "operator_declared"),
+        &de_only,
+        None,
+    );
+    assert_ne!(code, 0, "{err}");
+    assert!(
+        err.contains("ENC2726") && err.contains("allowed_regions"),
+        "{err}"
+    );
+    assert_eq!(sent, 0, "the evaluator was contacted");
+    // Nothing pinned about this evaluator's placement: not admitted.
+    let (code, err, sent) = run("[]", &de_only, None);
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("ENC2726") && err.contains("pin set says nothing"),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
+    // A pin for another key does not stand in.
+    let other = "ef".repeat(32);
+    let (code, err, sent) = run(
+        &pin(
+            &other,
+            "platform",
+            "europe-west3",
+            "DE",
+            "operator_declared",
+        ),
+        &de_only,
+        None,
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("ENC2726"), "{err}");
+    assert_eq!(sent, 0);
+    // The control plane claims Germany; the client pinned the United
+    // States: the pin wins, and the disagreement is refused either way.
+    let claimed_de = serde_json::json!({"operator": "platform", "evidence": "operator_declared",
+        "location": {"jurisdiction": "DE", "provider": "gcp", "region": "europe-west3"}});
+    let (code, err, sent) = run(
+        &pin(&key, "platform", "us-central1", "US", "operator_declared"),
+        &de_only,
+        Some(claimed_de.clone()),
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("ENC2726"), "{err}");
+    assert_eq!(sent, 0);
+    // The pin is Germany but the control plane recorded the job elsewhere:
+    // one of them is wrong; nothing is sent.
+    let claimed_us = serde_json::json!({"operator": "platform", "evidence": "operator_declared",
+        "location": {"jurisdiction": "US", "provider": "gcp", "region": "us-central1"}});
+    let (code, err, sent) = run(
+        &pin(&key, "platform", "europe-west3", "DE", "operator_declared"),
+        &de_only,
+        Some(claimed_us),
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("ENC2726") && err.contains("record"), "{err}");
+    assert_eq!(sent, 0);
+    // A constraint on the operator, and on the evidence level.
+    let only_opco = write("opco.json", r#"{"allowed_operators": ["opco"]}"#);
+    let (code, err, sent) = run(
+        &pin(&key, "platform", "europe-west3", "DE", "operator_declared"),
+        &only_opco,
+        None,
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("allowed_operators"), "{err}");
+    assert_eq!(sent, 0);
+    let attested = write("att.json", r#"{"min_evidence": "attested"}"#);
+    let (code, err, sent) = run(
+        &pin(&key, "platform", "europe-west3", "DE", "operator_declared"),
+        &attested,
+        None,
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("min_evidence"), "{err}");
+    assert_eq!(sent, 0);
+    // Invalid constraints (an unknown region) are refused, not ignored.
+    let typo = write(
+        "typo.json",
+        r#"{"allowed_regions": [{"provider": "gcp", "region": "europe-west99"}]}"#,
+    );
+    let (code, err, sent) = run(
+        &pin(&key, "platform", "europe-west3", "DE", "operator_declared"),
+        &typo,
+        None,
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("ENC2726"), "{err}");
+    assert_eq!(sent, 0);
+    // Inside the constraints, and agreeing with the control plane, the job
+    // proceeds to the evaluator (which then fails here).
+    let (code, err, sent) = run(
+        &pin(&key, "platform", "europe-west3", "DE", "operator_declared"),
+        &de_only,
+        Some(claimed_de),
+    );
+    assert_ne!(code, 0);
+    assert!(!err.contains("ENC2726"), "{err}");
+    assert!(sent > 0, "{err}");
+}
+
+#[test]
+fn without_placement_constraints_the_run_is_unchanged() {
+    let s = setup("no-placement");
+    let key = encompute_verification::EvaluatorSigner::generate()
+        .unwrap()
+        .identity()
+        .public_key_hex();
+    let (evaluator, sent) = stub(|_, _| (500, "{}".into()));
+    let (control, _) = control_plane(&evaluator, &key);
+    let (code, err) = jobs_run(&s, &control, &["--trust-evaluator", &key], &[]);
+    assert_ne!(code, 0);
+    assert!(!err.contains("ENC2726"), "{err}");
+    assert!(!sent.lock().unwrap().is_empty());
+}

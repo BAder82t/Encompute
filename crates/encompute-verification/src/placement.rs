@@ -218,6 +218,91 @@ impl GrantPlacement {
     }
 }
 
+/// What a client pins about an evaluator it is willing to send ciphertexts
+/// to: its receipt key (as for the pin set of INV-184) together with its
+/// operator, where it is and how that is known. The client's own pin, not
+/// the control plane's word.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluatorPin {
+    /// The evaluator's receipt key (hex Ed25519).
+    pub receipt_key: String,
+    pub operator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    pub evidence: LocationEvidence,
+}
+
+/// The client-side placement check (ENC2726): before any ciphertext is
+/// sent to the evaluator with `receipt_key`, the client's own
+/// `constraints` (for the data it sends) must admit what the client
+/// **pinned** about it, whatever the control plane says. Refused when:
+/// - the client pinned nothing about this evaluator's placement (missing
+///   evidence is not admission) while the constraints cover ciphertexts;
+/// - the pinned operator, location or evidence is outside the constraints
+///   (deny wins; an unknown location satisfies no location rule);
+/// - the control plane's record of where the job was placed (`recorded`)
+///   differs from the pin: one of them is wrong, and neither is trusted.
+pub fn check_pinned_placement(
+    constraints: &PlacementConstraints,
+    receipt_key: &str,
+    pins: &[EvaluatorPin],
+    recorded: Option<&GrantPlacement>,
+) -> Result<()> {
+    let refuse = |m: String| Error::new(Code::GovernanceClientPlacement, m);
+    constraints.check().map_err(|e| refuse(e.message))?;
+    if !constraints.applies(&[Scope::Ciphertext]) {
+        return Ok(());
+    }
+    let key = receipt_key.to_ascii_lowercase();
+    let Some(pin) = pins
+        .iter()
+        .find(|p| p.receipt_key.to_ascii_lowercase() == key)
+    else {
+        return Err(refuse(
+            "your pin set says nothing about where this evaluator runs or who operates it: no \
+             ciphertext is sent where placement is unknown"
+                .into(),
+        ));
+    };
+    let machine = Machine {
+        id: "",
+        operator: &pin.operator,
+        location: pin.location.as_ref(),
+        evidence: pin.evidence,
+    };
+    // An evaluator ID is not pinned (the key is): constraints naming
+    // evaluators by ID are judged by the control plane.
+    let mut c = constraints.clone();
+    c.allowed_evaluators = None;
+    let why = c.refusals(&machine);
+    if !why.is_empty() {
+        let fields: Vec<&str> = why.iter().map(Refused::field).collect();
+        return Err(refuse(format!(
+            "the evaluator you pinned (operated by {}, {}) is outside your placement constraints \
+             ({}): nothing is sent",
+            pin.operator,
+            pin.location
+                .as_ref()
+                .map_or("location unknown".to_owned(), Location::display),
+            fields.join(", ")
+        )));
+    }
+    if let Some(rec) = recorded {
+        if rec.operator != pin.operator
+            || rec.location != pin.location
+            || rec.evidence != pin.evidence
+        {
+            return Err(refuse(
+                "the control plane's record of where the job was placed is not what you pinned \
+                 for this evaluator: nothing is sent"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A set of locations: each field present must match; an absent field
 /// matches anything. At least one field is present.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

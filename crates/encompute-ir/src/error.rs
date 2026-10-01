@@ -200,6 +200,8 @@ pub enum Code {
     GovernancePlacementChange,
     /// Operator separation refused: every evaluator that could run the job is operated by a source owner or by an organization that holds a decryption key for the output, or a SecAgg coordinator is also a contributor (ENC2725).
     GovernanceOperatorSeparation,
+    /// A client refused to send ciphertexts to an evaluator outside its own placement constraints: the evaluator it pinned is at a location, operated by an organization, or known by evidence the constraints do not admit, or the pin set says nothing about where it is (ENC2726).
+    GovernanceClientPlacement,
 }
 
 impl Code {
@@ -287,13 +289,14 @@ impl Code {
             Code::GovernanceLocationEvidence => "ENC2723",
             Code::GovernancePlacementChange => "ENC2724",
             Code::GovernanceOperatorSeparation => "ENC2725",
+            Code::GovernanceClientPlacement => "ENC2726",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 82] = [
+    pub const ALL: [Code; 83] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -376,6 +379,7 @@ impl Code {
         Code::GovernanceLocationEvidence,
         Code::GovernancePlacementChange,
         Code::GovernanceOperatorSeparation,
+        Code::GovernanceClientPlacement,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

@@ -137,7 +137,8 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceCustody
         | Code::GovernanceAuditorSeparation
         | Code::GovernanceLocationEvidence
-        | Code::GovernanceOperatorSeparation => 403,
+        | Code::GovernanceOperatorSeparation
+        | Code::GovernanceClientPlacement => 403,
         Code::NotFound => 404,
         Code::Conflict
         | Code::PrivacyBudgetExceeded

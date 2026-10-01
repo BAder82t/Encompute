@@ -47,7 +47,8 @@ pub struct PlanOpts {
     /// Training to plan with the program (JSON: model and data assets).
     #[arg(long)]
     pub training: Option<PathBuf>,
-    /// Among valid plans, prefer lower latency or lower cost.
+    /// Among valid plans, prefer lower latency, lower cost, or `minimize`
+    /// (the plan that releases least).
     #[arg(long, default_value = "latency")]
     pub prefer: String,
     /// Nothing may run in the cloud.
@@ -72,7 +73,13 @@ impl PlanOpts {
         let objective = match self.prefer.as_str() {
             "latency" => Objective::Latency,
             "cost" => Objective::Cost,
-            _ => return Err(Error::new(Code::BadInput, "--prefer is latency or cost")),
+            "minimize" => Objective::Minimize,
+            _ => {
+                return Err(Error::new(
+                    Code::BadInput,
+                    "--prefer is latency, cost or minimize",
+                ))
+            }
         };
         let infrastructure: Infrastructure = match &self.infrastructure {
             Some(p) => json(p)?,

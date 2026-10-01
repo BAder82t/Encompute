@@ -123,3 +123,114 @@ fn evidence_levels_are_ordered() {
         assert_eq!(LocationEvidence::parse(e.as_str()), Some(e));
     }
 }
+
+fn pin(
+    key: &str,
+    operator: &str,
+    region: Option<(&str, &str)>,
+    ev: LocationEvidence,
+) -> EvaluatorPin {
+    EvaluatorPin {
+        receipt_key: key.into(),
+        operator: operator.into(),
+        location: region.map(|(p, r)| Location::resolve(p, r, None).unwrap()),
+        evidence: ev,
+    }
+}
+
+#[test]
+fn a_client_judges_what_it_pinned_by_its_own_constraints() {
+    use encompute_ir::Code;
+    let key = "ab".repeat(32);
+    let de = PlacementConstraints {
+        allowed_regions: Some([LocationPattern::jurisdiction("DE")].into()),
+        ..PlacementConstraints::default()
+    };
+    let good = pin(
+        &key,
+        "platform",
+        Some(("gcp", "europe-west3")),
+        LocationEvidence::OperatorDeclared,
+    );
+    check_pinned_placement(&de, &key, std::slice::from_ref(&good), None).unwrap();
+    // The key matches in any case.
+    check_pinned_placement(&de, &key.to_uppercase(), std::slice::from_ref(&good), None).unwrap();
+    let refused =
+        |c: &PlacementConstraints, pins: &[EvaluatorPin], rec: Option<&GrantPlacement>| {
+            let e = check_pinned_placement(c, &key, pins, rec).unwrap_err();
+            assert_eq!(e.code, Code::GovernanceClientPlacement, "{e}");
+            e.message
+        };
+    // Elsewhere, nothing pinned, another key pinned, unknown location.
+    let us = pin(
+        &key,
+        "platform",
+        Some(("gcp", "us-central1")),
+        LocationEvidence::OperatorDeclared,
+    );
+    assert!(refused(&de, &[us], None).contains("allowed_regions"));
+    assert!(refused(&de, &[], None).contains("pin set says nothing"));
+    let other = pin(
+        &"cd".repeat(32),
+        "platform",
+        Some(("gcp", "europe-west3")),
+        LocationEvidence::Attested,
+    );
+    assert!(refused(&de, &[other], None).contains("pin set says nothing"));
+    let unknown = pin(&key, "platform", None, LocationEvidence::Attested);
+    assert!(refused(&de, &[unknown], None).contains("location"));
+    // Prohibited wins, operators and evidence count.
+    let mut no_us = PlacementConstraints::default();
+    no_us
+        .prohibited_locations
+        .insert(LocationPattern::jurisdiction("DE"));
+    assert!(refused(&no_us, std::slice::from_ref(&good), None).contains("prohibited_locations"));
+    let ops = PlacementConstraints {
+        allowed_operators: Some(["opco".to_owned()].into()),
+        ..PlacementConstraints::default()
+    };
+    assert!(refused(&ops, std::slice::from_ref(&good), None).contains("allowed_operators"));
+    let attested = PlacementConstraints {
+        min_evidence: LocationEvidence::Attested,
+        ..PlacementConstraints::default()
+    };
+    assert!(refused(&attested, std::slice::from_ref(&good), None).contains("min_evidence"));
+    // The control plane's record must agree with the pin.
+    let said = GrantPlacement {
+        operator: "platform".into(),
+        location: good.location.clone(),
+        evidence: LocationEvidence::OperatorDeclared,
+        evidence_digest: None,
+    };
+    check_pinned_placement(&de, &key, std::slice::from_ref(&good), Some(&said)).unwrap();
+    for lie in [
+        GrantPlacement {
+            operator: "opco".into(),
+            ..said.clone()
+        },
+        GrantPlacement {
+            evidence: LocationEvidence::Attested,
+            ..said.clone()
+        },
+        GrantPlacement {
+            location: Some(Location::resolve("gcp", "europe-west1", None).unwrap()),
+            ..said.clone()
+        },
+        GrantPlacement {
+            location: None,
+            ..said.clone()
+        },
+    ] {
+        assert!(refused(&de, std::slice::from_ref(&good), Some(&lie)).contains("record"));
+    }
+    // Invalid constraints are refused, and constraints about other scopes
+    // say nothing about ciphertexts.
+    let typo = PlacementConstraints {
+        allowed_regions: Some([LocationPattern::region("gcp", "europe-west99")].into()),
+        ..PlacementConstraints::default()
+    };
+    refused(&typo, std::slice::from_ref(&good), None);
+    let mut keys_only = de.clone();
+    keys_only.applies_to = [Scope::Keys].into();
+    check_pinned_placement(&keys_only, &key, &[], None).unwrap();
+}
