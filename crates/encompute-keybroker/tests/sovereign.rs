@@ -102,6 +102,8 @@ fn ticket_without_local_authorization_refused() {
         binding: binding(),
         spec,
         authorization: signed(authorization()),
+        placement: None,
+        zone: None,
     };
     let s = w.session();
     let handle = w.attest(&s);
@@ -162,6 +164,8 @@ fn unpinned_ticket_signer_refused() {
         binding: binding(),
         spec,
         authorization: w.authorization.clone(),
+        placement: None,
+        zone: None,
     };
     let s = w2.session();
     let handle = w2.attest(&s);
@@ -591,6 +595,8 @@ fn dev_escape_refused_in_production() {
         binding: binding(),
         spec: spec.clone(),
         authorization: signed(authorization()),
+        placement: None,
+        zone: None,
     };
     let s = w.session();
     let handle = w.attest(&s);
@@ -636,6 +642,8 @@ fn ungoverned_secret_refused_on_governed_broker() {
         binding: binding(),
         spec,
         authorization: signed(authorization()),
+        placement: None,
+        zone: None,
     };
     let s = w.session();
     let handle = w.attest(&s);
@@ -671,6 +679,8 @@ fn a_bound_version_is_immutable() {
         binding: binding(),
         spec: spec_for(&binding()),
         authorization: signed(authorization()),
+        placement: None,
+        zone: None,
     };
     let s = w.session();
     let handle = w.attest(&s);
@@ -784,6 +794,8 @@ fn v1_broker_release_unchanged() {
         binding: binding(),
         spec,
         authorization: signed(authorization()),
+        placement: None,
+        zone: None,
     };
     let s = w.session();
     let handle = w.attest(&s);
@@ -1352,6 +1364,8 @@ fn derived_world(
         binding: binding(),
         spec,
         authorization: signed(authorization()),
+        placement: None,
+        zone: None,
     };
     let mut record = release_record(&w, &h('7'));
     record.derived_version_id = asset_version();

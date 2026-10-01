@@ -1403,3 +1403,51 @@ fn the_production_floor_refuses_a_plan_that_accepts_self_declared_locations() {
     let e = prod.verify_stored_plan(&program, &plan).unwrap_err();
     assert!(e.message.contains("self-declared"), "{e}");
 }
+
+#[test]
+fn a_release_ticket_carries_the_constraints_its_binding_names() {
+    let Some(g) = world() else { return };
+    quiet_platform_default(&g);
+    let ev = g.platform_evaluator("ev-de", Some("europe-west3"), true);
+    let constraints = allow_regions(&["DE"]);
+    assert_eq!(g.constrain(&g.tax_sec1, constraints.clone()).0, 200);
+    let (v, _, job) = queued(&g, "2026-q1");
+    let (s, r) = g.t.call(
+        &ev.service,
+        "POST",
+        &format!("/v1/jobs/{job}/release-ticket"),
+        Some(json!({"asset_version_id": v.version})),
+    );
+    assert_eq!(s, 201, "{r}");
+    let t = &r["ticket"];
+    // The document, and the digest the binding the workload attests to
+    // names: the broker judges the attested zone by it.
+    assert_eq!(t["placement"], constraints, "{t}");
+    assert_eq!(t["placement_digest"], g.placement().1["digest"]);
+    assert_eq!(t["binding"]["placement_digest"], t["placement_digest"]);
+    let ticket: encompute_verification::ticket::ReleaseTicket =
+        serde_json::from_value(t.clone()).unwrap();
+    ticket.check_consistent().unwrap();
+    assert_eq!(
+        ticket.placement.as_ref().unwrap().digest(),
+        ticket.placement_digest.clone().unwrap()
+    );
+}
+
+#[test]
+fn a_release_ticket_without_project_constraints_carries_none() {
+    let Some(g) = world() else { return };
+    let (v, _, job) = queued(&g, "2026-q1");
+    let (s, r) = g.t.call(
+        &g.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{job}/release-ticket"),
+        Some(json!({"asset_version_id": v.version})),
+    );
+    assert_eq!(s, 201, "{r}");
+    let t = r["ticket"].as_object().unwrap();
+    assert!(
+        !t.contains_key("placement") && !t.contains_key("placement_digest"),
+        "{t:?}"
+    );
+}

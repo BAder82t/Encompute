@@ -187,6 +187,8 @@ fn saved_world(path: &Path, mark: &MemoryMark) -> World {
         binding: binding(),
         spec,
         authorization,
+        placement: None,
+        zone: None,
     }
 }
 

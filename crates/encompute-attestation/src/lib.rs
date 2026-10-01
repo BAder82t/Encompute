@@ -36,7 +36,7 @@ pub use grant::{
 };
 pub use policy::{
     public_denial, AttestationPolicy, DebugPolicy, Security, TcbStatus, TeeKind, VerifiedGpu,
-    VerifiedWorkload, POLICY_VERSION,
+    VerifiedWorkload, WorkloadLocation, POLICY_VERSION,
 };
 pub use provider::{
     check_freshness, AttestationEvidence, AttestationProvider, Attester, DynProvider, Verifier,

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use encompute_ir::{Code, Result};
+use encompute_ir::{Code, Error, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::binding::WorkloadBinding;
@@ -103,6 +103,44 @@ pub struct VerifiedWorkload {
     pub issued_at: Option<u64>,
     pub expires_at: Option<u64>,
     pub gpu: Option<VerifiedGpu>,
+    /// Where the cloud says the workload runs, when the evidence names it
+    /// (a Confidential Space token names the Compute Engine zone). Absent
+    /// is not "anywhere": a placement constraint with a location rule
+    /// refuses a workload with no location.
+    pub location: Option<WorkloadLocation>,
+}
+
+/// Where verified evidence says a workload runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadLocation {
+    /// The cloud: `gcp`.
+    pub provider: String,
+    /// The provider's zone, as the evidence names it (`us-central1-a`).
+    pub zone: String,
+}
+
+impl WorkloadLocation {
+    /// The location in the locations table's terms, with the evidence level
+    /// `Attested`; refused when the table does not know the zone (an
+    /// unknown location is never admitted).
+    pub fn resolve(&self) -> Result<encompute_verification::placement::Location> {
+        use encompute_verification::placement::{locations, Location};
+        let region = match self.provider.as_str() {
+            "gcp" => locations::gce_zone_region(&self.zone),
+            _ => None,
+        };
+        let region = region.ok_or_else(|| {
+            Error::new(
+                Code::GovernanceResidency,
+                format!(
+                    "the location table does not know {} zone {:?}: an unknown location is never \
+                     admitted",
+                    self.provider, self.zone
+                ),
+            )
+        })?;
+        Location::resolve(&self.provider, region, Some(&self.zone))
+    }
 }
 
 impl VerifiedWorkload {

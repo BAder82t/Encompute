@@ -575,6 +575,20 @@ impl Control {
                 workload_or_recipient: receipt_key,
                 recipient: None,
                 placement_digest: g.binding.placement_digest.clone(),
+                // The constraints that digest names, so the owner's broker
+                // can judge the workload's attested location by them.
+                placement: match &g.binding.placement_digest {
+                    Some(d) => Some(
+                        crate::ops::placement::project_placement_by_digest(t, &project, d)?
+                            .ok_or_else(|| {
+                                Error::new(
+                                    Code::GovernanceResidency,
+                                    "the job's binding names project constraints the project never had",
+                                )
+                            })?,
+                    ),
+                    None => None,
+                },
                 execution_spec: spec,
                 binding: g.binding.clone(),
                 not_before: at,

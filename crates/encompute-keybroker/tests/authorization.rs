@@ -58,6 +58,8 @@ fn saved_world(path: &Path) -> World {
         binding: binding(),
         spec,
         authorization: signed(a),
+        placement: None,
+        zone: None,
     }
 }
 

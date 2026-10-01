@@ -565,6 +565,46 @@ impl PlacementConstraints {
         out
     }
 
+    /// Why this constraint refuses a machine at `location` whose location
+    /// is known by `evidence`, judging only where it is: the location
+    /// rules and the evidence level (an operator or an evaluator ID is not
+    /// something a key broker can see). `None` is a machine whose location
+    /// is not known: refused whenever a location rule exists.
+    pub fn location_refusals(
+        &self,
+        location: Option<&Location>,
+        evidence: LocationEvidence,
+    ) -> Vec<Refused> {
+        let mut out = vec![];
+        let needs_location =
+            self.allowed_regions.is_some() || !self.prohibited_locations.is_empty();
+        match location {
+            None if needs_location => out.push(Refused::UnknownLocation),
+            None => {}
+            Some(l) if l.check().is_err() => {
+                if needs_location {
+                    out.push(Refused::UnknownLocation);
+                }
+            }
+            Some(l) => {
+                if self
+                    .allowed_regions
+                    .as_ref()
+                    .is_some_and(|a| !a.iter().any(|p| p.contains(l)))
+                {
+                    out.push(Refused::AllowedRegions);
+                }
+                if self.prohibited_locations.iter().any(|p| p.may_contain(l)) {
+                    out.push(Refused::ProhibitedLocations);
+                }
+            }
+        }
+        if evidence < self.min_evidence {
+            out.push(Refused::MinEvidence);
+        }
+        out
+    }
+
     /// The combination of two constraints: allowed sets intersect (an
     /// absent set does not restrict), prohibited sets union, evidence is
     /// the maximum, scopes union (each covers what it covers). Monotone:

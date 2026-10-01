@@ -170,6 +170,11 @@ pub struct World {
     pub binding: GovernanceBinding,
     pub spec: ExecutionSpec,
     pub authorization: SignedAuthorizationV2,
+    /// The project's placement constraints the ticket carries (the
+    /// binding's `placement_digest` must name them).
+    pub placement: Option<encompute_verification::placement::PlacementConstraints>,
+    /// Where the evaluator's attestation says it runs: `(provider, zone)`.
+    pub zone: Option<(String, String)>,
 }
 
 /// A bare development broker for `ORG` holding `ASSET` under the governed
@@ -218,6 +223,8 @@ pub fn world_with(binding: GovernanceBinding, authorization: AuthorizationV2) ->
         binding,
         spec,
         authorization,
+        placement: None,
+        zone: None,
     }
 }
 
@@ -260,10 +267,11 @@ impl World {
             self.spec.policy_id.as_deref(),
             ARTIFACT,
         );
-        hw().attester(IMAGE)
-            .issued_at(issued_at)
-            .attest(&c, &b)
-            .unwrap()
+        let mut a = hw().attester(IMAGE).issued_at(issued_at);
+        if let Some((provider, zone)) = &self.zone {
+            a = a.located(provider, zone);
+        }
+        a.attest(&c, &b).unwrap()
     }
 
     /// An attested session (the broker's handle for it).
@@ -294,6 +302,7 @@ impl World {
             workload_or_recipient: self.evaluator_key(),
             recipient: None,
             placement_digest: self.binding.placement_digest.clone(),
+            placement: self.placement.clone(),
             execution_spec: self.spec.clone(),
             binding: self.binding.clone(),
             not_before: now,
