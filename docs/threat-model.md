@@ -611,6 +611,11 @@ institution shows its own auditor, so the attacks are on what they say.
 | Present a stale revocation head as covering a later run, or judge a historical run by today's clock | Authorizations are judged at the grant's signed time; what they say now is shown apart and never fails a historical audit. A head covers only what happened up to its own date; for a later `--as-of` it is UNCHECKED | `a_stale_revocation_head_is_not_covered_for_a_later_run`, `execution_time_validity_never_fails_a_historical_audit` |
 | A control plane that shows members different histories | Members compare BundleIds of the shared view (one state, one id) and witness checkpoints; a bundle whose log is not witnessed by every member is UNCHECKED | INV-247 |
 
+The plaintext guard (a length cap outside a few text fields, typed
+sections, salted commitments) is a heuristic that catches the common
+shapes of a leak, not a proof that no record is in a bundle: the types
+and what the control plane never holds are the defence.
+
 Not covered: the shared view's metadata by design (members, versions used,
 counts, pseudonyms); a card's content, which is the control plane's word
 until the owner discloses the signed document; the key model (who can

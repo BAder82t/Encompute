@@ -106,9 +106,9 @@ pub struct Anchors {
     /// attestation that verifies needs no anchor.
     pub evaluators: BTreeSet<String>,
     /// Organization → its governance public key (hex), pinned by the
-    /// caller. These override any governance key a bundle anchors itself:
-    /// a bundle that brings its own anchor, and a signature made with it,
-    /// must not verify a v2 authorization.
+    /// caller. When any is pinned they are the only governance keys: none a
+    /// bundle anchors itself counts, so a bundle that brings its own anchor
+    /// and a signature made with it cannot verify a v2 authorization.
     pub governance_keys: BTreeMap<String, String>,
 }
 

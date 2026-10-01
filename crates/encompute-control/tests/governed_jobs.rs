@@ -5722,11 +5722,15 @@ fn the_log_is_never_partially_exported_and_the_route_is_rate_limited() {
         g.t.ok(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
     let b = GovernanceBundle::from_bytes(&canonical_bytes(&b)).unwrap();
     let cp = b.audit.checkpoint.as_ref().unwrap();
-    assert_eq!(b.audit.events.len() as u64, cp.body.size);
-    // A log over the cap is refused whole (ENC2730), never truncated.
+    // The events a reader of this job needs, each proven against the
+    // checkpoint (not the whole log).
+    assert!(b.audit.events.len() as u64 <= cp.body.size);
+    // More relevant events than the cap is refused whole (ENC2730), never
+    // truncated; the cap counts what concerns this job (its members and
+    // revocations), not the size of the whole project's log.
     g.t.control
         .bundle_max_events
-        .store(cp.body.size - 1, std::sync::atomic::Ordering::Relaxed);
+        .store(0, std::sync::atomic::Ordering::Relaxed);
     let (st, v) =
         g.t.call(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
     assert_eq!((st, code(&v)), (422, "ENC2730"), "{v}");
@@ -5734,6 +5738,15 @@ fn the_log_is_never_partially_exported_and_the_route_is_rate_limited() {
         .bundle_max_events
         .store(cp.body.size, std::sync::atomic::Ordering::Relaxed);
     g.t.ok(&g.ben_dev_admin(), "GET", &bundle_url(&job, ""), None);
+    // At most a few bundles are built at once, whoever asks (503).
+    g.t.control
+        .bundle_slots
+        .store(4, std::sync::atomic::Ordering::SeqCst);
+    let (st, _) = g.t.call(&g.tax_admin, "GET", &bundle_url(&job, ""), None);
+    assert_eq!(st, 503);
+    g.t.control
+        .bundle_slots
+        .store(0, std::sync::atomic::Ordering::SeqCst);
     // A caller is rate limited: the dearest read there is.
     g.t.control.bundle_limit.set(2);
     let who = g.tax_sec1.clone();

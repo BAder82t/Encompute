@@ -281,22 +281,26 @@ impl TrustGraph {
         Ok(())
     }
 
-    /// This graph with the governance keys the caller pinned replacing
-    /// whatever the bundle anchors for those organizations (and its
-    /// revocation times for them): a bundle that brings its own anchor
+    /// This graph with the governance keys the caller pinned as the only
+    /// governance keys (the bundle's own anchors and revocation times are
+    /// dropped for every organization): a bundle that brings its own anchor
     /// cannot make a v2 authorization verify.
     pub(crate) fn with_pinned_governance_keys(
         &self,
         pins: &BTreeMap<String, String>,
     ) -> TrustGraph {
         let mut g = self.clone();
-        for (org, key) in pins {
-            if let Some(n) = g.nodes.get_mut(&node_id(NodeKind::Party, org)) {
+        // Once the caller pins any governance key, no organization's key
+        // comes from the bundle: an organization it did not pin has none.
+        for (id, n) in g.nodes.iter_mut() {
+            if n.kind == NodeKind::Party {
                 n.attrs.retain(|k, _| !is_governance_anchor(k));
-                n.attrs.insert(
-                    format!("{GOVERNANCE_KEY_ATTR}{}", governance_key_id(key)),
-                    key.clone(),
-                );
+                if let Some(key) = id.strip_prefix("party:").and_then(|org| pins.get(org)) {
+                    n.attrs.insert(
+                        format!("{GOVERNANCE_KEY_ATTR}{}", governance_key_id(key)),
+                        key.clone(),
+                    );
+                }
             }
         }
         g

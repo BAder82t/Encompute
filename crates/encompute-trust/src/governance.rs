@@ -242,7 +242,7 @@ pub struct GovernanceRow {
     pub name: &'static str,
     pub status: Status,
     /// What a non-specialist reads: `NO`, `YES`, `NONE`, `INDEPENDENT`,
-    /// `VALID AT EXECUTION`, `UNKNOWN` or a mechanism in words.
+    /// `VALID AT GRANT`, `UNKNOWN` or a mechanism in words.
     pub value: Option<String>,
     pub details: Vec<String>,
 }
@@ -488,6 +488,7 @@ pub fn check_audit(
     audit: &AuditEvidence,
     a: &GovernanceAnchors,
     owners: &BTreeSet<String>,
+    required: &BTreeSet<String>,
     as_of: u64,
 ) -> AuditFindings {
     if audit.version != GOVERNANCE_EVIDENCE_VERSION {
@@ -519,17 +520,17 @@ pub fn check_audit(
             cp.body.partition
         ));
     }
-    if audit.events.len() as u64 != cp.body.size {
-        return fail(format!(
-            "the evidence has {} events of a checkpoint of {}",
-            audit.events.len(),
-            cp.body.size
-        ));
-    }
-    for (i, e) in audit.events.iter().enumerate() {
-        if e.event.pseq != i as u64 + 1 {
-            return fail(format!("event {} is out of order or missing", i as u64 + 1));
+    // The events a reader of this job needs, each proven against the
+    // checkpoint, in order (not the whole log).
+    let mut last = 0;
+    for e in &audit.events {
+        if e.event.pseq <= last || e.event.pseq > cp.body.size {
+            return fail(format!(
+                "event {} is out of order or beyond the checkpoint",
+                e.event.pseq
+            ));
         }
+        last = e.event.pseq;
         if let Err(x) = cp.includes(&e.event, &e.proof) {
             return fail(format!("event {}: {}", e.event.pseq, x.message));
         }
@@ -555,7 +556,20 @@ pub fn check_audit(
             ));
         }
     }
-    let witnessed = !members.is_empty() && members.iter().all(|o| witnessed_by.contains(o));
+    // The member list in the bundle is a baseline the control plane
+    // states (unsigned): every owner and participant of the signed binding
+    // must witness whatever it says, so dropping an organization from it
+    // changes nothing.
+    let mut must: BTreeSet<&String> = members.iter().collect();
+    must.extend(required.iter());
+    let witnessed = !must.is_empty() && must.iter().all(|o| witnessed_by.contains(*o));
+    for o in required {
+        if !members.contains(o) {
+            notes.push(format!(
+                "{o} takes part in the job but is not in the member list the control plane stated: it must witness all the same"
+            ));
+        }
+    }
     for o in &members {
         if !a.organizations.contains_key(o) {
             notes.push(format!(
@@ -776,6 +790,19 @@ fn row_project(j: &Job<'_>) -> GovernanceRow {
                     ));
                 }
             }
+        }
+    }
+    for o in j.participants.iter().chain(j.recipients().iter()) {
+        if !j.binding.inputs.values().any(|i| &i.organization == o)
+            && !j
+                .ev
+                .purpose_acceptances
+                .iter()
+                .any(|x| &x.body.organization == o)
+        {
+            t.note(format!(
+                "{o} takes part (as submitter or recipient) and has signed no acceptance of the purpose"
+            ));
         }
     }
     t.note("this release has no separate project charter: the consent shown is each organization's signed acceptance of the purpose".into());
@@ -1060,11 +1087,31 @@ fn row_source_assets(j: &Job<'_>) -> GovernanceRow {
     )
 }
 
+/// Whether every authorization is a verified signature: "nothing is
+/// declared" may not rest on the body of a card or an unchecked document.
+fn all_signed(j: &Job<'_>) -> bool {
+    j.auths.iter().all(|a| matches!(a.sig, Sig::Verified))
+}
+
+fn unchecked_na(name: &'static str) -> GovernanceRow {
+    GovernanceRow {
+        name,
+        status: Status::Unchecked,
+        value: Some("UNKNOWN".into()),
+        details: vec![
+            "whether the feature is declared rests on authorizations whose signatures are not all verified (a card, an unpinned key or an invalid signature)".into(),
+        ],
+    }
+}
+
 fn row_linkage(j: &Job<'_>) -> GovernanceRow {
     let declared = j.binding.linkage_policy_id.is_some()
         || j.ev.purpose.linkage_policy_id.is_some()
         || j.ev.purpose.modes.contains(&PurposeMode::RecordLevelExact)
         || j.auths.iter().any(|a| a.body.linkage_policy_id.is_some());
+    if !declared && !all_signed(j) {
+        return unchecked_na("Linkage");
+    }
     if declared {
         not_present(
             "Linkage",
@@ -1284,6 +1331,19 @@ fn row_approvals(j: &Job<'_>) -> GovernanceRow {
             t.fail(format!("{what} has no approvals"));
         }
         let people: BTreeSet<&str> = a.approvals.iter().map(|(p, _, _)| p.as_str()).collect();
+        // The submitter is a pseudonym; a raw approver of the submitter's
+        // own organization cannot be compared with it.
+        if j.ev
+            .submitter
+            .as_deref()
+            .is_some_and(|s| s.starts_with("psn_"))
+            && j.ev.grant.organization == a.party
+            && a.approvals.iter().any(|(p, _, _)| !p.starts_with("psn_"))
+        {
+            t.unanchored(format!(
+                "{what}: its approvers are shown by identity and the submitter by pseudonym, so that they are different people cannot be checked"
+            ));
+        }
         if let Err(e) = crate::authz::quorum_met(
             a.approvals.iter().map(|(p, r, _)| (p.as_str(), r.as_str())),
             2,
@@ -1437,6 +1497,17 @@ fn row_window(j: &Job<'_>) -> GovernanceRow {
                 ));
             }
         }
+        // Revoked while the grant was still usable: the run's own time is
+        // not in the evidence (a receipt carries none), so whether it came
+        // first cannot be told.
+        for at in [r.authorization, r.key].into_iter().flatten() {
+            if at > j.t0 && at <= j.ev.grant.expires_at {
+                t.unanchored(format!(
+                    "{what} (or its key) was revoked at {at}, after the grant at {} and before it expired at {}: whether the run came first is not evidenced",
+                    j.t0, j.ev.grant.expires_at
+                ));
+            }
+        }
         if !j.audit.is_verified() {
             t.unanchored(format!(
                 "{what}: whether it or its key was revoked before the run rests on the project's log, which is not verified"
@@ -1445,14 +1516,14 @@ fn row_window(j: &Job<'_>) -> GovernanceRow {
         sig_status(&mut t, j, a);
     }
     t.note(format!(
-        "judged at the grant's signed time {} (valid until {}), never at the time of verification",
+        "judged at the grant's signed time {} (valid until {}), never at the time of verification; the run's own time is not evidenced, only that the grant was issued then",
         j.t0, j.gg.not_after
     ));
     grow(
         t,
         "Authorization window",
         Status::Satisfied,
-        Some("VALID AT EXECUTION"),
+        Some("VALID AT GRANT"),
         None,
     )
 }
@@ -1588,6 +1659,9 @@ fn row_privacy(j: &Job<'_>, base: &TrustReport) -> GovernanceRow {
             "Privacy policy",
             "an authorization names a privacy scope; scoped budgets are not evidenced in this release",
         );
+    }
+    if !budgeted && !all_signed(j) {
+        return unchecked_na("Privacy policy");
     }
     if !budgeted {
         return not_applicable(
@@ -1826,7 +1900,7 @@ impl TrustGraph {
         };
         let binding = &gg.binding;
         let t0 = ev.grant.issued_at;
-        let as_of = opts.as_of.unwrap_or(t0);
+        let as_of = opts.as_of.map_or(t0, |x| x.max(t0));
         let program = match g.node(&node_id(NodeKind::Program, &ev.spec.program_id)) {
             Some(n) => match &n.evidence {
                 Some(Evidence::Program(text)) => parse(text).ok(),
@@ -1853,7 +1927,7 @@ impl TrustGraph {
             .values()
             .map(|i| i.organization.clone())
             .collect();
-        let findings = check_audit(audit, &opts.anchors, &owners, as_of);
+        let findings = check_audit(audit, &opts.anchors, &owners, &participants, as_of);
         let job = Job {
             ev,
             gg,

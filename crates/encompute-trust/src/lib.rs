@@ -22,8 +22,8 @@ pub use authz::{
 };
 pub use bundle::{
     check_no_plaintext, GovernanceBundle, Manifest, Outcome, Pin, Pins, Provenance,
-    SignatureFinding, SignatureStatus, Verified, VerifyOptions, BUNDLE_FORMAT, EXIT_CODES,
-    MAX_STRING,
+    SignatureFinding, SignatureStatement, SignatureStatus, Verified, VerifyOptions, BUNDLE_FORMAT,
+    EXIT_CODES, MAX_STRING,
 };
 pub use governance::{
     check_audit, AuditEntry, AuditEvidence, AuditFindings, AuditState, AuthorizationCard,

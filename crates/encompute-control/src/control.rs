@@ -79,6 +79,8 @@ pub struct Control {
     pub bundle_limit: crate::ops::RateLimit,
     /// The most events of a project's log one bundle carries.
     pub bundle_max_events: std::sync::atomic::AtomicU64,
+    /// Bundles being built now.
+    pub bundle_slots: std::sync::atomic::AtomicUsize,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -216,6 +218,7 @@ impl Control {
             project_log_limit: Default::default(),
             bundle_limit: crate::ops::RateLimit::limited(crate::ops::BUNDLE_RATE),
             bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
+            bundle_slots: 0.into(),
         };
         c.ensure_self_registered()?;
         let existed = match opened {
@@ -382,6 +385,7 @@ impl Control {
             project_log_limit: Default::default(),
             bundle_limit: crate::ops::RateLimit::limited(crate::ops::BUNDLE_RATE),
             bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
+            bundle_slots: 0.into(),
         })
     }
 

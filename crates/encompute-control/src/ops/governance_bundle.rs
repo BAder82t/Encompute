@@ -55,6 +55,32 @@ pub const MAX_BUNDLE_EVENTS: u64 = 5_000;
 /// the whole log with its proofs).
 pub const BUNDLE_RATE: u32 = 12;
 
+/// One of the few concurrent bundle builds the control plane allows.
+struct BundleSlot<'a>(&'a std::sync::atomic::AtomicUsize);
+
+/// How many bundles may be built at once.
+pub const BUNDLE_SLOTS: usize = 4;
+
+impl<'a> BundleSlot<'a> {
+    fn take(n: &'a std::sync::atomic::AtomicUsize) -> Result<Self> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if n.fetch_add(1, SeqCst) >= BUNDLE_SLOTS {
+            n.fetch_sub(1, SeqCst);
+            return Err(Error::new(
+                Code::Scheduling,
+                "too many governance bundles are being built: retry shortly",
+            ));
+        }
+        Ok(Self(n))
+    }
+}
+
+impl Drop for BundleSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 enum View {
     Shared,
     Organization(String),
@@ -104,6 +130,8 @@ impl Control {
         organization: Option<&str>,
     ) -> Result<Value> {
         self.bundle_limit.hit(&ctx.principal.id)?;
+        // At most a few bundles are built at once, whoever asks.
+        let _slot = BundleSlot::take(&self.bundle_slots)?;
         let view = match (view.unwrap_or("shared"), organization) {
             ("shared", None) => View::Shared,
             ("shared", Some(_)) => return Err(bad("the shared view is for no organization")),
@@ -257,38 +285,44 @@ impl Control {
             let max = self
                 .bundle_max_events
                 .load(std::sync::atomic::Ordering::Relaxed);
-            if cp.body.size > max {
-                return Err(limit(format!(
-                    "the project's log has {} events; a bundle carries at most {max}, and a partial log is never exported",
-                    cp.body.size
-                )));
-            }
-            let mut after = 0u64;
-            while after < cp.body.size {
-                let page = govlog::leaves(
-                    t,
-                    &self.node_cache,
-                    &partition,
-                    after,
-                    cp.body.size,
-                    crate::ops::PROJECT_LOG_MAX_PAGE,
-                )?;
-                let Some(last) = page.last().map(|(e, _, _)| e.pseq) else {
-                    return Err(db_err("the log's events stop before its checkpoint"));
-                };
-                events.extend(
-                    page.into_iter()
-                        .map(|(event, _, proof)| AuditEntry { event, proof }),
-                );
-                after = last;
-            }
+            // The events one reader of this job needs, not the whole log: a
+            // busy project cannot make every job's export fail.
+            let page = govlog::relevant_leaves(
+                t,
+                &self.node_cache,
+                &partition,
+                cp.body.size,
+                &j.id,
+                max,
+            )?
+            .ok_or_else(|| {
+                limit(format!(
+                    "more than {max} of the project's log events concern this job, its revocations and its members; a partial selection is never exported"
+                ))
+            })?;
+            events = page
+                .into_iter()
+                .map(|(event, _, proof)| AuditEntry { event, proof })
+                .collect();
             witnesses = govlog::witnesses_at(t, &partition, cp.body.size)?;
             members = govlog::members_at(t, &j.project, cp.body.size)?;
         }
+        // Only heads the checkpoint's log records: one state, one set of
+        // bytes for every member.
         let heads = crate::ops::revocation_heads::latest_heads(t, &j.project)?
             .into_iter()
             .map(|v| serde_json::from_value(v).map_err(|e| db_err(format!("stored head: {e}"))))
-            .collect::<Result<Vec<SignedRevocationHead>>>()?;
+            .collect::<Result<Vec<SignedRevocationHead>>>()?
+            .into_iter()
+            .filter(|h| {
+                events.iter().any(|e| {
+                    e.event.kind == encompute_trust::govlog::kind::REVOCATION_HEAD_SIGNED
+                        && e.event.org.as_deref() == Some(h.body.organization.as_str())
+                        && e.event.refs.get("seq") == Some(&h.body.seq.to_string())
+                        && e.event.refs.get("root") == Some(&h.body.root)
+                })
+            })
+            .collect();
         Ok(Parts {
             submitter: self.pseudonyms.pseudonym(&j.project, &j.initiated_by),
             program_text: program.to_string(),

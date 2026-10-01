@@ -30,6 +30,13 @@ fn pins(fx: &Fixture) -> Pins {
                     obtained: obtained.clone(),
                 },
             ),
+            (
+                OTHER.to_owned(),
+                encompute_trust::bundle::OrganizationPin {
+                    identity_key: pk(&fx.other),
+                    obtained: obtained.clone(),
+                },
+            ),
         ]
         .into(),
         control_plane: Some(Pin {
@@ -456,8 +463,9 @@ fn the_plaintext_guard_refuses_what_a_bundle_must_not_carry() {
         Provenance::default(),
     )
     .unwrap_err();
-    assert_eq!(e.code, Code::GovernanceBundlePlaintext);
-    // The same in the log.
+    // An identifier is checked as one before the guard sees it.
+    assert_eq!(e.code, Code::GovernanceBundleMalformed);
+    // A long string in a field that is a label, in the log.
     let mut a = fx.audit.clone();
     a.members = vec!["m".repeat(300)];
     assert_eq!(
@@ -650,4 +658,138 @@ fn outcomes_have_one_table_of_exit_codes() {
     assert_eq!(Outcome::Refused.exit_code(), 2);
     assert_eq!(Outcome::Unchecked.exit_code(), 3);
     assert!(encompute_trust::EXIT_CODES.contains("3 unchecked"));
+}
+
+fn built(
+    fx: &Fixture,
+    edit: impl FnOnce(&mut encompute_trust::GovernanceEvidence, &mut encompute_trust::AuditEvidence),
+) -> encompute_ir::Result<GovernanceBundle> {
+    let (mut g, mut a) = (fx.shared(), fx.audit.clone());
+    edit(&mut g, &mut a);
+    GovernanceBundle::build(
+        "shared",
+        T0,
+        "encompute-control",
+        fx.graph.clone(),
+        g,
+        a,
+        Provenance::default(),
+    )
+}
+
+/// Identifiers become file names and terminal text: only `[A-Za-z0-9._-]`.
+#[test]
+fn identifiers_are_safe_as_file_names() {
+    let fx = Fixture::build();
+    for bad in [
+        "../evil",
+        "/etc/passwd",
+        "a/b",
+        "a\\b",
+        "nul\0byte",
+        "",
+        &"x".repeat(201),
+        "caf\u{e9}",
+        "a b",
+        "esc\u{1b}[31m",
+        "a\nb",
+    ] {
+        let r = built(&fx, |g, a| {
+            g.project = bad.to_owned();
+            a.project = bad.to_owned();
+        });
+        assert_eq!(
+            r.unwrap_err().code,
+            Code::GovernanceBundleMalformed,
+            "{bad:?}"
+        );
+        let r = built(&fx, |g, _| g.job_id = bad.to_owned());
+        assert!(r.is_err(), "{bad:?}");
+    }
+    assert!(encompute_trust::bundle::check_ident("x", &"x".repeat(200)).is_ok());
+    // A signer's organization too, and the verifier applies the same.
+    let mut b = shared_bundle(&fx);
+    assert!(b.sign("../evil", &fx.tax).is_err());
+    let mut x = b.clone();
+    x.manifest.project_id = "../evil".into();
+    assert!(x.check().is_err());
+}
+
+#[test]
+fn a_bundle_has_bounds() {
+    let fx = Fixture::build();
+    // Too many events, witnesses, heads, members or signatures.
+    let many = |n: usize| {
+        let mut a = fx.audit.clone();
+        let e = a.events[0].clone();
+        a.events = vec![e; n];
+        a
+    };
+    let r = built(&fx, |_, a| *a = many(5001));
+    assert_eq!(r.unwrap_err().code, Code::GovernanceBundleLimit);
+    let r = built(&fx, |_, a| a.witnesses = vec![a.witnesses[0].clone(); 1001]);
+    assert_eq!(r.unwrap_err().code, Code::GovernanceBundleLimit);
+    let r = built(&fx, |_, a| {
+        a.revocation_heads = vec![a.revocation_heads[0].clone(); 1001]
+    });
+    assert_eq!(r.unwrap_err().code, Code::GovernanceBundleLimit);
+    let r = built(&fx, |_, a| a.members = vec!["m".into(); 1001]);
+    assert_eq!(r.unwrap_err().code, Code::GovernanceBundleLimit);
+    let r = built(&fx, |_, a| {
+        a.events[0].proof.path = vec!["00".repeat(32); 65]
+    });
+    assert_eq!(r.unwrap_err().code, Code::GovernanceBundleLimit);
+    let r = built(&fx, |g, _| g.purpose.description = "d".repeat(2001));
+    assert!(r.is_err());
+    // A file over the size bound is refused before it is parsed.
+    let big = vec![b' '; encompute_trust::bundle::MAX_BUNDLE_BYTES + 1];
+    assert_eq!(
+        code(GovernanceBundle::from_bytes(&big)),
+        Code::GovernanceBundleLimit
+    );
+}
+
+#[test]
+fn a_signature_states_what_its_signer_verified() {
+    let fx = Fixture::build();
+    let p = pins(&fx);
+    let b = shared_bundle(&fx);
+    // An unpinned signature must still verify under its own key.
+    let mut s = b.clone();
+    s.sign("somebody", &key(5)).unwrap();
+    s.signatures[0].signature = "00".repeat(64);
+    assert_eq!(code(s.verify(&opts(&p))), Code::GovernanceBundleUnverified);
+    // A statement about another bundle is refused.
+    let mut s = b.clone();
+    s.sign("somebody", &key(5)).unwrap();
+    s.signatures[0].statement.bundle_id = "0".repeat(64);
+    assert!(s.verify(&opts(&p)).is_err());
+    // The statement is signed: changing what it says breaks the signature.
+    let mut s = b.clone();
+    s.sign(TAX, &fx.tax).unwrap();
+    s.signatures[0].statement.accepted_unchecked = true;
+    assert_eq!(code(s.verify(&opts(&p))), Code::GovernanceBundleUnverified);
+    // A verified statement is carried into the findings.
+    let mut s = b.clone();
+    let st = encompute_trust::SignatureStatement {
+        bundle_id: s.id().unwrap(),
+        verdict: "not_fully_evidenced".into(),
+        pins_digest: Some(p.digest().unwrap()),
+        accepted_unchecked: true,
+        accepted_unpinned: false,
+    };
+    s.sign_statement(TAX, &fx.tax, st.clone()).unwrap();
+    let v = s.verify(&opts(&p)).unwrap();
+    assert_eq!(v.signatures[0].statement, st);
+}
+
+#[test]
+fn one_key_has_one_role_in_the_pins() {
+    let fx = Fixture::build();
+    let mut p = pins(&fx);
+    p.evaluators[0].key = p.control_plane.as_ref().unwrap().key.clone();
+    assert!(p.check().is_err());
+    let mut p = pins(&fx);
+    p.control_plane.as_mut().unwrap().key = p.organizations[TAX].identity_key.clone();
+    assert!(p.check().is_err());
 }

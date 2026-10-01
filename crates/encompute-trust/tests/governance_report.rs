@@ -80,7 +80,7 @@ fn a_whole_cross_agency_job_verifies() {
     assert_eq!(value("Unauthorized releases").as_deref(), Some("NONE"));
     assert_eq!(
         value("Authorization window").as_deref(),
-        Some("VALID AT EXECUTION")
+        Some("VALID AT GRANT")
     );
     // The one thing this release cannot evidence is who holds a result's
     // key: it is never claimed, so the verdict is not SATISFIED.
@@ -440,19 +440,37 @@ fn revocations_count_from_their_time_and_are_never_retroactive() {
         AuthorizationEntry::Signed { document } => document.body.party.clone(),
         _ => unreachable!(),
     };
-    // Revoked after the run: history stays valid, the revocation shows,
-    // and now says REVOKED.
-    let f = Fixture::with(Knobs {
-        revocations: vec![revocation(
-            &org,
+    let rev = |kind_: &str, refs: &[(&str, &str)], at: u64| {
+        Fixture::with(Knobs {
+            revocations: vec![revocation(&org, kind_, refs, at)],
+            head_at: T0 + 6000,
+            ..Knobs::default()
+        })
+    };
+    let kid = encompute_trust::authz::governance_key_id(&pk(&probe.tax));
+    // Revoked while the grant was still usable: the run's own time is not
+    // evidenced, so whether it came first is UNCHECKED, never a pass.
+    for f in [
+        rev(
             kind::AUTHORIZATION_REVOKED,
             &[("authorization_id", &auth)],
             T0 + 5,
-        )],
-        ..Knobs::default()
-    });
+        ),
+        rev(kind::GOVERNANCE_KEY_REVOKED, &[("key_id", &kid)], T0 + 5),
+    ] {
+        let r = show(&f);
+        assert_eq!(status(&r, "Authorization window"), Status::Unchecked);
+        assert!(details(&r, "Authorization window").contains("not evidenced"));
+    }
+    // Revoked after the grant expired: history stays valid, the revocation
+    // shows, and now says REVOKED.
+    let f = rev(
+        kind::AUTHORIZATION_REVOKED,
+        &[("authorization_id", &auth)],
+        T0 + 5000,
+    );
     let mut o = f.options();
-    o.now = Some(T0 + 100);
+    o.now = Some(T0 + 6000);
     let r = f
         .graph
         .governance_report(&f.evidence, &f.audit, &o)
@@ -469,40 +487,19 @@ fn revocations_count_from_their_time_and_are_never_retroactive() {
         r.authorization_now
     );
     assert_eq!(r.revocations.len(), 1);
-    assert_eq!(r.revocations[0].at, T0 + 5);
+    assert_eq!(r.revocations[0].at, T0 + 5000);
     // Revoked at or before the run: failed.
-    let f = Fixture::with(Knobs {
-        revocations: vec![revocation(
-            &org,
-            kind::AUTHORIZATION_REVOKED,
-            &[("authorization_id", &auth)],
-            T0,
-        )],
-        ..Knobs::default()
-    });
+    let f = rev(
+        kind::AUTHORIZATION_REVOKED,
+        &[("authorization_id", &auth)],
+        T0,
+    );
     assert_eq!(status(&show(&f), "Authorization window"), Status::Failed);
     // Its governance key revoked before it was used: failed.
-    let kid = encompute_trust::authz::governance_key_id(&pk(&probe.tax));
-    let f = Fixture::with(Knobs {
-        revocations: vec![revocation(
-            &org,
-            kind::GOVERNANCE_KEY_REVOKED,
-            &[("key_id", &kid)],
-            T0 - 5,
-        )],
-        ..Knobs::default()
-    });
+    let f = rev(kind::GOVERNANCE_KEY_REVOKED, &[("key_id", &kid)], T0 - 5);
     assert_eq!(status(&show(&f), "Authorization window"), Status::Failed);
-    // A key revoked after the run leaves it valid.
-    let f = Fixture::with(Knobs {
-        revocations: vec![revocation(
-            &org,
-            kind::GOVERNANCE_KEY_REVOKED,
-            &[("key_id", &kid)],
-            T0 + 5,
-        )],
-        ..Knobs::default()
-    });
+    // A key revoked after the grant expired leaves it valid.
+    let f = rev(kind::GOVERNANCE_KEY_REVOKED, &[("key_id", &kid)], T0 + 5000);
     assert_eq!(status(&show(&f), "Authorization window"), Status::Satisfied);
 }
 
@@ -563,6 +560,10 @@ fn a_shared_view_is_unchecked_until_the_owner_discloses() {
         .unwrap();
     // The cards' signatures cannot be checked: what rests on them is
     // UNCHECKED, never a pass.
+    // Neither can "nothing is declared" rest on a card's body.
+    for name in ["Linkage", "Privacy policy"] {
+        assert_eq!(status(&r, name), Status::Unchecked, "{name}");
+    }
     for name in [
         "Source assets",
         "Approvals",
@@ -735,4 +736,83 @@ fn caller_pinned_governance_keys_override_a_bundles_own_anchors() {
     assert_eq!(pinned.rows[0].status, Status::Failed, "{pinned}");
     // The report still names the bundle it was given.
     assert_eq!(pinned.root, unpinned.root);
+}
+
+#[test]
+fn the_as_of_time_never_goes_below_the_run() {
+    // A caller asking for an earlier time gets the run's: a head dated
+    // before the grant says nothing of revocations since.
+    let f = Fixture::with(Knobs {
+        head_at: T0 - 5,
+        ..Knobs::default()
+    });
+    let mut o = f.options();
+    o.as_of = Some(1);
+    let r = f
+        .graph
+        .governance_report(&f.evidence, &f.audit, &o)
+        .unwrap();
+    assert_eq!(status(&r, "Audit chain"), Status::Unchecked);
+}
+
+#[test]
+fn every_participant_must_witness_whatever_the_member_list_says() {
+    let fx = Fixture::build();
+    assert_eq!(status(&show(&fx), "Audit chain"), Status::Satisfied);
+    // The control plane's (unsigned) member list drops an organization that
+    // has not witnessed: it still has to.
+    for org in [OTHER, BEN, TAX] {
+        let mut a = fx.audit.clone();
+        a.witnesses.retain(|w| w.body.organization != org);
+        a.members.retain(|m| m != org);
+        let r = fx
+            .graph
+            .governance_report(&fx.evidence, &a, &fx.options())
+            .unwrap();
+        assert_eq!(
+            status(&r, "Audit chain"),
+            Status::Unchecked,
+            "{org} dropped"
+        );
+        assert!(details(&r, "Audit chain").contains("witnessed"), "{org}");
+    }
+}
+
+#[test]
+fn a_submitter_pseudonym_cannot_be_compared_with_raw_approvers_of_its_own_organization() {
+    // The submitter belongs to the owner: its approvers are shown by
+    // identity and it by pseudonym, so separation cannot be checked.
+    let f = Fixture::with(Knobs {
+        submitter: TAX,
+        ..Knobs::default()
+    });
+    let r = show(&f);
+    assert_eq!(status(&r, "Approvals"), Status::Unchecked);
+    assert!(details(&r, "Approvals").contains("cannot be checked"));
+    // From another organization the same approvers are not in question.
+    assert_eq!(
+        status(&show(&Fixture::build()), "Approvals"),
+        Status::Satisfied
+    );
+}
+
+#[test]
+fn duplicate_heads_cost_no_more_than_their_number() {
+    let fx = Fixture::build();
+    let mut a = fx.audit.clone();
+    let h = a.revocation_heads[0].clone();
+    for _ in 0..1000 {
+        a.revocation_heads.push(h.clone());
+    }
+    let t = std::time::Instant::now();
+    let r = fx
+        .graph
+        .governance_report(&fx.evidence, &a, &fx.options())
+        .unwrap();
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
+    );
+    assert!(r.row("Audit chain").is_some());
 }

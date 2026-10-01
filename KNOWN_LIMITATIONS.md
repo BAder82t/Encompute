@@ -482,8 +482,12 @@ these limits:
   control plane's own record, not signed, and are not counted.
 - **Bundles are not signed by the control plane,** and carry no software
   provenance (release manifest, Sigstore bundle, evaluator image) yet; the
-  report says so. A bundle holds at most 5,000 log events and `exported_at`
-  is the time of the log state, not of the request.
+  report says so. A bundle holds at most 5,000 of the log events that
+  concern its job, each proven against the checkpoint; a bundle that
+  leaves out a membership event is not detected by the proofs (the
+  member list is the control plane's word, so every owner and participant
+  must witness whatever it says). `exported_at` is the time of the log
+  state, not of the request. The plaintext guard is a heuristic.
 
 ## Compatibility and upgrades
 

@@ -55,6 +55,14 @@ const SIGNATURE_DOMAIN: &str = "encompute.governance-bundle-signature.v1";
 pub const PROVENANCE_VERSION: u32 = 1;
 /// The longest string a bundle may carry outside [`allowed_long`] fields.
 pub const MAX_STRING: usize = 256;
+/// The largest bundle file a reader parses.
+pub const MAX_BUNDLE_BYTES: usize = 32 * 1024 * 1024;
+/// How many of each repeated item a bundle may carry (ENC2730 beyond).
+pub const MAX_EVENTS: usize = 5_000;
+pub const MAX_ITEMS: usize = 1_000;
+pub const MAX_SIGNATURES: usize = 100;
+/// The most siblings an inclusion proof has (a tree of 2^64 leaves).
+pub const MAX_PROOF_PATH: usize = 64;
 
 fn malformed(m: impl Into<String>) -> Error {
     Error::new(Code::GovernanceBundleMalformed, m)
@@ -62,6 +70,26 @@ fn malformed(m: impl Into<String>) -> Error {
 
 fn unverified(m: impl Into<String>) -> Error {
     Error::new(Code::GovernanceBundleUnverified, m)
+}
+
+fn too_big(m: impl Into<String>) -> Error {
+    Error::new(Code::GovernanceBundleLimit, m)
+}
+
+/// An identifier that is safe as a path component and on a terminal:
+/// `[A-Za-z0-9._-]{1,200}`.
+pub fn check_ident(what: &str, v: &str) -> Result<()> {
+    let ok = !v.is_empty()
+        && v.len() <= 200
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    if ok {
+        Ok(())
+    } else {
+        Err(malformed(format!(
+            "{what} is 1-200 characters of letters, digits, '.', '_' and '-'"
+        )))
+    }
 }
 
 fn plaintext(m: impl Into<String>) -> Error {
@@ -105,7 +133,27 @@ pub struct Manifest {
 pub struct BundleSignature {
     pub organization: String,
     pub public_key: String,
+    /// What the signer says it did: the signature is over this statement.
+    pub statement: SignatureStatement,
     pub signature: String,
+}
+
+/// What a signature of a bundle states: which bundle, and what its signer
+/// verified before signing (nothing, or a verdict against pins it names by
+/// digest, with the acceptances it made).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignatureStatement {
+    pub bundle_id: String,
+    /// `not_verified`, or the verdict the signer's machine reached.
+    pub verdict: String,
+    /// The digest of the pins it verified against, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pins_digest: Option<String>,
+    /// It signed although rows were unchecked or not evidenced.
+    pub accepted_unchecked: bool,
+    /// It signed without pins.
+    pub accepted_unpinned: bool,
 }
 
 /// Where the software that ran the job came from: digests only, so the
@@ -229,6 +277,11 @@ impl GovernanceBundle {
     /// what they parse to (so an edit, a reordering, a duplicated key or
     /// whitespace changes them), with a known format and no unknown field.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_BUNDLE_BYTES {
+            return Err(too_big(format!(
+                "a bundle is at most {MAX_BUNDLE_BYTES} bytes"
+            )));
+        }
         let b: Self = serde_json::from_slice(bytes)
             .map_err(|e| malformed(format!("malformed governance bundle: {e}")))?;
         if b.manifest.format != BUNDLE_FORMAT {
@@ -254,7 +307,74 @@ impl GovernanceBundle {
         if m.format != BUNDLE_FORMAT {
             return Err(malformed("unknown governance bundle format"));
         }
+        // Counts first: nothing below costs more than a bundle this size.
+        for (what, n, max) in [
+            ("events", self.audit.events.len(), MAX_EVENTS),
+            ("witnesses", self.audit.witnesses.len(), MAX_ITEMS),
+            (
+                "revocation heads",
+                self.audit.revocation_heads.len(),
+                MAX_ITEMS,
+            ),
+            ("members", self.audit.members.len(), MAX_ITEMS),
+            ("signatures", self.signatures.len(), MAX_SIGNATURES),
+            (
+                "authorizations",
+                self.governance.authorizations.len(),
+                MAX_ITEMS,
+            ),
+            (
+                "authorization revocations",
+                self.governance.authorization_revocations.len(),
+                MAX_ITEMS,
+            ),
+            (
+                "purpose acceptances",
+                self.governance.purpose_acceptances.len(),
+                MAX_ITEMS,
+            ),
+            (
+                "release records",
+                self.governance.release_records.len(),
+                MAX_ITEMS,
+            ),
+            ("jobs", m.job_ids.len(), 1),
+        ] {
+            if n > max {
+                return Err(too_big(format!(
+                    "a bundle carries at most {max} {what}, not {n}"
+                )));
+            }
+        }
+        if self
+            .audit
+            .events
+            .iter()
+            .any(|e| e.proof.path.len() > MAX_PROOF_PATH)
+        {
+            return Err(too_big("an inclusion proof is longer than any tree allows"));
+        }
         check_view(&m.view)?;
+        check_ident("the project", &m.project_id)?;
+        check_ident("the exporter", &m.exported_by)?;
+        check_ident("the project", &self.governance.project)?;
+        check_ident("the project", &self.audit.project)?;
+        check_ident("the job", &self.governance.job_id)?;
+        for j in &m.job_ids {
+            check_ident("a job", j)?;
+        }
+        if self.governance.purpose.description.len() > 2000
+            || self
+                .governance
+                .purpose
+                .description
+                .chars()
+                .any(|c| c.is_control())
+        {
+            return Err(malformed(
+                "a purpose description is at most 2000 printable characters",
+            ));
+        }
         if m.legal_boundary != LEGAL_BOUNDARY_ID {
             return Err(malformed("the bundle names another legal boundary"));
         }
@@ -321,6 +441,9 @@ impl GovernanceBundle {
 
     fn check_signatures_shape(&self) -> Result<()> {
         let orgs: Vec<&String> = self.signatures.iter().map(|s| &s.organization).collect();
+        for s in &self.signatures {
+            check_ident("a signer's organization", &s.organization)?;
+        }
         if orgs.windows(2).any(|w| w[0] >= w[1]) {
             return Err(malformed("signatures are sorted by organization, one each"));
         }
@@ -377,17 +500,37 @@ impl GovernanceBundle {
         Ok(())
     }
 
-    /// An organization's signature of the BundleId (attribution). Replaces
-    /// the organization's earlier signature.
+    /// An organization's signature of the BundleId (attribution) with the
+    /// statement that nothing was verified. Replaces the organization's
+    /// earlier signature.
     pub fn sign(&mut self, organization: &str, key: &SigningKey) -> Result<()> {
-        if organization.is_empty() || organization.len() > 200 {
-            return Err(malformed("an organization ID is 1-200 characters"));
+        let st = SignatureStatement {
+            bundle_id: self.id()?,
+            verdict: "not_verified".into(),
+            pins_digest: None,
+            accepted_unchecked: false,
+            accepted_unpinned: false,
+        };
+        self.sign_statement(organization, key, st)
+    }
+
+    /// A signature that states what the signer verified first.
+    pub fn sign_statement(
+        &mut self,
+        organization: &str,
+        key: &SigningKey,
+        st: SignatureStatement,
+    ) -> Result<()> {
+        check_ident("an organization", organization)?;
+        if st.bundle_id != self.id()? {
+            return Err(malformed("the statement is about another bundle"));
         }
-        let sig = hex(&key.sign(&signature_input(&self.id()?)).to_bytes());
+        let sig = hex(&key.sign(&signature_input(&st)?).to_bytes());
         self.signatures.retain(|s| s.organization != organization);
         self.signatures.push(BundleSignature {
             organization: organization.into(),
             public_key: hex(&key.verifying_key().to_bytes()),
+            statement: st,
             signature: sig,
         });
         self.signatures
@@ -396,11 +539,11 @@ impl GovernanceBundle {
     }
 }
 
-fn signature_input(bundle_id: &str) -> Vec<u8> {
+fn signature_input(st: &SignatureStatement) -> Result<Vec<u8>> {
     let mut v = SIGNATURE_DOMAIN.as_bytes().to_vec();
     v.push(0);
-    v.extend(bundle_id.as_bytes());
-    v
+    v.extend(canonical_json(st)?);
+    Ok(v)
 }
 
 // --- the plaintext guard ---------------------------------------------------------
@@ -556,13 +699,36 @@ impl Pins {
             check_key("key", &p.key)?;
             check_obtained("key", &p.obtained)?;
         }
-        // Two organizations on one key are not two organizations.
-        let mut seen = BTreeSet::new();
+        // One key, one role: two organizations on one key are not two
+        // organizations, and a key that is an organization's and also the
+        // control plane's or an evaluator's means one party plays both.
+        let mut seen: BTreeSet<&String> = BTreeSet::new();
         for (o, p) in &self.organizations {
             if !seen.insert(&p.identity_key) {
                 return Err(unverified(format!(
                     "pins: {o} shares its key with another organization"
                 )));
+            }
+        }
+        for (role, keys) in [
+            (
+                "the control plane",
+                self.control_plane.iter().collect::<Vec<_>>(),
+            ),
+            ("an evaluator", self.evaluators.iter().collect()),
+            ("a coordinator", self.coordinators.iter().collect()),
+            (
+                "a linkage authority",
+                self.linkage_authorities.iter().collect(),
+            ),
+            ("a release signer", self.release_signers.iter().collect()),
+        ] {
+            for k in keys {
+                if !seen.insert(&k.key) {
+                    return Err(unverified(format!(
+                        "pins: a key is pinned for {role} and for another role"
+                    )));
+                }
             }
         }
         Ok(())
@@ -589,6 +755,11 @@ impl Pins {
         )
     }
 
+    /// A digest of the pins (what a signature's statement names).
+    pub fn digest(&self) -> Result<String> {
+        Ok(tagged_hex("encompute.pins.v1", &canonical_json(self)?))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.organizations.is_empty()
             && self.control_plane.is_none()
@@ -605,7 +776,9 @@ impl Pins {
 pub enum SignatureStatus {
     /// Verified under the organization's pinned key.
     Verified,
-    /// The organization's key is not pinned: attribution is not checked.
+    /// The organization's key is not pinned: the signature is
+    /// self-consistent (it verifies under the key it carries) and
+    /// attribution to the organization is not checked.
     Unpinned,
 }
 
@@ -613,6 +786,8 @@ pub enum SignatureStatus {
 pub struct SignatureFinding {
     pub organization: String,
     pub status: SignatureStatus,
+    /// What the signer said it verified.
+    pub statement: SignatureStatement,
 }
 
 /// The one table of verification results (the CLI's exit codes).
@@ -680,12 +855,28 @@ impl GovernanceBundle {
         let (anchors, base_anchors) = opts.pins.anchors();
         let mut findings = vec![];
         for s in &self.signatures {
+            if s.statement.bundle_id != id {
+                return Err(unverified(format!(
+                    "the signature of {} is about another bundle",
+                    s.organization
+                )));
+            }
+            // Every signature must verify under its own embedded key; a
+            // pinned organization's must be under its pinned key. Unpinned
+            // ones are self-consistent attribution only.
+            let own = verify_signature(&s.public_key, &s.signature, &s.statement);
             let status = match opts.pins.organizations.get(&s.organization) {
-                None => SignatureStatus::Unpinned,
+                None => {
+                    if !own {
+                        return Err(unverified(format!(
+                            "the signature of {} (not pinned) is invalid",
+                            s.organization
+                        )));
+                    }
+                    SignatureStatus::Unpinned
+                }
                 Some(p) => {
-                    let ok = p.identity_key == s.public_key
-                        && verify_signature(&s.public_key, &s.signature, &id);
-                    if !ok {
+                    if p.identity_key != s.public_key || !own {
                         return Err(unverified(format!(
                             "the signature of {} does not verify under its pinned key",
                             s.organization
@@ -697,6 +888,7 @@ impl GovernanceBundle {
             findings.push(SignatureFinding {
                 organization: s.organization.clone(),
                 status,
+                statement: s.statement.clone(),
             });
         }
         let mut base = ReportOptions {
@@ -748,7 +940,7 @@ impl GovernanceBundle {
     }
 }
 
-fn verify_signature(public_key: &str, signature: &str, bundle_id: &str) -> bool {
+fn verify_signature(public_key: &str, signature: &str, st: &SignatureStatement) -> bool {
     use ed25519_dalek::{Signature, VerifyingKey};
     let Some(k) = unhex(public_key)
         .and_then(|b| <[u8; 32]>::try_from(b).ok())
@@ -759,5 +951,5 @@ fn verify_signature(public_key: &str, signature: &str, bundle_id: &str) -> bool 
     let Some(sig) = unhex(signature).and_then(|b| Signature::from_slice(&b).ok()) else {
         return false;
     };
-    k.verify_strict(&signature_input(bundle_id), &sig).is_ok()
+    signature_input(st).is_ok_and(|m| k.verify_strict(&m, &sig).is_ok())
 }

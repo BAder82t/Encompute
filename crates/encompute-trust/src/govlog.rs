@@ -1116,20 +1116,28 @@ pub fn check_revocation_heads(
         .iter()
         .filter(|h| h.body.organization == organization && h.body.project == project)
         .collect();
-    for (i, a) in mine.iter().enumerate() {
-        for b in &mine[i + 1..] {
+    // Two heads of one number: grouped by number, so the cost is linear in
+    // the heads supplied, not quadratic.
+    let mut by_seq: BTreeMap<u64, Vec<&SignedRevocationHead>> = BTreeMap::new();
+    for h in &mine {
+        if h.public_key == pinned_key {
+            by_seq.entry(h.body.seq).or_default().push(h);
+        }
+    }
+    for group in by_seq.values() {
+        let Some(first) = group.first() else { continue };
+        if let Some(other) = group.iter().find(|h| h.body.root != first.body.root) {
             let proof = HeadEquivocation {
-                a: (*a).clone(),
-                b: (*b).clone(),
+                a: (*first).clone(),
+                b: (*other).clone(),
             };
-            if a.body.seq == b.body.seq
-                && a.public_key == pinned_key
-                && b.public_key == pinned_key
-                && proof.verify(pinned_key).is_ok()
-            {
+            if proof.verify(pinned_key).is_ok() {
                 return done(
                     HeadVerdict::OwnerEquivocation,
-                    format!("{organization} signed two heads numbered {}", a.body.seq),
+                    format!(
+                        "{organization} signed two heads numbered {}",
+                        first.body.seq
+                    ),
                     Some(proof),
                 );
             }

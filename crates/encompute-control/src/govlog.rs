@@ -1470,6 +1470,52 @@ pub fn leaves(
         .iter()
         .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
         .collect::<Result<_>>()?;
+    prove_events(c, cache, partition, size, events)
+}
+
+/// The events of `partition` up to `size` that a reader of one job needs
+/// (membership changes, every revocation and head, and what happened to
+/// the job), with inclusion proofs against the checkpoint of `size`. At
+/// most `max` of them: more is `None`.
+pub fn relevant_leaves(
+    c: &mut impl GenericClient,
+    cache: &NodeCache,
+    partition: &str,
+    size: u64,
+    job: &str,
+    max: u64,
+) -> Result<Option<Vec<(GovEvent, String, InclusionProof)>>> {
+    let mut kinds: Vec<String> = encompute_trust::govlog::kind::REVOCATIONS
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect();
+    kinds.push(encompute_trust::govlog::kind::REVOCATION_HEAD_SIGNED.into());
+    let rows = c
+        .query(
+            "SELECT body FROM governance_events
+              WHERE partition = $1 AND pseq <= $2
+                AND (kind LIKE 'membership.%' OR kind = ANY($3) OR subject_id = $4)
+              ORDER BY pseq LIMIT $5",
+            &[&partition, &(size as i64), &kinds, &job, &(max as i64 + 1)],
+        )
+        .map_err(db_err)?;
+    if rows.len() as u64 > max {
+        return Ok(None);
+    }
+    let events: Vec<GovEvent> = rows
+        .iter()
+        .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
+        .collect::<Result<_>>()?;
+    prove_events(c, cache, partition, size, events).map(Some)
+}
+
+fn prove_events(
+    c: &mut impl GenericClient,
+    cache: &NodeCache,
+    partition: &str,
+    size: u64,
+    events: Vec<GovEvent>,
+) -> Result<Vec<(GovEvent, String, InclusionProof)>> {
     // Which nodes the proofs read depends on the sizes only, so a dry run
     // with placeholder hashes names them.
     let mut needed = std::collections::BTreeSet::new();

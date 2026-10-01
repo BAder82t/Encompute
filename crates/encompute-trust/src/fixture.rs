@@ -40,6 +40,8 @@ pub const PROJECT: &str = "prj_cross";
 pub const JOB: &str = "job_1";
 pub const TAX: &str = "tax-agency";
 pub const BEN: &str = "benefits-agency";
+/// The submitter: an organization whose data the job does not read.
+pub const OTHER: &str = "other-co";
 /// The signed time of the run: the grant's issue time.
 pub const T0: u64 = 1_800_000_000;
 
@@ -87,6 +89,8 @@ pub struct Knobs {
     pub linkage: bool,
     pub placement: bool,
     pub privacy_policy: bool,
+    /// The submitting organization.
+    pub submitter: &'static str,
 }
 
 impl Default for Knobs {
@@ -103,6 +107,7 @@ impl Default for Knobs {
             linkage: false,
             placement: false,
             privacy_policy: false,
+            submitter: OTHER,
         }
     }
 }
@@ -116,6 +121,7 @@ pub struct Fixture {
     pub control: ServiceSigner,
     pub tax: SigningKey,
     pub ben: SigningKey,
+    pub other: SigningKey,
     pub knobs: Knobs,
 }
 
@@ -190,6 +196,7 @@ impl Fixture {
     pub fn with(k: Knobs) -> Self {
         let tax = key(1);
         let ben = key(2);
+        let other = key(3);
         let control = ServiceSigner::from_seed("encompute-control", &[9u8; 32]).unwrap();
         let evaluator = EvaluatorSigner::from_seed(&[7; 32]);
         let program = parse(PROGRAM).unwrap();
@@ -329,7 +336,7 @@ impl Fixture {
         let mut grant = JobGrant {
             version: JOB_GRANT_V2,
             job_id: JOB.into(),
-            organization: TAX.into(),
+            organization: k.submitter.into(),
             project: PROJECT.into(),
             plan_id: plan_hex,
             spec_id: spec.id().hex(),
@@ -425,7 +432,7 @@ impl Fixture {
             submitter: Some("psn_submitter".into()),
         };
 
-        let audit = Self::log(&k, &control, &tax, &ben);
+        let audit = Self::log(&k, &control, &tax, &ben, &other);
         Self {
             graph,
             evidence,
@@ -434,6 +441,7 @@ impl Fixture {
                 organizations: BTreeMap::from([
                     (TAX.to_owned(), pk(&tax)),
                     (BEN.to_owned(), pk(&ben)),
+                    (OTHER.to_owned(), pk(&other)),
                 ]),
                 control_plane: Some(control.public_key_hex()),
             },
@@ -441,6 +449,7 @@ impl Fixture {
             control,
             tax,
             ben,
+            other,
             knobs: k,
         }
     }
@@ -475,6 +484,7 @@ impl Fixture {
         control: &ServiceSigner,
         tax: &SigningKey,
         ben: &SigningKey,
+        other: &SigningKey,
     ) -> AuditEvidence {
         let mut events: Vec<GovEvent> = vec![];
         for (org, kind_, refs, at) in &k.revocations {
@@ -524,7 +534,7 @@ impl Fixture {
         }
         .sign(control)
         .unwrap();
-        let witnesses = [(TAX, tax), (BEN, ben)]
+        let witnesses = [(TAX, tax), (BEN, ben), (OTHER, other)]
             .into_iter()
             .map(|(o, key_)| {
                 CheckpointWitness {
@@ -543,7 +553,7 @@ impl Fixture {
             version: GOVERNANCE_EVIDENCE_VERSION,
             project: PROJECT.into(),
             checkpoint: Some(cp),
-            members: vec![BEN.into(), TAX.into()],
+            members: vec![BEN.into(), OTHER.into(), TAX.into()],
             witnesses,
             events: events
                 .iter()

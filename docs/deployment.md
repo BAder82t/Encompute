@@ -764,9 +764,25 @@ auditor and verify offline. Everything below is `encompute governance`
   of its own date. By default a bundle is checked for the time of the run
   (the grant's signed time); `--as-of T` checks it for a later use, and a
   head dated before `T` is UNCHECKED, never covered.
-- **Limits.** One bundle carries at most 5,000 events of the project's log
-  (a larger log is refused with ENC2730, never truncated); the route is
-  limited to 12 requests a minute per caller.
+- **Limits.** One bundle carries at most 5,000 of the log's events that
+  concern the job (membership changes, revocations and heads, the job's
+  own), each proven against the signed checkpoint; more is refused with
+  ENC2730, never truncated, so a busy project does not block its jobs'
+  exports. A file is at most 32 MiB, and its counts of witnesses, heads,
+  members, authorizations and signatures are bounded (ENC2730). Every
+  identifier in it is `[A-Za-z0-9._-]{1,200}` (ENC2727): the default file
+  name is built from them and is never a path. The route is limited to 12
+  requests a minute per caller and four builds at once.
+- **Countersigning states what was verified.** A signature signs a
+  statement: the BundleId, the verdict this machine reached, a digest of
+  the pins used, and whether it accepted unchecked rows or no pins.
+  `countersign` refuses an unchecked or unpinned bundle (exit 3) unless
+  `--i-accept-unchecked` is given, and records that in the statement. A
+  signature by an organization nobody pinned must still verify under the
+  key it carries (reported as unpinned, attribution unchecked).
+- **"Valid at grant".** A receipt carries no run time, so the report
+  says the authorizations were valid when the grant was issued, and a
+  revocation between the grant and its expiry is UNCHECKED.
 
 ## Audit
 

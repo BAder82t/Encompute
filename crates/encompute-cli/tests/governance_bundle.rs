@@ -112,6 +112,7 @@ fn pins(fx: &Fixture) -> Pins {
         organizations: [
             (TAX.to_owned(), org(&fx.tax)),
             (BEN.to_owned(), org(&fx.ben)),
+            (OTHER.to_owned(), org(&fx.other)),
         ]
         .into(),
         control_plane: Some(Pin {
@@ -526,6 +527,7 @@ fn countersign_adds_attribution_and_nothing_else() {
             "--disclosure",
             &disc,
             "--allow-unchecked",
+            "--i-accept-unchecked",
         ],
     );
     assert_eq!(code, 0, "{so}{e}");
@@ -562,6 +564,7 @@ fn countersign_adds_attribution_and_nothing_else() {
             "--disclosure",
             &disc,
             "--allow-unchecked",
+            "--i-accept-unchecked",
         ],
     );
     assert_eq!(code, 0);
@@ -595,6 +598,7 @@ fn countersign_adds_attribution_and_nothing_else() {
             "--disclosure",
             &disc,
             "--allow-unchecked",
+            "--i-accept-unchecked",
         ],
     );
     assert_eq!(
@@ -762,4 +766,187 @@ fn explain_governance_in_words_from_verified_evidence_only() {
     assert_eq!(code, 2, "{e}");
     let (code, _, _) = explain(&d, &["model.encompute", "--governance", "--bundle", f]);
     assert_eq!(code, 2);
+}
+
+#[test]
+fn countersign_records_what_it_verified_and_refuses_the_unchecked_unless_told() {
+    let d = dir("countersign-stmt");
+    let fx = Fixture::build();
+    let b = shared(&fx);
+    let path = d.join("b.encgov.json");
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+    let f = path.to_str().unwrap();
+    let p = write_json(&d, "pins.json", &pins(&fx));
+    let disc = disclosures(&d, &fx);
+    let k = key_file(&d, "tax.key", 1);
+    // --allow-unchecked alone never signs: the acceptance is its own flag.
+    let (code, _, e) = run(
+        &d,
+        &[
+            "countersign",
+            f,
+            "--key",
+            &k,
+            "--organization",
+            TAX,
+            "--pins",
+            &p,
+            "--disclosure",
+            &disc,
+            "--allow-unchecked",
+        ],
+    );
+    assert_eq!(code, 3, "{e}");
+    assert!(e.contains("--i-accept-unchecked"), "{e}");
+    // A foreign temporary file next to the bundle is never touched.
+    let foreign = d.join("b.encgov.tmp");
+    std::fs::write(&foreign, b"someone else's").unwrap();
+    let (code, so, e) = run(
+        &d,
+        &[
+            "countersign",
+            f,
+            "--key",
+            &k,
+            "--organization",
+            TAX,
+            "--pins",
+            &p,
+            "--disclosure",
+            &disc,
+            "--allow-unchecked",
+            "--i-accept-unchecked",
+        ],
+    );
+    assert_eq!(code, 0, "{so}{e}");
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"someone else's");
+    let leftovers: Vec<_> = std::fs::read_dir(&d)
+        .unwrap()
+        .filter_map(|x| x.ok())
+        .filter(|x| x.file_name().to_string_lossy().ends_with(".tmp") && x.path() != foreign)
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    // The statement is signed and says what was and was not verified.
+    let (_, so, _) = run(
+        &d,
+        &[
+            "verify",
+            f,
+            "--pins",
+            &p,
+            "--disclosure",
+            &disc,
+            "--allow-unchecked",
+        ],
+    );
+    let v: Value = serde_json::from_str(&so).unwrap();
+    let st = &v["signatures"][0]["statement"];
+    assert_eq!(st["verdict"], "not_fully_evidenced");
+    assert_eq!(st["accepted_unchecked"], true);
+    assert_eq!(st["accepted_unpinned"], false);
+    assert_eq!(st["pins_digest"], v["pins"]["digest"]);
+    // The pins and where each key was obtained are in the result.
+    assert_eq!(
+        v["pins"]["organizations"][TAX]["obtained"],
+        "the agency's official key page"
+    );
+    // Unpinned, it needs the acceptance too, and says so.
+    let (code, _, _) = run(
+        &d,
+        &[
+            "countersign",
+            f,
+            "--key",
+            &k,
+            "--organization",
+            BEN,
+            "--allow-unpinned",
+            "--allow-unchecked",
+        ],
+    );
+    assert_eq!(code, 3);
+}
+
+#[test]
+fn a_hostile_answer_cannot_name_a_file_or_exhaust_the_reader() {
+    let d = dir("hostile");
+    let fx = Fixture::build();
+    let fake = Fake::start();
+    let p = write_json(&d, "pins.json", &pins(&fx));
+    let b = shared(&fx);
+    // A project ID that is a path: the bundle is refused (ENC2727) and
+    // nothing is written anywhere.
+    let mut v = serde_json::to_value(&b).unwrap();
+    v["manifest"]["project_id"] = json!("../../escape");
+    v["governance"]["project"] = json!("../../escape");
+    v["audit"]["project"] = json!("../../escape");
+    *fake.answer.lock().unwrap() = v;
+    let sub = d.join("a").join("b");
+    std::fs::create_dir_all(&sub).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .args([
+            "governance",
+            "export",
+            JOB,
+            "--url",
+            &fake.url,
+            "--pins",
+            &p,
+            "--allow-unchecked",
+        ])
+        .current_dir(&sub)
+        .env("ENCOMPUTE_TOKEN", "t")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ENC2727"));
+    assert!(std::fs::read_dir(&sub).unwrap().next().is_none());
+    assert!(!d.join("escape-job_1.encgov.json").exists());
+    // The default name of a good bundle is built from checked identifiers.
+    fake.serve(&b);
+    let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .args([
+            "governance",
+            "export",
+            JOB,
+            "--url",
+            &fake.url,
+            "--pins",
+            &p,
+            "--allow-unchecked",
+        ])
+        .current_dir(&sub)
+        .env("ENCOMPUTE_TOKEN", "t")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(sub.join("prj_cross-job_1.encgov.json").exists());
+    // Query values and the job are percent-encoded.
+    let (_, _, _) = run(
+        &d,
+        &[
+            "export",
+            "a/b c",
+            "--view",
+            "org",
+            "--organization",
+            "x y&z=1",
+            "--url",
+            &fake.url,
+            "--allow-unpinned",
+            "--allow-unchecked",
+            "--out",
+            d.join("q.json").to_str().unwrap(),
+        ],
+    );
+    let q = fake.queries.lock().unwrap().last().cloned().unwrap();
+    assert!(q.contains("/v1/jobs/a%2Fb%20c/governance-bundle"), "{q}");
+    assert!(q.contains("organization=x%20y%26z%3D1"), "{q}");
+    // A file over the size bound is refused without being parsed.
+    let big = d.join("big.encgov.json");
+    let f = std::fs::File::create(&big).unwrap();
+    f.set_len(33 * 1024 * 1024).unwrap();
+    let (code, _, e) = run(&d, &["verify", big.to_str().unwrap(), "--allow-unpinned"]);
+    assert_eq!(code, 2, "{e}");
+    assert!(e.contains("ENC2730"), "{e}");
 }

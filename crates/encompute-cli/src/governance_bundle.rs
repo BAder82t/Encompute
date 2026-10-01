@@ -120,25 +120,72 @@ pub struct CountersignArgs {
     /// Write here instead of replacing the bundle.
     #[arg(long)]
     pub out: Option<PathBuf>,
+    /// Sign although the bundle is unchecked, not fully evidenced or
+    /// unpinned (with `--allow-unchecked` / `--allow-unpinned`); the
+    /// signature's statement records that you did.
+    #[arg(long)]
+    pub i_accept_unchecked: bool,
     #[command(flatten)]
     pub checks: Checks,
 }
 
+/// Reads a file of at most `max` bytes: a larger one is refused (ENC2730)
+/// without being read whole.
+fn read_bounded(p: &Path, max: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let f = std::fs::File::open(p).map_err(|e| io(p, e))?;
+    let mut v = vec![];
+    f.take(max as u64 + 1)
+        .read_to_end(&mut v)
+        .map_err(|e| io(p, e))?;
+    if v.len() > max {
+        return Err(Error::new(
+            Code::GovernanceBundleLimit,
+            format!("{} is over {max} bytes", p.display()),
+        ));
+    }
+    Ok(v)
+}
+
 fn read_bundle(p: &Path) -> Result<GovernanceBundle> {
-    GovernanceBundle::from_bytes(&std::fs::read(p).map_err(|e| io(p, e))?)
+    GovernanceBundle::from_bytes(&read_bounded(
+        p,
+        encompute_runtime::trust::bundle::MAX_BUNDLE_BYTES,
+    )?)
 }
 
 fn load_pins(p: Option<&Path>) -> Result<Pins> {
     match p {
         None => Ok(Pins::default()),
-        Some(p) => Pins::from_bytes(&std::fs::read(p).map_err(|e| io(p, e))?),
+        Some(p) => Pins::from_bytes(&read_bounded(p, 1 << 20)?),
     }
+}
+
+/// Percent-encodes a path or query component.
+fn enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// Text for a terminal: control characters (escape sequences included) are
+/// shown as `?`.
+fn tty(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() && c != '\n' { '?' } else { c })
+        .collect()
 }
 
 fn load_disclosures(files: &[PathBuf]) -> Result<Vec<SignedAuthorizationV2>> {
     let mut out = vec![];
     for f in files {
-        let v: Value = serde_json::from_slice(&std::fs::read(f).map_err(|e| io(f, e))?)
+        let v: Value = serde_json::from_slice(&read_bounded(f, 8 << 20)?)
             .map_err(|e| err(format!("{}: {e}", f.display())))?;
         // A document, an array of documents, or a `GET /v1/authorizations`
         // answer (its `signed` field).
@@ -183,6 +230,10 @@ pub fn exit_code(outcome: Outcome, unpinned: bool, c: &Checks) -> u8 {
 }
 
 fn verify_with(b: &GovernanceBundle, c: &Checks) -> Result<(Verified, u8)> {
+    verify_pins(b, c).map(|(v, code, _)| (v, code))
+}
+
+fn verify_pins(b: &GovernanceBundle, c: &Checks) -> Result<(Verified, u8, Pins)> {
     let pins = load_pins(c.pins.as_deref())?;
     let unpinned = c.pins.is_none() || pins.is_empty();
     let v = b.verify(&VerifyOptions {
@@ -193,11 +244,17 @@ fn verify_with(b: &GovernanceBundle, c: &Checks) -> Result<(Verified, u8)> {
         now: None,
     })?;
     let code = exit_code(v.outcome, unpinned, c);
-    Ok((v, code))
+    Ok((v, code, pins))
 }
 
-fn summary(v: &Verified, code: u8) -> Value {
+fn summary(v: &Verified, code: u8, pins: &Pins) -> Value {
     json!({
+        "pins": {
+            "organizations": pins.organizations.iter().map(|(o, p)| (o.clone(), json!({"key": p.identity_key, "obtained": p.obtained}))).collect::<serde_json::Map<_, _>>(),
+            "control_plane": pins.control_plane,
+            "evaluators": pins.evaluators,
+            "digest": pins.digest().ok(),
+        },
         "bundle_id": v.bundle_id,
         "view": v.view,
         "verdict": v.report.verdict,
@@ -227,10 +284,10 @@ fn explain_exit(code: u8) {
 
 pub fn verify(a: VerifyArgs) -> Result<ExitCode> {
     let b = read_bundle(&a.bundle)?;
-    let (v, code) = verify_with(&b, &a.checks)?;
+    let (v, code, pins) = verify_pins(&b, &a.checks)?;
     println!(
         "{}",
-        serde_json::to_string_pretty(&summary(&v, code)).expect("serializable")
+        serde_json::to_string_pretty(&summary(&v, code, &pins)).expect("serializable")
     );
     explain_exit(code);
     Ok(ExitCode::from(code))
@@ -238,22 +295,52 @@ pub fn verify(a: VerifyArgs) -> Result<ExitCode> {
 
 pub fn report(a: VerifyArgs) -> Result<ExitCode> {
     let b = read_bundle(&a.bundle)?;
-    let (v, code) = verify_with(&b, &a.checks)?;
+    let (v, code, pins) = verify_pins(&b, &a.checks)?;
     if a.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&summary(&v, code)).expect("serializable")
+            serde_json::to_string_pretty(&summary(&v, code, &pins)).expect("serializable")
         );
     } else {
         println!("bundle {} ({} view)", v.bundle_id, v.view);
         for s in &v.signatures {
-            println!("signed by {}: {:?}", s.organization, s.status);
+            println!(
+                "signed by {}: {:?}; it stated: {} (accepted unchecked: {}, unpinned: {})",
+                tty(&s.organization),
+                s.status,
+                tty(&s.statement.verdict),
+                s.statement.accepted_unchecked,
+                s.statement.accepted_unpinned
+            );
+        }
+        println!("pins (what this conclusion rests on):");
+        for (o, p) in &pins.organizations {
+            println!(
+                "  {}: key {}..., obtained: {}",
+                tty(o),
+                &p.identity_key[..16],
+                tty(&p.obtained)
+            );
+        }
+        if let Some(p) = &pins.control_plane {
+            println!(
+                "  control plane: key {}..., obtained: {}",
+                &p.key[..16],
+                tty(&p.obtained)
+            );
+        }
+        for p in &pins.evaluators {
+            println!(
+                "  evaluator: key {}..., obtained: {}",
+                &p.key[..16],
+                tty(&p.obtained)
+            );
         }
         for n in &v.notes {
             println!("note: {n}");
         }
         println!();
-        print!("{}", v.report);
+        print!("{}", tty(&v.report.to_string()));
     }
     explain_exit(code);
     Ok(ExitCode::from(code))
@@ -262,12 +349,18 @@ pub fn report(a: VerifyArgs) -> Result<ExitCode> {
 /// Writes a new file, never over an existing one.
 fn write_new(p: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    std::fs::OpenOptions::new()
+    let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(p)
-        .and_then(|mut f| f.write_all(bytes))
-        .map_err(|e| io(p, e))
+        .map_err(|e| io(p, e))?;
+    // The file is ours (created here): a failed write leaves no part of it.
+    if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(p);
+        return Err(io(p, e));
+    }
+    Ok(())
 }
 
 fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
@@ -280,11 +373,11 @@ fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
 
 pub fn export(a: ExportArgs) -> Result<ExitCode> {
     let c = crate::control::ControlClient::from_env(a.url.as_deref())?;
-    let mut q = format!("view={}", a.view);
+    let mut q = format!("view={}", enc(&a.view));
     if let Some(o) = &a.organization {
-        q.push_str(&format!("&organization={o}"));
+        q.push_str(&format!("&organization={}", enc(o)));
     }
-    let v = c.get(&format!("/v1/jobs/{}/governance-bundle?{q}", a.job))?;
+    let v = c.get(&format!("/v1/jobs/{}/governance-bundle?{q}", enc(&a.job)))?;
     // The exporter's own check, before anything is written: the control
     // plane's answer must be a bundle (digests, graph root, the view's
     // rules, no plaintext), canonical, and what it can verify against the
@@ -308,9 +401,23 @@ pub fn export(a: ExportArgs) -> Result<ExitCode> {
     if let (Some(k), Some(org)) = (&a.sign_key, &a.sign_as) {
         b.sign(org, &key_file(k)?)?;
     }
-    let out = a.out.clone().unwrap_or_else(|| {
-        PathBuf::from(format!("{}-{}.encgov.json", b.manifest.project_id, a.job))
-    });
+    // The default name is built from the identifiers the bundle was checked
+    // to carry (letters, digits, '.', '_' and '-'): never a path.
+    let out = match &a.out {
+        Some(o) => o.clone(),
+        None => {
+            for (what, v) in [
+                ("project", &b.manifest.project_id),
+                ("job", &b.governance.job_id),
+            ] {
+                encompute_runtime::trust::bundle::check_ident(what, v)?;
+            }
+            PathBuf::from(format!(
+                "{}-{}.encgov.json",
+                b.manifest.project_id, b.governance.job_id
+            ))
+        }
+    };
     write_new(&out, &b.to_bytes()?)?;
     println!(
         "{}",
@@ -329,28 +436,55 @@ pub fn export(a: ExportArgs) -> Result<ExitCode> {
 
 pub fn countersign(a: CountersignArgs) -> Result<ExitCode> {
     let mut b = read_bundle(&a.bundle)?;
-    // Sign only what verifies at least as far as this machine can tell: a
-    // countersignature is a statement that this package is vouched for.
-    let (verified, code) = verify_with(&b, &a.checks)?;
-    if code == 1 {
+    let (verified, code, pins) = verify_pins(&b, &a.checks)?;
+    if code == 1 || verified.outcome == Outcome::NotSatisfied {
         eprintln!("refusing to countersign: the bundle does not verify");
         return Ok(ExitCode::from(1));
     }
-    if code == 3 {
-        eprintln!("refusing to countersign a bundle this machine could not verify");
-        explain_exit(3);
+    // What was and was not verified is part of what is signed. A bundle that
+    // is unchecked or unpinned is signed only on an explicit acceptance,
+    // which the statement records.
+    let unchecked = verified.outcome == Outcome::Unchecked;
+    let unpinned = a.checks.pins.is_none() || pins.is_empty();
+    if (unchecked || unpinned) && !a.i_accept_unchecked {
+        eprintln!(
+            "refusing to countersign a bundle that is {}: pass --i-accept-unchecked to sign it and record that you did",
+            if unpinned { "unpinned or unchecked" } else { "not fully verified" }
+        );
         return Ok(ExitCode::from(3));
     }
-    b.sign(&a.organization, &key_file(&a.key)?)?;
+    let statement = encompute_runtime::trust::SignatureStatement {
+        bundle_id: verified.bundle_id.clone(),
+        verdict: serde_json::to_value(verified.report.verdict)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default(),
+        pins_digest: if unpinned { None } else { Some(pins.digest()?) },
+        accepted_unchecked: unchecked,
+        accepted_unpinned: unpinned,
+    };
+    b.sign_statement(&a.organization, &key_file(&a.key)?, statement)?;
     let bytes = b.to_bytes()?;
     match &a.out {
         Some(o) => write_new(o, &bytes)?,
         None => {
-            // Replace the bundle atomically.
-            let tmp = a.bundle.with_extension("tmp");
-            let _ = std::fs::remove_file(&tmp);
+            // A temporary file of our own (never another's), in the same
+            // directory, replaced over the bundle atomically.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let name = a
+                .bundle
+                .file_name()
+                .map_or("bundle".into(), |n| n.to_string_lossy().into_owned());
+            let tmp = a
+                .bundle
+                .with_file_name(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
             write_new(&tmp, &bytes)?;
-            std::fs::rename(&tmp, &a.bundle).map_err(|e| io(&a.bundle, e))?;
+            if let Err(e) = std::fs::rename(&tmp, &a.bundle) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(io(&a.bundle, e));
+            }
         }
     }
     println!(
@@ -359,6 +493,7 @@ pub fn countersign(a: CountersignArgs) -> Result<ExitCode> {
             "bundle_id": verified.bundle_id,
             "countersigned_as": a.organization,
             "signatures": b.signatures.iter().map(|s| &s.organization).collect::<Vec<_>>(),
+            "stated": b.signatures.iter().find(|s| s.organization == a.organization).map(|s| &s.statement),
         }))
         .expect("serializable")
     );
@@ -383,11 +518,11 @@ pub fn explain(
         (None, Some(f)) => read_bundle(f)?,
         (Some(job), None) => {
             let c = crate::control::ControlClient::from_env(url)?;
-            let mut q = format!("view={view}");
+            let mut q = format!("view={}", enc(view));
             if let Some(o) = organization {
-                q.push_str(&format!("&organization={o}"));
+                q.push_str(&format!("&organization={}", enc(o)));
             }
-            let v = c.get(&format!("/v1/jobs/{job}/governance-bundle?{q}"))?;
+            let v = c.get(&format!("/v1/jobs/{}/governance-bundle?{q}", enc(job)))?;
             GovernanceBundle::from_bytes(
                 &canonical_json(&v).map_err(|e| err(format!("the answer is not a bundle: {e}")))?,
             )?
@@ -399,7 +534,19 @@ pub fn explain(
         }
     };
     let (v, code) = verify_with(&b, checks)?;
-    print!("{}", crate::governance_explain::render(&b, &v));
+    print!("{}", tty(&crate::governance_explain::render(&b, &v)));
     explain_exit(code);
     Ok(ExitCode::from(code))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_text_and_urls_are_escaped() {
+        assert_eq!(tty("a\u{1b}[31mred\u{7}\nline"), "a?[31mred?\nline");
+        assert_eq!(enc("a/b c&d=é"), "a%2Fb%20c%26d%3D%C3%A9");
+        assert_eq!(enc("job_1.x-y~z"), "job_1.x-y~z");
+    }
 }
