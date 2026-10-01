@@ -364,3 +364,42 @@ pub fn countersign(a: CountersignArgs) -> Result<ExitCode> {
     );
     Ok(ExitCode::SUCCESS)
 }
+
+/// `encompute explain --governance`: the bundle from a file (offline) or
+/// from the control plane (`job`), verified here against the pins, and
+/// explained from what verified. Exit codes as `verify`.
+pub fn explain(
+    job: Option<&str>,
+    bundle: Option<&Path>,
+    view: &str,
+    organization: Option<&str>,
+    url: Option<&str>,
+    checks: &Checks,
+) -> Result<ExitCode> {
+    let b = match (job, bundle) {
+        (Some(_), Some(_)) => {
+            return Err(err("explain a job or a bundle file, not both"));
+        }
+        (None, Some(f)) => read_bundle(f)?,
+        (Some(job), None) => {
+            let c = crate::control::ControlClient::from_env(url)?;
+            let mut q = format!("view={view}");
+            if let Some(o) = organization {
+                q.push_str(&format!("&organization={o}"));
+            }
+            let v = c.get(&format!("/v1/jobs/{job}/governance-bundle?{q}"))?;
+            GovernanceBundle::from_bytes(
+                &canonical_json(&v).map_err(|e| err(format!("the answer is not a bundle: {e}")))?,
+            )?
+        }
+        (None, None) => {
+            return Err(err(
+                "name the job (explain --governance JOB) or a bundle (explain --governance --bundle FILE)",
+            ));
+        }
+    };
+    let (v, code) = verify_with(&b, checks)?;
+    print!("{}", crate::governance_explain::render(&b, &v));
+    explain_exit(code);
+    Ok(ExitCode::from(code))
+}

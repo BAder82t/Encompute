@@ -615,3 +615,151 @@ fn countersign_adds_attribution_and_nothing_else() {
     );
     assert_eq!(code, 2);
 }
+
+fn explain(d: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_encompute"))
+        .arg("explain")
+        .args(args)
+        .env("ENCOMPUTE_TOKEN", "test-token")
+        .env_remove("ENCOMPUTE_SERVICE_ID")
+        .env_remove("ENCOMPUTE_SERVICE_KEY_FILE")
+        .env("HOME", d)
+        .env("XDG_CONFIG_HOME", d)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into(),
+        String::from_utf8_lossy(&out.stderr).into(),
+    )
+}
+
+const SECTIONS: [&str; 9] = [
+    "WHAT WAS COMPUTED",
+    "WHO OWNED THE DATA",
+    "WHY",
+    "WHO APPROVED",
+    "WHERE IT RAN",
+    "WHAT WAS RELEASED",
+    "WHICH PROTECTIONS APPLIED",
+    "WHAT EVIDENCE EXISTS",
+    "WHAT THIS DOES NOT TELL YOU",
+];
+
+#[test]
+fn explain_governance_in_words_from_verified_evidence_only() {
+    let d = dir("explain");
+    let fx = Fixture::build();
+    let b = shared(&fx);
+    let path = d.join("b.encgov.json");
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+    let f = path.to_str().unwrap();
+    let p = write_json(&d, "pins.json", &pins(&fx));
+    let disc = disclosures(&d, &fx);
+    // Offline, verified against the pins and the owners' disclosures: every
+    // section in order, the plain-language rows, the legal boundary last.
+    let (code, so, e) = explain(
+        &d,
+        &[
+            "--governance",
+            "--bundle",
+            f,
+            "--pins",
+            &p,
+            "--disclosure",
+            &disc,
+            "--allow-unchecked",
+        ],
+    );
+    assert_eq!(code, 0, "{so}{e}");
+    let mut at = 0;
+    for s in SECTIONS.iter().chain(&["VERDICT"]) {
+        let i = so[at..]
+            .find(&format!("\n{s}\n"))
+            .unwrap_or_else(|| panic!("{s} missing or out of order in\n{so}"));
+        at += i + 1;
+    }
+    for want in [
+        "Raw data centralized: NO",
+        "Ownership retained: YES",
+        "Key custody: INDEPENDENT",
+        "Legal reference: act-12 (recorded, not checked)",
+        "owned by tax-agency",
+        "owned by benefits-agency",
+        "Decryption control: not verified",
+        "No placement constraint was declared",
+        "CROSS-AGENCY REQUIREMENTS NOT FULLY EVIDENCED",
+    ] {
+        assert!(so.contains(want), "missing {want:?} in\n{so}");
+    }
+    assert!(
+        so.trim_end()
+            .lines()
+            .last()
+            .unwrap()
+            .contains("not legal advice"),
+        "{so}"
+    );
+    assert!(!so.contains("person-"), "approvers stay pseudonyms");
+    // Without the owners' disclosure a section built on a card is not
+    // verified, and says why; without accepting that the exit is 3.
+    let (code, so, _) = explain(&d, &["--governance", "--bundle", f, "--pins", &p]);
+    assert_eq!(code, 3);
+    assert!(so.contains("not verified: Source assets"), "{so}");
+    assert!(so.contains("not verified: Approvals"), "{so}");
+    // Without pins nothing signed was checked: the explanation says so
+    // instead of presenting the claims.
+    let (code, so, _) = explain(&d, &["--governance", "--bundle", f]);
+    assert_eq!(code, 3);
+    assert!(so.contains("not verified"), "{so}");
+    assert!(!so.contains("Raw data centralized: NO"), "{so}");
+    // Online: the bundle comes from the control plane and is verified
+    // here; the server's own opinion is never shown.
+    let fake = Fake::start();
+    fake.serve(&b);
+    let (code, so, e) = explain(
+        &d,
+        &[
+            "--governance",
+            JOB,
+            "--url",
+            &fake.url,
+            "--pins",
+            &p,
+            "--disclosure",
+            &disc,
+            "--allow-unchecked",
+        ],
+    );
+    assert_eq!(code, 0, "{so}{e}");
+    assert!(fake
+        .queries
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|q| q.contains("view=shared")));
+    assert!(so.contains("Raw data centralized: NO"));
+    // A bundle that was edited on its way is refused, not explained.
+    let mut v = serde_json::to_value(&b).unwrap();
+    v["governance"]["grant"]["issued_at"] = json!(T0 + 1);
+    *fake.answer.lock().unwrap() = v;
+    let (code, so, _) = explain(
+        &d,
+        &[
+            "--governance",
+            JOB,
+            "--url",
+            &fake.url,
+            "--pins",
+            &p,
+            "--allow-unchecked",
+        ],
+    );
+    assert_eq!(code, 2);
+    assert!(!so.contains("WHAT WAS COMPUTED"), "{so}");
+    // Standard explain is unchanged: a model, and not both.
+    let (code, _, e) = explain(&d, &[]);
+    assert_eq!(code, 2, "{e}");
+    let (code, _, _) = explain(&d, &["model.encompute", "--governance", "--bundle", f]);
+    assert_eq!(code, 2);
+}
