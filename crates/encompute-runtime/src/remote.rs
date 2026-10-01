@@ -111,9 +111,19 @@ impl Remote {
         format!("{}{path}", self.base)
     }
 
+    /// A GET carrying the grant, if any: an evaluator managed by a control
+    /// plane lists a program and answers key lookups only for a holder of
+    /// a grant for it.
+    fn get(&self, path: &str) -> ureq::Request {
+        let r = self.agent.get(&self.url(path));
+        match &self.grant {
+            Some(g) => r.set(encompute_verification::service::H_JOB_GRANT, g),
+            None => r,
+        }
+    }
+
     pub fn info(&self) -> Result<Value> {
-        self.agent
-            .get(&self.url("/v1/info"))
+        self.get("/v1/info")
             .call()
             .map_err(remote_err)
             .and_then(read_json)
@@ -169,8 +179,10 @@ impl Remote {
         key_id: &str,
         keys: Option<&[u8]>,
     ) -> Result<usize> {
-        let url = self.url(&format!("/v1/programs/{program_id}/keys/{key_id}"));
-        match self.agent.get(&url).call() {
+        match self
+            .get(&format!("/v1/programs/{program_id}/keys/{key_id}"))
+            .call()
+        {
             Ok(_) => return Ok(0),
             Err(ureq::Error::Status(404, _)) => {}
             Err(e) => return Err(remote_err(e)),
@@ -219,6 +231,107 @@ impl Remote {
             .read_to_end(&mut out)
             .map_err(|e| Error::new(Code::Remote, format!("reading result: {e}")))?;
         Ok((out, job))
+    }
+
+    /// The evaluator receipt keys to accept for a job a control plane
+    /// schedules: `explicit` pins (command-line or SDK arguments), else
+    /// `ENCOMPUTE_TRUSTED_EVALUATORS` (comma- or space-separated hex keys;
+    /// set but empty pins nothing and refuses every evaluator). `None`
+    /// accepts the key the control plane names, and is returned only with
+    /// the explicit development opt-out (`allow_unpinned`, or
+    /// `ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1`), and only when
+    /// `ENCOMPUTE_ENV=development` is set explicitly (unset or any other
+    /// value refuses the opt-out). With no pin and no opt-out it fails
+    /// closed: a compromised control plane could otherwise choose the
+    /// evaluator and the receipt key that "verifies" its result.
+    pub fn trusted_evaluators(
+        explicit: Option<Vec<String>>,
+        allow_unpinned: bool,
+    ) -> Result<Option<std::collections::BTreeSet<String>>> {
+        Self::trusted_evaluators_from(explicit, allow_unpinned, |k| std::env::var(k).ok())
+    }
+
+    /// [`Remote::trusted_evaluators`] with the environment given by `env`.
+    pub fn trusted_evaluators_from(
+        explicit: Option<Vec<String>>,
+        allow_unpinned: bool,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<std::collections::BTreeSet<String>>> {
+        let parse = |keys: &[String]| -> std::collections::BTreeSet<String> {
+            keys.iter()
+                .flat_map(|k| k.split(|c: char| c == ',' || c.is_whitespace()))
+                .filter(|k| !k.is_empty())
+                .map(str::to_lowercase)
+                .collect()
+        };
+        if let Some(keys) = explicit {
+            return Ok(Some(parse(&keys)));
+        }
+        if let Some(v) = env("ENCOMPUTE_TRUSTED_EVALUATORS") {
+            return Ok(Some(parse(&[v])));
+        }
+        let opted_out = allow_unpinned
+            || matches!(
+                env("ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR").as_deref(),
+                Some("1" | "true" | "yes")
+            );
+        if !opted_out {
+            return Err(Error::new(
+                Code::InsecureConfiguration,
+                "no trusted evaluator keys are pinned: pass --trust-evaluator KEY (or set \
+                 ENCOMPUTE_TRUSTED_EVALUATORS) with the receipt keys of the evaluators you \
+                 trust; for development only, --allow-unpinned-evaluator accepts the key the \
+                 control plane names",
+            ));
+        }
+        // Fails closed: the opt-out holds only where the environment says,
+        // explicitly, that this is development. Unset, production or any
+        // other value (a typo included) refuses it.
+        if env("ENCOMPUTE_ENV").as_deref() != Some("development") {
+            return Err(Error::new(
+                Code::InsecureConfiguration,
+                "an unpinned evaluator is for development only: the opt-out \
+                 (--allow-unpinned-evaluator, ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR) is honoured \
+                 only with ENCOMPUTE_ENV=development; elsewhere pin the evaluator keys with \
+                 --trust-evaluator KEY or ENCOMPUTE_TRUSTED_EVALUATORS",
+            ));
+        }
+        Ok(None)
+    }
+
+    /// Refuses `receipt_key` unless it is among `trusted` (`None`: the
+    /// development opt-out, any key).
+    pub fn check_trusted_evaluator(
+        trusted: Option<&std::collections::BTreeSet<String>>,
+        receipt_key: &str,
+    ) -> Result<()> {
+        match trusted {
+            Some(keys) if !keys.contains(&receipt_key.to_lowercase()) => Err(Error::new(
+                Code::ServiceAuthentication,
+                format!(
+                    "the control plane scheduled evaluator key {receipt_key}, which is not \
+                     among the trusted evaluators"
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// [`Remote::run`] for a job a control plane scheduled on the evaluator
+    /// with `receipt_key`: the key is checked against `trusted` (see
+    /// [`Remote::trusted_evaluators`]) before anything is sent.
+    pub fn run_scheduled(
+        &self,
+        client: &ClientSession,
+        program: &Program,
+        eval_keys: Option<&[u8]>,
+        inputs: &encompute_ir::Inputs,
+        receipt_key: &str,
+        trusted: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<RemoteRun> {
+        Self::check_trusted_evaluator(trusted, receipt_key)?;
+        let identity = EvaluatorIdentity::from_public_key_hex(receipt_key)?;
+        self.run(client, program, eval_keys, inputs, &identity)
     }
 
     /// Full remote run: program and keys ensured, encrypted request, then
@@ -288,5 +401,88 @@ impl Remote {
             request,
             response,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolve(
+        explicit: Option<&[&str]>,
+        allow: bool,
+        env: &[(&str, &str)],
+    ) -> Result<Option<std::collections::BTreeSet<String>>> {
+        let env: std::collections::HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Remote::trusted_evaluators_from(
+            explicit.map(|k| k.iter().map(|s| s.to_string()).collect()),
+            allow,
+            |k| env.get(k).cloned(),
+        )
+    }
+
+    /// Review findings EV-4 and PY-1 (ENC-SF-2026-046, ENC-SF-2026-078): pins are the client's, an empty pin
+    /// set refuses every key, and without a pin only the explicit
+    /// development opt-out, under an explicit `ENCOMPUTE_ENV=development`,
+    /// accepts the control plane's choice.
+    #[test]
+    fn evaluator_pins_fail_closed() {
+        let (a, b) = ("AB".repeat(32), "cd".repeat(32));
+        let pins = resolve(Some(&[&a]), false, &[("ENCOMPUTE_TRUSTED_EVALUATORS", &b)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(pins.len(), 1, "explicit pins win over the environment");
+        assert!(Remote::check_trusted_evaluator(Some(&pins), &a).is_ok());
+        let e = Remote::check_trusted_evaluator(Some(&pins), &b).unwrap_err();
+        assert_eq!(e.code, Code::ServiceAuthentication);
+        let env = resolve(
+            None,
+            true,
+            &[("ENCOMPUTE_TRUSTED_EVALUATORS", &format!("{a}, {b}"))],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(env.len(), 2, "a pin in the environment beats the opt-out");
+        for empty in [
+            resolve(Some(&[]), true, &[]),
+            resolve(None, true, &[("ENCOMPUTE_TRUSTED_EVALUATORS", " , ")]),
+        ] {
+            let empty = empty.unwrap().unwrap();
+            assert!(Remote::check_trusted_evaluator(Some(&empty), &a).is_err());
+        }
+        assert_eq!(
+            resolve(None, false, &[]).unwrap_err().code,
+            Code::InsecureConfiguration
+        );
+        let dev = ("ENCOMPUTE_ENV", "development");
+        assert_eq!(resolve(None, true, &[dev]).unwrap(), None);
+        assert_eq!(
+            resolve(
+                None,
+                false,
+                &[("ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR", "1"), dev]
+            )
+            .unwrap(),
+            None
+        );
+        // The opt-out is honoured only under an explicit
+        // ENCOMPUTE_ENV=development: unset, production or anything else
+        // (a typo included) fails closed.
+        for env in [
+            &[][..],
+            &[("ENCOMPUTE_ENV", "production")][..],
+            &[("ENCOMPUTE_ENV", "prod")][..],
+            &[("ENCOMPUTE_ENV", "")][..],
+            &[("ENCOMPUTE_ENV", "Development")][..],
+            &[("ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR", "1")][..],
+        ] {
+            let e = resolve(None, true, env).unwrap_err();
+            assert_eq!(e.code, Code::InsecureConfiguration, "{env:?}");
+            assert!(e.message.contains("ENCOMPUTE_ENV=development"), "{e}");
+        }
+        assert!(Remote::check_trusted_evaluator(None, &b).is_ok());
     }
 }

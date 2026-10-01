@@ -71,7 +71,9 @@ fn gates_match_their_truth_tables() {
 #[test]
 #[ignore]
 fn measure_paramsets() {
-    for ps in ["STD128", "STD128_LMKCDEY"] {
+    // GINX sets only: the evaluator refuses bootstrapping keys of any other
+    // method (review finding EV-3).
+    for ps in ["STD128", "STD128Q"] {
         let client = BinClient::generate(ps).unwrap();
         let (refresh, switching) = client.bootstrapping_keys().unwrap();
         let mut ctx = BinContext::new(ps).unwrap();
@@ -192,5 +194,55 @@ fn measure_concurrent_gates() {
             "{threads} threads: {n} gates in {secs:.2}s = {:.1} ms/gate",
             secs * 1000.0 / n as f64
         );
+    }
+}
+
+/// Review finding EV-3 (ENC-SF-2026-045): the evaluator loaded bootstrapping keys without
+/// checking their method, dimensions or moduli; the parameter ID in the
+/// envelope is only the uploader's label. Keys of another parameter set
+/// sealed with the vetted ID were accepted, and with `STD128_LMKCDEY` keys
+/// the first gate read out of bounds (SIGSEGV, taking down every tenant's
+/// jobs). They are now refused before any gate runs.
+#[test]
+fn foreign_bootstrapping_keys_are_refused_before_any_gate() {
+    use encompute_ir::Code;
+    use encompute_openfhe_exact::{
+        default_profile, parameter_id, seal, Header, OpenFheGates, KIND_EVALUATION_KEYS,
+    };
+    let sealed = |refresh: &[u8], switching: &[u8]| {
+        seal(
+            &Header {
+                kind: KIND_EVALUATION_KEYS,
+                parameter_id: parameter_id(&default_profile()),
+                key_id: [7; 16],
+                elem: 0,
+            },
+            &[refresh, switching],
+        )
+    };
+    let (rk, sk) = BinClient::generate("STD128")
+        .unwrap()
+        .bootstrapping_keys()
+        .unwrap();
+    assert!(OpenFheGates::new(&default_profile(), &sealed(&rk, &sk)).is_ok());
+    for ps in ["STD128_LMKCDEY", "STD128Q"] {
+        let (frk, fsk) = BinClient::generate(ps)
+            .unwrap()
+            .bootstrapping_keys()
+            .unwrap();
+        for (refresh, switching, what) in [
+            (&frk, &fsk, "both keys"),
+            (&frk, &sk, "the refresh key"),
+            (&rk, &fsk, "the switching key"),
+        ] {
+            let e = OpenFheGates::new(&default_profile(), &sealed(refresh, switching))
+                .err()
+                .unwrap_or_else(|| panic!("{ps}: {what} of another parameter set accepted"));
+            assert_eq!(e.code, Code::WrongParameters, "{ps} {what}: {e}");
+            // The same through the context directly.
+            let mut ctx = BinContext::new("STD128").unwrap();
+            let e = ctx.load_keys(refresh, switching).unwrap_err();
+            assert_eq!(e.code, Code::WrongParameters, "{ps} {what}: {e}");
+        }
     }
 }

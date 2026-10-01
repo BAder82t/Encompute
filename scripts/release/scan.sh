@@ -13,6 +13,12 @@
 #   scripts/release/scan.sh
 #   IMAGES="encompute-evaluator:rc encompute-control:rc" scripts/release/scan.sh
 #   REQUIRE_TOOLS=1 ...   # a missing scanner fails instead of skipping (CI)
+#   REQUIRE_IMAGES="encompute-training ..."  # fail unless each was in IMAGES
+#
+# A release scans every image, the Confidential Space workloads
+# (encompute-confidential-space, encompute-training) included: signing,
+# pinning and attestation say which image ran, not that it has no known
+# vulnerabilities.
 #
 # Reports go to target/release-scan/ (OUT=...). Exit 0 only when every
 # step passed.
@@ -80,6 +86,16 @@ if [ -n "${IMAGES:-}" ]; then
 else
   skip "container scan" "set IMAGES=\"image:tag ...\""
 fi
+# Every required image was scanned (by repository name: registry, tag and
+# digest aside).
+for want in ${REQUIRE_IMAGES:-}; do
+  found=0
+  for img in ${IMAGES:-}; do
+    name="${img%%@*}"; name="${name##*/}"; name="${name%%:*}"
+    [ "$name" = "$want" ] && found=1
+  done
+  [ $found = 1 ] || fail "container scan $want" "not in IMAGES (REQUIRE_IMAGES)"
+done
 
 # 3. Python licenses.
 if python3 scripts/release/python_licenses.py "$lock" --json "$OUT/python-licenses.json" > "$OUT/python-licenses.txt" 2>&1; then
@@ -111,7 +127,26 @@ PY
 then row "OpenFHE review" "PASS ($(cat "$OUT/openfhe-review.txt"))"
 else fail "OpenFHE review" "$(tail -n 1 "$OUT/openfhe-review.txt") (security/openfhe-review.toml)"; fi
 
-# 5. The severity policy.
+# 5. The severity policy. Its own tests first (exceptions must be exact,
+# complete, approved and current), then the controls the exceptions rely
+# on: the shipped Python package never calls the PyTorch and Transformers
+# entry points the torch and transformers exceptions declare unused
+# (security/exceptions.toml, compensating_controls).
+if python3 -m unittest discover -s scripts/release -p 'test_vuln_policy.py' > "$OUT/policy-tests.txt" 2>&1; then
+  row "severity policy tests" "PASS ($(grep -E '^Ran ' "$OUT/policy-tests.txt"))"
+else fail "severity policy tests" "see $OUT/policy-tests.txt"; fi
+# A syntax-tree scan, not a text search: import aliases, from-imports and
+# getattr with a literal name are seen. Exit 1 is a finding, 2 a scan that
+# could not run (a missing path, a file that does not parse): neither passes.
+if python3 -m unittest discover -s scripts/release -p 'test_scan_torch_usage.py' > "$OUT/exception-controls-tests.txt" 2>&1; then
+  row "exception controls tests" "PASS ($(grep -E '^Ran ' "$OUT/exception-controls-tests.txt"))"
+else fail "exception controls tests" "see $OUT/exception-controls-tests.txt"; fi
+python3 scripts/release/scan_torch_usage.py python/encompute > "$OUT/exception-controls.txt" 2>&1
+case $? in
+  0) row "exception controls" "PASS ($(tail -n 1 "$OUT/exception-controls.txt"))" ;;
+  1) fail "exception controls" "python/encompute uses an entry point an exception declares unused (see $OUT/exception-controls.txt)" ;;
+  *) fail "exception controls" "the scan did not complete: $(tail -n 1 "$OUT/exception-controls.txt")" ;;
+esac
 if [ ${#policy_args[@]} -gt 0 ]; then
   if python3 scripts/release/vuln_policy.py "${policy_args[@]}" --exceptions security/exceptions.toml \
       --osv-cache "$OUT/osv-cache.json" --report "$OUT/vulnerabilities.md" > "$OUT/policy.txt" 2>&1; then

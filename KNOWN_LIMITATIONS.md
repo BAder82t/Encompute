@@ -14,12 +14,23 @@ Related: [support matrix](docs/support-matrix.md),
 - **No formal proof of the whole system.** The cryptographic building
   blocks (CKKS, BinFHE, BGV, Ed25519, HPKE, secure aggregation, the
   discrete Gaussian) have published analyses. Their composition in
-  Encompute has none. The assurance suite tests 104 security invariants
+  Encompute has none. The assurance suite tests 150 security invariants
   with positive, negative, adversarial and end-to-end evidence. A passing
   report means those invariants held for the tested cases. It does not
   prove the system secure.
-- **An independent security review is in progress** for this release
-  candidate. It has not concluded.
+- **Trust reports judge authorization expiry at verification time.** An
+  owner's authorization with an expiry verifies only while it has not
+  expired, so a report on a job that ran while the authorization was valid
+  fails once it has expired. A bundle carries no signed execution time to
+  judge it against; evaluating validity at execution time is planned. An
+  authorization without a purpose or policy applies to every purpose or
+  policy, and authorizations name no project.
+- **An independent security review of 0.3.0-rc.3 has reported.** Its
+  55 findings, 7 more from a later review of their fixes
+  (ENC-SF-2026-033 to 094), and the fixes are listed in
+  [docs/security-findings.md](docs/security-findings.md). Some are only
+  partly fixed; the remainders are listed below and in that page's
+  "Open" list.
 - **Receipts are signed claims, not proofs.** An evaluator signs what it
   says it computed. A dishonest evaluator can sign a wrong result, and the
   receipt still verifies. Only verified execution rules this out, and it
@@ -130,7 +141,68 @@ Related: [support matrix](docs/support-matrix.md),
   unkeyed hash chain until the next checkpoint.
 - **IDs can reveal existence through conflicts.** Other tenants' resources
   are "not found", but registering an ID that is already taken fails with
-  a conflict.
+  a conflict. Project invitations answer the same whether the organization
+  exists, but `create_user` still answers 409 for an identity that is
+  already registered.
+- **Identity providers are not bound per organization.** Any configured
+  issuer's identity can be registered by any organization's admin, so an
+  identity another organization will onboard can be registered first.
+- **`/metrics` is closed in production.** It needs
+  `Authorization: Bearer <metrics token>` (`ENCOMPUTE_METRICS_TOKEN_FILE`),
+  unless `ENCOMPUTE_METRICS_PUBLIC=true`. Scrapers set up for rc.3 need
+  the token.
+- **One control-plane process per state anchor.** A lost compare-and-set
+  reloads and retries, but replicas sharing one anchor are not supported.
+  The whole anchor is rewritten on each update.
+- **A job's sources are declarations, not data.** The control plane never
+  sees inputs, so it cannot tell which data a client actually encrypts. It
+  derives a job's sources from what its program declares: the purpose, and
+  the registered assets its secret inputs are bound to by asset ID. The
+  request's `source_assets` must list exactly those assets (none for a
+  program that binds none); lineage, revocation, the audit trail and the
+  trust report follow the derived set. The program's own `asset`
+  declarations (owners, readers, purposes) are the submitter's text and
+  are not compared with the registry; only the IDs are. Checking that a
+  registered asset ID names a real asset also tells a submitter who
+  already knows an ID that it exists.
+- **The anchor's sets of ended jobs, withdrawn approvals, removed
+  project memberships and removed roles grow without bound.** Every
+  spend, cancellation, withdrawal and removal rewrites and re-signs the
+  whole anchor. OpenBao's KV store refuses entries above its raft
+  `max_entry_size` (1 MiB by default), which is roughly 25,000 to 30,000
+  ended jobs; past it anchor writes fail, and the control plane fails
+  closed: privacy spends, cancellations and revocation acknowledgements
+  stop. Watch the `encompute_anchor_bytes` gauge (the control plane also
+  logs `anchor_size_warning` above 512 KiB) and raise `max_entry_size` before it is
+  reached. The anchoring cost also grows with the deployment's age: each
+  privacy spend re-loads and re-verifies the whole ledger to anchor it
+  (besides verifying it inside the spend), and every revocation, disable,
+  cancellation, withdrawal or removal rescans all the anchored-state
+  tables. Both fail closed. A hash-chained governance event log will
+  replace these sets, and these costs, before general availability.
+- **An anchor restored from the same backup forgets later spend.** When
+  the database and the anchor are restored together, privacy spend rolls
+  back to the backup. Keep the anchor outside the backup set, in the
+  customer's vault.
+- **The evaluator program table has no eviction.** Uploaded programs stay
+  in memory until the evaluator restarts.
+- **Trust Graph queries are quadratic** in the number of records.
+- **The control plane bounds privacy reservations, but does not recompute
+  them.** A reservation whose declared sensitivity is below what its own
+  noise implies is refused, but its noise multiplier and sampling rate are
+  the coordinator's declaration.
+- **Key broker state can be rolled back to an older authenticated copy.**
+  The state file is authenticated under a key derived from the KEK, so an
+  edited file does not open. An older copy that was genuinely
+  authenticated still opens, and restoring it brings revoked keys back.
+  Revocation does not crypto-shred: an old state file plus the unchanged
+  KEK still yields the revoked keys. Keep broker backups access-controlled.
+- **Evaluator upload grants are reusable** until they expire, and are not
+  bound to a client.
+- **A co-tenant can block a victim's evaluation-key upload.** A client that
+  knows another client's key tag (it is in every ciphertext) can upload
+  keys under it first; the victim's upload is then refused until that
+  entry is evicted. The victim never gets a wrong result.
 - **Secrets have environment-variable fallbacks.** `*_FILE` is preferred,
   but production mode also accepts the plain variable (for example
   `ENCOMPUTE_DATABASE_URL`, `BAO_TOKEN`).
@@ -148,6 +220,10 @@ Related: [support matrix](docs/support-matrix.md),
   for every evaluator, whatever its hardware.
 - **Platforms.** Supported: Linux x86_64 and macOS arm64. Linux arm64 is
   experimental. macOS x86_64 and Windows are not supported.
+- **macOS loads two OpenMP runtimes** when OpenFHE and torch run in one
+  process.
+- **The Linux wheel may bundle libgomp**, which THIRD_PARTY_NOTICES does
+  not list. (Not yet checked against a built Linux wheel.)
 - **Benchmarks come from one machine type** (Apple M3 Max). Linux servers
   and real TEEs have not been benchmarked.
 
@@ -162,6 +238,13 @@ Related: [support matrix](docs/support-matrix.md),
 - **Attestation trusts the TEE vendor** and its attestation service (for
   Confidential Space: Google's verifier and launcher), and the reviewed
   image: the image digest is the measurement.
+- **One key broker per confidential training job.** A training spec names
+  exactly one key broker. A workload trusts every broker its spec names for
+  every asset, so with several, one broker could grant a key of its own
+  choosing for an asset another owner's broker holds (a participant's
+  contribution key among them). Jobs whose owners each run their own broker
+  need a per-asset broker binding first; until then every asset of a job is
+  protected by the one broker the spec names.
 
 ## Differential privacy
 
@@ -173,6 +256,13 @@ Related: [support matrix](docs/support-matrix.md),
   guarantees hold only if `unit_ids` really identify patients, and every
   record of a patient carries the same ID. Encompute checks consistency,
   not truth.
+- **A patient-level budget without DP-SGD pays for an organization's
+  sensitivity.** Aggregated without Poisson sampling, nothing clips one
+  patient (record, user, device) inside a party's contribution, so each is
+  charged `2 × clip_norm`. The named levels compensate with twice their
+  listed noise for such units (`strong`: noise 12, not 6), which keeps the
+  budget's release count but also doubles the noise on the aggregate.
+  Per-unit clipping (DP-SGD) needs half that noise.
 - **Budgets cover releases through Encompute only.** Anything an owner
   releases about the same data elsewhere is not in the ledger.
 - **Organization-level DP protects organizations, not individuals.** A
@@ -181,8 +271,23 @@ Related: [support matrix](docs/support-matrix.md),
 - **DP bounds what the released aggregate reveals** within (ε, δ). It
   does not hide the model architecture, the number of rounds or the
   training configuration, which are shared as metadata.
+- **A DP plan with no budgeted asset produces no privacy receipt**, so an
+  aggregation receipt has nothing to bind.
 - **Randomness must be production randomness.** The deterministic noise
   feature exists for tests only and is refused in releases (ENC2204).
+- **A person held by several parties is protected at group level.** The
+  unit is one patient (or record, user, device) inside one party. A
+  patient whose records k hospitals hold can move the aggregate up to k
+  times the per-unit sensitivity (about k²ρ under zCDP). Encompute cannot
+  link units across parties: set budgets with this in mind, or
+  de-duplicate patients across parties before training.
+- **An owner-approved unit count is public.** A DP-SGD training spec
+  publishes no count derived from the data: the sampling rate is set
+  explicitly or derived from a number of privacy units each owner approves
+  for publication (`public_units`). That figure, if given, is released by
+  the owner's consent, outside the differential-privacy guarantee. Dataset
+  and grouping digests are salted commitments whose salt stays with the
+  owner.
 - **Secure aggregation does not guarantee a correct aggregate.** A
   malicious coordinator can abort a round or report a wrong aggregate. It
   cannot learn an honest party's input while it colludes with no more
@@ -207,6 +312,26 @@ Related: [support matrix](docs/support-matrix.md),
   quantization and multi-GPU training are not tested or supported.
 - **LoRA only.** Full fine-tuning and other adapter methods are not
   supported.
+- **Local revocation checks are run by the beneficiary.** In local
+  `finetune` runs the revocation checks for resume, inference and export
+  read the model owner's trust bundle plus any owner-supplied bundles
+  (`revocations=`); the model owner benefits from forgetting a revocation,
+  so enforcement relies on owners revoking at their key brokers or control
+  plane. In these checks a revocation of a parent asset that the trust
+  report does not honour (signed by a non-owner, with an invalid
+  signature, or revoking a single authorization) also refuses, so anyone
+  whose bundle is passed in can stop the run until it is resolved; the
+  trust report itself still honours only the owner's revocation.
+- **The training image ships PyTorch 2.3 and Transformers 4.46, which
+  have open CVEs.** The release's vulnerability gate scans the TEE images
+  like every other image; these findings pass only through exceptions for
+  the exact advisory, package and installed version, each with the
+  analysis that the code is unreachable, the controls that keep it so, an
+  upstream tracking link and an expiry (`security/exceptions.toml`). They
+  expire on 2026-12-31, which forces the upgrade planned for 0.4.
+- **The plan validator is only partly independent.** It recomputes the
+  program's semantics and applies its own floor of core requirements, but
+  its exact-equality check still uses the planner's own derivation.
 
 ## Compatibility and upgrades
 
@@ -217,4 +342,14 @@ Related: [support matrix](docs/support-matrix.md),
   [docs/compatibility.md](docs/compatibility.md).
 - **Database migrations are forward only.** To downgrade, restore a backup
   taken before the upgrade.
+- **Legacy service accounts with `security_admin` are accepted in 0.3.x.**
+  A service account given `security_admin` before 0.3.0 keeps it (for
+  disabling, revoking and audit reads); it is never stripped silently. It
+  never counts as a policy's proposer or approver. The control plane
+  warns on every start (log line, audit event,
+  `encompute_legacy_service_admins` gauge), and
+  `encompute security legacy-service-admins` lists them (exit 1). 0.4.0
+  will refuse them, at startup or through a migration announced in
+  advance. See "Upgrading from 0.3.0-rc.3 or earlier" in
+  [docs/deployment.md](docs/deployment.md).
 - **Python 3.11 or later** is required. CI tests 3.11 and 3.12.

@@ -4,23 +4,29 @@ attested workload (Google Confidential Space in production).
     python -m encompute.torch.cs_worker JOB
 
 ``JOB`` is a job descriptor (a path, ``gs://`` or ``https://`` URL) with
-public commitments only: the training spec, the model package ID, where
-the sealed model, dataset and adapter are, the broker, and where the
-output goes. It holds no key and no plaintext. The operator can change it,
-but only to make the job fail: every commitment is checked, and the broker
-releases keys only to a workload attesting to the approved training spec.
+public commitments only: the training spec, the model package ID, the
+approved plan, where the sealed model, dataset and adapter are (and, after
+round 1, the adapter's signed record), the broker's address, the round's
+seed, and where the output goes. It holds no key and no plaintext. The
+operator can change it, but only to make the job fail: every commitment
+is checked against the training spec, the broker's grants are accepted
+only under the grant-signing key the spec names, the training
+configuration comes from the spec, and the broker releases keys only to a
+workload attesting to the approved training spec.
 
 The worker:
 
 1. checks the descriptor against the training spec it names (IDs, the
-   model package, the participant's dataset);
+   model package, the participant's dataset, the plan, the input adapter),
+   and that its own training code is the code the spec binds;
 2. creates a session identity in memory, attests (the Confidential Space
    launcher's token, bound to the session, the spec and the broker's
    challenge), and receives the model, dataset, adapter and output keys
    sealed to that session;
-3. fetches and opens the sealed assets, checking every digest: the model
-   weights, the package, the dataset, its patient grouping, its
-   tokenization;
+3. fetches and opens the sealed model and builds it (checking the
+   weights, the package and the adapter layout), then opens the dataset and
+   adapter, checking every digest: the dataset, its patient grouping, its
+   tokenization, the adapter against the spec or its signed record;
 4. runs the bound training step, the same code as local runs (with
    DP-SGD: per-patient gradients, grouping, clipping, Poisson sampling);
 5. seals its contribution (release ``aggregate_only``: only an attested
@@ -39,6 +45,9 @@ Environment:
   Space's). A simulated launcher is for development only.
 - ``ENCOMPUTE_MOCK_SEED``, ``ENCOMPUTE_MOCK_IMAGE``: the mock attester's.
 - ``JOB_URL``: the job descriptor, if no argument is given.
+
+Test hooks (``ENCOMPUTE_CANARY_UPDATE``) are honoured only under the mock
+attester: never with Confidential Space evidence.
 """
 
 from __future__ import annotations
@@ -56,9 +65,12 @@ import torch
 
 from .. import _native
 from . import tensors
-from .worker import Worker
+from .worker import Worker, check_code, codec_clip, development, split_dataset
 
 JOB_KIND = "encompute.confidential-training-job.v1"
+# 2: the plan and the input adapter's record; the configuration comes from
+# the training spec.
+JOB_VERSION = 2
 METADATA = "http://metadata.google.internal/computeMetadata/v1"
 
 
@@ -118,14 +130,24 @@ def join(prefix: str, name: str) -> str:
 # --- the job ---------------------------------------------------------------------
 
 
+# The LoRA settings a descriptor may repeat: each must equal the spec's.
+LORA_FIELDS = ("rank", "alpha", "target_modules", "optimizer", "learning_rate", "update_clip",
+               "local_steps", "batch_size", "rounds")
+
+
 def check_job(job: dict) -> dict:
     """The descriptor must name one approved training spec consistently;
     returns the spec. Anything the operator changed that the broker would
-    not catch is caught here."""
-    if job.get("kind") != JOB_KIND or job.get("version") != 1:
-        raise JobRefused("not a confidential training job descriptor (version 1)")
+    not catch is caught here: the training configuration comes from the
+    spec, the input adapter must be the spec's or the coordinator's record
+    of the previous round, the broker's key comes from the spec."""
+    if job.get("kind") != JOB_KIND or job.get("version") != JOB_VERSION:
+        raise JobRefused(f"not a confidential training job descriptor (version {JOB_VERSION})")
     spec = job["training_spec"]
-    sid = _native.training_spec_id(json.dumps(spec))
+    try:
+        sid = _native.training_spec_id(json.dumps(spec))
+    except _native.NativeError as e:
+        raise JobRefused(f"TRAINING SPEC REFUSED: {e.args[1]}") from None
     if sid != job["training_spec_id"]:
         raise JobRefused("TRAINING SPEC MISMATCH: the descriptor's spec is not "
                          f"{job['training_spec_id'][:16]}")
@@ -142,9 +164,65 @@ def check_job(job: dict) -> dict:
     mine = [d for d in spec["datasets"] if d["owner"] == job["participant"]]
     if not mine or job["dataset"]["asset_id"] != mine[0]["asset_id"]:
         raise JobRefused("DATASET ASSET MISMATCH: not this participant's approved dataset")
-    if not 1 <= int(job["round"]) <= spec["config"]["rounds"]:
+    rnd = job["round"]
+    if not isinstance(rnd, int) or not 1 <= rnd <= spec["config"]["rounds"]:
         raise JobRefused("a round outside the training spec")
+    # The training configuration is the spec's: a descriptor may repeat it,
+    # never change it.
+    given = job.get("lora") or {}
+    c = spec["config"]
+    for k in LORA_FIELDS:
+        if k in given and _same(given[k], c[k]) is False:
+            raise JobRefused(f"CONFIGURATION MISMATCH: the descriptor's {k} is not the training "
+                             "spec's")
+    seed, micro = job.get("seed", 0), job.get("microbatch", 64)
+    if not isinstance(seed, int) or not 0 <= seed < 2 ** 63:
+        raise JobRefused("the round's seed is a non-negative 63-bit integer")
+    if not isinstance(micro, int) or not 1 <= micro <= 4096:
+        raise JobRefused("the microbatch is between 1 and 4096 records")
+    if "#" in job["broker"]:
+        raise JobRefused("the broker's grant-signing key comes from the training spec, not the "
+                         "descriptor")
+    # The input adapter: the spec's initial one, or the one the coordinator
+    # recorded for the previous round of this run.
+    a = job["adapter"]
+    record = a.get("record")
+    try:
+        _native.check_input_adapter(json.dumps(spec), job["run_id"], rnd, a["asset_id"],
+                                    a["digest"], None if record is None else json.dumps(record))
+    except _native.NativeError as e:
+        raise JobRefused(e.args[1]) from None
+    # This worker's own code must be the code the spec binds.
+    try:
+        check_code(spec)
+    except ValueError as e:
+        raise JobRefused(f"TRAINING CODE MISMATCH: {e}") from None
     return spec
+
+
+def _same(given, bound) -> bool:
+    """A descriptor's value equals the spec's (numbers bound as strings)."""
+    if isinstance(bound, str) and isinstance(given, (int, float)):
+        try:
+            return float(bound) == float(given)
+        except ValueError:
+            return False
+    if isinstance(bound, list):
+        return list(given) == bound
+    return given == bound
+
+
+def attested_image(record: str) -> str:
+    """The image digest this worker's own attestation measures (the token
+    the launcher issued it, verified by the broker), never the image the
+    descriptor expects (review finding KB-5)."""
+    import base64
+    ev = json.loads(record)["evidence"]
+    if ev["provider"] == "mock":
+        return json.loads(ev["evidence"])["claims"]["image_digest"]
+    token = ev["evidence"].split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+    return claims["submods"]["container"]["image_digest"]
 
 
 def run(job: dict) -> dict:
@@ -155,6 +233,14 @@ def run(job: dict) -> dict:
     model_id = spec["base_model"]["asset_id"]
     mine = next(d for d in spec["datasets"] if d["owner"] == party)
     attester = os.environ.get("ENCOMPUTE_ATTESTER", "confidential-space")
+    clip = None
+    if spec["config"].get("dp_sgd"):
+        if "plan" not in job:
+            raise JobRefused("a DP-SGD job carries its approved plan")
+        try:
+            clip = codec_clip(spec, json.dumps(job["plan"]))
+        except ValueError as e:
+            raise JobRefused(f"PLAN MISMATCH: {e}") from None
     _say("Training spec", "enctrain1:" + job["training_spec_id"][:16] + "...")
     if spec["base_model"].get("huggingface"):
         _say("Model package", "enchf1:" + job["model_package_id"][:16] + "...")
@@ -171,7 +257,8 @@ def run(job: dict) -> dict:
     t1 = time.perf_counter()
     try:
         # The session attests as this participant: only its own dataset
-        # and output keys are released to it.
+        # and output keys are released to it. Grants are accepted only
+        # under the broker keys the spec names.
         keys, record = _native.acquire_session_keys(
             json.dumps(spec), job["broker"],
             [f"{model_id}.{party}", dataset_key_id, f"adapters.{party}", output_key_id],
@@ -179,43 +266,55 @@ def run(job: dict) -> dict:
     except _native.NativeError as e:
         raise JobRefused(f"KEY RELEASE DENIED: {e.args[0]}: {e.args[1]}") from None
     keys = dict(keys)
+    hooks = development(record)
+    image = attested_image(record)
+    if job.get("expected_image") not in (None, image):
+        raise JobRefused("IMAGE MISMATCH: this worker's attested image is not the one the "
+                         "descriptor expects")
     t["attestation_and_key_release_s"] = time.perf_counter() - t1
     _say("Attestation", "VERIFIED BY THE BROKER")
     _say("Model key", "RELEASED TO ATTESTED SESSION")
     _say("Dataset key", "RELEASED TO ATTESTED SESSION")
 
-    # 2. Fetch and open the sealed assets; every digest is checked.
+    # 2. The model first: opened, built and its layout checked before any
+    # data is opened.
     t1 = time.perf_counter()
     sealed_model = fetch(job["model"]["ciphertext"])
+    try:
+        weights = _native.open_asset(keys[f"{model_id}.{party}"], sealed_model, project, model_id,
+                                     spec["base_model"]["weights_digest"])
+    except _native.NativeError as e:
+        raise JobRefused(f"ASSET MISMATCH: {e.args[1]}") from None
+    del sealed_model
+    try:
+        w = Worker.for_model(spec, bytes(weights), int(job.get("seed", 0)), clip, hooks)
+    except (ValueError, RuntimeError, _native.NativeError) as e:
+        raise JobRefused(f"TRAINING REFUSED: {e}") from None
+    del weights
+    t["model_loading_s"] = time.perf_counter() - t1
+
+    # 3. Fetch and open the dataset and adapter; every digest is checked.
+    t1 = time.perf_counter()
     sealed_data = fetch(job["dataset"]["ciphertext"])
     sealed_adapter = fetch(job["adapter"]["ciphertext"])
     t["asset_download_s"] = time.perf_counter() - t1
     t1 = time.perf_counter()
     try:
-        weights = _native.open_asset(keys[f"{model_id}.{party}"], sealed_model, project, model_id,
-                                     spec["base_model"]["weights_digest"])
         blob = _native.open_asset(keys[dataset_key_id], sealed_data, project, mine["asset_id"],
                                   mine["digest"])
         a0 = _native.open_asset(keys[f"adapters.{party}"], sealed_adapter, project,
                                 job["adapter"]["asset_id"], job["adapter"]["digest"])
     except _native.NativeError as e:
         raise JobRefused(f"ASSET MISMATCH: {e.args[1]}") from None
-    del sealed_model, sealed_data
+    del sealed_data
     t["decryption_s"] = time.perf_counter() - t1
-    data = tensors.loads(bytes(blob))
+    data, unit_ids, salt = split_dataset(tensors.loads(bytes(blob)))
     del blob
-    unit_ids = data.pop("unit_ids", None)
-
-    # 3. The bound model and adapter, the approved layout, the dataset's
-    # grouping: the same checks as every worker.
-    t1 = time.perf_counter()
     try:
-        w = Worker.from_assets(spec, bytes(weights), data, unit_ids, mine["asset_id"],
-                               job["lora"], int(job.get("microbatch", 64)))
+        w.load(data, unit_ids, salt, mine["asset_id"], int(job.get("microbatch", 64)))
     except (ValueError, RuntimeError, _native.NativeError) as e:
-        raise JobRefused(f"TRAINING REFUSED: {e}") from None
-    del weights
-    t["model_loading_s"] = time.perf_counter() - t1
+        raise JobRefused("TRAINING REFUSED: the dataset does not match its commitments"
+                         if spec["config"].get("dp_sgd") else f"TRAINING REFUSED: {e}") from None
     if w.dp is not None:
         _say("Privacy unit", w.dp.unit)
         _say("Per-patient clipping", "ACTIVE (" + {"vmap": "vectorized per-example gradients",
@@ -225,10 +324,15 @@ def run(job: dict) -> dict:
     # 4. One training step: the contribution, in the codec's range.
     t1 = time.perf_counter()
     adapter = tensors.loads(bytes(a0))["adapter"]
-    v, _, _ = w.contribution([float(x) for x in adapter], int(job.get("seed", 0)))
-    canary = os.environ.get("ENCOMPUTE_CANARY_UPDATE")  # leakage tests only
-    if canary:
-        v[:4] = float(canary)
+    try:
+        v, _, _ = w.contribution([float(x) for x in adapter], int(job.get("seed", 0)))
+    except Exception as e:
+        if w.dp is not None:
+            # A fixed error: a data-dependent one would leak outside the
+            # privacy accounting (review finding DP-5).
+            raise JobRefused("TRAINING FAILED: the DP-SGD step failed") from None
+        raise JobRefused(f"TRAINING FAILED: {e}") from None
+    w.canary(v)  # leakage tests only (development attestation)
     t["training_step_s"] = time.perf_counter() - t1
     _say("Training", "COMPLETE")
 
@@ -242,13 +346,18 @@ def run(job: dict) -> dict:
     del keys, v, payload
     t["output_sealing_s"] = time.perf_counter() - t1
     ev = {
-        "version": 1, "project": project, "training_spec_id": job["training_spec_id"],
+        "version": 2, "project": project, "training_spec_id": job["training_spec_id"],
         "run_id": job["run_id"], "plan_id": spec["plan_id"], "policy_id": spec["policy_id"],
         "privacy_policy_id": spec["privacy_policy_id"], "participant": party, "round": rnd,
         "model_asset": model_id, "model_package_id": job.get("model_package_id"),
         "weights_digest": spec["base_model"]["weights_digest"],
         "dataset_asset": mine["asset_id"], "dataset_digest": mine["digest"],
-        "layout_digest": spec["layout_digest"], "image_digest": job["expected_image"],
+        "layout_digest": spec["layout_digest"],
+        "input_adapter": job["adapter"]["asset_id"],
+        "input_adapter_digest": job["adapter"]["digest"],
+        "config_digest": _native.training_config_digest(json.dumps(spec)),
+        "seed": int(job.get("seed", 0)),
+        "image_digest": image,
         "attestation_record_id": "", "session_id": "",
         "output_asset": out_asset,
         "output_commitment": hashlib.sha256(sealed).hexdigest(),

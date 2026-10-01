@@ -4,7 +4,10 @@
 #                   privacy ledgers, trust metadata, audit records)
 #   anchor.tar      the state anchor (signed privacy and audit roots)
 #   broker.tar      the key broker's state: wrapped keys and the wrapped KEK
-#                   (no plaintext key: the root key stays in the KMS)
+#                   (no plaintext key: the root key stays in the KMS). The
+#                   state is authenticated under the KEK, but restoring an
+#                   older copy brings back keys revoked since (a rollback):
+#                   keep backups access-controlled
 #   evaluator.tar   the evaluator's receipt-signing identity
 #
 #   ./backup.sh DIR

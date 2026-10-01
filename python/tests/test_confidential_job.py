@@ -52,7 +52,7 @@ def prep(tmp_path_factory):
     for i, owner in enumerate(("hospital-a", "hospital-b")):
         texts, labels = hf.synthetic_notes(i + 1, 200, hf.WORDS[13:])
         d = et.private_text_dataset(texts, labels, tokenizer=tok, max_length=8,
-                                    unit_ids=[j // 2 for j in range(200)])
+                                    unit_ids=[j // 2 for j in range(200)], public_units=100)
         d.tensors["input_ids"][5] = torch.tensor(TOKEN_CANARY)
         data.append(p.data(f"notes-{'ab'[i]}", owner=owner, dataset=d))
     port = job._port()
@@ -120,6 +120,45 @@ def test_the_approved_workload_trains_and_its_evidence_verifies(prep, approved):
                         bundle=str(Path(prep["workdir"]) / "verify.json"))
     assert "Workload                ATTESTED" in report, report
     assert "Training                VERIFIED" in report, report
+
+
+def test_the_evidence_binds_what_the_worker_trained_from_and_with(prep, approved):
+    """Review findings TR-2 and KB-5 (ENC-SF-2026-050, ENC-SF-2026-062): the evidence commits to the input
+    adapter, the training configuration and the seed, and its image is
+    the one the worker's own attestation measures."""
+    outs, _ = approved
+    st = prep["state"]
+    spec = json.loads(st["spec"])
+    for out in outs:
+        e = json.loads((Path(out) / "evidence.json").read_text())["evidence"]
+        assert e["version"] == 2
+        assert e["input_adapter"] == "adapter-0"
+        assert e["input_adapter_digest"] == spec["initial_adapter_digest"]
+        assert e["config_digest"] == encompute._native.training_config_digest(st["spec"])
+        record = json.loads((Path(out) / "attestation.json").read_text())
+        from encompute.torch import cs_worker
+        assert e["image_digest"] == cs_worker.attested_image(json.dumps(record)) == APPROVED
+
+
+def test_test_hooks_are_off_with_hardware_attestation(prep, local, approved):
+    """Review finding SC-5 (ENC-SF-2026-082): the leakage tests' canary (it overwrites the
+    contribution after clipping) is not honoured with Confidential Space
+    evidence, whatever the environment says (the approved jobs ran with
+    ENCOMPUTE_CANARY_UPDATE set)."""
+    import os
+    from encompute.torch import tensors
+    outs, _ = approved
+    st = prep["state"]
+    keys, _ = encompute._native.acquire_session_keys(
+        st["spec"], prep["broker_id"], ["contribution-hospital-a"], os.urandom(32),
+        "confidential-space", str(local.socket), "", "hospital-a")
+    sealed = next(Path(outs[0]).glob("*.sealed")).read_bytes()
+    n = int.from_bytes(sealed[8:12], "little")
+    digest = json.loads(sealed[12:12 + n])["digest"]
+    plain = encompute._native.open_asset(dict(keys)["contribution-hospital-a"], sealed,
+                                         st["project"], "contribution-hospital-a-r1", digest)
+    v = tensors.loads(bytes(plain))["contribution"]
+    assert not torch.isclose(v[:4], torch.full((4,), UPDATE_CANARY)).any()
 
 
 def test_the_output_is_sealed_to_attested_workloads(prep, approved):
@@ -248,6 +287,110 @@ def test_replayed_evidence_and_outputs_are_refused(prep, local, approved, tmp_pa
     report = job.verify(prep, [str(first), outs[0]], str(job.TEST_KEYS / "jwks.json"),
                         bundle=str(tmp_path / "bundle.json"))
     assert "a replay" in report, report
+
+
+def test_the_descriptor_cannot_change_the_training(prep, local):
+    """Review finding TR-2 (ENC-SF-2026-050): the configuration comes from the spec, and the
+    input adapter must be the spec's initial one (round 1) or the one the
+    coordinator recorded for the previous round; a descriptor that says
+    otherwise is refused before any key is requested."""
+    def lr(j):
+        j["lora"] = {"learning_rate": 1000.0}
+    def steps(j):
+        j["lora"] = {"local_steps": 10 ** 9}
+    def replayed_adapter(j):
+        j["adapter"]["digest"] = "0" * 64
+    def later_round_without_record(j):
+        j["round"] = 2
+    def seed(j):
+        j["seed"] = -1
+    for edit, needle in ((lr, "CONFIGURATION MISMATCH"), (steps, "CONFIGURATION MISMATCH"),
+                         (replayed_adapter, "INPUT ADAPTER MISMATCH"),
+                         (later_round_without_record, "INPUT ADAPTER MISMATCH"),
+                         (seed, "seed")):
+        out = refused(local.run_worker(job_file(prep, edit=edit, name=edit.__name__)[0]),
+                      needle)
+        assert "Attestation" not in out, out
+
+
+def test_only_the_specs_broker_key_is_trusted(prep, local, tmp_path):
+    """Review finding KB-1 (ENC-SF-2026-036): the descriptor cannot pin a broker key, and a
+    broker whose grant key the spec does not name (the operator's own,
+    releasing keys it chose under the same public policies) gets nothing
+    accepted."""
+    def pinned(j):
+        j["broker"] += "#" + "ab" * 32
+    refused(local.run_worker(job_file(prep, edit=pinned, name="pinned")[0]),
+            "comes from the training spec")
+    # The operator's broker: the same asset names and participant policy,
+    # its own keys and grant-signing key, trusting the same launcher keys.
+    port = job._port()
+    url = f"http://127.0.0.1:{port}"
+    mc = Path(prep["workdir"]) / prep["state"]["model_owner"]
+    for asset in ("clinical-model.hospital-a", "dataset-notes-a", "adapters.hospital-a",
+                  "contribution-hospital-a"):
+        subprocess.run([CLI, "keys", "protect", "--asset", asset, "--policy",
+                        str(mc / "training-policy-hospital-a.json"), "--broker-id", url,
+                        "--kek", str(tmp_path / "evil.kek"), "--broker",
+                        str(tmp_path / "evil.json")], check=True, capture_output=True)
+    evil = subprocess.Popen([CLI, "keys", "serve", "--listen", f"127.0.0.1:{port}", "--broker",
+                             str(tmp_path / "evil.json"), "--kek", str(tmp_path / "evil.kek"),
+                             "--jwks", str(job.TEST_KEYS / "jwks.json")],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        ft._wait_port(port, evil, "the operator's broker")
+
+        def operators_broker(j):
+            j["broker"] = url
+        refused(local.run_worker(job_file(prep, edit=operators_broker, name="evil")[0]),
+                "KEY RELEASE DENIED", "attested identity")
+    finally:
+        evil.kill()
+        evil.wait()
+
+
+def test_the_worker_refuses_other_code_before_any_key(prep, local):
+    """Review finding TR-1 (ENC-SF-2026-037): a spec naming a factory the image does not ship
+    is refused, and so is one whose code digest is not this worker's own
+    code, before the worker attests or opens anything."""
+    def factory(j):
+        j["training_spec"]["base_model"]["architecture"] = json.dumps(
+            {"factory": "timeit:timeit", "kwargs": {"stmt": "import os", "number": 1}})
+    out = refused(local.run_worker(job_file(prep, edit=factory, name="factory")[0]),
+                  "TRAINING SPEC REFUSED", "worker image")
+    assert "Attestation" not in out
+
+    def code(j):
+        j["training_spec"]["code_digest"] = "0" * 64
+        j["training_spec_id"] = encompute._native.training_spec_id(
+            json.dumps(j["training_spec"]))
+    out = refused(local.run_worker(job_file(prep, edit=code, name="code")[0]),
+                  "TRAINING CODE MISMATCH")
+    assert "Attestation" not in out
+
+
+def test_the_plan_and_image_come_from_approved_sources(prep, local):
+    """Review findings DP-3 and KB-5 (ENC-SF-2026-067, ENC-SF-2026-062): a DP-SGD job applies the approved
+    plan's clip only if the plan is the spec's; and the image the evidence
+    names is the attested one, so a descriptor expecting another is
+    refused."""
+    def other_plan(j):
+        for step in j["plan"]["steps"]:
+            for m in step["mechanisms"]:
+                if m["mechanism"] == "differential_privacy":
+                    m["clip_norm"] = "0.5"
+    refused(local.run_worker(job_file(prep, edit=other_plan, name="plan")[0]),
+            "PLAN MISMATCH")
+
+    def no_plan(j):
+        del j["plan"]
+    refused(local.run_worker(job_file(prep, edit=no_plan, name="noplan")[0]),
+            "approved plan")
+
+    def other_image(j):
+        j["expected_image"] = TAMPERED
+    refused(local.run_worker(job_file(prep, edit=other_image, name="image")[0]),
+            "IMAGE MISMATCH")
 
 
 # --- nothing leaves the workload ------------------------------------------------------------

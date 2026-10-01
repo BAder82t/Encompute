@@ -32,6 +32,25 @@ gcloud artifacts repositories describe "$REPO" --location "$REGION" >/dev/null 2
   gcloud artifacts repositories create "$REPO" --repository-format docker --location "$REGION"
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
+# The broker exists before the image: its grant-signing key is baked into
+# the image (broker-keys), so the workload accepts only this broker's grants
+# whatever address the operator gives it. The broker is created with a
+# placeholder asset no image can receive (its policy names an all-zero
+# image digest).
+if [ ! -f broker.json ]; then
+  encompute compile "$HERE/demo.eir" -o bootstrap.encompute >/dev/null
+  encompute attest policy bootstrap.encompute --backend mock --tee "$POLICY_TEE" \
+    --image "sha256:0000000000000000000000000000000000000000000000000000000000000000" \
+    > bootstrap-policy.json
+  encompute keys protect --asset broker-bootstrap --policy bootstrap-policy.json \
+    --broker-id "$BROKER_URL" --broker broker.json > bootstrap.out
+  rm -rf bootstrap.encompute bootstrap-policy.json
+fi
+GRANT_KEY="$(awk '/^Grant key/ { print $3 }' bootstrap.out)"
+[ -n "$GRANT_KEY" ] || { echo "no grant key for broker.json (bootstrap.out)" >&2; exit 2; }
+echo "test-key $GRANT_KEY" > "$HERE/broker-keys"
+echo "broker grant key: $GRANT_KEY (baked into the image)"
+
 gcloud builds submit "$ROOT" --config "$HERE/cloudbuild.yaml" \
   --substitutions "_IMAGE=${IMAGE},_VARIANT=${VARIANT}"
 DIGEST="$(gcloud artifacts docker images describe "$IMAGE" --format 'value(image_summary.digest)')"
@@ -44,10 +63,10 @@ if [ "$VARIANT" = approved ]; then
   docker run --rm --platform linux/amd64 --entrypoint encompute "$IMAGE" \
     attest policy /app/model.encompute --backend mock --image "$DIGEST" \
     --tee "$POLICY_TEE" > attestation-policy.json
-  if [ ! -f broker.json ]; then
+  if ! grep -q '"test-key"' broker.json; then
     head -c 32 /dev/urandom > test.key
     encompute keys protect --asset test-key --policy attestation-policy.json \
-      --key-file test.key --broker-id "$BROKER_URL" --broker broker.json
+      --key-file test.key --broker broker.json
     rm test.key
   fi
   echo "Now run the broker where the VM can reach $BROKER_URL:"

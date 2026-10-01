@@ -9,6 +9,17 @@
 //!   (the key ID ciphertexts are bound to) and, for program-specific
 //!   backends, the program. A ciphertext under another client's key never
 //!   runs under these keys: its own key binding is checked when it loads.
+//! - OpenFHE CKKS and BGV keep relinearization and rotation keys in
+//!   process-wide maps keyed by the secret key's tag, which is public (it
+//!   is in every ciphertext), not by this cache's key. The shim therefore
+//!   checks an upload completely before inserting anything, requires the
+//!   keys inside to carry exactly the tag they are sent under, and binds
+//!   each loaded tag to the SHA-256 of the bytes it came from: an upload
+//!   naming a tag already loaded from other bytes is refused. So an entry
+//!   for key ID K runs exactly the key material whose SHA-256 is K, and an
+//!   upload, accepted or refused, never changes the keys another key ID
+//!   uses. Two clients can therefore not share a tag
+//!   in one process: the second is refused until the first is evicted.
 //! - Metrics: hits, misses, load seconds and bytes (`GET /metrics`); no key
 //!   material or identifiers in them.
 

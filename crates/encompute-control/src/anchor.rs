@@ -11,10 +11,23 @@
 //! The anchor is updated after each privacy spend commits (synchronously,
 //! before the spend is acknowledged) and at each audit checkpoint. A crash
 //! between the two leaves the database *ahead* of the anchor, which is
-//! allowed; only *behind* is a rollback.
+//! allowed; only *behind* is a rollback. The anchor only ever moves
+//! forward along the same chain: a ledger checkpoint or audit root that
+//! does not extend the anchored one is refused, while the service runs as
+//! well as at startup.
+//!
+//! Security-negative transitions are anchored too (revoked assets, frozen
+//! ledgers, disabled service accounts and users, cancelled and failed
+//! jobs, withdrawn asset approvals, removed project memberships, removed
+//! organization roles), so a restored database cannot silently undo them.
+//!
+//! One control plane process per anchor: updates are compare-and-set on the
+//! counter, and a process whose update lost the race reloads the stored
+//! anchor and re-applies its change.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +40,36 @@ use encompute_verification::service::{verify_signed, ServiceSigner, STATE_ANCHOR
 use crate::config::AnchorConfig;
 
 pub const ANCHOR_VERSION: u32 = 1;
+
+/// Serialized anchor size above which every anchor write (and the start)
+/// logs an `anchor_size_warning`. The anchor holds every ended job and
+/// every disable, withdrawal and removal, and each write re-signs all of
+/// it; an OpenBao KV entry is limited by the raft `max_entry_size` (1 MiB
+/// by default), past which anchor writes fail and the control plane fails
+/// closed. Half of that leaves time to act.
+pub const ANCHOR_WARN_BYTES: u64 = 512 * 1024;
+
+/// The anchor's size as written: its compact JSON serialization (what the
+/// OpenBao KV store holds as one string; the directory store writes it
+/// pretty-printed, somewhat larger).
+pub fn serialized_len(a: &StateAnchor) -> u64 {
+    serde_json::to_vec(a).map_or(0, |v| v.len() as u64)
+}
+
+/// Logs that the anchor outgrew [`ANCHOR_WARN_BYTES`] (nothing otherwise).
+pub fn warn_if_large(service: &str, when: &str, bytes: u64) {
+    if bytes > ANCHOR_WARN_BYTES {
+        crate::log::LogLine::new(service, "anchor_size_warning")
+            .field("when", when)
+            .field("anchor_bytes", bytes)
+            .field("threshold_bytes", ANCHOR_WARN_BYTES)
+            .field(
+                "action",
+                "the state anchor is growing towards the anchor store's entry size limit (OpenBao raft max_entry_size, 1 MiB by default), past which anchor writes fail and the control plane refuses privacy spends and other anchored operations; raise max_entry_size, and plan for the governance event log that replaces the anchored sets (see docs/deployment.md)",
+            )
+            .emit();
+    }
+}
 
 fn anchor_err(m: impl Into<String>) -> Error {
     Error::new(Code::PrivacyLedger, m)
@@ -43,13 +86,36 @@ pub struct StateAnchor {
     /// Asset ID → the ledger's checkpoint (entry count and root).
     pub ledgers: BTreeMap<String, Checkpoint>,
     /// Ledgers frozen by an operator's recovery after a rollback (treated
-    /// as exhausted).
+    /// as exhausted, whatever the database says).
     #[serde(default)]
-    pub frozen: std::collections::BTreeSet<String>,
+    pub frozen: BTreeSet<String>,
     /// Revoked assets: a restored database must still show them revoked.
-    /// (Omitted while empty, so anchors written before it still verify.)
-    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    pub revoked: std::collections::BTreeSet<String>,
+    /// (This and the sets below are omitted while empty, so anchors written
+    /// before them still verify.)
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub revoked: BTreeSet<String>,
+    /// Disabled service accounts: a restored database must still show them
+    /// disabled (or not hold them).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_services: BTreeSet<String>,
+    /// Disabled users, likewise.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_users: BTreeSet<String>,
+    /// Cancelled and failed jobs: never scheduled or started again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub ended_jobs: BTreeSet<String>,
+    /// Withdrawn asset approvals and ended grants (approval and grant IDs,
+    /// never reused): a restored database must not hold them again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub withdrawn_grants: BTreeSet<String>,
+    /// Project memberships (and invitations) removed (membership IDs, never
+    /// reused): a restored database must not list them again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub removed_memberships: BTreeSet<String>,
+    /// Organization roles removed from principals (role membership IDs,
+    /// never reused): a restored database must not hold them again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub removed_roles: BTreeSet<String>,
     pub signer: String,
     pub signer_public_key: String,
     #[serde(default)]
@@ -66,6 +132,12 @@ impl StateAnchor {
             ledgers: BTreeMap::new(),
             frozen: Default::default(),
             revoked: Default::default(),
+            disabled_services: Default::default(),
+            disabled_users: Default::default(),
+            ended_jobs: Default::default(),
+            withdrawn_grants: Default::default(),
+            removed_memberships: Default::default(),
+            removed_roles: Default::default(),
             signer: signer.id().into(),
             signer_public_key: signer.public_key_hex(),
             signature: String::new(),
@@ -272,6 +344,8 @@ pub fn open_store(c: &AnchorConfig) -> Result<Box<dyn AnchorStore>> {
 pub struct Anchor {
     store: Box<dyn AnchorStore>,
     state: Mutex<StateAnchor>,
+    /// [`serialized_len`] of the anchor as last loaded or written.
+    bytes: AtomicU64,
 }
 
 impl Anchor {
@@ -284,13 +358,21 @@ impl Anchor {
             }
             None => (StateAnchor::empty(signer), false),
         };
+        let bytes = AtomicU64::new(serialized_len(&state));
         Ok((
             Self {
                 store,
                 state: Mutex::new(state),
+                bytes,
             },
             existed,
         ))
+    }
+
+    /// The anchor's serialized size as last loaded or written (the
+    /// `encompute_anchor_bytes` gauge).
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> StateAnchor {
@@ -305,39 +387,158 @@ impl Anchor {
     pub fn update(
         &self,
         signer: &ServiceSigner,
-        f: impl FnOnce(&mut StateAnchor),
+        f: impl Fn(&mut StateAnchor),
     ) -> Result<StateAnchor> {
-        let mut g = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let mut next = g.clone();
-        f(&mut next);
-        next.counter = g.counter + 1;
-        next.sign(signer)?;
-        self.store.store(&next, g.counter)?;
-        *g = next.clone();
-        Ok(next)
+        self.try_update(signer, |a| {
+            f(a);
+            Ok(true)
+        })
     }
 
-    /// Records a ledger checkpoint if it is newer than the anchored one.
-    pub fn record_ledger(
+    /// Applies `f` under the anchor's lock; persists the result (counter +
+    /// 1, re-signed) when `f` returns `Ok(true)`, keeps the anchor as it is
+    /// on `Ok(false)` or an error. Checks that must see the anchor exactly
+    /// as it will be updated (a rollback check, say) belong in `f`.
+    ///
+    /// If another process changed the stored anchor meanwhile (its counter
+    /// moved), the stored anchor is reloaded (and verified) and `f` applied
+    /// to it again, a few times at most.
+    pub fn try_update(
         &self,
         signer: &ServiceSigner,
-        asset: &str,
-        cp: &Checkpoint,
-    ) -> Result<()> {
-        if self
-            .snapshot()
-            .ledgers
-            .get(asset)
-            .is_some_and(|a| a.seq >= cp.seq)
-        {
-            return Ok(());
-        }
-        self.update(signer, |a| {
-            let newer = a.ledgers.get(asset).is_none_or(|x| x.seq < cp.seq);
-            if newer {
-                a.ledgers.insert(asset.into(), cp.clone());
+        mut f: impl FnMut(&mut StateAnchor) -> Result<bool>,
+    ) -> Result<StateAnchor> {
+        let mut g = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut attempt = 0;
+        loop {
+            let mut next = g.clone();
+            if !f(&mut next)? {
+                return Ok(g.clone());
             }
+            next.counter = g.counter + 1;
+            next.sign(signer)?;
+            // Measured before the write, so a write the store refuses for
+            // its size is still reported.
+            let bytes = serialized_len(&next);
+            warn_if_large(signer.id(), "write", bytes);
+            match self.store.store(&next, g.counter) {
+                Ok(()) => {
+                    self.bytes.store(bytes, Ordering::Relaxed);
+                    *g = next.clone();
+                    return Ok(next);
+                }
+                Err(e) if attempt < 3 && e.message.contains("changed concurrently") => {
+                    attempt += 1;
+                    let stored = self
+                        .store
+                        .load()?
+                        .ok_or_else(|| anchor_err("the state anchor disappeared"))?;
+                    stored.verify(&signer.public_key_hex())?;
+                    if stored.counter < g.counter {
+                        return Err(anchor_err(format!(
+                            "the stored state anchor went back from counter {} to {}",
+                            g.counter, stored.counter
+                        )));
+                    }
+                    *g = stored;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signer() -> ServiceSigner {
+        ServiceSigner::from_seed("control-plane", &[7; 32]).unwrap()
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "encompute-anchor-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Review finding CP-S-4 (ENC-SF-2026-039): the anchored sets of disabled principals and
+    /// ended jobs are optional, so an anchor written by 0.3.0-rc.3 (without
+    /// them) still loads and verifies, and they are signed once present.
+    #[test]
+    fn anchors_without_the_new_sets_still_verify() {
+        let s = signer();
+        let mut a = StateAnchor::empty(&s);
+        a.revoked.insert("ast_1".into());
+        a.sign(&s).unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        for k in [
+            "disabled_services",
+            "disabled_users",
+            "ended_jobs",
+            "withdrawn_grants",
+            "removed_memberships",
+            "removed_roles",
+        ] {
+            assert!(v.get(k).is_none(), "{k} serialized while empty");
+        }
+        let back: StateAnchor = serde_json::from_value(v).unwrap();
+        back.verify(&s.public_key_hex()).unwrap();
+        // Once present, they are covered by the signature.
+        let mut a = back;
+        a.ended_jobs.insert("job_1".into());
+        a.sign(&s).unwrap();
+        a.verify(&s.public_key_hex()).unwrap();
+        let mut tampered = serde_json::to_value(&a).unwrap();
+        tampered["ended_jobs"] = serde_json::json!([]);
+        let t: StateAnchor = serde_json::from_value(tampered).unwrap();
+        assert!(t.verify(&s.public_key_hex()).is_err());
+    }
+
+    /// Review finding CP-S-8 (ENC-SF-2026-083): an update that lost the compare-and-set race
+    /// (another process moved the stored anchor) reloads the stored
+    /// anchor, re-applies its change and keeps both; rc.3 failed every
+    /// later update.
+    #[test]
+    fn a_lost_compare_and_set_reloads_and_reapplies() {
+        let s = signer();
+        let dir = tmp("cas");
+        let (a1, _) = Anchor::open(Box::new(DirAnchor::new(dir.clone()).unwrap()), &s).unwrap();
+        a1.update(&s, |_| {}).unwrap();
+        let (a2, existed) =
+            Anchor::open(Box::new(DirAnchor::new(dir.clone()).unwrap()), &s).unwrap();
+        assert!(existed);
+        a1.update(&s, |x| {
+            x.revoked.insert("ast_a".into());
         })
-        .map(|_| ())
+        .unwrap();
+        let after = a2
+            .update(&s, |x| {
+                x.disabled_users.insert("usr_b".into());
+            })
+            .unwrap();
+        assert!(
+            after.revoked.contains("ast_a"),
+            "the other process's change is kept"
+        );
+        assert!(after.disabled_users.contains("usr_b"));
+        let stored = DirAnchor::new(dir).unwrap().load().unwrap().unwrap();
+        stored.verify(&s.public_key_hex()).unwrap();
+        assert_eq!(stored, after);
+        // A refused change stores nothing.
+        let before = a2.snapshot();
+        assert!(a2.try_update(&s, |_| Err(anchor_err("refused"))).is_err());
+        assert_eq!(
+            a2.try_update(&s, |_| Ok(false)).unwrap().counter,
+            before.counter
+        );
+        assert_eq!(a2.snapshot(), before);
     }
 }

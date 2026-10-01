@@ -81,11 +81,13 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-protocol/tests/envelope.rs::mutations_never_pass_or_panic"),
         (EndToEnd, "test:crates/encompute-runtime/tests/sessions.rs::round_trip_and_rejections"),
     ]),
-    inv!("INV-007", "envelopes", "Parsers never panic on arbitrary input (IR text, envelopes, HTTP requests).", [
+    inv!("INV-007", "envelopes", "Parsers never panic on arbitrary input (IR text, envelopes, HTTP requests), and an exact program the builder accepts compiles and lowers without panicking: a lookup table longer than its index type can reach is a type error (ENC-SF-2026-051).", [
         (Positive, "test:crates/encompute-ir/tests/ir.rs::print_parse_round_trip"),
         (Negative, "test:crates/encompute-ir/tests/ir.rs::parse_errors_carry_line_numbers"),
+        (Negative, "test:crates/encompute-evaluator/tests/exact_selection.rs::a_bool_indexed_lookup_longer_than_two_is_a_type_error"),
         (Adversarial, "test:crates/encompute-protocol/tests/envelope.rs::arbitrary_bytes_never_panic"),
         (Adversarial, "test:crates/encompute-ir/tests/ir.rs::parse_never_panics_on_arbitrary_text"),
+        (Adversarial, "test:crates/encompute-exact/tests/lowering_differential.rs::lookups_never_read_index_bits_the_index_lacks"),
         (EndToEnd, "test:crates/encompute-runtime/tests/network.rs::malformed_requests_are_rejected_with_codes"),
     ]),
     inv!("INV-008", "compiler", "CKKS and exact schemes never cross: envelopes, keys and backends of one are refused by the other.", [
@@ -306,10 +308,12 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::nothing_vouches_for_itself"),
         (EndToEnd, "test:crates/encompute-cli/tests/cli.rs::secure_aggregation_round"),
     ]),
-    inv!("INV-101", "trust", "The graph the report reads is exactly what its evidence implies; any added, dropped or edited edge, node or attribute fails.", [
+    inv!("INV-101", "trust", "The graph the report reads is exactly what its evidence implies; any added, dropped or edited edge, node or attribute fails, and records that ingest would refuse (an invalid training spec, an authorization by a non-owner) fail the report when forced into a bundle (ENC-SF-2026-076).", [
         (Positive, "test:crates/encompute-runtime/tests/trust.rs::a_whole_collaboration_verifies"),
         (Negative, "test:crates/encompute-runtime/tests/trust.rs::tampered_evidence_fails_the_report"),
+        (Negative, "test:crates/encompute-runtime/tests/trust_bundle_checks.rs::an_invalid_training_spec_in_a_bundle_fails_the_report"),
         (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::edges_come_from_the_evidence"),
+        (Adversarial, "test:crates/encompute-runtime/tests/trust_bundle_checks.rs::a_non_owner_authorization_in_a_bundle_fails_the_report"),
     ]),
     inv!("INV-102", "trust", "Every asset a program uses is approved by each owner for that program, unexpired and unrevoked; a revocation lists everything derived from the asset.", [
         (Positive, "test:crates/encompute-runtime/tests/trust.rs::owners_must_approve_the_program"),
@@ -428,18 +432,21 @@ pub const INVARIANTS: &[Invariant] = &[
         (EndToEnd, "test:python/tests/test_finetune_leakage.py::test_keys_stay_in_the_owners_key_store"),
     ]),
     // Patient-level differential privacy (DP-SGD).
-    inv!("INV-130", "dp-sgd", "Each privacy unit's gradient is computed per example, grouped by unit and clipped before summation, so one unit moves a worker's contribution by at most the clip, for any microbatch size.", [
+    inv!("INV-130", "dp-sgd", "Each privacy unit's gradient is computed per example, grouped by unit and clipped before summation, so one unit moves a worker's contribution by at most the clip, for any microbatch size; a unit whose gradient is not finite contributes zero instead of failing the party (ENC-SF-2026-069).", [
         (Positive, "test:python/tests/test_dpsgd.py::test_vectorized_gradients_match_the_reference_for_any_microbatch"),
         (Negative, "test:python/tests/test_dpsgd.py::test_unit_index_groups_records_by_patient"),
         (Adversarial, "test:python/tests/test_dpsgd.py::test_one_patient_moves_the_sum_by_at_most_the_clip"),
         (Adversarial, "test:python/tests/test_dpsgd.py::test_contributions_bypassing_the_attested_worker_are_refused"),
+        (Adversarial, "test:python/tests/test_dpsgd.py::test_non_finite_unit_gradients_contribute_nothing"),
         (EndToEnd, "test:python/tests/test_dpsgd.py::test_patient_run_is_satisfied_and_binds_every_setting"),
     ]),
-    inv!("INV-131", "dp-sgd", "The Poisson-subsampled Rényi DP accountant agrees with an independent reference and is never optimistic; composition and the affordable-release boundary are consistent.", [
+    inv!("INV-131", "dp-sgd", "The Poisson-subsampled Rényi DP accountant agrees with an independent reference and is never optimistic, also for long compositions and extreme sampling rates off the reference grid; composition and the affordable-release boundary are consistent (ENC-SF-2026-085).", [
         (Positive, "test:crates/encompute-privacy/tests/rdp.rs::curves_match_the_reference_and_are_never_optimistic"),
         (Positive, "test:crates/encompute-privacy/tests/rdp.rs::epsilon_matches_the_reference_and_is_never_optimistic"),
         (Negative, "test:crates/encompute-privacy/tests/rdp.rs::ledger_costs_use_rdp_only_with_sampled_releases"),
         (Adversarial, "check:dp_rdp_accountant_properties"),
+        (Adversarial, "test:crates/encompute-privacy/tests/rdp.rs::long_compositions_are_never_optimistic"),
+        (Adversarial, "test:crates/encompute-privacy/tests/rdp.rs::zcdp_epsilon_is_never_below_the_reference"),
         (EndToEnd, "test:python/tests/test_dpsgd.py::test_the_ledgers_charge_what_the_preview_projected"),
     ]),
     inv!("INV-132", "dp-sgd", "Poisson sampling draws every unit's inclusion from the operating system's CSPRNG inside the attested worker, never from a seeded PRNG: no party's seed chooses the sample, and each unit is included independently (ENC-SF-2026-013).", [
@@ -476,17 +483,20 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:python/tests/test_huggingface.py::test_changed_settings_get_no_model_key"),
         (EndToEnd, "test:python/tests/test_huggingface.py::test_the_run_is_trusted_and_binds_the_package"),
     ]),
-    inv!("INV-137", "huggingface", "Confidential workers never execute repository code: remote code, custom-code configurations and trust_remote_code are refused, and models are rebuilt from Transformers-native classes only.", [
+    inv!("INV-137", "huggingface", "Confidential workers never execute repository code: remote code, custom-code configurations and trust_remote_code are refused, and models are rebuilt from Transformers-native classes only; a model or tokenizer configuration holding settings outside the allowlist (custom tokenizer code or class, quantization, the attention implementation) is refused (ENC-SF-2026-073).", [
         (Positive, "test:python/tests/test_huggingface.py::test_the_run_is_trusted_and_binds_the_package"),
         (Negative, "test:python/tests/test_huggingface.py::test_unsafe_repositories_are_refused"),
         (Negative, "test:crates/encompute-training/tests/training.rs::hugging_face_packages_and_peft_are_bound_and_checked"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::package_configurations_hold_only_known_settings"),
+        (Adversarial, "test:python/tests/test_huggingface.py::test_package_settings_outside_the_allowlist_are_refused"),
         (Adversarial, "script:examples/17_huggingface_peft/attack.py"),
         (EndToEnd, "script:examples/17_huggingface_peft/attack.py"),
     ]),
-    inv!("INV-138", "huggingface", "Only safetensors, configuration and tokenizer files enter a model package; pickled or unknown files are refused before any loading.", [
+    inv!("INV-138", "huggingface", "Only safetensors, configuration and tokenizer files enter a model package; pickled or unknown files, and symbolic links, are refused before any loading (ENC-SF-2026-072).", [
         (Positive, "test:python/tests/test_huggingface.py::test_packages_are_content_addressed"),
         (Negative, "test:python/tests/test_huggingface.py::test_unsafe_repositories_are_refused"),
         (Adversarial, "test:crates/encompute-training/tests/training.rs::hugging_face_packages_and_peft_are_bound_and_checked"),
+        (Adversarial, "test:python/tests/test_huggingface.py::test_symbolic_links_never_enter_a_package"),
         (EndToEnd, "script:examples/17_huggingface_peft/attack.py"),
     ]),
     inv!("INV-139", "huggingface", "The PEFT adapter layout is canonical and identical for every participant; every PEFT setting is bound in the TrainingSpecId.", [
@@ -508,16 +518,20 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:python/tests/test_huggingface.py::test_both_gradient_paths_match_the_reference"),
         (EndToEnd, "test:python/tests/test_huggingface.py::test_the_run_is_trusted_and_binds_the_package"),
     ]),
-    inv!("INV-142", "huggingface", "An adapter is exported as PEFT files only when every parent permits it, no parent is revoked and the trust report is satisfied; otherwise nothing is written.", [
+    inv!("INV-142", "huggingface", "An adapter is exported as PEFT files only when every parent permits it, no parent is revoked and the trust report is satisfied; otherwise nothing is written. Revocations are read from the model owner's bundle and any owner-supplied bundles, judged against the run's own program and ownership (an owner's revocation alone in its bundle still counts), a supplied bundle that cannot be read or a revocation of a parent that the report does not honour refuses, and a refused check is read from its exit code (ENC-SF-2026-074).", [
         (Positive, "test:python/tests/test_huggingface.py::test_exported_adapters_load_with_standard_peft"),
         (Negative, "test:python/tests/test_huggingface.py::test_private_adapters_are_never_exported"),
         (Adversarial, "test:python/tests/test_huggingface.py::test_export_after_revocation_writes_nothing"),
+        (Adversarial, "test:python/tests/test_finetune_matrix.py::test_export_denied_after_revocation_or_tampering"),
+        (Adversarial, "test:python/tests/test_finetune_matrix.py::test_owner_revocation_alone_refuses_export_infer_and_resume"),
+        (Negative, "test:python/tests/test_finetune_matrix.py::test_non_owner_revocation_does_not_revoke_but_is_not_dropped"),
         (EndToEnd, "script:examples/17_huggingface_peft/attack.py"),
     ]),
     // Confidential Space training workers.
-    inv!("INV-143", "confidential-space", "Production model and dataset keys are released only to a hardware-attested workload running the approved training image, acting for the participant whose keys they are; development (mock) evidence never receives them.", [
+    inv!("INV-143", "confidential-space", "Production model and dataset keys are released only to a hardware-attested workload running the approved training image, acting for the participant whose keys they are; development (mock) evidence never receives them. The broker keeps Google's token-signing keys current: a rotated key verifies after one refetch, and a withdrawn key stops being trusted after the maximum age (ENC-SF-2026-063).", [
         (Positive, "test:python/tests/test_confidential_job.py::test_the_approved_workload_trains_and_its_evidence_verifies"),
         (Negative, "test:python/tests/test_confidential_job.py::test_mock_evidence_gets_no_production_keys"),
+        (Positive, "test:crates/encompute-attestation/tests/attestation.rs::confidential_space_keys_are_refreshed"),
         (Negative, "test:crates/encompute-keybroker/tests/release.rs::production_brokers_refuse_development_evidence"),
         (Adversarial, "test:python/tests/test_confidential_job.py::test_a_genuine_tee_with_another_image_gets_no_keys"),
         (Adversarial, "test:python/tests/test_confidential_job.py::test_a_session_acts_for_one_participant_only"),
@@ -541,9 +555,10 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:python/tests/test_confidential_job.py::test_replayed_evidence_and_outputs_are_refused"),
         (EndToEnd, "script:examples/18_confidential_space_hf/job.py"),
     ]),
-    inv!("INV-147", "confidential-space", "A confidential training output is sealed, and bound by signed evidence to its training spec, participant, round, source assets and attestation; substituted assets or a second output for a round are refused.", [
+    inv!("INV-147", "confidential-space", "A confidential training output is sealed, and bound by signed evidence to its training spec, participant, round, source assets and attestation; substituted assets or a second output for a round are refused. The evidence names the image the worker's own attestation measures, and verification compares its privacy policy and code artifact with the spec's (ENC-SF-2026-062).", [
         (Positive, "test:crates/encompute-training/tests/training.rs::worker_evidence_binds_its_spec_assets_and_attestation"),
         (Negative, "test:python/tests/test_confidential_job.py::test_substituted_assets_are_refused"),
+        (Negative, "test:python/tests/test_confidential_job.py::test_the_plan_and_image_come_from_approved_sources"),
         (Adversarial, "test:python/tests/test_confidential_job.py::test_replayed_evidence_and_outputs_are_refused"),
         (EndToEnd, "test:python/tests/test_confidential_job.py::test_the_approved_workload_trains_and_its_evidence_verifies"),
         (EndToEnd, "test:python/tests/test_confidential_job.py::test_the_output_is_sealed_to_attested_workloads"),
@@ -600,10 +615,16 @@ pub const INVARIANTS: &[Invariant] = &[
         (EndToEnd, "script:examples/19_openfhe_exact/run.sh"),
     ]),
     // Enterprise deployment: control plane, tenancy, keys, durable state.
-    inv!("INV-156", "deployment", "An authenticated identity cannot read or use resources owned solely by another organization (projects, assets, policies, jobs, privacy ledgers, trust reports, key references, audit records) without an explicit collaboration grant.", [
+    inv!("INV-156", "deployment", "An authenticated identity cannot read or use resources owned solely by another organization (projects, assets, policies, jobs, privacy ledgers, trust reports, key references, audit records) without an explicit collaboration grant. Project membership needs the invited organization's consent, a caller outside a project is refused before its program is compiled, only the submitting organization learns a job's evaluator, and platform automation accounts can be disabled. An organization an asset is shared with sees what identifies it (ID, owner, kind, name, digest, status, lineage, whether jobs need the owner's approval), never its key reference, storage location, size, media type or full policy; and a source asset's owner sees a job's actors from other organizations only as organization and kind (ENC-SF-2026-057, ENC-SF-2026-058, ENC-SF-2026-060, ENC-SF-2026-092).", [
         (Positive, "test:crates/encompute-control/tests/isolation.rs::every_route_authenticates_authorizes_and_isolates"),
         (Negative, "test:crates/encompute-control/tests/isolation.rs::cross_tenant_attacks_fail"),
+        (Negative, "test:crates/encompute-control/tests/request_hardening.rs::planning_is_authorized_before_compiling"),
+        (Negative, "test:crates/encompute-control/tests/collaboration.rs::a_platform_automation_account_can_be_disabled"),
         (Adversarial, "test:crates/encompute-control/tests/isolation.rs::credentials_are_checked"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::membership_needs_the_invited_organizations_consent"),
+        (Adversarial, "test:crates/encompute-control/tests/request_hardening.rs::only_the_submitter_learns_the_evaluator"),
+        (Adversarial, "test:crates/encompute-control/tests/isolation.rs::collaborators_see_no_private_metadata"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_left_project_left"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
     inv!("INV-157", "deployment", "Production asset keys are protected by the configured customer root key provider, and never silently fall back to local or plaintext development storage: an unavailable, disabled or wrong provider, organization or key version releases nothing.", [
@@ -625,10 +646,11 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/state.rs::privacy_spending_is_race_safe_and_idempotent"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
-    inv!("INV-160", "deployment", "Restoring an older database cannot silently roll back authoritative privacy or audit state: startup is refused until an operator's explicit recovery freezes the rolled-back ledgers (treated as exhausted).", [
+    inv!("INV-160", "deployment", "Restoring an older database, or rolling a privacy ledger back while the service runs, cannot silently roll back authoritative privacy or audit state: the anchor records a ledger checkpoint only if it extends the anchored one, a spend on a ledger that no longer extends the anchor is refused at run time, and startup is refused until an operator's explicit recovery freezes the rolled-back ledgers (treated as exhausted) (ENC-SF-2026-033).", [
         (Positive, "test:crates/encompute-control/tests/state.rs::restart_keeps_spending_and_restoring_an_older_backup_is_refused"),
         (Negative, "test:crates/encompute-control/tests/state.rs::truncated_audit_and_tampered_or_missing_anchor_are_refused"),
         (Adversarial, "test:crates/encompute-control/tests/state.rs::audit_chain_is_tamper_evident_and_anchored"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::online_ledger_rollback_is_refused_and_never_anchored"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
     inv!("INV-161", "deployment", "A revoked asset cannot start a new authorized job or receive a new key release: jobs not yet running fail, new submissions are refused (also when racing the revocation), and the key broker destroys the key.", [
@@ -637,11 +659,14 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-keybroker/tests/root_keys.rs::openbao_wraps_unwraps_rotates_rewraps_and_revokes"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
-    inv!("INV-162", "deployment", "Audit records identify every security-sensitive state transition in a tamper-evident, anchored chain, without containing protected payloads (keys, data, weights, gradients, input values).", [
+    inv!("INV-162", "deployment", "Audit records identify every security-sensitive state transition in a tamper-evident, anchored chain, without containing protected payloads (keys, data, weights, gradients, input values). An audit checkpoint is signed and anchored only if the chain extends the anchored root; a job failed at start for a revoked asset, and an evaluator's receipt key at registration, are audited (ENC-SF-2026-038, ENC-SF-2026-053, ENC-SF-2026-054).", [
         (Positive, "test:crates/encompute-control/tests/jobs.rs::lifecycle_receipt_trust_and_duplicate_messages"),
         (Positive, "test:crates/encompute-control/tests/keys.rs::key_releases_and_rotations_are_audited"),
+        (Positive, "test:crates/encompute-control/tests/jobs.rs::a_job_failed_at_start_for_a_revoked_asset_is_audited"),
+        (Positive, "test:crates/encompute-control/tests/jobs.rs::re_registration_keeps_an_operators_drain_and_audits_the_receipt_key"),
         (Negative, "test:crates/encompute-control/tests/state.rs::audit_chain_is_tamper_evident_and_anchored"),
         (Adversarial, "test:crates/encompute-control/tests/state.rs::truncated_audit_and_tampered_or_missing_anchor_are_refused"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::online_audit_rollback_is_never_reanchored"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
     inv!("INV-163", "deployment", "An evaluator executes only jobs compatible with its registered backend and parameter profile, only with an unexpired grant from the pinned control plane naming it and the job's program, and only after the control plane consents to the start.", [
@@ -650,9 +675,13 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/isolation.rs::every_route_authenticates_authorizes_and_isolates"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
-    inv!("INV-164", "deployment", "Production mode rejects development identities and tokens, development key stores and root keys, missing signing keys, default database credentials and plain-HTTP identity providers.", [
+    inv!("INV-164", "deployment", "Production mode rejects development identities and tokens, development key stores and root keys, missing signing keys, default database credentials and plain-HTTP identity providers. The control plane refuses to start without an explicit environment, identity tokens need a past issue time and a bounded lifetime, identity-provider errors are not echoed to callers, and production metrics need the metrics token (ENC-SF-2026-060).", [
         (Positive, "test:crates/encompute-control/src/config.rs::production_refuses_insecure_fallbacks"),
         (Negative, "test:crates/encompute-control/tests/isolation.rs::oidc_tokens_and_production_refusals"),
+        (Negative, "test:crates/encompute-control/src/config.rs::unset_or_misspelt_environment_refuses_to_start"),
+        (Negative, "test:crates/encompute-control/tests/request_hardening.rs::identity_tokens_have_bounded_lifetimes"),
+        (Negative, "test:crates/encompute-control/tests/request_hardening.rs::production_metrics_need_the_metrics_token"),
+        (Adversarial, "test:crates/encompute-control/tests/request_hardening.rs::identity_provider_errors_are_not_echoed"),
         (Adversarial, "test:crates/encompute-keybroker/tests/root_keys.rs::development_root_key_wraps_rotates_and_is_refused_in_production"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
@@ -686,16 +715,18 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-planner/tests/planner.rs::the_validator_accepts_unverified_bgv_only_in_the_subset"),
         (EndToEnd, "test:crates/encompute-runtime/tests/exact.rs::planner_and_compiler_select_the_same_exact_backend"),
     ]),
-    inv!("INV-170", "exact-optimization", "A program runs on BGV only when every one of its operations is in the BGV subset; one unsupported operation keeps the whole program on BinFHE, and schemes are never mixed within a program.", [
+    inv!("INV-170", "exact-optimization", "A program runs on BGV only when every one of its operations, at its type, is in the BGV subset (bitwise logic on Booleans only); one unsupported operation keeps the whole program on BinFHE, and schemes are never mixed within a program (ENC-SF-2026-066).", [
         (Positive, "test:crates/encompute-evaluator/src/cost.rs::arithmetic_scoring_runs_on_bgv"),
         (Negative, "test:crates/encompute-evaluator/src/cost.rs::one_op_outside_the_subset_keeps_the_whole_program_on_binfhe"),
         (Adversarial, "test:crates/encompute-evaluator/src/cost.rs::comparisons_stay_on_binfhe"),
+        (Adversarial, "test:crates/encompute-evaluator/tests/exact_selection.rs::integer_bitwise_logic_is_not_selected_for_bgv"),
         (EndToEnd, "test:crates/encompute-runtime/tests/openfhe_bgv.rs::arithmetic_programs_run_on_bgv_without_proofs"),
     ]),
-    inv!("INV-171", "exact-optimization", "The evaluation-key cache is bounded in serialized key bytes (a single entry larger than the bound is admitted alone) and never runs a ciphertext under another client's keys: sessions use only keys registered with them, a ciphertext runs only under the key its envelope is bound to, and evicted keys are reported missing.", [
+    inv!("INV-171", "exact-optimization", "The evaluation-key cache is bounded in serialized key bytes (a single entry larger than the bound is admitted alone) and never runs a ciphertext under another client's keys: sessions use only keys registered with them, a ciphertext runs only under the key its envelope is bound to, and evicted keys are reported missing. Registering evaluation keys under key ID K makes the evaluator use exactly the key material whose SHA-256 is K; an upload, accepted or refused, never inserts or changes keys used for another key ID, and a key tag already loaded is shared only by byte-identical key material (ENC-SF-2026-035).", [
         (Positive, "test:crates/encompute-runtime/tests/keycache.rs::bounded_shared_and_isolated"),
         (Negative, "test:crates/encompute-runtime/tests/sessions.rs::round_trip_and_rejections"),
         (Adversarial, "test:crates/encompute-evaluator/src/keycache.rs::bounded_lru_and_shared_loads"),
+        (Adversarial, "test:crates/encompute-openfhe-client/tests/key_tags.rs::another_clients_keys_under_the_victims_tag_are_never_used"),
         (EndToEnd, "test:crates/encompute-runtime/tests/network.rs::remote_round_trip_uploads_program_and_keys_once"),
     ]),
     // Release-candidate hardening: fuzzing, network attacks, restarts and
@@ -740,10 +771,13 @@ pub const INVARIANTS: &[Invariant] = &[
         (EndToEnd, "test:crates/encompute-keybroker/tests/network_attacks.rs::oversized_malformed_and_unauthenticated_requests_are_refused"),
         (EndToEnd, "script:scripts/release/soak.sh"),
     ]),
-    inv!("INV-174", "deployment", "Signed service requests are fresh, single-use and bound: the signature covers the method, the path with its query string, the body hash, the sender, the recipient, the timestamp and a nonce, and a replayed nonce, a stale timestamp or any changed field (the query included) is refused (ENC-SF-2026-004).", [
+    inv!("INV-174", "deployment", "Signed service requests are fresh, single-use and bound: the signature covers the method, the path with its query string, the body hash, the sender, the recipient, the timestamp and a nonce, and a replayed nonce, a stale timestamp or any changed field (the query included) is refused (ENC-SF-2026-004). A used nonce is kept past the end of the window in which its request could be accepted, and a query string naming a parameter twice is refused (ENC-SF-2026-059, ENC-SF-2026-060).", [
         (Positive, "test:crates/encompute-control/tests/isolation.rs::signed_service_requests_bind_the_query"),
         (Negative, "test:crates/encompute-control/tests/network_attacks.rs::expired_forged_and_misaddressed_messages_are_refused"),
+        (Negative, "test:crates/encompute-control/tests/request_hardening.rs::duplicate_query_parameters_are_refused"),
+        (Negative, "test:crates/encompute-verification/src/service.rs::signed_requests_bind_everything"),
         (Adversarial, "test:crates/encompute-control/tests/network_attacks.rs::signed_requests_are_fresh_single_use_and_bound"),
+        (Adversarial, "test:crates/encompute-control/tests/request_hardening.rs::nonces_outlive_their_acceptance_window"),
         (EndToEnd, "test:crates/encompute-keybroker/tests/network_attacks.rs::control_messages_are_authenticated_fresh_and_applied_once"),
     ]),
     inv!("INV-175", "deployment", "Every service message applies at most once, even when duplicates arrive concurrently: the deduplication record and the message's effects commit in one transaction, so a redelivered privacy event, key release report or job status is recorded once (ENC-SF-2026-005).", [
@@ -752,9 +786,10 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/network_attacks.rs::duplicate_messages_apply_once_even_concurrently"),
         (EndToEnd, "test:crates/encompute-keybroker/tests/network_attacks.rs::control_messages_are_authenticated_fresh_and_applied_once"),
     ]),
-    inv!("INV-176", "deployment", "An evaluator that has a control plane accepts programs, keys and jobs only with a job grant from that control plane, runs each granted job once, and gives jobs random, unguessable IDs; a local evaluator without a control plane needs no grant (ENC-SF-2026-006).", [
+    inv!("INV-176", "deployment", "An evaluator that has a control plane accepts programs, keys and jobs only with a job grant from that control plane, runs each granted job once, and gives jobs random, unguessable IDs; a local evaluator without a control plane needs no grant (ENC-SF-2026-006). The grant is checked against the program's ID before anything is compiled, so a refused upload changes no evaluator state (ENC-SF-2026-044).", [
         (Positive, "test:crates/encompute-evaluator/tests/uploads.rs::local_uploads_need_no_grant_and_job_ids_are_random"),
         (Negative, "test:crates/encompute-evaluator/tests/uploads.rs::uploads_need_a_grant_with_a_control_plane"),
+        (Adversarial, "test:crates/encompute-evaluator/tests/uploads.rs::a_refused_program_upload_loads_nothing"),
         (Adversarial, "test:crates/encompute-control/tests/network_attacks.rs::evaluator_runs_only_granted_jobs_once"),
         (Adversarial, "test:crates/encompute-evaluator/tests/network_attacks.rs::unknown_and_traversing_references_are_not_found"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
@@ -767,10 +802,17 @@ pub const INVARIANTS: &[Invariant] = &[
         (EndToEnd, "test:crates/encompute-control/tests/restart.rs::killed_control_plane_process_recovers_every_time"),
         (EndToEnd, "test:crates/encompute-control/tests/restart.rs::http_server_survives_database_connection_loss"),
     ]),
-    inv!("INV-178", "deployment", "Asset revocations survive a database rollback: they are recorded in the signed state anchor, so restoring an older database is refused at startup and recovery re-applies them; backups capture the anchor before the database, and a restore keeps a newer key broker state.", [
+    inv!("INV-178", "deployment", "Security-negative transitions survive a database rollback: asset revocations, frozen ledgers, disabled service accounts and users, cancelled and failed jobs, withdrawn asset approvals (including the grants an organization loses by leaving a project), removed project memberships and organization roles removed from a principal are recorded in the signed state anchor before they are acknowledged, so restoring an older database is refused at startup and recovery re-applies them (an organization that left a project neither sees it, plans or submits jobs in it, nor is covered by later approvals; a principal whose role was removed cannot act with it); an approval given, a project joined, or a role granted again after a withdrawal is a new one, never the anchored one, and rows from before schema version 4 get the same IDs on every migration; an anchor update that loses a compare-and-set race reloads and re-applies, anchors written before these sets existed still verify, backups capture the anchor before the database, and a restore keeps a newer key broker state (ENC-SF-2026-039, ENC-SF-2026-083, ENC-SF-2026-091, ENC-SF-2026-093).", [
         (Positive, "test:crates/encompute-control/tests/jobs.rs::revocation_stops_future_use"),
         (Negative, "test:crates/encompute-keybroker/tests/lifecycle.rs::lifecycle_revocation_survives_rollback_after_kek_rotation_and_root_retirement"),
+        (Positive, "test:crates/encompute-control/src/anchor.rs::a_lost_compare_and_set_reloads_and_reapplies"),
+        (Positive, "test:crates/encompute-control/src/anchor.rs::anchors_without_the_new_sets_still_verify"),
         (Adversarial, "test:crates/encompute-control/tests/state.rs::restoring_an_older_backup_cannot_unrevoke_an_asset"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_disables_and_cancellations"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_withdrawn_approvals"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_left_project_left"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_removed_role_removed"),
+        (Positive, "test:crates/encompute-control/tests/anchor_rollback.rs::approvals_from_before_version_4_get_stable_ids"),
         (EndToEnd, "script:scripts/release/backup-drill.sh"),
     ]),
     inv!("INV-179", "secagg", "A restarted SecAgg coordinator never re-runs a round or releases a round's aggregate twice, and each release is charged once.", [
@@ -779,12 +821,13 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-runtime/tests/secagg_restart.rs::coordinator_restart_never_reruns_a_round_or_releases_twice"),
         (EndToEnd, "test:crates/encompute-control/tests/state.rs::secagg_privacy_events_arrive_once_through_messages"),
     ]),
-    inv!("INV-180", "keybroker", "Key broker restarts fail closed: a restart forgets challenges and sessions but never keys, a revocation that was not persisted is not acknowledged and is applied on redelivery, and production never falls back to development key storage; plain HTTP to OpenBao is allowed only for an exact loopback host (ENC-SF-2026-002).", [
+    inv!("INV-180", "keybroker", "Key broker restarts fail closed: a restart forgets challenges and sessions but never keys, a revocation that was not persisted is not acknowledged and is applied on redelivery, and production never falls back to development key storage; plain HTTP to OpenBao is allowed only for an exact loopback host (ENC-SF-2026-002), and the OpenBao client follows no redirect, so its token never reaches another origin (ENC-SF-2026-061).", [
         (Positive, "test:crates/encompute-keybroker/tests/restart.rs::a_restart_forgets_challenges_and_sessions_never_keys"),
         (Negative, "test:crates/encompute-keybroker/tests/lifecycle.rs::production_provider_misconfiguration_is_refused"),
         (Negative, "test:crates/encompute-keybroker/tests/lifecycle.rs::lifecycle_disabled_root_key_refuses_every_reopen"),
         (Adversarial, "test:crates/encompute-keybroker/tests/restart.rs::an_unpersisted_revocation_is_not_acknowledged_and_is_applied_on_redelivery"),
         (Adversarial, "test:crates/encompute-keybroker/tests/lifecycle.rs::production_never_falls_back_to_development_storage_local_kek"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/root_keys.rs::openbao_redirects_are_refused_and_the_token_stays_home"),
         (EndToEnd, "test:crates/encompute-keybroker/tests/lifecycle.rs::production_never_falls_back_to_development_storage_openbao"),
         (EndToEnd, "test:crates/encompute-cli/tests/keys_lifecycle.rs::production_keys_commands_never_fall_back_to_development_storage"),
     ]),
@@ -794,24 +837,39 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/keys.rs::cross_tenant_key_ref_cannot_be_registered_or_revoked"),
         (EndToEnd, "test:crates/encompute-keybroker/tests/network_attacks.rs::control_messages_are_authenticated_fresh_and_applied_once"),
     ]),
-    inv!("INV-182", "keybroker", "Key grants are signed by the key broker, and a workload that pins the broker key refuses a grant substituted or re-signed by anyone else (ENC-SF-2026-003).", [
+    inv!("INV-182", "keybroker", "Key grants are signed by the key broker, and a workload accepts a grant only if it is signed by a broker key bound into its attested execution identity, with one signer per broker session: the host cannot choose or omit that key, a grant substituted or re-signed by anyone else is refused, and an unpinned broker is refused with any non-development attester (ENC-SF-2026-003, ENC-SF-2026-036).", [
         (Positive, "test:crates/encompute-attestation/tests/attestation.rs::grants_are_signed_by_the_broker"),
         (Negative, "test:crates/encompute-attestation/tests/attestation.rs::grants_open_only_in_their_session"),
+        (Positive, "test:crates/encompute-training/tests/training.rs::a_spec_binds_its_key_brokers"),
+        (Negative, "test:crates/encompute-keybroker/tests/grant_pinning.rs::a_hardware_workload_refuses_an_unpinned_broker"),
         (Adversarial, "test:crates/encompute-keybroker/tests/release.rs::a_substituted_grant_is_refused"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/grant_pinning.rs::grants_from_two_signers_in_one_session_are_refused"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/grant_pinning.rs::only_broker_keys_from_the_attested_identity_are_trusted"),
+        (EndToEnd, "test:python/tests/test_confidential_job.py::test_only_the_specs_broker_key_is_trusted"),
         (EndToEnd, "test:crates/encompute-cli/tests/cli.rs::attestation_and_key_release"),
     ]),
-    inv!("INV-183", "keybroker", "Secret key files are owner-only (0600) after every write, including over an existing wider-mode file or a leftover temporary file; the public evaluator pin is written 0644, and pinning it over plain HTTP to a remote host is warned (ENC-SF-2026-007).", [
+    inv!("INV-183", "keybroker", "Secret key files are owner-only (0600) after every write, including over an existing wider-mode file or a leftover temporary file; the key broker refuses an existing KEK file that is not private and an OpenBao token file writable by anyone but its owner; the public evaluator pin is written 0644, and pinning it over plain HTTP to a remote host is warned (ENC-SF-2026-007, ENC-SF-2026-063).", [
         (Positive, "test:crates/encompute-cli/tests/cli.rs::keys_and_audit"),
         (Negative, "test:crates/encompute-keybroker/tests/release.rs::state_round_trips_without_printing_keys"),
         (Adversarial, "test:crates/encompute-keybroker/tests/release.rs::state_round_trips_without_printing_keys"),
+        (Negative, "test:crates/encompute-keybroker/tests/secret_files.rs::an_existing_kek_file_must_be_private"),
+        (Negative, "test:crates/encompute-keybroker/tests/secret_files.rs::the_openbao_token_file_must_not_be_writable_by_others"),
         (Adversarial, "test:crates/encompute-cli/src/main.rs::pinning_over_plain_http_to_another_host_is_warned"),
         (EndToEnd, "test:crates/encompute-cli/tests/cli.rs::remote_receipts_and_verify"),
     ]),
-    inv!("INV-184", "receipts", "A client sends no inputs to an evaluator whose receipt key is outside its pinned set: a compromised control plane cannot choose which evaluator key the Python client accepts (ENC-SF-2026-008).", [
-        (Positive, "test:python/tests/test_client.py::test_a_pinned_key_passes_and_unpinned_warns"),
+    inv!("INV-184", "receipts", "Every client that decrypts (the CLI's `jobs run`, the Python SDK and the native SDK) sends no inputs to an evaluator whose receipt key is outside its own pinned set: a compromised control plane cannot choose which evaluator key a client accepts. An empty pin set refuses every evaluator, and without a pin a job is refused unless an explicit development opt-out is given, honoured only with ENCOMPUTE_ENV=development (ENC-SF-2026-008, ENC-SF-2026-046, ENC-SF-2026-078).", [
+        (Positive, "test:crates/encompute-cli/tests/jobs_run.rs::a_pinned_key_proceeds_to_the_evaluator"),
+        (Positive, "test:python/tests/test_client.py::test_the_pin_comes_from_the_environment"),
         (Negative, "test:python/tests/test_client.py::test_a_key_outside_the_pinned_set_is_refused"),
-        (Adversarial, "test:python/tests/test_client.py::test_the_pin_comes_from_the_environment"),
+        (Negative, "test:python/tests/test_client.py::test_an_empty_pin_set_refuses_every_evaluator"),
+        (Negative, "test:python/tests/test_client.py::test_without_a_pin_a_job_is_refused"),
+        (Negative, "test:crates/encompute-runtime/src/remote.rs::evaluator_pins_fail_closed"),
+        (Adversarial, "test:crates/encompute-cli/tests/jobs_run.rs::a_key_outside_the_pin_set_is_refused_before_anything_is_sent"),
+        (Adversarial, "test:python/tests/test_client.py::test_the_native_run_enforces_the_pin_before_sending_anything"),
+        (Adversarial, "test:python/tests/test_client.py::test_the_development_opt_out_warns_and_is_refused_in_production"),
+        (EndToEnd, "test:crates/encompute-cli/tests/jobs_run.rs::without_a_pin_the_job_is_refused_unless_explicitly_in_development"),
         (EndToEnd, "test:crates/encompute-cli/tests/cli.rs::remote_receipts_and_verify"),
+        (Adversarial, "test:python/tests/test_client.py::test_the_opt_out_fails_closed_unless_explicitly_in_development"),
     ]),
     inv!("INV-185", "dp", "A differentially private aggregation receipt verifies only with the privacy receipts it binds: missing, substituted or unbound privacy receipts fail verification (ENC-SF-2026-009).", [
         (Positive, "test:crates/encompute-runtime/tests/privacy.rs::dp_receipts_require_bound_privacy_receipts"),
@@ -819,9 +877,11 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-runtime/tests/privacy.rs::dp_receipts_require_bound_privacy_receipts"),
         (EndToEnd, "script:examples/09_differential_privacy/run.sh"),
     ]),
-    inv!("INV-186", "dp", "A coordinator under a control plane never releases an aggregate before the control plane has reserved its privacy spend, and a coordinator that cannot report refuses before the round starts, so no party contributes (ENC-SF-2026-010).", [
+    inv!("INV-186", "dp", "A coordinator under a control plane never releases an aggregate before the control plane has reserved its privacy spend, and a coordinator that cannot report refuses before the round starts, so no party contributes (ENC-SF-2026-010). Every budgeted contributor needs a well-formed control-plane mapping before the round; a missing, misspelt or malformed one releases nothing (ENC-SF-2026-048).", [
         (Positive, "test:crates/encompute-cli/src/aggregate.rs::release_never_precedes_the_control_plane_reservation"),
         (Negative, "test:crates/encompute-cli/tests/aggregate_report.rs::a_coordinator_that_cannot_report_refuses_before_the_round"),
+        (Negative, "test:crates/encompute-cli/tests/aggregate_privacy.rs::a_control_plane_coordinator_needs_every_budgeted_mapping_before_the_round"),
+        (Adversarial, "test:crates/encompute-cli/src/aggregate.rs::unmapped_budgeted_assets_release_nothing"),
         (Adversarial, "test:crates/encompute-cli/src/aggregate.rs::release_never_precedes_the_control_plane_reservation"),
         (EndToEnd, "test:crates/encompute-cli/tests/aggregate_report.rs::a_coordinator_that_cannot_report_refuses_before_the_round"),
     ]),
@@ -858,5 +918,181 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-exact/tests/optimizer.rs::prop_ranges_are_sound"),
         (Adversarial, "test:crates/encompute-exact/src/circuit.rs::prop_known_bits_are_sound"),
         (EndToEnd, "test:crates/encompute-exact/tests/optimizer.rs::diff_optimize_matches_reference_lowering"),
+    ]),
+    // The independent review of 0.3.0-rc.3 (ENC-SF-2026-033 to 094 in
+    // docs/security-findings.md). Findings that extend an earlier claim
+    // added their evidence to it instead.
+    inv!("INV-192", "deployment", "A ledger frozen in the anchor is refused for spending whatever the database says: clearing the freeze in the database does not make it spendable, startup refuses a database in which it is unfrozen, and recovery re-freezes it (ENC-SF-2026-034).", [
+        (Positive, "test:crates/encompute-control/tests/anchor_rollback.rs::a_frozen_ledger_stays_frozen_whatever_the_database_says"),
+        (Negative, "test:crates/encompute-control/tests/anchor_rollback.rs::a_frozen_ledger_stays_frozen_whatever_the_database_says"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::a_frozen_ledger_stays_frozen_whatever_the_database_says"),
+    ]),
+    inv!("INV-193", "deployment", "A key broker receives an asset's revocation only after the state anchor records it: a revocation committed to the database but not yet anchored stays in the outbox until anchoring catches up (ENC-SF-2026-084).", [
+        (Positive, "test:crates/encompute-control/tests/anchor_rollback.rs::broker_revocation_is_delivered_only_once_anchored"),
+        (Negative, "test:crates/encompute-control/tests/anchor_rollback.rs::broker_revocation_is_delivered_only_once_anchored"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::broker_revocation_is_delivered_only_once_anchored"),
+        (EndToEnd, "test:crates/encompute-control/tests/jobs.rs::revocation_stops_future_use"),
+    ]),
+    inv!("INV-194", "deployment", "An asset approval grants access only to organizations that were active project members when the owner approved it: an organization that joins later neither sees the asset nor runs a job on it until the owner approves again. An approval covers only jobs whose program declares the approved purpose (the request's purpose must equal it; a program that declares none cannot use another organization's asset), and a job's sources are exactly the registered assets its program reads, so none can be left out or stood in for. Every executed job's authoritative source-asset set is exactly the set bound by its program/execution specification; caller-supplied asset metadata cannot add, omit, or substitute source assets: the request's list must equal that set, each asset once, and be empty when the program binds none (the submitter's own data included), and the job records, revokes, audits and reports the derived set (ENC-SF-2026-040, ENC-SF-2026-088, ENC-SF-2026-089, ENC-SF-2026-094).", [
+        (Positive, "test:crates/encompute-control/tests/collaboration.rs::a_late_joiner_inherits_no_asset_approval"),
+        (Negative, "test:crates/encompute-control/tests/collaboration.rs::a_late_joiner_inherits_no_asset_approval"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::a_late_joiner_inherits_no_asset_approval"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::an_approval_covers_only_programs_declared_for_its_purpose"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_registered_assets_its_program_reads"),
+        (Positive, "test:crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_assets_its_program_binds_even_its_own"),
+        (Negative, "test:crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_assets_its_program_binds_even_its_own"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_assets_its_program_binds_even_its_own"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::the_derived_sources_drive_revocation_and_the_trust_report"),
+        (EndToEnd, "script:scripts/release/backup-drill.sh"),
+    ]),
+    inv!("INV-195", "deployment", "Policy approval takes two different people with security_admin in the project owner's organization: no path grants security_admin to a service account, and a collaborator's security admins cannot approve a policy on the owner's project. A service account that holds it from before the fix is never a proposer or approver, is reported on every start (log line, audit event in its organization's trail, gauge) and listed by the API and `encompute security legacy-service-admins` (exit 1) until an organization admin removes the role. Likewise, a job over an asset whose policy requires job approval is approved only by a person homed in the asset's organization, never a service account (ENC-SF-2026-056, ENC-SF-2026-090).", [
+        (Positive, "test:crates/encompute-control/tests/collaboration.rs::policy_four_eyes_are_two_people_of_the_projects_owner"),
+        (Negative, "test:crates/encompute-control/tests/collaboration.rs::policy_four_eyes_are_two_people_of_the_projects_owner"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::policy_four_eyes_are_two_people_of_the_projects_owner"),
+        (Negative, "test:crates/encompute-control/tests/legacy_service_admins.rs::no_path_grants_security_admin_to_a_service_account"),
+        (Adversarial, "test:crates/encompute-control/tests/legacy_service_admins.rs::legacy_security_admin_service_accounts_are_reported_until_removed"),
+        (EndToEnd, "test:crates/encompute-cli/tests/security_legacy_admins.rs::legacy_service_admins_command_exits_1_until_they_are_removed"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::a_job_is_approved_by_a_person_of_the_owner"),
+    ]),
+    inv!("INV-196", "deployment", "Messages about an asset's key go to, and are accepted from, only a key broker owned by the platform or by the asset's organization: another tenant cannot register or name that broker, receive the asset's revocation, or write key releases into its audit trail (ENC-SF-2026-041).", [
+        (Positive, "test:crates/encompute-control/tests/collaboration.rs::a_tenant_cannot_squat_another_organizations_key_broker"),
+        (Negative, "test:crates/encompute-control/tests/collaboration.rs::a_tenant_cannot_squat_another_organizations_key_broker"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::a_tenant_cannot_squat_another_organizations_key_broker"),
+        (Adversarial, "test:crates/encompute-control/tests/keys.rs::cross_tenant_key_ref_cannot_be_registered_or_revoked"),
+    ]),
+    inv!("INV-197", "deployment", "Every grant (user, role, organization membership, project membership, asset approval) has an API revocation, refused to non-admins, audited and effective from the next request; removing a project member or withdrawing an asset approval also fails the jobs not yet started that depended on it (ENC-SF-2026-042).", [
+        (Positive, "test:crates/encompute-control/tests/collaboration.rs::every_grant_can_be_withdrawn_through_the_api"),
+        (Negative, "test:crates/encompute-control/tests/collaboration.rs::every_grant_can_be_withdrawn_through_the_api"),
+        (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::every_grant_can_be_withdrawn_through_the_api"),
+        (EndToEnd, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_disables_and_cancellations"),
+    ]),
+    inv!("INV-198", "dp", "The control plane charges a reservation only if its declared sensitivity is at least what its own noise and mechanism imply for the ledger's privacy unit; an under-declared reservation is refused (ENC-SF-2026-048).", [
+        (Positive, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+        (Negative, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+        (Adversarial, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+    ]),
+    inv!("INV-199", "keybroker", "Every field of key broker state that gates release is authenticated under a key derived from the KEK: an edited state file does not open, an unauthenticated one opens only after its owner's explicit upgrade, every legitimate save advances the generation, and a production store that cannot authenticate state backs no broker (ENC-SF-2026-043).", [
+        (Positive, "test:crates/encompute-keybroker/tests/state_integrity.rs::owner_changes_are_reauthenticated_and_generations_advance"),
+        (Negative, "test:crates/encompute-keybroker/tests/state_integrity.rs::an_unauthenticated_state_needs_its_owner_to_upgrade_it"),
+        (Negative, "test:crates/encompute-keybroker/tests/state_integrity.rs::a_production_store_must_authenticate_state"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/state_integrity.rs::an_edited_state_file_does_not_open"),
+        (EndToEnd, "test:crates/encompute-cli/tests/keys_lifecycle.rs::an_unauthenticated_broker_state_needs_its_owner_to_upgrade_it"),
+    ]),
+    inv!("INV-200", "keybroker", "A refused key release does not disclose the asset's expected execution spec, policies, artifact or minimum TCB: public denials keep only what the caller's own evidence showed (ENC-SF-2026-063).", [
+        (Positive, "test:crates/encompute-attestation/src/policy.rs::public_denials_withhold_expected_values"),
+        (Negative, "test:crates/encompute-keybroker/tests/network_attacks.rs::refusals_do_not_reveal_the_release_policy"),
+        (Adversarial, "test:crates/encompute-keybroker/tests/network_attacks.rs::refusals_do_not_reveal_the_release_policy"),
+    ]),
+    inv!("INV-201", "openfhe-exact", "The evaluator refuses BinFHE bootstrapping keys whose method, dimensions or moduli differ from the vetted context, before any gate runs (ENC-SF-2026-045).", [
+        (Positive, "test:crates/encompute-openfhe-client/tests/binfhe.rs::std128_context_has_the_vetted_lwe_parameters"),
+        (Negative, "test:crates/encompute-openfhe-client/tests/binfhe.rs::foreign_bootstrapping_keys_are_refused_before_any_gate"),
+        (Adversarial, "test:crates/encompute-openfhe-client/tests/binfhe.rs::foreign_bootstrapping_keys_are_refused_before_any_gate"),
+    ]),
+    inv!("INV-202", "evaluator", "With a control plane, the evaluator discloses a loaded program, or whether a key is registered for it, only to a holder of a valid grant for that program (ENC-SF-2026-064).", [
+        (Positive, "test:crates/encompute-evaluator/tests/uploads.rs::with_a_control_plane_programs_and_keys_are_not_advertised"),
+        (Negative, "test:crates/encompute-evaluator/tests/uploads.rs::with_a_control_plane_programs_and_keys_are_not_advertised"),
+        (Adversarial, "test:crates/encompute-evaluator/tests/uploads.rs::with_a_control_plane_programs_and_keys_are_not_advertised"),
+    ]),
+    inv!("INV-203", "openfhe-exact", "A client never returns a decrypted exact output outside the interval that range analysis proves for it, and an exact program that lacks a range-analysis interval for any output is refused at key generation, restore and decryption: a missing range is never a skipped check (ENC-SF-2026-065).", [
+        (Positive, "test:crates/encompute-runtime/src/client.rs::exact_outputs_outside_their_proven_range_are_refused"),
+        (Positive, "test:crates/encompute-evaluator/src/compiled.rs::exact_output_ranges_are_serialized"),
+        (Negative, "test:crates/encompute-runtime/src/client.rs::exact_outputs_outside_their_proven_range_are_refused"),
+        (Negative, "test:crates/encompute-evaluator/src/compiled.rs::exact_program_without_output_ranges_is_refused"),
+        (Adversarial, "test:crates/encompute-runtime/src/client.rs::exact_outputs_outside_their_proven_range_are_refused"),
+        (Adversarial, "test:crates/encompute-runtime/src/client.rs::exact_outputs_without_a_proven_range_are_refused"),
+    ]),
+    inv!("INV-204", "openfhe-exact", "Plans whose worst-case BGV noise multiplier (sums add, products multiply) exceeds the calibrated budget never run on BGV, and the budget decrypts exactly on OpenFHE with an 8x margin (ENC-SF-2026-065).", [
+        (Positive, "test:crates/encompute-openfhe-client/tests/bgv.rs::the_noise_budget_holds_on_openfhe"),
+        (Negative, "test:crates/encompute-evaluator/tests/exact_selection.rs::programs_beyond_the_bgv_noise_budget_do_not_run_on_bgv"),
+        (Adversarial, "test:crates/encompute-evaluator/tests/exact_selection.rs::programs_beyond_the_bgv_noise_budget_do_not_run_on_bgv"),
+        (EndToEnd, "test:crates/encompute-openfhe-client/tests/bgv.rs::the_noise_budget_holds_on_openfhe"),
+    ]),
+    inv!("INV-205", "dp", "A secure-aggregation aggregate is always a release, even when sealed: any privacy-budgeted contributor forces a DP mechanism and a ledger charge, so such a program does not compile or validate without dp, a budgeted party does not join it, a coordinator does not release it without noise, and its receipt does not verify without privacy receipts (ENC-SF-2026-047).", [
+        (Positive, "test:crates/encompute-analysis/tests/aggregation.rs::privacy_budgets_need_a_mechanism_at_the_release_boundary"),
+        (Negative, "test:crates/encompute-secagg/src/round_tests.rs::a_sealed_budgeted_aggregate_without_dp_is_not_a_valid_spec"),
+        (Negative, "test:crates/encompute-secagg/src/round_tests.rs::a_budgeted_party_does_not_join_a_round_without_dp"),
+        (Adversarial, "test:crates/encompute-secagg/src/round_tests.rs::a_coordinator_never_releases_budgeted_contributions_without_noise"),
+        (Adversarial, "test:crates/encompute-secagg/src/round_tests.rs::a_receipt_of_budgeted_assets_without_privacy_receipts_does_not_verify"),
+        (EndToEnd, "test:crates/encompute-cli/tests/aggregate_privacy.rs::a_sealed_budgeted_aggregate_without_dp_does_not_compile"),
+    ]),
+    inv!("INV-206", "secagg", "A party's round state is never lost or lowered: updates run under an exclusive lock and are written atomically, and the state is monotonic per aggregation spec (ENC-SF-2026-071).", [
+        (Positive, "test:crates/encompute-cli/src/aggregate.rs::state_is_monotonic_and_per_spec"),
+        (Negative, "test:crates/encompute-cli/src/aggregate.rs::state_is_monotonic_and_per_spec"),
+        (Adversarial, "test:crates/encompute-cli/src/aggregate.rs::concurrent_state_updates_are_never_lost"),
+    ]),
+    inv!("INV-207", "dp", "The charged sensitivity covers one privacy unit's largest possible influence: 1 x clip_norm only for a unit inside a party with Poisson sampling (DP-SGD, where the attested workload clips each sampled unit), 2 x clip_norm otherwise; explain never claims a per-unit clip that is not enforced. A named privacy level resolves, in Rust for every caller including Python, to twice its listed noise for a unit inside a party (once for an organization), so its cost per release is the level's documented one; the mechanism records the level beside the effective noise that is sampled, charged and receipted, the compiler refuses a level whose noise is not exactly that, and privacy explain and the trust report show preset, sensitivity factor and effective noise (ENC-SF-2026-068).", [
+        (Positive, "test:crates/encompute-privacy/tests/privacy.rs::sensitivity_bounds_the_encoded_difference"),
+        (Positive, "test:crates/encompute-privacy/tests/privacy.rs::preset_levels_charge_their_effective_noise"),
+        (Positive, "test:crates/encompute-analysis/tests/aggregation.rs::privacy_presets"),
+        (Negative, "test:crates/encompute-privacy/tests/privacy.rs::an_unsampled_patient_is_charged_the_whole_contribution_swing"),
+        (Negative, "test:crates/encompute-analysis/tests/aggregation.rs::preset_mechanisms_carry_the_effective_noise"),
+        (Adversarial, "test:crates/encompute-privacy/tests/privacy.rs::an_unsampled_patient_is_charged_the_whole_contribution_swing"),
+        (Adversarial, "test:crates/encompute-runtime/tests/trust.rs::the_privacy_row_shows_the_preset_and_its_effective_noise"),
+        (EndToEnd, "test:crates/encompute-runtime/tests/privacy.rs::explain_shows_budgets_and_preview"),
+        (EndToEnd, "test:crates/encompute-runtime/tests/privacy.rs::explain_shows_the_preset_and_its_effective_noise"),
+        (EndToEnd, "test:python/tests/test_privacy.py::test_preset_resolution_is_the_native_one"),
+    ]),
+    inv!("INV-208", "training", "A training worker builds the base model only from an allowlisted in-image factory with schema-checked arguments, and a Hugging Face model only from the package's own config.json; any other architecture is refused by the spec validator before any key is released, and a worker whose code digest differs from the spec's refuses before it attests (ENC-SF-2026-037).", [
+        (Positive, "test:python/tests/test_training_contract.py::test_models_build_only_allowlisted_factories"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::a_spec_names_only_an_allowlisted_factory"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_the_worker_refuses_other_code_before_any_key"),
+        (EndToEnd, "script:examples/15_confidential_lora/attack.py"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::reference_factory_arguments_are_bounded_together"),
+    ]),
+    inv!("INV-209", "confidential-space", "A confidential training job trains with the spec's configuration and only from the spec's initial adapter (round 1) or the coordinator-recorded adapter of the previous round; its signed evidence commits to the input adapter, the configuration digest and the seed (ENC-SF-2026-050).", [
+        (Positive, "test:python/tests/test_confidential_job.py::test_the_evidence_binds_what_the_worker_trained_from_and_with"),
+        (Negative, "test:crates/encompute-training/tests/training.rs::a_worker_trains_only_from_the_previous_recorded_adapter"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_the_descriptor_cannot_change_the_training"),
+        (EndToEnd, "test:crates/encompute-training/tests/training.rs::worker_evidence_binds_its_spec_assets_and_attestation"),
+    ]),
+    inv!("INV-210", "dp-sgd", "No data-dependent value appears in a shared training spec except through an accounted DP release, an owner-approved public figure, or a salted commitment: the DP-SGD sampling rate is never derived from the data, and dataset and grouping digests are salted with a secret the owner keeps (ENC-SF-2026-049).", [
+        (Positive, "test:python/tests/test_dpsgd.py::test_published_dataset_digests_hide_the_data"),
+        (Negative, "test:python/tests/test_dpsgd.py::test_the_sampling_rate_is_never_derived_from_the_data"),
+        (Adversarial, "test:python/tests/test_dpsgd.py::test_published_dataset_digests_hide_the_data"),
+    ]),
+    inv!("INV-211", "dp-sgd", "A DP-SGD worker contributes only under the spec's approved plan, sampling at the plan's rate and clipping each unit to the plan's clip norm (ENC-SF-2026-067).", [
+        (Positive, "test:python/tests/test_dpsgd.py::test_workers_apply_the_plans_clip_and_rate"),
+        (Negative, "test:python/tests/test_dpsgd.py::test_workers_apply_the_plans_clip_and_rate"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_the_plan_and_image_come_from_approved_sources"),
+    ]),
+    inv!("INV-212", "confidential-space", "Test hooks (the update canary, training failpoints) are honoured only by a worker whose own attestation is development (ENC-SF-2026-082).", [
+        (Negative, "test:python/tests/test_confidential_job.py::test_test_hooks_are_off_with_hardware_attestation"),
+        (Adversarial, "test:python/tests/test_confidential_job.py::test_test_hooks_are_off_with_hardware_attestation"),
+    ]),
+    inv!("INV-213", "trust", "The trust report honours a revocation only from an owner of the revoked asset or from the signer of the revoked authorization; other revocations are refused at ingest and, when forced into a bundle, ignored with a note (ENC-SF-2026-075).", [
+        (Positive, "test:crates/encompute-runtime/tests/trust_bundle_checks.rs::an_authorization_is_revoked_only_by_its_signer"),
+        (Negative, "test:crates/encompute-runtime/tests/trust_bundle_checks.rs::a_revocation_by_a_non_owner_is_ignored_with_a_note"),
+        (Adversarial, "test:crates/encompute-runtime/tests/trust_bundle_checks.rs::a_revocation_by_a_non_owner_is_ignored_with_a_note"),
+    ]),
+    inv!("INV-214", "planner", "A plan's self-declared context is not trusted: the validator recomputes the program's semantics and a floor of requirements with its own rules, a verifier's floor (compiler facts, accepted backends, minimum profile, production) refuses a plan whose context would weaken it, and a claimed execution proof satisfies correctness only when the proof is checked (ENC-SF-2026-077).", [
+        (Positive, "test:crates/encompute-planner/tests/planner.rs::the_validator_has_its_own_floor_of_requirements"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::a_production_floor_refuses_plans_that_accept_development_attestation"),
+        (Negative, "test:crates/encompute-trust/tests/report_plan_floor.rs::a_claimed_execution_proof_is_unchecked_until_the_proof_is_checked"),
+        (Adversarial, "test:crates/encompute-planner/tests/planner.rs::the_validator_checks_the_plans_own_context_against_the_verifiers_floor"),
+        (Negative, "test:crates/encompute-planner/tests/planner.rs::the_validator_fails_closed_when_the_semantics_cannot_be_determined"),
+        (Adversarial, "test:crates/encompute-trust/tests/report_plan_floor.rs::a_plan_claiming_facts_the_compiler_does_not_produce_fails_the_report"),
+        (EndToEnd, "test:crates/encompute-trust/tests/report_plan_floor.rs::the_report_applies_the_callers_plan_floor"),
+        (EndToEnd, "test:crates/encompute-control/tests/jobs.rs::production_plans_are_checked_against_the_control_planes_floor"),
+        (EndToEnd, "test:python/tests/test_plan_floor.py::test_production_refuses_a_plan_accepting_development_attestation"),
+        (Positive, "test:python/tests/test_finetune_matrix.py::test_revocation_check_uses_production_strictness_for_production_runs"),
+    ]),
+    inv!("INV-215", "supply-chain", "The commercial build audit fails when it cannot read an Encompute binary's Rust symbols (a stripped binary or an unknown format), instead of passing vacuously (ENC-SF-2026-079).", [
+        (Negative, "script:scripts/audit-commercial-build.sh"),
+        (EndToEnd, "script:scripts/audit-commercial-build.sh"),
+    ]),
+    inv!("INV-216", "supply-chain", "Every GitHub Action is pinned by commit SHA and every container base image by digest, and the TEE training image installs hash-locked Python packages at the release lock's versions; the pin check fails otherwise. Every released image, the Confidential Space workload images included, is in the release's vulnerability gate, and a vulnerability exception covers a finding only for its exact advisory, package and installed version: an entry that is a wildcard or list, lacks a rationale, compensating controls, tracking link, added date or approval, or has expired fails the gate (ENC-SF-2026-080, ENC-SF-2026-081).", [
+        (Positive, "test:scripts/release/test_vuln_policy.py::test_an_exact_entry_excepts_its_finding"),
+        (Negative, "script:scripts/release/check-pins.sh"),
+        (Negative, "test:scripts/release/test_vuln_policy.py::test_another_version_is_not_matched"),
+        (Negative, "test:scripts/release/test_vuln_policy.py::test_every_required_field_is_required"),
+        (Negative, "test:scripts/release/test_vuln_policy.py::test_an_expired_entry_fails"),
+        (Adversarial, "test:scripts/release/test_vuln_policy.py::test_blanket_entries_fail"),
+        (Adversarial, "test:scripts/release/test_vuln_policy.py::test_an_entry_added_after_the_approval_is_pending"),
+        (EndToEnd, "script:scripts/release/check-pins.sh"),
+        (EndToEnd, "script:scripts/release/scan.sh"),
+    ]),
+    inv!("INV-217", "supply-chain", "THIRD_PARTY_NOTICES reproduces the license and notice files of every crate in the production dependency graph; the notices check fails when it is out of date (ENC-SF-2026-086).", [
+        (Negative, "script:scripts/third_party_notices.py"),
+        (EndToEnd, "script:scripts/third_party_notices.py"),
     ]),
 ];

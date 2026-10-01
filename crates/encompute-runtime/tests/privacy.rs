@@ -49,8 +49,10 @@ fn program(noise: f64, clip: f64, epsilon: f64) -> Model {
     Model::compile(parse(&s).unwrap()).unwrap()
 }
 
+/// Noise 8: a patient is charged the whole clipped contribution (sensitivity
+/// 2 x clip_norm, review finding DP-4), so a few rounds fit the budget.
 fn approved() -> Model {
-    program(4.0, 1.0, 3.0)
+    program(8.0, 1.0, 3.0)
 }
 
 fn party(i: usize) -> PartyId {
@@ -207,8 +209,8 @@ fn rounds_until_the_budget_is_spent() {
             3,
             "one privacy receipt per hospital"
         );
-        // Noisy, but near the clear sum: sigma = 4 * 1.0 * 4096 codes.
-        let sigma = 4.0 * 4096.0 / 4096.0;
+        // Noisy, but near the clear sum: sigma = 8 * 1.0 * 4096 codes.
+        let sigma = 8.0 * 4096.0 / 4096.0;
         let mut exact = true;
         for j in 0..LEN {
             let clear: f64 = (0..3).map(|i| gradient(i)[j]).sum();
@@ -250,8 +252,8 @@ fn weaker_mechanisms_are_not_the_approved_spec() {
     // spec they approved.
     for cheat in [
         program(0.5, 1.0, 3.0),
-        program(4.0, 2.0, 3.0),
-        program(4.0, 1.0, 30.0),
+        program(8.0, 2.0, 3.0),
+        program(8.0, 1.0, 30.0),
     ] {
         let mut c = RoundCoordinator::open(
             spec_of(&cheat),
@@ -389,6 +391,8 @@ fn explain_shows_budgets_and_preview() {
         "patient",
         "epsilon 3",
         "delta 1e-6",
+        // Review finding DP-4 (ENC-SF-2026-068): no per-patient clip is claimed.
+        "sensitivity 2 x clip_norm",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
@@ -413,6 +417,40 @@ fn explain_shows_budgets_and_preview() {
     for want in ["PRIVACY BUDGET", "gradient-a", "Remaining"] {
         assert!(budget.contains(want), "missing {want:?}\n{budget}");
     }
+}
+
+/// Review finding DP-4: a named level shows what it resolved to. For
+/// patients (no per-patient clipping without sampling) the level uses twice
+/// its listed noise, and `privacy explain` says so, with the sensitivity
+/// factor; the projection charges that effective noise.
+#[test]
+fn explain_shows_the_preset_and_its_effective_noise() {
+    let text = program(12.0, 1.0, 3.0).program().to_string().replace(
+        "noise_multiplier 12.0",
+        "noise_multiplier 12.0 preset \"strong\"",
+    );
+    let m = Model::compile(parse(&text).unwrap()).unwrap();
+    let explain = m.privacy_explain().unwrap().unwrap();
+    assert!(
+        explain.contains(
+            "preset=strong, sensitivity_factor=2, effective_noise_multiplier=12 (2x preset 6.0)"
+        ),
+        "{explain}"
+    );
+    assert!(explain.contains("noise_multiplier 12"), "{explain}");
+    // The projection charges the effective noise: about ten releases of the
+    // strong (epsilon 3) patient-level budget, as the level promises.
+    let rows = m.privacy_projection(1).unwrap();
+    assert_eq!(rows.len(), 3);
+    for r in &rows {
+        assert!((9..=13).contains(&r.affordable), "{}", r.affordable);
+    }
+    // The listed noise under the level's name is refused for patients.
+    let listed = text.replace("noise_multiplier 12.0", "noise_multiplier 6.0");
+    let e = Model::compile(parse(&listed).unwrap())
+        .and_then(|m| m.privacy_explain().map(|_| ()))
+        .unwrap_err();
+    assert_eq!(e.code, Code::PrivacyPolicy, "{}", e.message);
 }
 
 /// One owner's state protects every asset: hospital A has lost its state,

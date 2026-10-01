@@ -16,9 +16,22 @@ fn h(c: char) -> String {
     c.to_string().repeat(64)
 }
 
+const REFERENCE: &str =
+    r#"{"factory":"encompute.torch.models:tiny_classifier","kwargs":{"dim":32,"vocab":64}}"#;
+/// A package's `config.json` (its bytes are what the package binds).
+const HF_CONFIG: &str = r#"{"model_type": "bert", "hidden_size": 32}"#;
+
+fn hf_architecture() -> String {
+    serde_json::json!({
+        "factory": HF_FACTORY,
+        "kwargs": {"config": HF_CONFIG, "num_labels": 2, "task": "sequence-classification"},
+    })
+    .to_string()
+}
+
 fn spec() -> TrainingSpec {
     TrainingSpec {
-        version: 1,
+        version: 2,
         project: "medical-lora".into(),
         purpose: "disease-training".into(),
         plan_id: h('a'),
@@ -29,7 +42,7 @@ fn spec() -> TrainingSpec {
         base_model: ModelCommitment {
             asset_id: "base-model".into(),
             owner: "modelco".into(),
-            architecture: "TinyTransformer(d=32)".into(),
+            architecture: REFERENCE.into(),
             weights_digest: h('f'),
             huggingface: None,
         },
@@ -80,7 +93,14 @@ fn spec() -> TrainingSpec {
                 )
             })
             .collect(),
+        key_brokers: [("modelco".to_string(), h('5'))].into(),
+        coordinator_key: hex(&SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes()),
+        initial_adapter_digest: h('0'),
     }
+}
+
+fn hex(b: &[u8]) -> String {
+    encompute_verification::hex(b)
 }
 
 /// INV-126: every security-relevant field changes the TrainingSpecId.
@@ -119,6 +139,11 @@ fn every_field_changes_the_spec_id() {
         ("participants", |s| {
             s.participants.pop().map(|_| ()).unwrap_or(())
         }),
+        ("key broker", |s| {
+            s.key_brokers.insert("modelco".into(), h('9'));
+        }),
+        ("coordinator", |s| s.coordinator_key = h('9')),
+        ("initial adapter", |s| s.initial_adapter_digest = h('9')),
     ];
     for (what, e) in edits {
         let mut t = spec();
@@ -210,7 +235,7 @@ fn every_dp_sgd_setting_changes_the_spec_id() {
             s.config.dp_sgd.as_mut().unwrap().sampling_rate = "1.0".into()
         }),
         ("local steps", |s| s.config.local_steps = 5),
-        ("unit count", |s| s.datasets[1].privacy_units = None),
+        ("zero units", |s| s.datasets[1].privacy_units = Some(0)),
         ("grouping digest", |s| s.datasets[1].grouping_digest = None),
         ("units without DP-SGD", |s| s.config.dp_sgd = None),
     ];
@@ -286,6 +311,7 @@ fn release_round(d: &std::path::Path, round: u64) {
             clip_norm: 1.0,
             noise_multiplier: 6.0,
             sampling_rate: None,
+            preset: None,
         },
         codec: FixedPointCodec {
             clip_min: -1.0,
@@ -549,6 +575,9 @@ fn hf_package() -> HfModelPackage {
         },
         license: Some("apache-2.0".into()),
     };
+    let config = sha256_hex(HF_CONFIG.as_bytes());
+    p.files[0].sha256 = config.clone();
+    p.config_digest = config;
     p.tokenizer_digest = p.expected_tokenizer_digest();
     p
 }
@@ -556,6 +585,7 @@ fn hf_package() -> HfModelPackage {
 fn hf_spec() -> TrainingSpec {
     let mut s = spec();
     s.base_model.huggingface = Some(hf_package());
+    s.base_model.architecture = hf_architecture();
     s.config.method = "peft-lora".into();
     s.config.target_modules = vec!["query".into(), "value".into()];
     s.config.peft = Some(PeftConfig {
@@ -752,18 +782,28 @@ fn worker_evidence(
     s: &TrainingSpec,
     key: &SigningKey,
 ) -> (encompute_attestation::AttestationRecord, WorkerEvidence) {
+    worker_evidence_bound(s, key, s.privacy_policy_id.as_deref(), &s.code_digest)
+}
+
+/// Evidence whose attestation binds `privacy_policy` and `artifact`.
+fn worker_evidence_bound(
+    s: &TrainingSpec,
+    key: &SigningKey,
+    privacy_policy: Option<&str>,
+    artifact: &str,
+) -> (encompute_attestation::AttestationRecord, WorkerEvidence) {
     use encompute_attestation::mock::MockHardware;
     use encompute_attestation::{
         AttestationChallenge, AttestationRecord, Attester, WorkloadSession,
     };
     let identity = encompute_verification::EvaluatorSigner::from_seed(&key.to_bytes()).identity();
-    let session = WorkloadSession::new(&identity);
+    let session = WorkloadSession::new(&identity).with_privacy_policy(privacy_policy);
     let challenge = AttestationChallenge::new("broker", 1_000, 60).unwrap();
     let binding = session.binding(
         &challenge,
         &s.participant_execution_id(&s.datasets[0].owner).unwrap(),
         s.policy_id.as_deref(),
-        &s.code_digest,
+        artifact,
     );
     let evidence = MockHardware::from_seed(&[9; 32])
         .attester(&format!("sha256:{}", h('7')))
@@ -787,6 +827,10 @@ fn worker_evidence(
         dataset_asset: d.asset_id.clone(),
         dataset_digest: d.digest.clone(),
         layout_digest: s.layout_digest.clone(),
+        input_adapter: "adapter-0".into(),
+        input_adapter_digest: s.initial_adapter_digest.clone(),
+        config_digest: s.config_digest().unwrap(),
+        seed: 7,
         image_digest: format!("sha256:{}", h('7')),
         attestation_record_id: record.id().unwrap(),
         session_id: record.session_id().unwrap(),
@@ -823,6 +867,10 @@ fn worker_evidence_binds_its_spec_assets_and_attestation() {
         ("session", |e| e.session_id = h('0')),
         ("round", |e| e.round = 99),
         ("plan", |e| e.plan_id = h('0')),
+        // Review finding TR-2 (ENC-SF-2026-050): what it trained from and with.
+        ("input adapter", |e| e.input_adapter = "adapter-3".into()),
+        ("input adapter digest", |e| e.input_adapter_digest = h('9')),
+        ("configuration", |e| e.config_digest = h('9')),
     ];
     for (what, edit) in edits {
         let mut forged = signed.clone();
@@ -835,6 +883,10 @@ fn worker_evidence_binds_its_spec_assets_and_attestation() {
             "{what}: binding"
         );
     }
+    // The seed is committed: changing it breaks the signature.
+    let mut forged = signed.clone();
+    forged.evidence.seed = 8;
+    assert!(forged.verify(&s, &record).is_err());
     // Evidence under another training spec (a lower rank) does not verify.
     let mut t = hf_spec();
     t.config.rank = 8;
@@ -845,6 +897,20 @@ fn worker_evidence_binds_its_spec_assets_and_attestation() {
     assert!(signed.verify(&s, &record2).is_err());
     let (record3, _) = worker_evidence(&s, &SigningKey::from_bytes(&[8; 32]));
     assert!(signed.verify(&s, &record3).is_err());
+    // Review finding KB-5 (ENC-SF-2026-062): an attestation bound to another (or no) privacy
+    // policy, or to other training code, does not back the evidence.
+    for (privacy, artifact) in [
+        (None, s.code_digest.clone()),
+        (s.privacy_policy_id.clone(), h('9')),
+    ] {
+        let (r, e) = worker_evidence_bound(&s, &key, privacy.as_deref(), &artifact);
+        let err = e.sign(&key).unwrap().verify(&s, &r).unwrap_err();
+        assert_eq!(err.code, Code::TrainingSpec, "{err}");
+    }
+    // Review finding TR-2 (ENC-SF-2026-050): round 1 starts from the spec's initial adapter.
+    let mut other_start = e.clone();
+    other_start.input_adapter_digest = h('9');
+    assert!(other_start.sign(&key).unwrap().verify(&s, &record).is_err());
     // A session attested for another participant cannot act for this one:
     // hospital-a's evidence, claimed by a session scoped to hospital-b.
     let mut as_b = e.clone();
@@ -857,4 +923,241 @@ fn worker_evidence_binds_its_spec_assets_and_attestation() {
         s.participant_execution_id("hospital-b").unwrap()
     );
     assert!(s.participant_execution_id("mallory").is_err());
+}
+
+/// Review finding TR-1 (ENC-SF-2026-037): a training spec names only a factory the worker
+/// image ships, with arguments of its schema; a Hugging Face model is
+/// built only from the package's own config.json. Anything else is refused
+/// by the validator, before any key is released for the spec.
+#[test]
+fn a_spec_names_only_an_allowlisted_factory() {
+    type Edit = fn(&mut TrainingSpec);
+    let arch = |s: &mut TrainingSpec, v: serde_json::Value| {
+        s.base_model.architecture = v.to_string();
+    };
+    let reference: Vec<(&str, Edit)> = vec![
+        ("subprocess", |s| {
+            s.base_model.architecture =
+                r#"{"factory":"subprocess:run","kwargs":{"args":"touch /tmp/x","shell":true}}"#
+                    .into()
+        }),
+        ("timeit", |s| {
+            s.base_model.architecture =
+                r#"{"factory":"timeit:timeit","kwargs":{"stmt":"import os","number":1}}"#.into()
+        }),
+        ("unknown kwarg", |s| {
+            s.base_model.architecture =
+                r#"{"factory":"encompute.torch.models:tiny_classifier","kwargs":{"stmt":"x"}}"#
+                    .into()
+        }),
+        ("non-integer kwarg", |s| {
+            s.base_model.architecture =
+                r#"{"factory":"encompute.torch.models:tiny_classifier","kwargs":{"dim":"16"}}"#
+                    .into()
+        }),
+        ("extra field", |s| {
+            s.base_model.architecture =
+                r#"{"factory":"encompute.torch.models:tiny_classifier","kwargs":{},"module":"os"}"#
+                    .into()
+        }),
+        ("not JSON", |s| {
+            s.base_model.architecture = "TinyTransformer(d=32)".into()
+        }),
+        ("the HF factory for a reference model", |s| {
+            s.base_model.architecture = hf_architecture()
+        }),
+    ];
+    spec().validate().unwrap();
+    for (what, e) in reference {
+        let mut t = spec();
+        e(&mut t);
+        assert_eq!(t.validate().unwrap_err().code, Code::TrainingSpec, "{what}");
+    }
+    hf_spec().validate().unwrap();
+    let hf: Vec<(&str, Edit)> = vec![
+        ("the reference factory", |s| {
+            s.base_model.architecture = REFERENCE.into()
+        }),
+        ("another config", |s| {
+            s.base_model.architecture = serde_json::json!({"factory": HF_FACTORY, "kwargs": {
+                "config": r#"{"model_type": "bert", "hidden_size": 64}"#,
+                "num_labels": 2, "task": "sequence-classification"}})
+            .to_string()
+        }),
+        ("labels", |s| {
+            s.base_model.architecture = serde_json::json!({"factory": HF_FACTORY, "kwargs": {
+                "config": HF_CONFIG, "num_labels": 3, "task": "sequence-classification"}})
+            .to_string()
+        }),
+        ("extra kwarg", |s| {
+            s.base_model.architecture = serde_json::json!({"factory": HF_FACTORY, "kwargs": {
+                "config": HF_CONFIG, "num_labels": 2, "task": "sequence-classification",
+                "trust_remote_code": true}})
+            .to_string()
+        }),
+    ];
+    for (what, e) in hf {
+        let mut t = hf_spec();
+        e(&mut t);
+        assert_eq!(t.validate().unwrap_err().code, Code::TrainingSpec, "{what}");
+    }
+    // A config.json with custom code, bound by the package's own digest,
+    // is still refused.
+    let mut t = hf_spec();
+    let evil = r#"{"model_type": "bert", "auto_map": {"AutoModel": "x.Y"}}"#;
+    arch(
+        &mut t,
+        serde_json::json!({"factory": HF_FACTORY, "kwargs": {"config": evil,
+            "num_labels": 2, "task": "sequence-classification"}}),
+    );
+    let p = t.base_model.huggingface.as_mut().unwrap();
+    p.config_digest = sha256_hex(evil.as_bytes());
+    p.files[0].sha256 = p.config_digest.clone();
+    assert!(t.validate().is_err());
+}
+
+/// The reference factory's arguments were bounded one by one (each at most
+/// 2^20), not together: `dim` = 2^20 alone asks the worker for five
+/// dim x dim linear layers, terabytes. The model's exact parameter count
+/// (embedding, q/k/v/out/feed-forward, head) and its per-sample
+/// activations are bounded too, before any worker builds it.
+#[test]
+fn reference_factory_arguments_are_bounded_together() {
+    let parse = |kwargs: serde_json::Value| {
+        Architecture::parse(
+            &serde_json::json!({"factory": REFERENCE_FACTORY, "kwargs": kwargs}).to_string(),
+        )
+    };
+    // The TinyClassifier's parameters: vocab*dim + 5*(dim*dim + dim) + dim*classes + classes.
+    let params = |vocab: u64, dim: u64, classes: u64| {
+        vocab * dim + 5 * (dim * dim + dim) + dim * classes + classes
+    };
+    for ok in [
+        serde_json::json!({}),
+        serde_json::json!({"vocab": 64, "dim": 16, "classes": 2, "seq": 8}),
+        serde_json::json!({"dim": 4096}),
+        serde_json::json!({"vocab": 1 << 20, "dim": 128}),
+        serde_json::json!({"seq": 1 << 13}),
+        serde_json::json!({"seq": 16000}),
+        serde_json::json!({"classes": 1 << 20}),
+    ] {
+        parse(ok.clone()).unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    assert!(params(64, 4096, 2) <= 1 << 28 && params(64, 8192, 2) > 1 << 28);
+    for too_big in [
+        serde_json::json!({"dim": 1 << 20}),
+        serde_json::json!({"dim": 8192}),
+        serde_json::json!({"vocab": 1 << 20, "dim": 256}),
+        serde_json::json!({"dim": 1 << 14, "classes": 1 << 20}),
+        serde_json::json!({"seq": 1 << 20}),
+        serde_json::json!({"seq": 1 << 14}),
+        // seq alone fits (16000 x 16016); with dim 1000 the activations do not.
+        serde_json::json!({"seq": 16000, "dim": 1000}),
+    ] {
+        let e = parse(too_big.clone()).unwrap_err();
+        assert_eq!(e.code, Code::TrainingSpec, "{too_big}");
+        assert!(e.message.contains("too large"), "{too_big}: {e}");
+    }
+    // Through the validator too.
+    let mut t = spec();
+    t.base_model.architecture =
+        serde_json::json!({"factory": REFERENCE_FACTORY, "kwargs": {"dim": 1 << 20}}).to_string();
+    assert_eq!(t.validate().unwrap_err().code, Code::TrainingSpec);
+}
+
+/// Review finding TR-4 (ENC-SF-2026-073): a package's configuration cannot ask for
+/// quantization or choose the attention implementation, and its tokenizer
+/// configuration holds only known settings of a Transformers-native
+/// tokenizer.
+#[test]
+fn package_configurations_hold_only_known_settings() {
+    use encompute_training::hf::{check_config, check_tokenizer_config};
+    for c in [
+        r#"{"model_type": "bert", "quantization_config": {"quant_method": "bitsandbytes"}}"#,
+        r#"{"model_type": "bert", "_attn_implementation": "flash_attention_2"}"#,
+        r#"{"model_type": "bert", "_attn_implementation_autoset": true}"#,
+        r#"{"model_type": "bert", "attn_implementation": "sdpa"}"#,
+    ] {
+        let e = check_config(&serde_json::from_str(c).unwrap()).unwrap_err();
+        assert_eq!(e.code, Code::ModelPackage, "{c}");
+    }
+    let ok = serde_json::json!({"do_lower_case": true, "model_max_length": 512,
+        "tokenizer_class": "BertTokenizer", "cls_token": "[CLS]", "added_tokens_decoder": {}});
+    check_tokenizer_config(&ok).unwrap();
+    for c in [
+        serde_json::json!({"auto_map": {"AutoTokenizer": ["x.T", null]}}),
+        serde_json::json!({"tokenizer_class": "EvilTokenizer"}),
+        serde_json::json!({"processor_class": "x.P"}),
+        // Keys naming a file: Transformers would open whatever path they name.
+        serde_json::json!({"tokenizer_file": "/etc/passwd"}),
+        serde_json::json!({"full_tokenizer_file": "../other/tokenizer.json"}),
+        serde_json::json!({"special_tokens_map_file": "/home/x/special_tokens_map.json"}),
+        serde_json::json!({"tokenizer_file": null}),
+        serde_json::json!([]),
+    ] {
+        assert_eq!(
+            check_tokenizer_config(&c).unwrap_err().code,
+            Code::ModelPackage,
+            "{c}"
+        );
+    }
+}
+
+/// Review finding KB-1 (ENC-SF-2026-036): a spec binds the key brokers whose grants its
+/// workers accept.
+#[test]
+fn a_spec_binds_its_key_brokers() {
+    let mut t = spec();
+    t.key_brokers.clear();
+    assert_eq!(t.validate().unwrap_err().code, Code::TrainingSpec);
+    let mut t = spec();
+    t.key_brokers.insert("modelco".into(), "NOTHEX".into());
+    assert!(t.validate().is_err());
+    let mut t = spec();
+    t.coordinator_key = "x".into();
+    assert!(t.validate().is_err());
+    // A second broker would be trusted for every asset, so it could grant a
+    // key of its choosing for the first broker's assets (a participant's
+    // contribution key among them): one broker per spec.
+    let mut t = spec();
+    t.key_brokers.insert("colluding-broker".into(), h('7'));
+    let e = t.validate().unwrap_err();
+    assert_eq!(e.code, Code::TrainingSpec);
+    assert!(
+        e.message.contains("exactly one key broker"),
+        "{}",
+        e.message
+    );
+}
+
+/// Review finding TR-2 (ENC-SF-2026-050): a worker trains only from the spec's initial
+/// adapter (round 1) or from the adapter the coordinator recorded for the
+/// previous round of the same run; never from one whoever runs the job
+/// chooses (an older round's, another run's, its own).
+#[test]
+fn a_worker_trains_only_from_the_previous_recorded_adapter() {
+    let s = spec();
+    let coord = SigningKey::from_bytes(&[3; 32]);
+    let init = s.initial_adapter_digest.clone();
+    check_input_adapter(&s, "run", 1, "adapter-0", &init, None).unwrap();
+    for (id, d) in [("adapter-0", h('9')), ("adapter-1", init.clone())] {
+        assert!(check_input_adapter(&s, "run", 1, id, &d, None).is_err());
+    }
+    let rec = |round: u32, run: &str, key: &SigningKey| {
+        AdapterRecord::new(&s, run, round, None, &h('a'), "update", &h('b'))
+            .unwrap()
+            .sign(key)
+            .unwrap()
+    };
+    let r1 = rec(1, "run", &coord);
+    check_input_adapter(&s, "run", 2, "adapter-1", &h('b'), Some(&r1)).unwrap();
+    // No record; another digest; an older round's; another run's; a record
+    // the coordinator did not sign; a round outside the spec.
+    assert!(check_input_adapter(&s, "run", 2, "adapter-1", &h('b'), None).is_err());
+    assert!(check_input_adapter(&s, "run", 2, "adapter-1", &h('c'), Some(&r1)).is_err());
+    assert!(check_input_adapter(&s, "run", 3, "adapter-1", &h('b'), Some(&r1)).is_err());
+    assert!(check_input_adapter(&s, "run-2", 2, "adapter-1", &h('b'), Some(&r1)).is_err());
+    let forged = rec(1, "run", &SigningKey::from_bytes(&[4; 32]));
+    assert!(check_input_adapter(&s, "run", 2, "adapter-1", &h('b'), Some(&forged)).is_err());
+    assert!(check_input_adapter(&s, "run", 99, "adapter-98", &h('b'), Some(&r1)).is_err());
 }

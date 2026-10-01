@@ -68,8 +68,10 @@ model = project.model("clinical-model", owner="modelco", policy="private-model",
 data = []
 for i, owner in enumerate(("hospital-a", "hospital-b")):
     texts, labels, ids = hospital_notes(i + 1)
+    # Each hospital approves publishing its number of patients: the sampling
+    # rate is derived from that public figure, never from the data.
     d = et.private_text_dataset(texts, labels, tokenizer=tok, max_length=16, stride=4,
-                                unit_ids=ids)
+                                unit_ids=ids, public_units=PATIENTS)
     units = len(torch.unique(d.tensors["unit_ids"]))
     print(f"{owner:<24}{len(texts)} notes -> {len(d)} tokenized records -> {units} patients")
     data.append(project.data(f"notes-{'ab'[i]}", owner=owner, dataset=d, adapters="public"))

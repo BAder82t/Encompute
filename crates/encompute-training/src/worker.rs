@@ -9,7 +9,10 @@
 //!   this policy (and the record itself against the provider's roots and
 //!   the training spec's attestation policy, with a `Verifier`);
 //! - that the model package, dataset, layout, plan and policies are the
-//!   training spec's;
+//!   training spec's, and so is the configuration it trained with;
+//! - that it started from the spec's initial adapter in round 1 (later
+//!   rounds: [`crate::adapter::check_input_adapter`] with the previous
+//!   round's signed adapter record);
 //! - that the output is the sealed artifact it commits to.
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
@@ -23,7 +26,8 @@ use encompute_verification::{hex, unhex};
 use crate::spec::TrainingSpec;
 use crate::tagged;
 
-pub const WORKER_EVIDENCE_VERSION: u32 = 1;
+/// 2: the input adapter, the configuration digest and the seed.
+pub const WORKER_EVIDENCE_VERSION: u32 = 2;
 const EVIDENCE: &str = "encompute.training-worker-evidence.v1";
 
 fn err(m: impl Into<String>) -> Error {
@@ -49,7 +53,18 @@ pub struct WorkerEvidence {
     pub dataset_asset: String,
     pub dataset_digest: String,
     pub layout_digest: String,
-    /// The measured image, as the attestation reports it.
+    /// The adapter the worker trained from (`adapter-{round - 1}`) and
+    /// SHA-256 of its plaintext.
+    pub input_adapter: String,
+    pub input_adapter_digest: String,
+    /// [`TrainingSpec::config_digest`] of the configuration it trained
+    /// with.
+    pub config_digest: String,
+    /// The round's training seed (organization mode's batch order; DP-SGD
+    /// samples from the operating system instead).
+    pub seed: u64,
+    /// The measured image, as the attestation reports it (read from the
+    /// worker's own attestation, never from its job description).
     pub image_digest: String,
     pub attestation_record_id: String,
     pub session_id: String,
@@ -109,7 +124,7 @@ impl SignedWorkerEvidence {
             .map_err(|_| err("the worker evidence signature is invalid"))?;
         let b = &record.evidence.binding;
         let spec_id = spec.id()?;
-        let checks: [(&str, bool); 12] = [
+        let checks: [(&str, bool); 16] = [
             (
                 "the attestation binds another signing key",
                 b.evaluator_public_key == self.signer_key,
@@ -121,6 +136,24 @@ impl SignedWorkerEvidence {
             (
                 "the attestation binds another policy",
                 b.policy_id == spec.policy_id,
+            ),
+            (
+                "the attestation binds another privacy policy",
+                b.privacy_policy_id == spec.privacy_policy_id,
+            ),
+            (
+                "the attestation binds other training code",
+                b.artifact_digest == spec.code_digest,
+            ),
+            (
+                "another training configuration",
+                e.config_digest == spec.config_digest()?,
+            ),
+            (
+                "an input adapter that is not the previous round's",
+                e.round > 0
+                    && e.input_adapter == format!("adapter-{}", e.round - 1)
+                    && (e.round > 1 || e.input_adapter_digest == spec.initial_adapter_digest),
             ),
             (
                 "another attestation record",
@@ -162,7 +195,11 @@ impl SignedWorkerEvidence {
         if e.round == 0 || e.round > spec.config.rounds {
             return Err(err("worker evidence: a round outside the training spec"));
         }
-        for d in [&e.output_commitment, &e.step_commitment] {
+        for d in [
+            &e.output_commitment,
+            &e.step_commitment,
+            &e.input_adapter_digest,
+        ] {
             if d.len() != 64 || !d.bytes().all(|c| c.is_ascii_hexdigit()) {
                 return Err(err("worker evidence: malformed commitment"));
             }

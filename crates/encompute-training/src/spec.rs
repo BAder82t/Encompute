@@ -2,8 +2,10 @@
 //! confidential fine-tuning, canonical, with an ID (`enctrain1:`) that
 //! workers attest to, key brokers release keys for, and checkpoints and
 //! adapters are bound to. Changing any of it (base model, code, LoRA
-//! configuration, optimizer, privacy, aggregation, participants, plan)
-//! changes the ID.
+//! configuration, optimizer, privacy, aggregation, participants, plan,
+//! key brokers, coordinator, initial adapter) changes the ID.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +16,28 @@ use encompute_verification::canonical::canonical_json;
 
 use crate::tagged_hex;
 
-pub const SPEC_VERSION: u32 = 1;
+/// 2: typed, allowlisted architectures; the key brokers, the coordinator
+/// and the initial adapter are bound; privacy unit counts are optional
+/// public figures.
+pub const SPEC_VERSION: u32 = 2;
 const SPEC: &str = "encompute.training-spec.v1";
+const CONFIG: &str = "encompute.training-config.v1";
+
+/// The reference model factory (`method` `lora`).
+pub const REFERENCE_FACTORY: &str = "encompute.torch.models:tiny_classifier";
+/// The Hugging Face factory (`method` `peft-lora`): the package's own
+/// `config.json`, Transformers-native classes only.
+pub const HF_FACTORY: &str = "encompute.torch.hf:from_config";
+/// The reference factory's keyword arguments, each a positive integer.
+const REFERENCE_KWARGS: &[&str] = &["classes", "dim", "seq", "vocab"];
+const MAX_REFERENCE_DIM: u64 = 1 << 20;
+/// The reference model's parameters, all together (about 1 GiB of float32
+/// weights): each argument is bounded alone, but their products are what
+/// the worker allocates.
+const MAX_REFERENCE_PARAMETERS: u128 = 1 << 28;
+/// Its per-sample activations, `seq x (dim + seq)` (the hidden states and
+/// the attention matrix).
+const MAX_REFERENCE_ACTIVATIONS: u128 = 1 << 28;
 const RUN: &str = "encompute.training-run.v1";
 const PARTICIPANT: &str = "encompute.training-participant.v1";
 
@@ -254,7 +276,9 @@ impl TrainingConfig {
 pub struct ModelCommitment {
     pub asset_id: String,
     pub owner: String,
-    /// E.g. the class and shape summary.
+    /// The model factory and its arguments (JSON: `factory`, `kwargs`):
+    /// one of the factories the worker image ships (see
+    /// [`Architecture`]), never an arbitrary callable.
     pub architecture: String,
     /// SHA-256 of the serialized weights (hex).
     pub weights_digest: String,
@@ -273,13 +297,18 @@ pub struct DatasetCommitment {
     pub owner: String,
     /// The gradient asset the owner contributes for it.
     pub gradient_asset: String,
-    /// SHA-256 of the dataset as its owner holds it (hex).
+    /// SHA-256 of the dataset as its owner holds it (hex). The dataset
+    /// carries a random salt its owner keeps, so the digest is a hiding
+    /// commitment: nobody can test a guessed dataset against it.
     pub digest: String,
-    /// DP-SGD: the number of privacy units in the dataset.
+    /// DP-SGD: the number of privacy units the owner approved for
+    /// publication (a public figure, not a count of the data), which the
+    /// default sampling rate is derived from. Absent: the sampling rate
+    /// was set explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy_units: Option<u64>,
-    /// DP-SGD: SHA-256 of the per-record unit IDs (hex), which the
-    /// dataset digest also covers.
+    /// DP-SGD: SHA-256 of the per-record unit IDs and the dataset's salt
+    /// (hex), which the dataset digest also covers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grouping_digest: Option<String>,
     /// Text datasets: how the owner tokenized it. Tokenization changes the
@@ -330,6 +359,160 @@ pub struct TrainingSpec {
     pub config: TrainingConfig,
     /// The contributing parties and their identity keys.
     pub participants: Vec<PartyIdentity>,
+    /// The key brokers whose grants workers accept: broker ID -> its
+    /// grant-signing key (hex Ed25519). Part of the attested identity, so
+    /// the host cannot choose or omit a broker's key.
+    pub key_brokers: BTreeMap<String, String>,
+    /// The coordinator's adapter-record signing key (hex Ed25519): a
+    /// worker trains only from an adapter it recorded.
+    pub coordinator_key: String,
+    /// SHA-256 of the initial adapter (`adapter-0`, hex): round 1 starts
+    /// from it.
+    pub initial_adapter_digest: String,
+}
+
+/// A model factory the worker image ships, and its arguments: the only
+/// code a training spec can name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Architecture {
+    pub factory: String,
+    pub kwargs: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Architecture {
+    /// Parses and checks `base_model.architecture`: an allowlisted
+    /// factory, and arguments of its schema.
+    pub fn parse(s: &str) -> Result<Self> {
+        let v: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| bad(format!("the model architecture is not JSON: {e}")))?;
+        let o = v
+            .as_object()
+            .ok_or_else(|| bad("the model architecture is not an object"))?;
+        if o.len() != 2 {
+            return Err(bad(
+                "the model architecture has exactly a factory and kwargs",
+            ));
+        }
+        let factory = o
+            .get("factory")
+            .and_then(|f| f.as_str())
+            .ok_or_else(|| bad("the model architecture names no factory"))?
+            .to_owned();
+        let kwargs = o
+            .get("kwargs")
+            .and_then(|k| k.as_object())
+            .ok_or_else(|| bad("the model architecture's kwargs are not an object"))?
+            .clone();
+        let a = Self { factory, kwargs };
+        match a.factory.as_str() {
+            REFERENCE_FACTORY => {
+                for (k, v) in &a.kwargs {
+                    let ok = REFERENCE_KWARGS.contains(&k.as_str())
+                        && v.as_u64()
+                            .is_some_and(|n| (1..=MAX_REFERENCE_DIM).contains(&n));
+                    if !ok {
+                        return Err(bad(format!(
+                            "{REFERENCE_FACTORY}: {k} is not one of {} (a positive integer)",
+                            REFERENCE_KWARGS.join(", ")
+                        )));
+                    }
+                }
+                a.check_reference_size()?;
+            }
+            HF_FACTORY => {
+                let mut keys: Vec<&str> = a.kwargs.keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                if keys != ["config", "num_labels", "task"]
+                    || !a.kwargs["config"].is_string()
+                    || a.kwargs["num_labels"].as_u64().is_none()
+                    || a.kwargs["task"].as_str().is_none()
+                {
+                    return Err(bad(format!(
+                        "{HF_FACTORY} takes exactly config (the package's config.json), \
+                         num_labels and task"
+                    )));
+                }
+            }
+            other => {
+                return Err(bad(format!(
+                "model factory {other:?} is not one the worker image ships ({REFERENCE_FACTORY}, \
+                     {HF_FACTORY}): a training spec cannot name other code"
+            )))
+            }
+        }
+        Ok(a)
+    }
+
+    /// Bounds what the reference model (`TinyClassifier` in
+    /// `encompute/torch/models.py`) allocates, with its defaults for
+    /// missing arguments (vocab 64, dim 16, classes 2, seq 8): its exact
+    /// parameter count, `vocab*dim` (embedding) + `5*(dim*dim + dim)` (the
+    /// q, k, v, out and feed-forward layers) + `dim*classes + classes`
+    /// (the head), and its per-sample activations.
+    fn check_reference_size(&self) -> Result<()> {
+        let arg = |k: &str, default: u128| {
+            self.kwargs
+                .get(k)
+                .and_then(|v| v.as_u64())
+                .map_or(default, u128::from)
+        };
+        let (vocab, dim, classes, seq) = (
+            arg("vocab", 64),
+            arg("dim", 16),
+            arg("classes", 2),
+            arg("seq", 8),
+        );
+        let parameters = vocab * dim + 5 * (dim * dim + dim) + dim * classes + classes;
+        if parameters > MAX_REFERENCE_PARAMETERS {
+            return Err(bad(format!(
+                "{REFERENCE_FACTORY}: the model is too large: {parameters} parameters \
+                 (vocab {vocab}, dim {dim}, classes {classes}); at most \
+                 {MAX_REFERENCE_PARAMETERS}"
+            )));
+        }
+        let activations = seq * (dim + seq);
+        if activations > MAX_REFERENCE_ACTIVATIONS {
+            return Err(bad(format!(
+                "{REFERENCE_FACTORY}: the model is too large: {activations} activations per \
+                 sample (seq {seq}, dim {dim}); at most {MAX_REFERENCE_ACTIVATIONS}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The architecture fits the spec: the reference factory for reference
+    /// LoRA; for PEFT, the Hugging Face factory with exactly the package's
+    /// `config.json` bytes, labels and task.
+    fn check(&self, spec: &TrainingSpec) -> Result<()> {
+        match (self.factory.as_str(), &spec.base_model.huggingface) {
+            (REFERENCE_FACTORY, None) => Ok(()),
+            (HF_FACTORY, Some(p)) => {
+                let config = self.kwargs["config"].as_str().unwrap_or_default();
+                if crate::seal::sha256_hex(config.as_bytes()) != p.config_digest {
+                    return Err(bad(
+                        "the architecture's config is not the model package's config.json",
+                    ));
+                }
+                let v: serde_json::Value =
+                    serde_json::from_str(config).map_err(|e| bad(format!("config.json: {e}")))?;
+                if crate::hf::check_config(&v)? != p.model_type {
+                    return Err(bad("the architecture's model type is not the package's"));
+                }
+                if self.kwargs["num_labels"].as_u64() != Some(u64::from(p.num_labels))
+                    || self.kwargs["task"].as_str() != Some(p.task.as_str())
+                {
+                    return Err(bad(
+                        "the architecture's labels or task are not the package's",
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(bad(format!(
+                "a reference model is built with {REFERENCE_FACTORY}, a Hugging Face model with \
+                 {HF_FACTORY}"
+            ))),
+        }
+    }
 }
 
 fn hex64(name: &str, s: &str) -> Result<()> {
@@ -354,6 +537,29 @@ impl TrainingSpec {
         hex64("code_digest", &self.code_digest)?;
         hex64("layout_digest", &self.layout_digest)?;
         hex64("weights_digest", &self.base_model.weights_digest)?;
+        hex64("coordinator_key", &self.coordinator_key)?;
+        hex64("initial_adapter_digest", &self.initial_adapter_digest)?;
+        if self.key_brokers.is_empty() {
+            return Err(bad(
+                "a training spec names its key brokers and their grant-signing keys",
+            ));
+        }
+        // One broker per spec: a workload trusts every broker named here for
+        // every asset, so with two, one broker could grant a key (such as a
+        // participant's contribution key) for an asset held by the other.
+        // Several owners' brokers need a per-asset binding first.
+        if self.key_brokers.len() != 1 {
+            return Err(bad(
+                "a training spec names exactly one key broker: several brokers would each be \
+                 trusted for every asset",
+            ));
+        }
+        for (id, key) in &self.key_brokers {
+            if id.is_empty() {
+                return Err(bad("a key broker needs an ID"));
+            }
+            hex64("a key broker's grant-signing key", key)?;
+        }
         if self.datasets.len() < 2 {
             return Err(bad("training needs datasets from at least two parties"));
         }
@@ -379,6 +585,7 @@ impl TrainingSpec {
                 return Err(bad("the PEFT library version is not the package's"));
             }
         }
+        Architecture::parse(&self.base_model.architecture)?.check(self)?;
         for d in &self.datasets {
             hex64("dataset digest", &d.digest)?;
             match (hf, &d.preprocessing) {
@@ -407,7 +614,13 @@ impl TrainingSpec {
             }
             match (dp, d.privacy_units, &d.grouping_digest) {
                 (None, None, None) => {}
-                (Some(c), Some(n), g) if n > 0 => match (c.grouping.as_str(), g) {
+                (Some(_), Some(0), _) => {
+                    return Err(bad(format!(
+                        "{}'s public number of privacy units is zero",
+                        d.asset_id
+                    )))
+                }
+                (Some(c), _, g) => match (c.grouping.as_str(), g) {
                     ("unit_ids", Some(g)) => hex64("grouping digest", g)?,
                     ("none", None) => {}
                     _ => {
@@ -417,12 +630,6 @@ impl TrainingSpec {
                         )))
                     }
                 },
-                (Some(_), _, _) => {
-                    return Err(bad(format!(
-                        "DP-SGD needs {}'s number of privacy units",
-                        d.asset_id
-                    )))
-                }
                 (None, _, _) => {
                     return Err(bad(format!(
                         "{} declares privacy units, but the run is not DP-SGD",
@@ -447,6 +654,12 @@ impl TrainingSpec {
     /// `SHA256("encompute.training-spec.v1" || 0x00 || canonical spec)`.
     pub fn id(&self) -> Result<String> {
         Ok(tagged_hex(SPEC, &[&canonical_json(self)?]))
+    }
+
+    /// `SHA256("encompute.training-config.v1" || 0x00 || canonical
+    /// config)`: what a worker's evidence says it trained with.
+    pub fn config_digest(&self) -> Result<String> {
+        Ok(tagged_hex(CONFIG, &[&canonical_json(&self.config)?]))
     }
 
     /// One execution of this spec.

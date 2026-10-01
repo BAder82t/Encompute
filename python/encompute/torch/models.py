@@ -1,12 +1,18 @@
 """Model factories training workers may build. A worker never unpickles a
-model: it builds the architecture from a factory in code the training spec
-binds (by digest) and loads the weights from the canonical tensor format.
-Your own factory works the same way: a module-level function in an
-importable module, named as ``"package.module:function"``."""
+model: it builds the architecture from a factory the worker image ships,
+in code the training spec binds (by digest), and loads the weights from
+the canonical tensor format.
+
+Only the factories in ``FACTORIES`` can be named, each with arguments of
+its schema (checked natively, the same check the training spec validator
+applies): a training spec cannot make a worker call any other code. A new
+architecture is added to the worker image and to the allowlist, and
+reviewed there."""
 
 from __future__ import annotations
 
 import importlib
+import json
 
 import torch
 from torch import nn
@@ -38,14 +44,33 @@ def tiny_classifier(**kwargs) -> nn.Module:
     return TinyClassifier(**kwargs)
 
 
+# The factories the worker image ships (the training spec validator's
+# allowlist): the reference model, and Hugging Face models rebuilt from
+# their package's own config.json.
+FACTORIES = ("encompute.torch.models:tiny_classifier", "encompute.torch.hf:from_config")
+
+
+def check(factory: str, kwargs: dict) -> None:
+    """Refuses a factory outside ``FACTORIES``, or arguments outside its
+    schema, before anything is imported."""
+    from .. import _native
+
+    try:
+        _native.training_check_architecture(json.dumps({"factory": factory, "kwargs": kwargs}))
+    except _native.NativeError as e:
+        raise ValueError(e.args[1]) from None
+
+
 def build(factory: str, kwargs: dict) -> nn.Module:
-    """Builds ``factory`` ("module:function") with ``kwargs``."""
+    """Builds ``factory`` ("module:function", one of ``FACTORIES``) with
+    ``kwargs``."""
+    check(factory, kwargs)
     mod, _, fn = factory.partition(":")
-    if not mod or not fn:
-        raise ValueError(f"factory {factory!r}: expected 'package.module:function'")
     return getattr(importlib.import_module(mod), fn)(**kwargs)
 
 
 def source_file(factory: str) -> str:
     """The file defining ``factory``: part of the training code digest."""
+    if factory not in FACTORIES:
+        raise ValueError(f"factory {factory!r} is not one the worker image ships")
     return importlib.import_module(factory.partition(":")[0]).__file__

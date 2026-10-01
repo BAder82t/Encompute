@@ -20,6 +20,7 @@ mod workload;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -30,6 +31,7 @@ use encompute_attestation::{
     Verifier, WorkloadSession, GRANT_VERSION,
 };
 use encompute_ir::{Code, Error, Result};
+use encompute_verification::{hex, unhex};
 
 pub use client::BrokerClient;
 pub use root::{
@@ -159,6 +161,98 @@ pub struct BrokerState {
     /// (created when missing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_signing_key: Option<StoredKey>,
+    /// Incremented by every save: of two copies of a broker's state, the
+    /// one with the lower generation is older. Informational only: it is
+    /// not compared against anything persistent, so restoring an older
+    /// authentic copy is not detected (a known limitation).
+    #[serde(default)]
+    pub generation: u64,
+    /// Hex HMAC-SHA256 over every other field, under a key derived from
+    /// the store's KEK ([`SecretStore::state_mac`]): an edited state file
+    /// does not open, but an older authentic copy (one saved before a
+    /// revocation, say) still does. Absent only for development plaintext
+    /// storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+}
+
+/// What the state MAC covers: this domain, then the state (without its
+/// MAC) as the broker serializes it, so every field that gates release is
+/// authenticated, and an unknown or reordered field changes nothing.
+const STATE_MAC_DOMAIN: &[u8] = b"encompute.broker-state.v1\0";
+
+fn state_bytes(state: &BrokerState) -> Result<Zeroizing<Vec<u8>>> {
+    let mut s = state.clone();
+    s.mac = None;
+    let mut b = Zeroizing::new(STATE_MAC_DOMAIN.to_vec());
+    serde_json::to_writer(&mut *b, &s).map_err(|e| err(Code::KeyRelease, e.to_string()))?;
+    Ok(b)
+}
+
+/// Compares a stored state MAC with the expected one in constant time
+/// (the `hmac` crate's [`CtOutput`](hmac::digest::CtOutput) equality); a
+/// tag of the wrong length never matches.
+fn same_mac(a: &[u8], b: &[u8; 32]) -> bool {
+    use hmac::digest::{generic_array::GenericArray, CtOutput};
+    type StateMac = hmac::Hmac<sha2::Sha256>;
+    a.len() == b.len()
+        && CtOutput::<StateMac>::new(GenericArray::clone_from_slice(a))
+            == CtOutput::<StateMac>::new((*b).into())
+}
+
+/// How [`KeyBroker::open`] treats the state's MAC.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StateAuth {
+    /// A new broker's state: nothing to check yet.
+    New,
+    /// The MAC must verify.
+    Required,
+    /// A state written before states were authenticated: accepted without
+    /// a MAC, on its owner's word (`encompute keys upgrade-state`); one
+    /// that has a MAC must still verify.
+    Legacy,
+}
+
+fn authenticate(state: &BrokerState, store: &dyn SecretStore, auth: StateAuth) -> Result<()> {
+    let expected = store.state_mac(&state_bytes(state)?)?;
+    if expected.is_none() && store.security() == StoreSecurity::Production {
+        return Err(err(
+            Code::KeyRelease,
+            format!(
+                "the {} store cannot authenticate the broker state; a broker needs a store \
+                 that can",
+                store.name()
+            ),
+        ));
+    }
+    if auth == StateAuth::New {
+        return Ok(());
+    }
+    match (expected, &state.mac) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(err(
+            Code::KeyRelease,
+            format!(
+                "the {} store cannot authenticate the broker state; open it with the store \
+                 that wrapped its keys",
+                store.name()
+            ),
+        )),
+        (Some(m), Some(h)) if unhex(h).is_some_and(|h| same_mac(&h, &m)) => Ok(()),
+        (Some(_), Some(_)) => Err(err(
+            Code::KeyRelease,
+            "the broker state fails authentication under this broker's KEK: it was edited \
+             outside Encompute (a release policy, the mode, the organization or a key \
+             version changed); restore it from a trusted backup",
+        )),
+        (Some(_), None) if auth == StateAuth::Legacy => Ok(()),
+        (Some(_), None) => Err(err(
+            Code::KeyRelease,
+            "the broker state is not authenticated (written by an earlier Encompute): check \
+             its release policies, mode and organization, then run `encompute keys \
+             upgrade-state`",
+        )),
+    }
 }
 
 /// The wrap context of the grant-signing key: not a valid asset ID, so it
@@ -188,6 +282,8 @@ pub struct KeyBroker {
     sessions: BTreeMap<String, Session>,
     clock: Box<dyn Fn() -> u64 + Send>,
     grant_signer: GrantSigner,
+    /// The generation of the last state loaded or saved.
+    generation: AtomicU64,
 }
 
 fn check_broker_id(id: &str) -> Result<()> {
@@ -226,7 +322,7 @@ impl KeyBroker {
         store: Box<dyn SecretStore>,
     ) -> Result<Self> {
         check_broker_id(broker_id)?;
-        Self::from_state(
+        Self::open(
             BrokerState {
                 broker_id: broker_id.to_owned(),
                 mode,
@@ -236,18 +332,32 @@ impl KeyBroker {
                 challenges: Vec::new(),
                 organization: None,
                 grant_signing_key: None,
+                generation: 0,
+                mac: None,
             },
             verifier,
             store,
+            StateAuth::New,
         )
     }
 
-    /// Reopens a broker; `store` must be the one its keys were stored with.
-    /// A state without a grant-signing key gets one (saved with the state).
+    /// Reopens a broker; `store` must be the one its keys were stored with,
+    /// and the state must carry a valid MAC under its KEK (see
+    /// [`BrokerState::mac`]). A state without a grant-signing key gets one
+    /// (saved with the state).
     pub fn from_state(
+        state: BrokerState,
+        verifier: Verifier,
+        store: Box<dyn SecretStore>,
+    ) -> Result<Self> {
+        Self::open(state, verifier, store, StateAuth::Required)
+    }
+
+    fn open(
         mut state: BrokerState,
         verifier: Verifier,
         store: Box<dyn SecretStore>,
+        auth: StateAuth,
     ) -> Result<Self> {
         if state.mode == BrokerMode::Production && store.security() != StoreSecurity::Production {
             return Err(err(
@@ -272,6 +382,7 @@ impl KeyBroker {
                 ),
             ));
         }
+        authenticate(&state, store.as_ref(), auth)?;
         let broker_id = state.broker_id.clone();
         let ctx = KeyContext {
             broker_id: &broker_id,
@@ -295,6 +406,7 @@ impl KeyBroker {
             }
         };
         Ok(Self {
+            generation: AtomicU64::new(state.generation),
             state,
             verifier,
             store,
@@ -486,7 +598,9 @@ impl KeyBroker {
     }
 
     /// Revokes a version (default: the current one). A revoked current key
-    /// is never released; rotate to release again.
+    /// is never released; rotate to release again. Restoring a state file
+    /// saved before the revocation undoes it, undetected (see
+    /// [`load`](KeyBroker::load)).
     pub fn revoke(&mut self, asset_id: &str, version: Option<u64>) -> Result<u64> {
         let broker_id = self.state.broker_id.clone();
         let s = self
@@ -722,12 +836,19 @@ impl KeyBroker {
     }
 
     /// Writes the state (secrets included) to `path`, readable by the owner
-    /// only.
+    /// only, under the next generation and authenticated under the store's
+    /// KEK. The MAC stops edits, not a later restore of this file over a
+    /// newer one (see [`load`](KeyBroker::load)).
     pub fn save(&self, path: &Path) -> Result<()> {
         let io = |e: std::io::Error| err(Code::KeyRelease, format!("{}: {e}", path.display()));
+        let mut state = self.state.clone();
+        state.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        state.mac = self
+            .store
+            .state_mac(&state_bytes(&state)?)?
+            .map(|m| hex(&m));
         let json = Zeroizing::new(
-            serde_json::to_vec_pretty(&self.state)
-                .map_err(|e| err(Code::KeyRelease, e.to_string()))?,
+            serde_json::to_vec_pretty(&state).map_err(|e| err(Code::KeyRelease, e.to_string()))?,
         );
         let tmp = path.with_extension("tmp");
         {
@@ -754,7 +875,32 @@ impl KeyBroker {
         std::fs::rename(&tmp, path).map_err(io)
     }
 
+    /// Opens the state at `path`: it must be authenticated under `store`'s
+    /// KEK, so an edited file (a widened release policy, a flipped mode, a
+    /// cleared revocation) is refused. A rollback is not: restoring an
+    /// older authentic copy of the file (one saved before a revocation)
+    /// is not detected, and its revoked versions are released again (a
+    /// known limitation; the generation is not checked against anything
+    /// persistent).
     pub fn load(path: &Path, verifier: Verifier, store: Box<dyn SecretStore>) -> Result<Self> {
+        Self::open(Self::read(path)?, verifier, store, StateAuth::Required)
+    }
+
+    /// Opens a state file written before broker states were authenticated,
+    /// on its owner's word that it has not been edited (after checking its
+    /// release policies, mode and organization): the next [`save`] adds
+    /// the MAC. A state that has a MAC must still verify.
+    ///
+    /// [`save`]: KeyBroker::save
+    pub fn load_legacy(
+        path: &Path,
+        verifier: Verifier,
+        store: Box<dyn SecretStore>,
+    ) -> Result<Self> {
+        Self::open(Self::read(path)?, verifier, store, StateAuth::Legacy)
+    }
+
+    fn read(path: &Path) -> Result<BrokerState> {
         let bytes = Zeroizing::new(
             std::fs::read(path)
                 .map_err(|e| err(Code::KeyRelease, format!("{}: {e}", path.display())))?,
@@ -762,6 +908,23 @@ impl KeyBroker {
         let state: BrokerState = serde_json::from_slice(&bytes)
             .map_err(|e| err(Code::KeyRelease, format!("{}: {e}", path.display())))?;
         check_broker_id(&state.broker_id)?;
-        Self::from_state(state, verifier, store)
+        Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_mac;
+
+    #[test]
+    fn a_state_mac_matches_only_itself() {
+        let m = [7u8; 32];
+        assert!(same_mac(&m, &m));
+        let mut other = m;
+        other[31] ^= 1;
+        assert!(!same_mac(&other, &m));
+        assert!(!same_mac(&m[..31], &m));
+        assert!(!same_mac(&[7u8; 33], &m));
+        assert!(!same_mac(&[], &m));
     }
 }

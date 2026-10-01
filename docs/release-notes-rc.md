@@ -1,8 +1,11 @@
-# Encompute 0.3.0-rc.1: release notes (draft)
+# Encompute 0.3.0-rc.4: release notes
 
-**Status: draft.** This is the first release candidate of 0.3.0: the frozen
-target for independent security review ([security-review/](../security-review/)).
-No independent review has been completed yet. Features are frozen; only fixes go in
+This is the second published release candidate of
+0.3.0. The independent security review of 0.3.0-rc.3
+([security-review/](../security-review/)) has been completed: it and a
+follow-up review of the fixes reported 62 findings, ENC-SF-2026-033 to
+094, and all are fixed in this release candidate, several of them only
+partly (see "What is still open?"). Features are frozen; only fixes go in
 before 0.3.0.
 
 Encompute compiles ordinary Python into encrypted computation, and lets
@@ -60,6 +63,37 @@ Research only, never in production builds:
 The mock attestation provider and the development-mode OpenBao in Docker
 Compose are for development and trials. They protect nothing.
 
+## What changed since 0.3.0-rc.3?
+
+Security fixes for every finding of the review, each listed with its
+commits, regression test and invariant in
+[security-findings.md](security-findings.md) and summarized in the
+[CHANGELOG](../CHANGELOG.md). In short:
+
+- **State anchor.** Privacy-ledger and audit rollbacks made while the
+  control plane runs are refused and never anchored; frozen ledgers,
+  disables, cancelled and failed jobs, withdrawn approvals, left project
+  memberships and removed roles are anchored, so a restored database
+  cannot undo them.
+- **Collaboration.** Project membership is by invitation; an asset
+  approval covers only the organizations that were members when it was
+  given; a job's purpose and source assets are derived from its program;
+  job approvals take people, not service accounts; shared assets are
+  redacted for other organizations.
+- **Keys.** Key broker state is authenticated; grants are accepted only
+  from broker keys bound into the attested identity; the OpenBao client
+  follows no redirects; OpenFHE evaluation keys are bound to their
+  material and BinFHE keys are checked before use.
+- **Training and differential privacy.** Training specs name only
+  allowlisted factories and bind their brokers, coordinator and initial
+  adapter; every secure aggregate is a release that budgeted contributors
+  pay for; sensitivities are charged at their true value; the accountant
+  never rounds optimistically.
+- **Supply chain.** Actions pinned by commit, images by digest, TEE images
+  built by the release with hash-locked Python packages, and a commercial
+  build audit that fails when it cannot read symbols.
+- **Assurance suite**: 150 security invariants (was 124).
+
 ## What changed since 0.2.0?
 
 The full list is in the [CHANGELOG](../CHANGELOG.md). In short:
@@ -87,13 +121,36 @@ The full list is in the [CHANGELOG](../CHANGELOG.md). In short:
 - **Enterprise control plane**: organizations, OIDC, service identities,
   tenant isolation, jobs, scheduling, durable privacy state with a signed
   anchor, audit trail, API v1, Docker Compose deployment.
-- **Assurance suite**: 124 security invariants, a release gate in CI.
+- **Assurance suite**: 150 security invariants, a release gate in CI.
 - **Examples**: 20 runnable examples, each with its threat model.
 - **TFHE-rs** is isolated to research builds, and a commercial build audit
   proves it is absent from production builds.
 - **Toolchain**: Rust 1.98.1 (was 1.89.0).
 
 ## What breaks compatibility?
+
+From 0.3.0-rc.3, the fixes change behaviour. The full list, with what to
+do for each, is under "Breaking and behaviour changes" in the
+[CHANGELOG](../CHANGELOG.md). The ones most deployments meet:
+
+- **Control plane:** `ENCOMPUTE_ENV` is required; production `/metrics`
+  needs a token; migrations 0003 and 0004 run at startup; downgrading
+  afterwards is not supported (restore the pre-upgrade backup and its
+  anchor).
+- **API v1** (security exceptions, listed in
+  [api-stability.md](api-stability.md)): project membership by
+  invitation; a job's `purpose` and `source_assets` must match its
+  program; job approval by people only; redacted shared assets; identity
+  tokens need `iat` and a bounded lifetime.
+- **Clients:** `jobs run` and `Project.run` need a pinned evaluator key.
+- **Key broker:** KEK-protected state needs `encompute keys
+  upgrade-state`, and an existing KEK file must be owner-only.
+- **Formats:** TrainingSpec, WorkerEvidence and job descriptor v2; BGV
+  parameter-set IDs change (recompile and re-key BGV artifacts); new
+  privacy receipts for unsampled sub-organization units charge twice the
+  clip norm.
+
+From 0.2.0:
 
 - **Compiled artifacts.** 0.3 reads artifact format 5 only. 0.2 wrote
   format 2. Recompile every `.encompute` artifact; loading an old one fails
@@ -145,10 +202,37 @@ The full statements are in the [threat model](threat-model.md) and
 - **The control plane is trusted for coordination, not for trust
   decisions.** A compromised control plane can deny service, but cannot
   decrypt, release keys without attestation or forge receipts.
-- **No formal proof of the whole system.** The assurance suite tests 124
+- **No formal proof of the whole system.** The assurance suite tests 150
   invariants; it does not prove the system secure.
 
+## What is still open?
+
+Partial fixes, residual risks and accepted issues are in the "Open" list
+of [security-findings.md](security-findings.md) and in
+[KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md). Among them: an older
+authenticated key broker state file still opens (key broker rollback is
+not detected); the anchor's sets grow without bound and must stay under
+the vault's entry size limit; one control-plane process per anchor;
+identity providers are not bound per organization; local fine-tuning
+revocation checks are run by the beneficiary; and the torch and
+transformers CVE exceptions expire on 2026-12-31.
+
 ## How do I upgrade?
+
+From 0.3.0-rc.3:
+
+1. Take a database backup and a copy of the state anchor.
+2. Run `encompute security legacy-service-admins` and remove
+   `security_admin` from the service accounts it lists.
+3. Set `ENCOMPUTE_ENV` and the metrics token, make the KEK file
+   owner-only, and run `encompute keys upgrade-state` (then `--confirm`)
+   on each KEK-protected key broker.
+4. Upgrade the control plane, evaluators, key brokers and clients
+   together; pin evaluator keys on clients. Recompile and re-key BGV
+   artifacts and regenerate training specs.
+
+The details are in "Upgrading from 0.3.0-rc.3 or earlier" in
+[deployment.md](deployment.md).
 
 From 0.2.0:
 
@@ -172,6 +256,11 @@ From 0.2.0:
    `encompute test model.encompute --mode encrypted` on each artifact.
 7. For production builds, run `scripts/audit-commercial-build.sh
    target/release` to confirm no TFHE-rs code is linked.
+
+Verify what you download (checksums, Sigstore bundles, image signatures
+and attestations) with [verify-release.md](verify-release.md), and check
+the security invariants on your build with `assurance-report` (see
+[assurance.md](assurance.md)).
 
 For a new control-plane deployment, follow [deployment.md](deployment.md).
 Replace the Compose file's development-mode OpenBao with your own KMS

@@ -267,7 +267,8 @@ fn collusion_bound_sets_the_threshold() {
 }
 
 /// Release-boundary detection (ADR-013): revealing a budgeted asset needs a
-/// DP mechanism; sealed values are internal and cost nothing.
+/// DP mechanism; sealed values of encrypted computation are internal and
+/// cost nothing, but an aggregate is a release even when sealed.
 #[test]
 fn privacy_budgets_need_a_mechanism_at_the_release_boundary() {
     let budgeted = |dp: &str| {
@@ -287,10 +288,18 @@ fn privacy_budgets_need_a_mechanism_at_the_release_boundary() {
     assert_eq!(r.privacy_releases.len(), 1);
     assert_eq!(r.privacy_releases[0].charged.len(), 3);
     assert!(r.warnings.iter().any(|w| w.contains("each patient")));
-    // Sealed: internal, nothing charged, no mechanism needed.
+    // Review finding DP-1 (ENC-SF-2026-047): a sealed *aggregate* is still a release (the
+    // protocol unmasks it to the coordinator, which writes it out): without
+    // noise it is refused, with noise every budget is charged.
     let sealed = budgeted("").replace(" to \"coordinator\"", "");
-    let r = analyze(&parse(&sealed).unwrap()).unwrap().unwrap();
-    assert!(r.privacy_releases.is_empty());
+    let e = analyze(&parse(&sealed).unwrap()).unwrap_err();
+    assert_eq!(e.code, Code::PrivacyPolicy);
+    assert!(e.message.contains("even when sealed"), "{}", e.message);
+    let sealed_dp = budgeted(dp).replace(" to \"coordinator\"", "");
+    let r = analyze(&parse(&sealed_dp).unwrap()).unwrap().unwrap();
+    assert_eq!(r.privacy_releases.len(), 1);
+    assert_eq!(r.privacy_releases[0].charged.len(), 3);
+    assert_eq!(r.privacy_releases[0].recipient, OutputRelease::Sealed);
     // Invalid budgets and mechanisms.
     for bad in ["epsilon 0.0", "epsilon -1.0"] {
         let t = budgeted(dp).replace("epsilon 3.0", bad);
@@ -322,11 +331,34 @@ fn privacy_budgets_need_a_mechanism_at_the_release_boundary() {
 #[test]
 fn privacy_presets() {
     use encompute_ir::confidentiality::{privacy_preset, PrivacyUnit};
+    // Review finding DP-4: without sampling a patient has no per-unit
+    // clipping (sensitivity factor 2, like an organization), so a level
+    // uses twice its listed noise for it; an organization's factor was
+    // always 2 and its noise is the listed one.
     let (b, m) = privacy_preset("strong", PrivacyUnit::Patient).unwrap();
     assert_eq!(
         (b.epsilon, b.delta, m.noise_multiplier, m.clip_norm),
-        (3.0, 1e-6, 6.0, 1.0)
+        (3.0, 1e-6, 12.0, 1.0)
     );
+    assert_eq!(m.preset.as_deref(), Some("strong"));
+    assert_eq!(m.sampling_rate, None);
+    let (_, org) = privacy_preset("strong", PrivacyUnit::Organization).unwrap();
+    assert_eq!(org.noise_multiplier, 6.0);
+    for (name, _, _, listed) in encompute_ir::confidentiality::PRIVACY_PRESETS {
+        for unit in [
+            PrivacyUnit::Record,
+            PrivacyUnit::User,
+            PrivacyUnit::Patient,
+            PrivacyUnit::Device,
+            PrivacyUnit::Custom("visit".into()),
+        ] {
+            let (_, m) = privacy_preset(name, unit.clone()).unwrap();
+            assert_eq!(m.noise_multiplier, 2.0 * listed, "{name} {unit}");
+            m.validate().unwrap();
+        }
+        let (_, m) = privacy_preset(name, PrivacyUnit::Organization).unwrap();
+        assert_eq!(m.noise_multiplier, listed, "{name} organization");
+    }
     assert!(
         privacy_preset("maximum", PrivacyUnit::Record)
             .unwrap()
@@ -340,4 +372,81 @@ fn privacy_presets() {
             .code,
         Code::PrivacyPolicy
     );
+    assert_eq!(
+        privacy_preset("strong-patient", PrivacyUnit::Patient)
+            .unwrap_err()
+            .code,
+        Code::PrivacyPolicy
+    );
+}
+
+/// Review finding DP-4: a program records the level it resolved, with the
+/// effective noise; the analysis refuses a level whose noise is not
+/// exactly the level's for the charged units, so `explain` never names a
+/// level the noise does not match.
+#[test]
+fn preset_mechanisms_carry_the_effective_noise() {
+    let budgeted = |unit: &str, dp: &str| {
+        fedavg(&format!("{SUM}{OUT}"), &format!("{}{dp}\n", AGG.trim_end())).replace(
+            "release aggregate_only",
+            &format!("release aggregate_only privacy unit \"{unit}\" epsilon 3.0 delta 1e-6"),
+        )
+    };
+    let patient = budgeted(
+        "patient",
+        " dp discrete_gaussian clip_norm 1.0 noise_multiplier 12.0 preset \"strong\"",
+    );
+    let p = parse(&patient).unwrap();
+    assert_eq!(p.to_string(), patient, "canonical text");
+    let r = analyze(&p).unwrap().unwrap();
+    let m = &r.privacy_releases[0].mechanism;
+    assert_eq!(m.preset.as_deref(), Some("strong"));
+    assert_eq!(m.noise_multiplier, 12.0);
+    let units: Vec<_> = r.privacy_releases[0]
+        .charged
+        .iter()
+        .map(|(_, b)| b.unit.clone())
+        .collect();
+    assert_eq!(
+        m.preset_summary(&units).unwrap(),
+        "preset=strong, sensitivity_factor=2, effective_noise_multiplier=12 (2x preset 6.0)"
+    );
+    // The listed noise for a patient: the pre-DP-4 meaning, refused.
+    let listed = patient.replace("noise_multiplier 12.0", "noise_multiplier 6.0");
+    let e = analyze(&parse(&listed).unwrap()).unwrap_err();
+    assert_eq!(e.code, Code::PrivacyPolicy);
+    assert!(e.message.contains("noise_multiplier 12.0"), "{}", e.message);
+    // An organization's level is the listed noise, and twice it is refused.
+    let org = budgeted(
+        "organization",
+        " dp discrete_gaussian clip_norm 1.0 noise_multiplier 6.0 preset \"strong\"",
+    );
+    let r = analyze(&parse(&org).unwrap()).unwrap().unwrap();
+    assert_eq!(
+        r.privacy_releases[0]
+            .mechanism
+            .preset_summary(&[encompute_ir::confidentiality::PrivacyUnit::Organization])
+            .unwrap(),
+        "preset=strong, sensitivity_factor=2, effective_noise_multiplier=6 (preset 6.0)"
+    );
+    assert_eq!(
+        code(&org.replace("noise_multiplier 6.0", "noise_multiplier 12.0")),
+        Code::PrivacyPolicy
+    );
+    // A level that is not one, other noise, a clip norm or sampling: refused.
+    for bad in [
+        patient.replace("preset \"strong\"", "preset \"weak\""),
+        patient.replace("noise_multiplier 12.0", "noise_multiplier 1.0"),
+        patient.replace("clip_norm 1.0", "clip_norm 2.0"),
+        patient.replace(" preset", " sampling_rate 0.01 preset"),
+    ] {
+        assert_eq!(code(&bad), Code::PrivacyPolicy, "{bad}");
+    }
+    // The level is part of the privacy policy ID.
+    let id = |t: &str| {
+        encompute_verification::PrivacyPolicyId::of(parse(t).unwrap().confidentiality().unwrap())
+            .unwrap()
+            .hex()
+    };
+    assert_ne!(id(&patient), id(&patient.replace(" preset \"strong\"", "")));
 }

@@ -446,28 +446,17 @@ fn wrapped_key_store() {
         Code::KeyRelease
     );
 
-    // A wrapped key moved to another asset does not open.
+    // A wrapped key moved to another asset: the edited state does not open.
     let mut state: serde_json::Value = serde_json::from_str(&text).unwrap();
     let moved = state["secrets"]["patients"]["versions"]["1"]["key"].clone();
     state["secrets"]["weights"]["versions"]["1"]["key"] = moved;
     std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
-    let mut swapped = KeyBroker::load(&path, verifier(), kek_store(1))
-        .unwrap()
-        .with_clock(move || T0);
-    let ch = swapped.challenge().unwrap();
-    let e = hw()
-        .attester(IMAGE)
-        .issued_at(T0)
-        .attest(&ch, &session.binding(&ch, SPEC, Some(POLICY), ARTIFACT))
+    let e = KeyBroker::load(&path, verifier(), kek_store(1))
+        .err()
         .unwrap();
-    let info = swapped.verify_attestation(&e).unwrap();
-    assert_eq!(
-        swapped
-            .release_key(&info.session, "weights")
-            .unwrap_err()
-            .code,
-        Code::KeyRelease
-    );
+    assert_eq!(e.code, Code::KeyRelease);
+    assert!(e.message.contains("fails authentication"), "{e}");
+    let _ = session;
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -7,8 +7,10 @@
 //!
 //! Every party must reach the same decision, so the arithmetic is the
 //! pure-Rust `libm` (identical bits on every platform, unlike the system
-//! maths library), and each result is rounded up a few ulps so accounting
-//! is never optimistic.
+//! maths library), and each epsilon is rounded up: multiplied by
+//! `1 + RELATIVE_MARGIN`, then up a few ulps. The margin is far above the
+//! floating-point error measured against 60-digit references (below 1e-13
+//! relative), so accounting is never optimistic.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,21 @@ fn up(x: f64, ulps: u32) -> f64 {
     (0..ulps).fold(x, |x, _| x.next_up())
 }
 
+/// The relative margin every reported epsilon is raised by. A few ulps alone did not cover the accumulated rounding
+/// error of long compositions (review finding DP-7: 4e-14 relative below a
+/// 60-digit reference); this margin exceeds the measured error by more
+/// than an order of magnitude.
+pub const RELATIVE_MARGIN: f64 = 1e-12;
+
+/// `x` raised by [`RELATIVE_MARGIN`] and rounded up: never below `x`.
+pub fn conservative(x: f64) -> f64 {
+    if x > 0.0 {
+        up(x * (1.0 + RELATIVE_MARGIN), 2)
+    } else {
+        x
+    }
+}
+
 impl PrivacyAccountant for Zcdp {
     fn name(&self) -> &'static str {
         encompute_ir::confidentiality::PRIVACY_ACCOUNTANT
@@ -45,7 +62,7 @@ impl PrivacyAccountant for Zcdp {
         if rho == 0.0 {
             return 0.0;
         }
-        up(cdp_eps(rho, delta), 8)
+        conservative(up(cdp_eps(rho, delta), 8))
     }
 }
 

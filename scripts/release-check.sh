@@ -23,7 +23,9 @@
 #                       (OpenFHE, the services above, pg_dump/psql); else the
 #                       Compose smoke test (docker, images :dev)
 #   security scans      cargo-deny, cargo-audit, pip-audit; IMAGES="a b" adds a
-#                       container scan (trivy or grype) and container SBOMs (syft)
+#                       container scan (trivy or grype) and container SBOMs (syft);
+#                       a release lists the TEE images too (encompute-confidential-
+#                       space, encompute-training) and sets REQUIRE_IMAGES
 #   Python rows         python3 and network access for pip (first run)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -132,7 +134,10 @@ release_wheel() {
   [ -f "$LOG/.release-wheel" ] && return 0
   local f=()
   [ -z "$RELEASE_FEATURES" ] || f=(--features openfhe)
-  rm -rf target/release-check-wheels
+  # A previous wheel repair (auditwheel on Linux) rewrites the cached
+  # extension in target/maturin in place to need a renamed libgomp that only
+  # exists inside that wheel; building again from it fails. Start clean.
+  rm -rf target/release-check-wheels target/maturin
   (unset CONDA_PREFIX; VIRTUAL_ENV="$PWD/.venv" PATH="$PWD/.venv/bin:$PATH" \
     maturin build -q --release --locked ${f[@]+"${f[@]}"} -m crates/encompute-py/Cargo.toml -o target/release-check-wheels) &&
     touch "$LOG/.release-wheel"
@@ -294,7 +299,7 @@ else
   partial "SBOM" "the release SBOMs record the OpenFHE builds" \
     bash -c 'OPENFHE=0 BIN=target/release IMAGES="${IMAGES:-}" scripts/release/sbom-all.sh target/sbom'
 fi
-check "security scans" env IMAGES="${IMAGES:-}" scripts/release/scan.sh
+check "security scans" env IMAGES="${IMAGES:-}" REQUIRE_IMAGES="${REQUIRE_IMAGES:-}" scripts/release/scan.sh
 check "build pins" scripts/release/check-pins.sh
 if [ "$REPRO" = 1 ]; then
   if [ "$OPENFHE" = 1 ]; then check "reproducibility" scripts/release/repro-check.sh --openfhe
@@ -310,7 +315,7 @@ fi
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   check "CS training image" bash -c 'D=deploy/confidential-space-training/Dockerfile &&
     docker build -q -f $D -t encompute-training:production . >/dev/null &&
-    docker run --rm --entrypoint sh encompute-training:production -c "! command -v encompute" &&
+    docker run --rm --entrypoint sh encompute-training:production -c "! command -v encompute && ! python -c \"import pip\" 2>/dev/null && ! python -c \"import ensurepip\" 2>/dev/null" &&
     docker build -q --target rehearsal -f $D -t encompute-training:approved . >/dev/null &&
     docker build -q --target rehearsal --build-arg VARIANT=tampered -f $D -t encompute-training:tampered . >/dev/null &&
     W="$(mktemp -d)" && ENCOMPUTE_CLI="$PWD/target/debug/encompute" "$PY" examples/18_confidential_space_hf/job.py container "$W/a" &&

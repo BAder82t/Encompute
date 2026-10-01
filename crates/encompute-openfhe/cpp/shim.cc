@@ -65,6 +65,14 @@ std::map<std::string, int>& tag_counts() {
   static std::map<std::string, int> m;
   return m;
 }
+
+// The key material each loaded tag was inserted from: SHA-256 (hex) of the
+// uploaded evaluation keys. A later upload under the same tag must carry the
+// same bytes; OpenFHE looks keys up by tag alone.
+std::map<std::string, std::string>& tag_digests() {
+  static std::map<std::string, std::string> m;
+  return m;
+}
 }  // namespace
 
 void retain_key_tag(const std::string& tag) { ++tag_counts()[tag]; }
@@ -74,6 +82,7 @@ void release_key_tag(const std::string& tag) {
   if (it == tag_counts().end()) return;
   if (--it->second == 0) {
     tag_counts().erase(it);
+    tag_digests().erase(tag);
     lbcrypto::CryptoContextImpl<DCRTPoly>::ClearEvalMultKeys(tag);
     lbcrypto::CryptoContextImpl<DCRTPoly>::ClearEvalAutomorphismKeys(tag);
   }
@@ -181,31 +190,136 @@ uint32_t log_qp(const Context& ctx) {
   return params->GetParamsQP()->GetModulus().GetMSB();
 }
 
-rust::String load_evaluation_keys(Context& ctx,
-                                  rust::Slice<const uint8_t> bytes) {
+namespace {
+using CC = lbcrypto::CryptoContextImpl<DCRTPoly>;
+using EvalKeyVector = std::vector<lbcrypto::EvalKey<DCRTPoly>>;
+using AutomorphismKeys = std::map<uint32_t, lbcrypto::EvalKey<DCRTPoly>>;
+
+const char* const kForeignKeys = "evaluation keys belong to another parameter set";
+
+// A polynomial over exactly `params` (every tower's modulus and length), in
+// evaluation form: what key switching indexes without further checks.
+bool poly_matches(const DCRTPoly& p, const std::shared_ptr<DCRTPoly::Params>& params) {
+  if (!p.GetParams() || *p.GetParams() != *params) return false;
+  if (p.GetFormat() != Format::EVALUATION) return false;
+  const auto& towers = p.GetAllElements();
+  const auto& want = params->GetParams();
+  if (towers.size() != want.size()) return false;
+  for (size_t i = 0; i < towers.size(); ++i) {
+    const auto& v = towers[i].GetValues();  // throws if absent
+    if (v.GetLength() != params->GetRingDimension() || v.GetModulus() != want[i]->GetModulus())
+      return false;
+  }
+  return true;
+}
+
+// A hybrid key-switching key for `cc` under `tag`: one (a, b) pair per
+// digit of Q, each over Q·P.
+void check_key(const lbcrypto::EvalKey<DCRTPoly>& k, const lbcrypto::CryptoContext<DCRTPoly>& cc,
+               const std::string& tag) {
+  if (!k || k->GetCryptoContext() != cc) throw std::runtime_error(kForeignKeys);
+  if (k->GetKeyTag() != tag)
+    throw std::runtime_error("evaluation keys carry another key tag than the one they are sent under");
+  auto params = std::dynamic_pointer_cast<lbcrypto::CryptoParametersRNS>(cc->GetCryptoParameters());
+  if (!params) throw std::runtime_error(kForeignKeys);
+  const auto& qp = params->GetParamsQP();
+  const size_t digits = params->GetNumPartQ();
+  const auto& a = k->GetAVector();
+  const auto& b = k->GetBVector();
+  if (a.size() != digits || b.size() != digits) throw std::runtime_error(kForeignKeys);
+  for (size_t i = 0; i < digits; ++i)
+    if (!poly_matches(a[i], qp) || !poly_matches(b[i], qp)) throw std::runtime_error(kForeignKeys);
+}
+
+template <typename T>
+T deserialize_keys(std::istringstream& in, const char* what) {
+  T keys;
+  try {
+    lbcrypto::Serial::Deserialize(keys, in, lbcrypto::SerType::BINARY);
+  } catch (const std::exception& e) {
+    throw std::runtime_error(std::string(what) + " could not be deserialized: " + e.what());
+  }
+  if (in.peek() != std::char_traits<char>::eof())
+    throw std::runtime_error(std::string("trailing bytes after the ") + what);
+  return keys;
+}
+
+// Keys this process generated itself (a client's keygen in the same
+// process) have no recorded digest: compare their serialization, made as
+// the client exports it, with the upload.
+bool same_as_generated(const std::string& tag, const std::string& mult, const std::string& rot) {
+  std::ostringstream m;
+  if (!CC::SerializeEvalMultKey(m, lbcrypto::SerType::BINARY, tag) || m.str() != mult) return false;
+  const auto& autos = CC::GetAllEvalAutomorphismKeys();
+  if (autos.find(tag) == autos.end()) return rot.empty();
+  std::ostringstream r;
+  CC::SerializeEvalAutomorphismKey(r, lbcrypto::SerType::BINARY, tag);
+  return r.str() == rot;
+}
+}  // namespace
+
+rust::String load_evaluation_keys(Context& ctx, rust::Slice<const uint8_t> bytes,
+                                  rust::Str digest) {
   Guard lock(openfhe_mutex());
   Reader r{bytes.data(), bytes.size()};
   std::string tag = r.take(r.u64(4));
-  std::istringstream mult(r.take(r.u64(8)));
-  std::istringstream rot(r.take(r.u64(8)));
+  std::string mult_bytes = r.take(r.u64(8));
+  std::string rot_bytes = r.take(r.u64(8));
   if (r.n != 0) throw std::runtime_error("trailing bytes after evaluation keys");
-  using CC = lbcrypto::CryptoContextImpl<DCRTPoly>;
-  // In a single process the client's keygen already put these keys in
-  // OpenFHE's global maps (OpenFHE refuses to insert a tag twice), so only
-  // deserialize keys this process does not have yet.
-  const auto& loaded = CC::GetAllEvalMultKeys();
-  if (loaded.find(tag) == loaded.end()) {
-    if (!CC::DeserializeEvalMultKey(mult, lbcrypto::SerType::BINARY))
-      throw std::runtime_error("evaluation keys could not be deserialized");
-    // An empty rotation section means the program uses no rotations.
-    if (rot.rdbuf()->in_avail() > 0 &&
-        !CC::DeserializeEvalAutomorphismKey(rot, lbcrypto::SerType::BINARY))
-      throw std::runtime_error("rotation keys could not be deserialized");
+  if (tag.empty()) throw std::runtime_error("evaluation keys name no key tag");
+  const std::string sha(digest);
+
+  // OpenFHE finds keys by the ciphertext's key tag alone, in process-wide
+  // maps where the first keys inserted under a tag stay. So nothing is
+  // inserted until the upload is fully checked, and a tag already loaded
+  // is only ever shared by byte-identical key material: another client's
+  // keys relabelled with a victim's tag are refused, never used.
+  const auto& loaded_mult = CC::GetAllEvalMultKeys();
+  const auto& loaded_rot = CC::GetAllEvalAutomorphismKeys();
+  const bool present = loaded_mult.find(tag) != loaded_mult.end() ||
+                       loaded_rot.find(tag) != loaded_rot.end();
+  if (present) {
+    auto d = tag_digests().find(tag);
+    const bool same = d != tag_digests().end() ? d->second == sha
+                                               : same_as_generated(tag, mult_bytes, rot_bytes);
+    if (!same)
+      throw std::runtime_error(
+          "evaluation keys under this key tag are already loaded with different key material");
+    // The same keys again: they were checked when first inserted.
+    auto mk = loaded_mult.find(tag);
+    if (mk == loaded_mult.end() || mk->second.empty() ||
+        mk->second[0]->GetCryptoContext() != ctx.impl->cc)
+      throw std::runtime_error(kForeignKeys);
+    tag_digests()[tag] = sha;
+    retain_key_tag(tag);
+    ctx.impl->key_tags.push_back(tag);
+    return rust::String(tag);
   }
-  // The keys must belong to this context (same parameters).
-  const auto& mk = CC::GetEvalMultKeyVector(tag);
-  if (mk.empty() || mk[0]->GetCryptoContext() != ctx.impl->cc)
-    throw std::runtime_error("evaluation keys belong to another parameter set");
+
+  // Deserialize into local maps (DeserializeEvalMultKey would insert into
+  // the global maps before any check).
+  std::istringstream mult_in(mult_bytes);
+  auto mult = deserialize_keys<std::map<std::string, EvalKeyVector>>(mult_in, "evaluation keys");
+  if (mult.size() != 1 || mult.begin()->first != tag || mult.begin()->second.empty())
+    throw std::runtime_error("evaluation keys must hold exactly the keys of their stated key tag");
+  for (const auto& k : mult.begin()->second) check_key(k, ctx.impl->cc, tag);
+
+  std::shared_ptr<AutomorphismKeys> rot;
+  // An empty rotation section means the program uses no rotations.
+  if (!rot_bytes.empty()) {
+    std::istringstream rot_in(rot_bytes);
+    auto rots = deserialize_keys<std::map<std::string, std::shared_ptr<AutomorphismKeys>>>(
+        rot_in, "rotation keys");
+    if (rots.size() != 1 || rots.begin()->first != tag || !rots.begin()->second ||
+        rots.begin()->second->empty())
+      throw std::runtime_error("rotation keys must hold exactly the keys of their stated key tag");
+    for (const auto& [index, k] : *rots.begin()->second) check_key(k, ctx.impl->cc, tag);
+    rot = rots.begin()->second;
+  }
+
+  CC::InsertEvalMultKey(mult.begin()->second, tag);
+  if (rot) CC::InsertEvalAutomorphismKey(rot, tag);
+  tag_digests()[tag] = sha;
   retain_key_tag(tag);
   ctx.impl->key_tags.push_back(tag);
   return rust::String(tag);

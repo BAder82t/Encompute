@@ -250,6 +250,10 @@ impl SecretStore for RootWrappedKekStore {
     fn unwrap_for_release(&self, ctx: &KeyContext<'_>, stored: &StoredKey) -> Result<KeyMaterial> {
         self.kek.unwrap_as(Self::NAME, ctx, stored)
     }
+
+    fn state_mac(&self, state: &[u8]) -> Result<Option<[u8; 32]>> {
+        Ok(Some(self.kek.mac_state(state)))
+    }
 }
 
 // --- OpenBao / HashiCorp Vault Transit ----------------------------------------
@@ -304,8 +308,12 @@ impl OpenBaoTransit {
             mount: mount.into(),
             key: key.into(),
             token,
+            // Redirects are never followed: ureq would carry X-Vault-Token
+            // to whatever origin a redirect names (it strips only
+            // Authorization and Cookie). A 3xx is an error (see `answer`).
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(10))
+                .redirects(0)
                 .build(),
         })
     }
@@ -317,17 +325,34 @@ impl OpenBaoTransit {
         let addr = var(&["BAO_ADDR", "VAULT_ADDR"])
             .ok_or_else(|| err("set BAO_ADDR (or VAULT_ADDR) to the root key provider"))?;
         let token = match var(&["BAO_TOKEN_FILE", "VAULT_TOKEN_FILE"]) {
-            Some(f) => Zeroizing::new(
-                std::fs::read_to_string(&f)
-                    .map_err(|e| err(format!("{f}: {e}")))?
-                    .trim()
-                    .to_owned(),
-            ),
+            Some(f) => {
+                check_token_file(Path::new(&f))?;
+                Zeroizing::new(
+                    std::fs::read_to_string(&f)
+                        .map_err(|e| err(format!("{f}: {e}")))?
+                        .trim()
+                        .to_owned(),
+                )
+            }
             None => Zeroizing::new(var(&["BAO_TOKEN", "VAULT_TOKEN"]).ok_or_else(|| {
                 err("set BAO_TOKEN_FILE (or BAO_TOKEN) for the root key provider")
             })?),
         };
         Self::new(&addr, mount, key, token)
+    }
+
+    /// A reply's JSON body: only a 2xx answer counts. With redirects off,
+    /// a 3xx arrives here as a response; it is refused, not followed.
+    fn answer(&self, resp: ureq::Response) -> Result<serde_json::Value> {
+        let status = resp.status();
+        if !(200..300).contains(&status) {
+            return Err(err(format!(
+                "root key provider answered {status} (redirects are not followed; \
+                 point BAO_ADDR at the provider itself); no key is released without it"
+            )));
+        }
+        resp.into_json()
+            .map_err(|e| unavailable(self.provider(), e))
     }
 
     fn call(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
@@ -338,9 +363,7 @@ impl OpenBaoTransit {
             .set("X-Vault-Token", &self.token)
             .send_json(body);
         match r {
-            Ok(resp) => resp
-                .into_json()
-                .map_err(|e| unavailable(self.provider(), e)),
+            Ok(resp) => self.answer(resp),
             Err(ureq::Error::Status(code, resp)) => {
                 let detail = resp
                     .into_json::<serde_json::Value>()
@@ -375,6 +398,28 @@ impl OpenBaoTransit {
             .ok_or_else(|| err("the root key provider returned no ciphertext"))?;
         Ok((c.to_owned(), Self::ciphertext_version(c)?))
     }
+}
+
+/// The token file is a mounted secret: it may be readable by the service's
+/// user through the mount (Compose bind-mounts keep the host's mode), but
+/// never writable by anyone else, who could substitute the token.
+fn check_token_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let m = std::fs::metadata(path).map_err(|e| err(format!("{}: {e}", path.display())))?;
+        let mode = m.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 || !m.is_file() {
+            return Err(err(format!(
+                "{} is mode {mode:o}: the OpenBao/Vault token file must be a regular file \
+                 writable by its owner only (chmod 600, or 644 for a mounted secret)",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn b64(b: &[u8]) -> String {
@@ -434,14 +479,13 @@ impl RootKeyProvider for OpenBaoTransit {
     fn rotate(&self) -> Result<u64> {
         self.call(&format!("keys/{}/rotate", self.key), serde_json::json!({}))?;
         let url = format!("{}/v1/{}/keys/{}", self.addr, self.mount, self.key);
-        let v: serde_json::Value = self
-            .agent
-            .get(&url)
-            .set("X-Vault-Token", &self.token)
-            .call()
-            .map_err(|e| unavailable(self.provider(), e))?
-            .into_json()
-            .map_err(|e| unavailable(self.provider(), e))?;
+        let v = self.answer(
+            self.agent
+                .get(&url)
+                .set("X-Vault-Token", &self.token)
+                .call()
+                .map_err(|e| unavailable(self.provider(), e))?,
+        )?;
         v["data"]["latest_version"]
             .as_u64()
             .ok_or_else(|| err("the root key provider did not report a version"))

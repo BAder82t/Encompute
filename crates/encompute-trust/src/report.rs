@@ -16,11 +16,13 @@ use std::fmt;
 use serde::Serialize;
 
 use encompute_attestation::{AttestationPolicy, Verifier};
-use encompute_ir::{parse, Result};
+use encompute_ir::{parse, Program, Result};
 use encompute_secagg::verify_aggregation_receipt;
-use encompute_verification::{PolicyId, PrivacyPolicyId};
+use encompute_verification::{PolicyId, PrivacyPolicyId, SignedExecutionReceipt};
 
-use encompute_planner::{verify_plan, Mechanism, Placement, Scheme, StepKind};
+use encompute_planner::{
+    verify_plan_with, Mechanism, Placement, PlanFloor, ProgramFacts, Scheme, StepKind,
+};
 use encompute_verification::VerificationEvidence;
 
 use crate::graph::{node_id, EdgeKind, Evidence, NodeKind, TrustGraph};
@@ -101,6 +103,12 @@ pub struct Anchors {
     pub evaluators: BTreeSet<String>,
 }
 
+/// Computes a program's facts with the caller's own compiler.
+pub type FactsFn<'a> = &'a dyn Fn(&Program) -> Result<ProgramFacts>;
+
+/// Checks the execution proof an execution receipt claims.
+pub type ProofCheckFn<'a> = &'a dyn Fn(&SignedExecutionReceipt) -> Result<()>;
+
 /// What the report may use to check the evidence.
 #[derive(Default)]
 pub struct ReportOptions<'a> {
@@ -113,13 +121,28 @@ pub struct ReportOptions<'a> {
     pub require: Vec<String>,
     /// Time for authorization expiry (default: now).
     pub now: Option<u64>,
+    /// The weakest plan the caller accepts. A plan's context (profile,
+    /// backends, development attestation) is the plan's own claim; the
+    /// floor is the caller's. Production callers set
+    /// [`PlanFloor::production`].
+    pub plan_floor: PlanFloor,
+    /// Computes a program's facts with the caller's own compiler (the
+    /// runtime's `planning_facts`), so a plan's claims about its program
+    /// (an encrypted plan, proof coverage) are checked, not trusted.
+    pub program_facts: Option<FactsFn<'a>>,
+    /// Checks the execution proof a receipt claims. Without it a receipt
+    /// that claims a proof is present but unchecked, never proof of
+    /// verified execution.
+    pub proof_check: Option<ProofCheckFn<'a>>,
 }
 
-/// Collects a row's problems and the evidence it could not anchor.
+/// Collects a row's problems, the evidence it could not anchor, and
+/// evidence it ignored (reported whatever the row's status).
 #[derive(Default)]
 struct Tally {
     problems: Vec<String>,
     unchecked: Vec<String>,
+    notes: Vec<String>,
     present: bool,
 }
 
@@ -132,8 +155,12 @@ impl Tally {
         self.unchecked.push(m);
     }
 
+    fn note(&mut self, m: String) {
+        self.notes.push(m);
+    }
+
     fn row(self, name: &'static str, ok: Status) -> Row {
-        let (status, details) = if !self.problems.is_empty() {
+        let (status, mut details) = if !self.problems.is_empty() {
             (Status::Failed, self.problems)
         } else if !self.unchecked.is_empty() {
             (Status::Unchecked, self.unchecked)
@@ -142,6 +169,7 @@ impl Tally {
         } else {
             (ok, vec![])
         };
+        details.extend(self.notes);
         Row {
             name,
             status,
@@ -264,10 +292,13 @@ impl TrustGraph {
         }
         rows.push(prog.row("Program", Status::Verified));
         rows.push(policy.row("Policy", Status::Verified));
-        rows.push(plan_row(&g));
+        rows.push(plan_row(&g, opts));
 
-        // Revocations: asset → revoked at. An unanchored revocation is
-        // still honoured (it can only withhold trust), but is unchecked.
+        // Revocations: asset → revoked at. Only an owner revokes its asset,
+        // and only an authorization's signer revokes that authorization;
+        // any other revocation is ignored, with a note. An unanchored
+        // revocation is still honoured (it can only withhold trust), but is
+        // unchecked.
         let mut auth = Tally::default();
         let mut revoked_at: BTreeMap<String, u64> = BTreeMap::new();
         let mut revoked_auth: BTreeSet<String> = BTreeSet::new();
@@ -275,6 +306,37 @@ impl TrustGraph {
             let Some(Evidence::Revocation(r)) = &n.evidence else {
                 continue;
             };
+            let party = node_id(NodeKind::Party, &r.body.party);
+            let asset = node_id(NodeKind::Asset, &r.body.asset);
+            // Whether its signer may revoke what it names, before anything
+            // else: a revocation nobody could honour withholds nothing.
+            let revoked = r
+                .body
+                .authorization
+                .as_ref()
+                .map(|x| node_id(NodeKind::Authorization, x));
+            let ignored = match &revoked {
+                Some(an) => match g.node(an).and_then(|n| n.evidence.as_ref()) {
+                    Some(Evidence::Authorization(s))
+                        if s.body.party != r.body.party || s.body.asset != r.body.asset =>
+                    {
+                        Some(format!(
+                            "{} did not sign the authorization it revokes",
+                            r.body.party
+                        ))
+                    }
+                    Some(_) => None,
+                    None => Some("the authorization it revokes is not in the bundle".into()),
+                },
+                None if !g.into_(&asset, EdgeKind::Owns).any(|o| o == party) => {
+                    Some(format!("{} does not own {}", r.body.party, r.body.asset))
+                }
+                None => None,
+            };
+            if let Some(why) = ignored {
+                auth.note(format!("ignored {id}: {why}"));
+                continue;
+            }
             match a.parties.get(&r.body.party) {
                 Some(k) if r.verify(k).is_err() => {
                     auth.fail(format!("{id}: invalid revocation signature"));
@@ -286,14 +348,12 @@ impl TrustGraph {
                     r.body.party
                 )),
             }
-            match &r.body.authorization {
-                Some(x) => {
-                    revoked_auth.insert(node_id(NodeKind::Authorization, x));
+            match revoked {
+                Some(an) => {
+                    revoked_auth.insert(an);
                 }
                 None => {
-                    let at = revoked_at
-                        .entry(node_id(NodeKind::Asset, &r.body.asset))
-                        .or_insert(u64::MAX);
+                    let at = revoked_at.entry(asset).or_insert(u64::MAX);
                     *at = (*at).min(r.body.issued_at);
                 }
             }
@@ -446,6 +506,7 @@ impl TrustGraph {
         // stays within the budget the program *declares* and only grows.
         let mut dp = Tally::default();
         let mut per_asset: BTreeMap<String, Vec<(u64, f64)>> = BTreeMap::new();
+        let mut levels = BTreeSet::new();
         for (id, n) in g.of(NodeKind::PrivacyRelease) {
             dp.present = true;
             let Some(Evidence::PrivacyReceipt(r)) = &n.evidence else {
@@ -474,6 +535,31 @@ impl TrustGraph {
                 encompute_privacy::verify_privacy_receipt(r, Some(&r.signer_key), None, None)
             {
                 dp.fail(format!("{id}: {e}"));
+            }
+            // A named privacy level is shown with the noise it resolved to
+            // for this unit (review finding DP-4), and a receipt may not
+            // name a level its noise is below.
+            if let Some(level) = &r.mechanism.preset {
+                let least = encompute_ir::confidentiality::preset_mechanism(
+                    level,
+                    std::slice::from_ref(&r.unit),
+                );
+                match (r.mechanism.validate(), least) {
+                    (Ok(()), Ok(least))
+                        if r.mechanism.noise_multiplier >= least.noise_multiplier =>
+                    {
+                        if let Some(summary) =
+                            r.mechanism.preset_summary(std::slice::from_ref(&r.unit))
+                        {
+                            levels.insert(format!("{} ({} level): {summary}", r.asset_id, r.unit));
+                        }
+                    }
+                    _ => dp.fail(format!(
+                        "{id}: names privacy level {level:?}, but its noise multiplier {} is \
+                         not that level's for a {} unit",
+                        r.mechanism.noise_multiplier, r.unit
+                    )),
+                }
             }
             let asset = node_id(NodeKind::Asset, &r.asset_id);
             let declared = g.node(&asset).and_then(|n| {
@@ -526,6 +612,9 @@ impl TrustGraph {
                     ));
                 }
             }
+        }
+        for l in levels {
+            dp.note(l);
         }
         rows.push(dp.row("Privacy budget", Status::Satisfied));
 
@@ -644,11 +733,13 @@ impl TrustGraph {
 
 /// The approved plans, and whether what was observed matches them: every
 /// aggregation round under the plan's ID with its mechanisms, every
-/// execution of the planned program with the planned scheme (and proof),
-/// and evidence for every step. A round or execution of the planned
-/// program outside the plan fails; a step without evidence yet is
-/// unchecked.
-fn plan_row(g: &TrustGraph) -> Row {
+/// execution of the planned program with the planned scheme (and a proof
+/// the caller checked), and evidence for every step. A round or execution
+/// of the planned program outside the plan fails; a step without evidence
+/// yet, or with a proof nobody checked, is unchecked. Each plan is checked
+/// against the caller's floor and the facts the caller's compiler
+/// computes, not only against the context the plan declares.
+fn plan_row(g: &TrustGraph, opts: &ReportOptions<'_>) -> Row {
     let mut t = Tally::default();
     let plans: Vec<_> = g
         .of(NodeKind::Plan)
@@ -670,7 +761,17 @@ fn plan_row(g: &TrustGraph) -> Row {
         match program {
             None => t.fail(format!("{id}: its program is not in the bundle")),
             Some(p) => {
-                if let Err(e) = verify_plan(&p, plan) {
+                let mut floor = opts.plan_floor.clone();
+                if let Some(f) = opts.program_facts {
+                    match f(&p) {
+                        Ok(x) => floor.facts = Some(x),
+                        Err(e) => {
+                            t.fail(format!("{id}: its program's facts: {}", e.message));
+                            continue;
+                        }
+                    }
+                }
+                if let Err(e) = verify_plan_with(&p, plan, &floor) {
                     t.fail(format!("{id}: {}", e.message));
                     continue;
                 }
@@ -761,8 +862,30 @@ fn plan_row(g: &TrustGraph) -> Row {
                                                 Scheme::BinFhe => "BinFHE",
                                             }
                                 }
+                                // A receipt only claims a proof: the proof
+                                // itself is checked, or the step is unchecked.
                                 Mechanism::VerifiedExecution => {
-                                    matches!(e.evidence, VerificationEvidence::Vfhe { .. })
+                                    match (&e.evidence, opts.proof_check) {
+                                        (VerificationEvidence::Vfhe { .. }, Some(check)) => {
+                                            match check(r) {
+                                                Ok(()) => true,
+                                                Err(x) => {
+                                                    t.fail(format!(
+                                                    "{eid}: its execution proof does not verify: {}",
+                                                    x.message
+                                                ));
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        (VerificationEvidence::Vfhe { .. }, None) => {
+                                            t.unanchored(format!(
+                                            "{eid}: claims an execution proof, which was not checked"
+                                        ));
+                                            true
+                                        }
+                                        (VerificationEvidence::None, _) => false,
+                                    }
                                 }
                                 Mechanism::Attestation { .. }
                                 | Mechanism::ConfidentialCompute { .. } => e.attestation.is_some(),
@@ -1025,6 +1148,29 @@ fn training_row(g: &TrustGraph, a: &Anchors, opts: &ReportOptions<'_>) -> Row {
         if let Err(x) = r.verify(s, record) {
             t.fail(format!("{id}: {}", x.message));
             continue;
+        }
+        // After round 1 a worker trains only from the adapter the
+        // coordinator signed for the previous round of this run (review
+        // finding TR-2); round 1 is checked by `verify`.
+        if e.round > 1 {
+            let prev = match g
+                .node(&node_id(NodeKind::Adapter, &e.input_adapter))
+                .and_then(|n| n.evidence.as_ref())
+            {
+                Some(Evidence::Adapter(a)) => Some(a.as_ref()),
+                _ => None,
+            };
+            if let Err(x) = encompute_training::check_input_adapter(
+                s,
+                &e.run_id,
+                e.round,
+                &e.input_adapter,
+                &e.input_adapter_digest,
+                prev,
+            ) {
+                t.fail(format!("{id}: {}", x.message));
+                continue;
+            }
         }
         // The job attests as its participant: the policy, scoped to it.
         let scoped = opts.execution_policy.map(|p| {

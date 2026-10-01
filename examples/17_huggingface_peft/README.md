@@ -9,7 +9,7 @@ notes. They fine-tune the model together with standard PEFT LoRA:
 base = et.huggingface("org/clinical-bert", revision="<commit>")   # here: a local tiny BERT
 tok = base.encompute_tokenizer
 notes_a = et.private_text_dataset(texts_a, labels_a, tokenizer=tok, max_length=16,
-                                  stride=4, unit_ids=patient_ids_a)
+                                  stride=4, unit_ids=patient_ids_a, public_units=2000)
 model = project.model("clinical-model", owner="modelco", module=base, adapters="public")
 a = project.data("notes-a", owner="hospital-a", dataset=notes_a, adapters="public")
 adapter = project.finetune(model=model, data=[a, b], method="peft-lora",
@@ -45,6 +45,9 @@ The run:
 3. **Bind.** The training spec binds:
    - the package: its revision, every file's digest, the tokenizer and
      the library versions;
+   - the model factory: `encompute.torch.hf:from_config` with exactly the
+     package's `config.json`, labels and task (a spec cannot name any
+     other code);
    - each dataset's tokenization;
    - the PEFT configuration (rank, alpha, dropout, target modules, bias,
      the fully trained head, initialization, adapter name);

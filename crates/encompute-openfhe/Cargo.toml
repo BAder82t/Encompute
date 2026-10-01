@@ -13,6 +13,8 @@ cxx.workspace = true
 encompute-ir.workspace = true
 encompute-ckks.workspace = true
 encompute-backend.workspace = true
+# SHA-256 of uploaded evaluation keys (the key ID), bound to their key tag.
+sha2 = "0.10"
 
 [build-dependencies]
 cxx-build.workspace = true

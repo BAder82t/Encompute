@@ -1,9 +1,11 @@
 //! Adding evidence to the graph. Each `add_*` checks the evidence on the
 //! way in (as far as it can without trust anchors) and then *links* it:
 //! nodes, attributes and edges computed from the evidence alone. The
-//! report re-links every piece of evidence into a fresh graph
-//! ([`TrustGraph::rebuild`]), so a bundle's own edges and attributes are
-//! never trusted: they are a cache the report checks.
+//! report re-checks and re-links every piece of evidence into a fresh
+//! graph ([`TrustGraph::rebuild`]), so a bundle's own edges and attributes
+//! are never trusted (they are a cache the report checks), and evidence
+//! written into a bundle without `add_*` gets the same checks as evidence
+//! added through it.
 
 use std::collections::BTreeMap;
 
@@ -168,20 +170,28 @@ impl TrustGraph {
         Ok(())
     }
 
-    /// An owner's signed approval of a program for one of its assets.
-    pub fn add_authorization(&mut self, a: SignedAuthorization) -> Result<String> {
-        let b = &a.body;
-        a.verify(&self.party_key(&b.party)?)?;
-        self.check_owner(&b.party, &b.asset)?;
+    fn check_program(&self, program_id: &str, what: &str) -> Result<()> {
         if !self
             .nodes
-            .contains_key(&node_id(NodeKind::Program, &b.program_id))
+            .contains_key(&node_id(NodeKind::Program, program_id))
         {
-            return Err(graph_err(
-                "the authorization names a program not in the graph",
-            ));
+            return Err(graph_err(format!("{what} a program not in the graph")));
         }
+        Ok(())
+    }
+
+    /// An owner's signed approval of a program for one of its assets.
+    pub fn add_authorization(&mut self, a: SignedAuthorization) -> Result<String> {
+        a.verify(&self.party_key(&a.body.party)?)?;
+        self.check_authorization(&a)?;
         self.link_authorization(&a)
+    }
+
+    /// What an authorization must be without trust anchors: its signer
+    /// owns the asset, and the program is in the graph.
+    fn check_authorization(&self, a: &SignedAuthorization) -> Result<()> {
+        self.check_owner(&a.body.party, &a.body.asset)?;
+        self.check_program(&a.body.program_id, "the authorization names")
     }
 
     fn link_authorization(&mut self, a: &SignedAuthorization) -> Result<String> {
@@ -207,6 +217,22 @@ impl TrustGraph {
     pub fn add_revocation(&mut self, r: SignedRevocation) -> Result<String> {
         r.verify(&self.party_key(&r.body.party)?)?;
         self.check_owner(&r.body.party, &r.body.asset)?;
+        if let Some(x) = &r.body.authorization {
+            if let Some(Evidence::Authorization(a)) = self
+                .node(&node_id(NodeKind::Authorization, x))
+                .and_then(|n| n.evidence.as_ref())
+            {
+                if a.body.party != r.body.party || a.body.asset != r.body.asset {
+                    return Err(Error::new(
+                        Code::TrustAuthorization,
+                        format!(
+                            "{} cannot revoke an authorization {} signed for {}",
+                            r.body.party, a.body.party, a.body.asset
+                        ),
+                    ));
+                }
+            }
+        }
         self.link_revocation(&r)
     }
 
@@ -234,6 +260,11 @@ impl TrustGraph {
     /// An approved confidential execution plan, checked by the independent
     /// validator against the program already in the graph.
     pub fn add_plan(&mut self, plan: ConfidentialExecutionPlan) -> Result<String> {
+        self.check_plan(&plan)?;
+        self.link_plan(&plan)
+    }
+
+    fn check_plan(&self, plan: &ConfidentialExecutionPlan) -> Result<()> {
         let program = match self
             .node(&node_id(NodeKind::Program, &plan.program_id))
             .and_then(|n| n.evidence.as_ref())
@@ -241,8 +272,7 @@ impl TrustGraph {
             Some(Evidence::Program(t)) => parse(t)?,
             _ => return Err(graph_err("the plan is for a program not in the graph")),
         };
-        verify_plan(&program, &plan)?;
-        self.link_plan(&plan)
+        verify_plan(&program, plan)
     }
 
     fn link_plan(&mut self, plan: &ConfidentialExecutionPlan) -> Result<String> {
@@ -267,14 +297,13 @@ impl TrustGraph {
     /// A training specification (validated; the report checks it against
     /// the plan and the rounds).
     pub fn add_training_spec(&mut self, spec: TrainingSpec) -> Result<String> {
-        spec.validate()?;
-        if !self
-            .nodes
-            .contains_key(&node_id(NodeKind::Program, &spec.program_id))
-        {
-            return Err(graph_err("the training spec's program is not in the graph"));
-        }
+        self.check_training_spec(&spec)?;
         self.link_training_spec(&spec)
+    }
+
+    fn check_training_spec(&self, spec: &TrainingSpec) -> Result<()> {
+        spec.validate()?;
+        self.check_program(&spec.program_id, "the training spec runs")
     }
 
     fn link_training_spec(&mut self, spec: &TrainingSpec) -> Result<String> {
@@ -408,17 +437,14 @@ impl TrustGraph {
     /// An aggregation spec: the plan (program, policies, codec, mechanism)
     /// and the parties' keys.
     pub fn add_aggregation_spec(&mut self, spec: AggregationSpec) -> Result<String> {
-        spec.validate()?;
-        if !self
-            .nodes
-            .contains_key(&node_id(NodeKind::Program, &spec.plan.program_id))
-        {
-            return Err(graph_err(
-                "the aggregation spec runs a program not in the graph",
-            ));
-        }
+        self.check_aggregation_spec(&spec)?;
         self.add_party_keys(&spec.parties)?;
         self.link_aggregation_spec(&spec)
+    }
+
+    fn check_aggregation_spec(&self, spec: &AggregationSpec) -> Result<()> {
+        spec.validate()?;
+        self.check_program(&spec.plan.program_id, "the aggregation spec runs")
     }
 
     fn link_aggregation_spec(&mut self, spec: &AggregationSpec) -> Result<String> {
@@ -461,6 +487,11 @@ impl TrustGraph {
     /// added with the aggregate it released, its lineage and its privacy
     /// releases.
     pub fn add_aggregation(&mut self, receipt: AggregationReceipt) -> Result<String> {
+        self.check_aggregation(&receipt)?;
+        self.link_aggregation(&receipt)
+    }
+
+    fn check_aggregation(&self, receipt: &AggregationReceipt) -> Result<()> {
         let m = &receipt.manifest;
         let spec = self
             .spec(&m.spec_id)
@@ -471,7 +502,7 @@ impl TrustGraph {
                 ))
             })?
             .clone();
-        verify_aggregation_receipt(&receipt, &spec, None, None)?;
+        verify_aggregation_receipt(receipt, &spec, None, None)?;
         for pr in &m.privacy {
             encompute_privacy::verify_privacy_receipt(
                 pr,
@@ -480,7 +511,7 @@ impl TrustGraph {
                 None,
             )?;
         }
-        self.link_aggregation(&receipt)
+        Ok(())
     }
 
     fn link_aggregation(&mut self, receipt: &AggregationReceipt) -> Result<String> {
@@ -621,10 +652,7 @@ impl TrustGraph {
     /// An execution receipt (its signature checked against its own key; the
     /// report requires that key to be trusted or attested).
     pub fn add_execution_receipt(&mut self, r: SignedExecutionReceipt) -> Result<String> {
-        let own = encompute_verification::EvaluatorIdentity::from_public_key_hex(
-            &r.evaluator_public_key,
-        )?;
-        r.verify_signature(&own)?;
+        check_execution_receipt(&r)?;
         self.link_execution_receipt(&r)
     }
 
@@ -660,15 +688,20 @@ impl TrustGraph {
     }
 
     /// The graph as its evidence alone implies it: every piece of evidence
-    /// re-linked into a fresh graph, in dependency order. Edges, nodes and
-    /// attributes the bundle carries but the evidence does not imply are
-    /// absent here. Returns the graph and the evidence that failed to link.
+    /// re-checked as its `add_*` checks it (everything but the signatures,
+    /// which the report checks against its caller's anchors, never the
+    /// bundle's keys) and re-linked into a fresh graph, in dependency
+    /// order. Edges, nodes and attributes the bundle carries but the
+    /// evidence does not imply are absent here. Returns the graph and the
+    /// evidence that failed its checks or to link (any of which fails the
+    /// report's evidence row).
     pub fn rebuild(&self) -> (TrustGraph, Vec<String>) {
         let mut g = TrustGraph::new();
         let mut problems = vec![];
         let order = |e: &Evidence| match e {
             Evidence::Program(_) => 0,
-            Evidence::Plan(_) => 0,
+            // After its program, which it is checked against.
+            Evidence::Plan(_) => 1,
             Evidence::TrainingSpec(_) => 1,
             Evidence::Adapter(_) => 8,
             Evidence::TrainingWorker(_) => 8,
@@ -687,6 +720,29 @@ impl TrustGraph {
             .collect();
         items.sort_by_key(|(id, e)| (order(e), (*id).clone()));
         for (id, e) in items {
+            // Revocations are linked whoever signed them: the report
+            // decides which it honours (an owner's, or an authorization's
+            // signer's) and notes the others.
+            let checked = match e {
+                Evidence::Program(t) => parse(t).map(|_| ()),
+                Evidence::Plan(p) => g.check_plan(p),
+                Evidence::TrainingSpec(s) => g.check_training_spec(s),
+                Evidence::Adapter(r) => r.verify(None),
+                Evidence::TrainingWorker(_) | Evidence::Attestation(_) => Ok(()),
+                Evidence::AggregationSpec(s) => g.check_aggregation_spec(s),
+                Evidence::Authorization(a) => g.check_authorization(a),
+                Evidence::Revocation(_) => Ok(()),
+                Evidence::AggregationReceipt(r) => g.check_aggregation(r),
+                Evidence::PrivacyReceipt(r) => {
+                    encompute_privacy::verify_privacy_receipt(r, None, None, None)
+                }
+                Evidence::ExecutionReceipt(r) => check_execution_receipt(r),
+            };
+            // Linked even so: each row still reports what it finds wrong
+            // with it, and the problem alone fails the report.
+            if let Err(e) = checked {
+                problems.push(format!("{id}: invalid evidence: {}", e.message));
+            }
             let linked = match e {
                 Evidence::Program(t) => g.link_program(t),
                 Evidence::Plan(p) => g.link_plan(p),
@@ -711,4 +767,12 @@ impl TrustGraph {
         }
         (g, problems)
     }
+}
+
+/// An execution receipt's signature, against its own key (the report
+/// requires that key to be trusted or attested).
+fn check_execution_receipt(r: &SignedExecutionReceipt) -> Result<()> {
+    let own =
+        encompute_verification::EvaluatorIdentity::from_public_key_hex(&r.evaluator_public_key)?;
+    r.verify_signature(&own)
 }

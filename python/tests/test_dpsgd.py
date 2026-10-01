@@ -94,6 +94,30 @@ def test_one_patient_moves_the_sum_by_at_most_the_clip():
     assert float(ungrouped.norm()) > 5 * clip
 
 
+def test_non_finite_unit_gradients_contribute_nothing():
+    """Review finding DP-5 (ENC-SF-2026-069): a unit whose gradient is not finite (its records
+    overflow the loss) contributes zero, so the party's contribution stays
+    finite and its join cannot fail because of one patient's data."""
+    g = torch.tensor([[3.0, 4.0], [float("nan"), 1.0], [float("inf"), 0.0], [1e38, 1e38],
+                      [0.3, 0.4]])
+    c = dpsgd.clip_rows(g, 1.0)
+    assert torch.isfinite(c).all()
+    assert torch.allclose(c[0], torch.tensor([0.6, 0.8]))
+    assert (c[1:4] == 0).all() and torch.allclose(c[4], torch.tensor([0.3, 0.4]))
+    # End to end through the per-unit sum: one patient's poisoned record.
+    m = model()
+    x, y = records(8)
+    unit_of, n = dpsgd.unit_index(torch.arange(8), 8)
+    sampled = torch.arange(n)
+    real = m.head.weight.data.clone()
+    m.head.weight.data[0, 0] = float("nan")
+    out = dpsgd.clipped_sum(m, CL, {"x": x, "y": y}, unit_of, sampled, 0.05)
+    assert torch.isfinite(out).all()
+    ref = dpsgd.reference_clipped_sum(m, CL, {"x": x, "y": y}, unit_of, sampled, 0.05)
+    assert torch.isfinite(ref).all()
+    m.head.weight.data = real
+
+
 def test_poisson_sampling_uses_os_randomness():
     torch.manual_seed(0)
     a = dpsgd.poisson_sample(10_000, 0.03)
@@ -246,7 +270,7 @@ except encompute.EncomputeError:
 needs_cli = pytest.mark.skipif(CLI is None, reason="the encompute CLI is not built")
 
 
-def project(tmp, patients=64, grouped=True):
+def project(tmp, patients=64, grouped=True, public=True):
     p = encompute.Project("dp-lora", parties=["hospital-a", "hospital-b", "modelco"],
                           purpose="disease-training")
     torch.manual_seed(0)
@@ -257,7 +281,8 @@ def project(tmp, patients=64, grouped=True):
         x, y = records(patients * 2, i + 1)
         ids = torch.arange(patients).repeat_interleave(2) if grouped else None
         data.append(p.data(f"patients-{'ab'[i]}", owner=owner,
-                           dataset=et.private_dataset(x, y, unit_ids=ids)))
+                           dataset=et.private_dataset(x, y, unit_ids=ids,
+                                                      public_units=patients if public else None)))
     return p, m, data
 
 
@@ -285,6 +310,7 @@ def test_patient_run_is_satisfied_and_binds_every_setting(patient_run):
                  "sampling_rate": "0.0625", "noise_multiplier": "1.2", "delta": "1e-6",
                  "grouping": "unit_ids", "accountant": "rdp-poisson-zw2019",
                  "expected_batch": "8.0"}
+    # The owners' approved public figures, never a count of the data.
     assert all(x["privacy_units"] == 64 and len(x["grouping_digest"]) == 64
                for x in spec["datasets"])
     assert "Privacy unit: patient" in r.summary()
@@ -434,3 +460,76 @@ def test_contributions_bypassing_the_attested_worker_are_refused(patient_run, tm
     finally:
         serve.kill()
         serve.wait()
+
+
+@needs_cli
+def test_the_sampling_rate_is_never_derived_from_the_data(tmp_path):
+    """Review finding DP-2 (ENC-SF-2026-049): without an explicit sampling rate or the owners'
+    approved public figures, a DP-SGD run is refused before anything runs:
+    the spec would otherwise publish each dataset's exact number of
+    patients, and a rate computed from it, outside the privacy guarantee."""
+    p, m, data = project(tmp_path, public=False)
+    W = tmp_path / "run"
+    with pytest.raises(encompute.EncomputeError) as e:
+        p.finetune(model=m, data=data, privacy="strong-patient", allow_development=True,
+                   config=et.LoRAConfig(rounds=1, batch_size=4), workdir=str(W), verbose=False)
+    assert e.value.code == "ENC2501" and "must be public" in str(e.value)
+    assert not (W / "modelco" / "training-spec.json").exists()
+    # The same figures whatever the data: one patient more or less changes
+    # neither the published counts nor the sampling rate.
+    class D:
+        def __init__(self, i, n, public):
+            self.id, self.payload = f"d{i}", et.private_dataset(
+                *records(2 * n, i), unit_ids=torch.arange(n).repeat_interleave(2),
+                public_units=public)
+    pv = encompute.Privacy(level="strong-patient")
+    a = ft._dp_settings(pv, [D(1, 64, 64), D(2, 64, 64)], et.LoRAConfig(batch_size=4))
+    b = ft._dp_settings(pv, [D(1, 65, 64), D(2, 64, 64)], et.LoRAConfig(batch_size=4))
+    assert a == b
+    # An explicit public rate needs no figure, and publishes none.
+    c = ft._dp_settings(encompute.Privacy(level="strong-patient", sampling_rate=0.05),
+                        [D(1, 64, None), D(2, 70, None)], et.LoRAConfig(batch_size=4))
+    assert c["sampling_rate"] == "0.05" and c["units"] == {}
+
+
+@needs_cli
+def test_published_dataset_digests_hide_the_data(patient_run):
+    """Review finding DP-2 (ENC-SF-2026-049): the spec's dataset and grouping digests are
+    salted with a secret the owner keeps, so nobody can test a guessed
+    dataset or patient list against them."""
+    from encompute.torch import tensors
+    spec = json.loads(patient_run._ctx["spec"])
+    p, m, data = project(None)
+    for d, c in zip(data, spec["datasets"]):
+        x, y, ids = d.payload
+        plain = tensors.dumps({"x": x, "y": y, "unit_ids": ids})
+        assert _native.sha256_hex(plain) != c["digest"]
+        assert _native.sha256_hex(tensors.dumps({"unit_ids": ids})) != c["grouping_digest"]
+        # The owner, holding the salt, opens the commitment.
+        held = (patient_run.workdir / c["owner"] / "dataset.bin").read_bytes()
+        assert _native.sha256_hex(held) == c["digest"]
+
+
+@needs_cli
+def test_workers_apply_the_plans_clip_and_rate(patient_run):
+    """Review finding DP-3 (ENC-SF-2026-067): a worker refuses unless the approved plan is the
+    spec's and samples at the spec's rate, and applies the plan's per-unit
+    clip, so it contributes exactly what the accountant charges."""
+    from encompute.torch import worker
+    c = patient_run._ctx
+    plan = (c["modelco"] / "plan.json").read_text()
+    spec = json.loads(c["spec"])
+    assert worker.codec_clip(spec, plan) == dpsgd.CODEC_CLIP
+    # The spec samples at another rate than the plan the accountant uses.
+    other = json.loads(c["spec"])
+    other["config"]["dp_sgd"]["sampling_rate"] = "0.125"
+    with pytest.raises(ValueError, match="sampling rate"):
+        worker.codec_clip(other, plan)
+    # Another plan (a larger clip): not the spec's.
+    p = json.loads(plan)
+    for step in p["steps"]:
+        for mech in step["mechanisms"]:
+            if mech["mechanism"] == "differential_privacy":
+                mech["clip_norm"] = "0.5"
+    with pytest.raises(ValueError, match="not the training spec's plan"):
+        worker.codec_clip(spec, json.dumps(p))

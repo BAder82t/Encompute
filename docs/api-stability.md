@@ -34,6 +34,53 @@ Security exception: if a v1 behavior is itself a vulnerability, it is
 fixed in v1, and the fix is called out in the release notes and the
 advisory.
 
+Security fixes to v1 since 0.3.0-rc.3, under this exception:
+
+- Project membership is invite and accept on the same route
+  (`POST /v1/projects/{id}/members`): the owner's call returns
+  `200 {"status": "invited"}`, also for an organization that does not
+  exist (was 404), and the invited organization's admins accept with the
+  same call. The response gains `status`; `GET /v1/projects/{id}` adds
+  `invited`.
+- An asset approval covers only the organizations that were project
+  members when it was given; `approved_assets` lists only the approvals
+  that cover the caller's organizations, or of its own assets.
+- Service accounts cannot hold `security_admin` (`POST
+  .../service-accounts` with it answers 400), and policies are proposed
+  and approved only by people; the approver is a security admin of the
+  project owner's organization.
+- An organization's key broker cannot take an ID that another
+  organization's assets name, and an asset's `key_ref.broker`, when it is
+  a registered service, must be a key broker of the platform or of the
+  asset's organization.
+- Identity tokens need `iat`, and a lifetime no longer than
+  `ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS` (default 24 hours); otherwise 401.
+- A query string that names a parameter twice is refused (400).
+- `GET /metrics` needs the metrics token in production, unless
+  `ENCOMPUTE_METRICS_PUBLIC=true`.
+- `evaluator_url` and `evaluator_receipt_key` in a job go only to the
+  submitting organization (`null` for others in `GET /v1/jobs/{id}`).
+- A privacy reservation that under-declares its sensitivity, or in
+  production is not drawn with `csprng`, is refused.
+- A job's `purpose` must equal the purpose its program declares; a
+  request stating another is refused (ENC-SF-2026-088).
+- A job's `source_assets` must be exactly the registered assets its
+  program binds, each once, and empty when it binds none; an omitted,
+  extra, repeated or substituted asset is refused, also over the
+  submitter's own data (ENC-SF-2026-089, ENC-SF-2026-094).
+- Job approval (`POST /v1/jobs/{id}/approve`) takes a person of the
+  asset's organization; service accounts are refused (ENC-SF-2026-090).
+- Organizations an asset is shared with get it redacted (no `key_ref`,
+  `storage_uri`, `size_bytes` or `media_type`; `policy` reduced to
+  `require_job_approval`), and a job's actors appear to source owners as
+  `organization/user` or `organization/service` (ENC-SF-2026-092).
+
+New routes (additions, not breaking): `POST
+/v1/organizations/{id}/users/{user}/disable`, `POST
+/v1/organizations/{id}/memberships/remove`, `POST
+/v1/projects/{id}/members/remove`, `POST
+/v1/assets/{id}/approvals/withdraw`.
+
 Covered: every route in [api.md](api.md), the authentication headers
 (`Authorization`, `Encompute-Sender`, `Encompute-Recipient`,
 `Encompute-Timestamp`, `Encompute-Nonce`, `Encompute-Bind`,
@@ -80,17 +127,33 @@ with `_`, and any module not listed here, is internal.
 | Planning | `Project` (`data`, `model`, `train`, `plan`), `ProjectAsset`, `Training`, `Privacy`, `PlanningFailed` |
 | Errors | `EncomputeError` (`.code`, `.message`). Error codes are stable: [errors.md](errors.md) |
 | Build probes | `has_openfhe`, `has_exact`, `__version__` |
-| Control plane client | `Client`, `ControlError`, and the objects `Client` returns (`encompute.client.Project`, `Job`, `RunResult`). A thin client of the frozen API v1 |
+| Control plane client | `Client` (including `trusted_evaluators=`, and `allow_unpinned_evaluator=`, which is development only), `ControlError`, and the objects `Client` returns (`encompute.client.Project`, `Job`, `RunResult`). A thin client of the frozen API v1. Without a pinned evaluator key a job is refused, and an empty pin set refuses every evaluator |
 
 ### Experimental
 
 | Area | Names |
 |---|---|
-| Fine-tuning | `Project.finetune`, `encompute.torch`: `wrap_model`, `private_dataset`, `private_text_dataset`, `TextDataset`, `huggingface`, `import_model`, `LoRAConfig`, `apply_lora`, `layout`, `layout_digest`, `get_flat`, `set_flat`, `build`, `TinyClassifier`, and `FineTuneResult` (`infer`, `lineage`, `export_adapter`, `export_peft`, `resume`, `summary`, `close`) |
+| Fine-tuning | `Project.finetune`, `encompute.torch`: `wrap_model`, `private_dataset`, `private_text_dataset`, `PrivateDataset`, `TextDataset`, `huggingface`, `import_model`, `LoRAConfig`, `apply_lora`, `layout`, `layout_digest`, `get_flat`, `set_flat`, `build`, `TinyClassifier`, and `FineTuneResult` (`infer`, `lineage`, `export_adapter`, `export_peft`, `resume`, `summary`, `close`) |
 | Confidential Space jobs | `encompute.torch.job` (`prepare`, `verify`), `python -m encompute.torch.cs_worker` |
 
 These are tested end to end, but their arguments may still change as more
 model architectures and TEEs are added.
+
+Changes since 0.3.0-rc.3:
+
+- `wrap_model` and `build` accept only the factories the worker image
+  ships: `encompute.torch.models:tiny_classifier`, and
+  `encompute.torch.hf:from_config` (a Hugging Face package's own
+  `config.json`), each with arguments of its schema. Any other factory is
+  refused. `hf.from_config` now takes `(config: str, num_labels, task)`,
+  the exact text of `config.json`.
+- `FineTuneResult.resume`, `infer`, `export_adapter` and `export_peft`
+  take `revocations=`: owners' own trust bundles whose revocations are
+  honoured as well as the run's.
+- `private_dataset` and `private_text_dataset` take `public_units=`, a
+  number of privacy units the owner approves for publication.
+  `private_dataset` returns a `PrivateDataset` (a tuple with a
+  `public_units` attribute).
 
 ### Research only
 
@@ -121,12 +184,29 @@ the interface. Human-readable output may change; scripts should use
 
 | Class | Commands |
 |---|---|
-| Stable | `compile`, `run` (including `--remote`), `test`, `explain`, `bench`, `audit`, `keys generate`, `serve`, `verify`, `transcript`, `info`, `privacy explain`, `privacy graph`, `privacy budget`, `plan`, `check`, `aggregate identity`, `aggregate serve`, `aggregate join`, `aggregate verify`, `aggregate coordinator-policy`, `trust init`, `trust authorize`, `trust revoke`, `trust add`, `trust report`, `trust lineage`, `trust graph`, `attest verify`, `attest policy`, `keys protect`, `keys rotate`, `keys revoke`, `keys rewrap`, `keys rotate-root`, `keys serve`, `workload keys` |
-| Stable (clients of API v1) | `login`, `projects list`, `projects show`, `projects create`, `projects add-member`, `assets list`, `assets show`, `assets register`, `assets approve`, `assets revoke`, `assets lineage`, `jobs submit`, `jobs run`, `jobs status`, `jobs list`, `jobs cancel`, `trust report JOB`, `audit list` |
-| Experimental | `train`, `lineage`, `export` |
+| Stable | `compile`, `run` (including `--remote`), `test`, `explain`, `bench`, `audit`, `keys generate`, `serve`, `verify`, `transcript`, `info`, `privacy explain`, `privacy graph`, `privacy budget`, `plan`, `check`, `aggregate identity`, `aggregate serve`, `aggregate join`, `aggregate verify`, `aggregate coordinator-policy`, `trust init`, `trust authorize`, `trust revoke`, `trust add`, `trust report` (including `--production` and `--minimum-profile`), `trust lineage`, `trust graph`, `attest verify`, `attest policy`, `keys protect`, `keys rotate`, `keys revoke`, `keys rewrap`, `keys rotate-root`, `keys upgrade-state`, `keys serve`, `workload keys` |
+| Stable (clients of API v1) | `login`, `projects list`, `projects show`, `projects create`, `projects add-member`, `assets list`, `assets show`, `assets register`, `assets approve`, `assets revoke`, `assets lineage`, `jobs submit`, `jobs run` (including `--trust-evaluator`), `jobs status`, `jobs list`, `jobs cancel`, `trust report JOB`, `audit list`, `security legacy-service-admins` (including `--json`) |
+| Experimental | `train`, `lineage`, `export` (the last two also take `--production` and `--minimum-profile`) |
 | Research only | `verify --proof --evaluation-keys` (needs `vfhe-research`); `--backend tfhe-rs` anywhere (needs `research-tfhe-rs`) |
-| Development only | `attest mock-root`, `attest simulate-launcher`, `--mock-root`, `--development` (on `attest policy`, `aggregate coordinator-policy` and `keys protect`), `plan --allow-development`, `keys serve` without `--kek` or `--root-key` |
+| Development only | `attest mock-root`, `attest simulate-launcher`, `--mock-root`, `--development` (on `attest policy`, `aggregate coordinator-policy` and `keys protect`), `plan --allow-development`, `keys serve` without `--kek` or `--root-key`, `jobs run --allow-unpinned-evaluator` (honoured only with `ENCOMPUTE_ENV=development`; unset or any other value refuses it) |
 | Debugging | `keys challenge`, `keys release`, `workload attest` |
+
+`keys upgrade-state` authenticates a broker state written before 0.3.0
+(rc.3 and earlier). It prints what the state releases; without
+`--confirm` it exits 1 while the state is unauthenticated, and with
+`--confirm` it authenticates the state as printed. `jobs run` refuses
+a job without a pinned evaluator key (`--trust-evaluator` or
+`ENCOMPUTE_TRUSTED_EVALUATORS`) before sending anything. `trust report`,
+`lineage` and `export` check each plan against the verifier's own floor:
+`--production` (the default under `ENCOMPUTE_ENV=production`) refuses
+development attestation and research backends, and `--minimum-profile`
+(`standard`, `strong` or `maximum`; default `standard`) sets the weakest
+profile accepted.
+
+`security legacy-service-admins` lists the service accounts that still
+hold `security_admin` and how to remove the role. It exits 0 when there
+are none, 1 when there are any (so a runbook or CI job can gate on it),
+and 2 on an error.
 
 `encompute verify` exit codes are stable: 0 when the signature verifies
 against a trusted key and the artifact, request and response bindings were
@@ -160,12 +240,12 @@ evaluators must run the same Encompute minor release.
 
 | Route | Purpose |
 |---|---|
-| `GET /v1/info` | Backends, protocol version, receipt key |
+| `GET /v1/info` | Backends, protocol version, receipt key, loaded programs. With a control plane, it lists only the program a presented job grant names |
 | `GET /metrics` | Prometheus metrics (requests, jobs, evaluation-key cache) |
 | `GET /v1/attestation` | The attestation record the evaluator runs under (404 if none) |
 | `POST /v1/programs` | Upload a program (`.eir` text); returns its program ID |
 | `POST /v1/programs/{program}/keys` | Register evaluation keys |
-| `GET /v1/programs/{program}/keys/{key}` | Is this key registered? |
+| `GET /v1/programs/{program}/keys/{key}` | Is this key registered? With a control plane, answered only with a job grant for the program |
 | `POST /v1/programs/{program}/jobs` | Submit encrypted inputs (with a job grant when a control plane manages the evaluator) |
 | `GET /v1/jobs/{job}/result` | The encrypted result |
 | `GET /v1/jobs/{job}/receipt` | The signed execution receipt |
@@ -185,7 +265,10 @@ Python SDK, the CLI or the HTTP APIs instead.
 This includes the crates that other documents mention by name, such as
 `encompute-verification`, `encompute-attestation` and
 `encompute-keybroker`. Their serialized formats are covered by
-[compatibility.md](compatibility.md); their Rust APIs are not.
+[compatibility.md](compatibility.md); their Rust APIs are not. For
+example, since 0.3.0-rc.3 `encompute_trust::ReportOptions` has the fields
+`plan_floor`, `program_facts` and `proof_check`, and `encompute-planner`
+exports `PlanFloor` and `verify_plan_with`.
 
 Cargo features:
 

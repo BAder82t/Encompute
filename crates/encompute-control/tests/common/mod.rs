@@ -25,7 +25,65 @@ pub const SECRET: &str = "test-development-secret";
 
 static N: AtomicU64 = AtomicU64::new(0);
 
-/// A database for one test, or `None` (skipped).
+/// The databases the running test created (fresh ones and backups). Each
+/// test runs on its own thread, so this thread-local is dropped when the
+/// test ends, passing or panicking (unwinding drops the test's control
+/// planes first); dropping it drops the databases. Tests move the parts of
+/// their worlds around freely (`let env0 = t.env0`), so the cleanup cannot
+/// hang off one struct.
+struct TestDatabases {
+    admin: String,
+    names: Vec<String>,
+}
+
+impl Drop for TestDatabases {
+    fn drop(&mut self) {
+        if self.names.is_empty() {
+            return;
+        }
+        // Never panic here: a panicking thread-local destructor aborts.
+        let mut c = match postgres::Client::connect(&self.admin, postgres::NoTls) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("test databases {:?} not dropped: {e}", self.names);
+                return;
+            }
+        };
+        for name in self.names.iter().rev() {
+            // End the sessions first (a pool, a spawned server or a leaked
+            // client may still hold one); FORCE ends any that reconnect.
+            let _ = c.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                  WHERE datname = $1 AND pid <> pg_backend_pid()",
+                &[name],
+            );
+            if let Err(e) = c.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+            {
+                eprintln!("test database {name} not dropped: {e}");
+            }
+        }
+    }
+}
+
+thread_local! {
+    static CREATED: std::cell::RefCell<Option<TestDatabases>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Drops database `name` when the current test ends.
+fn drop_at_test_end(admin: &str, name: &str) {
+    CREATED.with(|c| {
+        c.borrow_mut()
+            .get_or_insert_with(|| TestDatabases {
+                admin: admin.to_owned(),
+                names: vec![],
+            })
+            .names
+            .push(name.to_owned())
+    });
+}
+
+/// A database for one test, or `None` (skipped). It is dropped when the
+/// test ends.
 pub fn fresh_database() -> Option<String> {
     let admin = match std::env::var("ENCOMPUTE_TEST_DATABASE_URL") {
         Ok(u) => u,
@@ -49,6 +107,7 @@ pub fn fresh_database() -> Option<String> {
     );
     let mut c = postgres::Client::connect(&admin, postgres::NoTls).expect("test database");
     c.batch_execute(&format!("CREATE DATABASE {name}")).unwrap();
+    drop_at_test_end(&admin, &name);
     // Replace the database name in the URL.
     let url = match admin.rsplit_once('/') {
         Some((base, _)) if admin.starts_with("postgres") => format!("{base}/{name}"),
@@ -61,13 +120,14 @@ fn admin_url() -> String {
     std::env::var("ENCOMPUTE_TEST_DATABASE_URL").unwrap()
 }
 
-fn db_name(url: &str) -> String {
+pub fn db_name(url: &str) -> String {
     url.rsplit('/').next().unwrap().to_owned()
 }
 
 /// "Backs up" `url` into database `backup` (a template copy; no connection
-/// to the source may be open).
+/// to the source may be open). The backup is dropped when the test ends.
 pub fn backup_database(url: &str, backup: &str) {
+    drop_at_test_end(&admin_url(), backup);
     let mut c = postgres::Client::connect(&admin_url(), postgres::NoTls).unwrap();
     let live = db_name(url);
     // A dropped pool closes its connections asynchronously: end them first.
@@ -110,6 +170,34 @@ pub fn restore_database(backup: &str, url: &str) {
         }
     }
     panic!("the backup database stayed in use");
+}
+
+/// The configuration `encompute-control recover` would run with on
+/// `env0`'s database and anchor.
+pub fn recovery_config(env0: &Env0) -> encompute_control::config::Config {
+    encompute_control::config::Config {
+        env: env0.env,
+        listen: "127.0.0.1:0".into(),
+        service_id: "control-plane".into(),
+        database_url: zeroize::Zeroizing::new(env0.url.clone()),
+        signing_key_file: None,
+        oidc: vec![],
+        dev_token_secret: None,
+        anchor: encompute_control::config::AnchorConfig::Dir(env0.anchor_dir.clone()),
+        audit_checkpoint_every: 5,
+        max_token_lifetime_secs: encompute_control::authn::DEFAULT_MAX_TOKEN_LIFETIME_SECS,
+        metrics: encompute_control::config::MetricsAccess::Closed,
+    }
+}
+
+/// Runs `encompute-control recover` on `env0`'s database and anchor: its
+/// notes.
+pub fn run_recovery(env0: &Env0) -> Vec<String> {
+    let db = Db::connect(&env0.url).unwrap();
+    let signer = ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
+    let store = Box::new(DirAnchor::new(env0.anchor_dir.clone()).unwrap());
+    let rc = Control::for_recovery(&recovery_config(env0), db, signer, store).unwrap();
+    rc.recover("operator-1").unwrap()
 }
 
 pub fn tmp_dir(tag: &str) -> PathBuf {
@@ -350,8 +438,15 @@ pub fn world() -> Option<World> {
         Some(json!({"organization": "modelco", "name": "medical-training"})),
     );
     let project = p["id"].as_str().unwrap().to_owned();
+    // modelco invites hospital-a; hospital-a's admin accepts.
     t.ok(
         &b_admin,
+        "POST",
+        &format!("/v1/projects/{project}/members"),
+        Some(json!({"organization": "hospital-a"})),
+    );
+    t.ok(
+        &a_admin,
         "POST",
         &format!("/v1/projects/{project}/members"),
         Some(json!({"organization": "hospital-a"})),
@@ -405,7 +500,11 @@ pub fn budget(epsilon: f64) -> Value {
     .unwrap()
 }
 
-/// A reservation costing `sigma2`-dependent privacy (sensitivity 1).
+/// A reservation costing what sensitivity 1 at noise variance `sigma2`
+/// would (declared as sensitivity 2 at `4 * sigma2`, the least a release
+/// can have: one clipped code unit plus one coordinate's rounding). Its
+/// mechanism is consistent with that charge (a large noise multiplier), so
+/// the control plane's check of the declared sensitivity accepts it.
 pub fn reserve(event: &str, sigma2: u64) -> Value {
     serde_json::to_value(encompute_privacy::PrivacyEvent::Reserve {
         event_id: event.into(),
@@ -416,12 +515,13 @@ pub fn reserve(event: &str, sigma2: u64) -> Value {
         mechanism: encompute_ir::confidentiality::DpMechanism {
             kind: encompute_ir::confidentiality::DpKind::DiscreteGaussian,
             clip_norm: 1.0,
-            noise_multiplier: 1.0,
+            noise_multiplier: 10_000_000.0,
             sampling_rate: None,
+            preset: None,
         },
-        sensitivity: 1,
-        sigma2,
-        vector_len: 8,
+        sensitivity: 2,
+        sigma2: 4 * sigma2,
+        vector_len: 1,
         rng: encompute_privacy::CSPRNG.into(),
     })
     .unwrap()
@@ -442,6 +542,42 @@ program score precision 0.001
 %1 = mul %0, %0 : secret vector<4>
 output \"y\" = %1
 ";
+
+/// [`EXACT`] over another organization's registered asset: the program
+/// declares its purpose and binds its input to the asset by ID, as a job
+/// using an asset another organization approved must.
+pub fn exact_over(asset: &str, owner: &str, kind: &str, purpose: &str) -> String {
+    format!(
+        "encompute 0.1
+program adult precision 0.001 purpose \"{purpose}\"
+party \"{owner}\" \"{owner}\"
+party \"modelco\" \"ModelCo\"
+asset \"{asset}\" {kind} owners [\"{owner}\"] readers [\"modelco\"] purposes [\"{purpose}\"] release allowed_parties
+%0 = input \"age\" [0.0, 120.0] asset \"{asset}\" : secret u8
+%1 = const [18.0] : public u8
+%2 = ge %0, %1 : secret bool
+output \"out\" = %2 to \"modelco\"
+"
+    )
+}
+
+/// [`EXACT`] over modelco's own registered asset `asset` (its model, say):
+/// the program binds its input to the asset by ID, so the asset is the
+/// job's source. A job lists exactly the assets its program binds, even
+/// over the submitter's own data; [`EXACT`] binds none and lists none.
+pub fn exact_own(asset: &str) -> String {
+    format!(
+        "encompute 0.1
+program adult precision 0.001 purpose \"medical-training\"
+party \"modelco\" \"ModelCo\"
+asset \"{asset}\" model owners [\"modelco\"] readers [\"modelco\"] purposes [\"medical-training\"] release allowed_parties
+%0 = input \"age\" [0.0, 120.0] asset \"{asset}\" : secret u8
+%1 = const [18.0] : public u8
+%2 = ge %0, %1 : secret bool
+output \"out\" = %2 to \"modelco\"
+"
+    )
+}
 
 impl World {
     /// A plan of `program` in the shared project, by modelco's developer.

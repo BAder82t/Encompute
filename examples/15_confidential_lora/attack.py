@@ -86,6 +86,14 @@ try:
     attack("run under another plan", "key broker: the TrainingSpecId binds the PlanId",
            lambda: keys(variant(plan_id="1" * 64)))
 
+    def any_callable():
+        s = json.loads(SPEC)
+        s["base_model"]["architecture"] = json.dumps(
+            {"factory": "subprocess:run", "kwargs": {"args": "true"}})
+        keys(json.dumps(s))
+    attack("name arbitrary code as the model factory",
+           "training spec: only factories the worker image ships", any_callable)
+
     print("== The workload checks what it was given ==\n")
     k = keys()["base-model"]
     sealed = (MC / "base-model.enc").read_bytes()
@@ -146,15 +154,17 @@ try:
 
     import re
     noise = float(re.search(r"noise_multiplier ([0-9.]+)", (MC / "training.eir").read_text())[1])
+    # The noise, and the privacy level it is labelled with (a coordinator
+    # that cuts the noise drops the label, which would no longer compile).
+    NOISE = r'noise_multiplier [0-9.]+( preset "[a-z]+")?'
     attack("cut the DP noise sharply (to 0.5)",
            "the privacy ledger charges the noise actually used: over budget",
            lambda: malicious_round(
-               lambda t: re.sub(r"noise_multiplier [0-9.]+", "noise_multiplier 0.5", t), []))
+               lambda t: re.sub(NOISE, "noise_multiplier 0.5", t), []))
     attack(f"cut the DP noise slightly ({noise} -> {noise * 0.9:.2f}, within budget)",
            "each hospital checks the coordinator's spec is the approved one",
            lambda: malicious_round(
-               lambda t: re.sub(r"noise_multiplier [0-9.]+",
-                                f"noise_multiplier {noise * 0.9:.2f}", t), []))
+               lambda t: re.sub(NOISE, f"noise_multiplier {noise * 0.9:.2f}", t), []))
     attack("bypass the approved plan (no --plan)",
            "each hospital checks the spec binds the approved PlanId",
            lambda: malicious_round(lambda t: t, []))

@@ -271,8 +271,20 @@ fn chain_err(m: impl Into<String>) -> Error {
 /// Recomputes the whole chain: every hash, link and sequence number.
 /// Returns (last seq, root).
 pub fn verify_chain(c: &mut impl GenericClient) -> Result<(i64, String)> {
-    let mut prev = GENESIS.to_owned();
-    let mut seq = 0i64;
+    verify_from(c, 0, GENESIS)
+}
+
+/// Checks the chain from event `from` (whose hash must be `root`; the
+/// genesis for 0) to the head: every later hash, link and sequence number,
+/// and the head row. Returns (last seq, root).
+pub fn verify_from(c: &mut impl GenericClient, from: i64, root: &str) -> Result<(i64, String)> {
+    if hash_at(c, from)?.as_deref() != Some(root) {
+        return Err(chain_err(format!(
+            "audit event {from} is missing or differs from the one seen before (deleted or rewritten events)"
+        )));
+    }
+    let mut prev = root.to_owned();
+    let mut seq = from;
     loop {
         let rows = c
             .query(
@@ -353,14 +365,24 @@ impl AuditCheckpoint {
     }
 }
 
-/// Signs and stores a checkpoint of the current head.
-pub fn checkpoint(c: &mut impl GenericClient, signer: &ServiceSigner) -> Result<AuditCheckpoint> {
-    let head = c
-        .query_one("SELECT seq, hash FROM audit_head WHERE id", &[])
+/// Signs and stores a checkpoint of the current head, only if the chain
+/// extends event `anchored_seq` with hash `anchored_root` (the last anchored
+/// checkpoint): the events from there to the head are checked first, with
+/// the head locked so none is appended meanwhile. A chain that does not
+/// extend it (events deleted or rewritten, an older database restored) is
+/// refused (ENC2301) and nothing is signed.
+pub fn checkpoint_extending(
+    c: &mut impl GenericClient,
+    signer: &ServiceSigner,
+    anchored_seq: i64,
+    anchored_root: &str,
+) -> Result<AuditCheckpoint> {
+    c.query_one("SELECT seq FROM audit_head WHERE id FOR UPDATE", &[])
         .map_err(db_err)?;
+    let (seq, root) = verify_from(c, anchored_seq, anchored_root)?;
     let mut cp = AuditCheckpoint {
-        seq: head.get(0),
-        root: head.get(1),
+        seq,
+        root,
         signer: signer.id().into(),
         signer_public_key: signer.public_key_hex(),
         signature: String::new(),

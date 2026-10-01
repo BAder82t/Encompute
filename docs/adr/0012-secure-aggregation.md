@@ -165,6 +165,15 @@ gradient, and the coordinator learns only the sum.
 | Replay attacker | Messages and contributions are bound to the round ID and signed; parties refuse rounds not newer than the last they joined (the CLI's required `--state`; library callers must persist it). The state is recorded before contributing, so a failed round cannot be rejoined: rerunning a round with different survivors would let a coordinator subtract two aggregates and recover a party's vector. Recovery is a new round. |
 | Cloud operator | Same as the coordinator, or as the network: messages are signed, and shares are encrypted end to end between parties. |
 
+**Update (2026-09-28), the replay row.** The CLI's `--state` now keeps the
+last round joined per aggregation spec ID (`sequences`), next to the older
+global sequence, which an earlier release wrote and which stays a floor
+for every spec. A new join records only its own spec's sequence, so rounds
+of one collaboration no longer block another's. Each join checks and records its round under an exclusive lock on
+the state file and replaces the file atomically, so two concurrent joins
+cannot both accept the same round. Sequences above 2^53 − 1 are refused,
+by the coordinator (`--sequence`) and by parties.
+
 Contributing the same vector to several rounds with different participant
 sets has the same effect as a differencing attack: the difference of two
 aggregates can isolate one party's vector. Parties should not resubmit an

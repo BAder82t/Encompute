@@ -160,7 +160,9 @@ pub fn check_file(path: &str) -> Result<()> {
 }
 
 /// Refuses a `config.json` that names custom code or an unsupported
-/// architecture.
+/// architecture, asks for quantization (loaders run extra code and
+/// libraries for it), or chooses the attention implementation (the worker
+/// always builds eager attention, which per-example gradients need).
 pub fn check_config(config: &serde_json::Value) -> Result<String> {
     let o = config
         .as_object()
@@ -170,6 +172,17 @@ pub fn check_config(config: &serde_json::Value) -> Result<String> {
             return Err(bad(format!(
                 "config.json names custom code ({k}): remote code is never run in a confidential \
                  workload"
+            )));
+        }
+    }
+    for k in o.keys() {
+        if k == "quantization_config"
+            || k.starts_with("_attn_implementation")
+            || k == "attn_implementation"
+        {
+            return Err(bad(format!(
+                "config.json sets {k}: a package's configuration may not choose quantization or \
+                 the attention implementation"
             )));
         }
     }
@@ -183,6 +196,81 @@ pub fn check_config(config: &serde_json::Value) -> Result<String> {
         )));
     }
     Ok(t.to_owned())
+}
+
+/// The keys a `tokenizer_config.json` may hold: the settings of the
+/// Transformers-native tokenizers of the supported architectures.
+///
+/// No key naming a file is allowed (`tokenizer_file`, `full_tokenizer_file`,
+/// `special_tokens_map_file`): Transformers prefers such a setting over the
+/// package's own file and opens whatever path it names, so a package could
+/// point tokenization at a file outside itself. `save_pretrained` never
+/// writes them.
+pub const TOKENIZER_CONFIG_KEYS: &[&str] = &[
+    "add_bos_token",
+    "add_eos_token",
+    "add_prefix_space",
+    "added_tokens_decoder",
+    "additional_special_tokens",
+    "bos_token",
+    "clean_up_tokenization_spaces",
+    "cls_token",
+    "do_basic_tokenize",
+    "do_lower_case",
+    "eos_token",
+    "errors",
+    "extra_special_tokens",
+    "mask_token",
+    "max_len",
+    "model_input_names",
+    "model_max_length",
+    "name_or_path",
+    "never_split",
+    "pad_token",
+    "padding_side",
+    "sep_token",
+    "split_special_tokens",
+    "strip_accents",
+    "tokenize_chinese_chars",
+    "tokenizer_class",
+    "trim_offsets",
+    "truncation_side",
+    "unk_token",
+];
+
+/// The tokenizer classes a package may name.
+pub const TOKENIZER_CLASSES: &[&str] = &[
+    "BertTokenizer",
+    "BertTokenizerFast",
+    "DistilBertTokenizer",
+    "DistilBertTokenizerFast",
+    "RobertaTokenizer",
+    "RobertaTokenizerFast",
+];
+
+/// Refuses a `tokenizer_config.json` with a key outside
+/// [`TOKENIZER_CONFIG_KEYS`] (`auto_map`, custom classes, processors) or a
+/// tokenizer class outside [`TOKENIZER_CLASSES`].
+pub fn check_tokenizer_config(config: &serde_json::Value) -> Result<()> {
+    let o = config
+        .as_object()
+        .ok_or_else(|| bad("tokenizer_config.json is not an object"))?;
+    for k in o.keys() {
+        if !TOKENIZER_CONFIG_KEYS.contains(&k.as_str()) {
+            return Err(bad(format!(
+                "tokenizer_config.json sets {k}, which a package may not (custom tokenizer code \
+                 or an unknown setting)"
+            )));
+        }
+    }
+    match o.get("tokenizer_class") {
+        None => Ok(()),
+        Some(serde_json::Value::String(c)) if TOKENIZER_CLASSES.contains(&c.as_str()) => Ok(()),
+        Some(c) => Err(bad(format!(
+            "tokenizer_config.json names tokenizer class {c}, not a Transformers-native one ({})",
+            TOKENIZER_CLASSES.join(", ")
+        ))),
+    }
 }
 
 /// Refuses a `model.safetensors.index.json` whose `weight_map` names

@@ -31,7 +31,11 @@
 //! The neighbouring relation is adding or removing one privacy unit (one
 //! patient, or all of one patient's grouped records). The arithmetic is
 //! `libm`, so every party computes identical bits, and the results round
-//! up.
+//! up: each curve value by an allowance for its rounding error, and each
+//! epsilon by a relative margin ([`crate::accountant::RELATIVE_MARGIN`]),
+//! then a few ulps.
+
+use crate::accountant::conservative;
 
 /// The integer Rényi orders the accountant evaluates: every order to 256,
 /// then a spread to 1024. High orders matter when a release is heavily
@@ -64,17 +68,22 @@ fn ln_binom(n: u32, k: u32) -> f64 {
     libm::lgamma(n + 1.0) - libm::lgamma(k + 1.0) - libm::lgamma(n - k + 1.0)
 }
 
-fn logsumexp(xs: &[f64]) -> f64 {
-    let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if m == f64::NEG_INFINITY {
-        return m;
-    }
-    m + libm::log(xs.iter().map(|x| libm::exp(x - m)).sum::<f64>())
+/// A bound on the absolute rounding error of a `libm` evaluation whose
+/// intermediate values sum, in magnitude, to `magnitude`: each operation
+/// is accurate to an ulp or two, so a multiple of machine epsilon.
+fn rounding_allowance(magnitude: f64) -> f64 {
+    8.0 * f64::EPSILON * magnitude
 }
 
 /// The Zhu–Wang Theorem 6 bound on the RDP at order `alpha` of a release
 /// Poisson-sampled at rate `q`, whose base mechanism has RDP `alpha * rho`
 /// (not yet capped by the unsampled curve).
+///
+/// Rounded up: the log-sum is taken around its largest term with `log1p`
+/// (no cancellation in `log(1 + small)`), and raised by an allowance for
+/// the rounding error of every term (weighted by its share of the sum) and
+/// of the sum. Before, low orders came out up to about 3e-11 relative too
+/// small (review finding DP-7).
 pub fn subsampled_bound(rho: f64, q: f64, alpha: u32) -> f64 {
     assert!(alpha >= 2 && (0.0..=1.0).contains(&q) && rho >= 0.0);
     let a = alpha as f64;
@@ -86,18 +95,53 @@ pub fn subsampled_bound(rho: f64, q: f64, alpha: u32) -> f64 {
     }
     let (lq, l1q) = (libm::log(q), libm::log1p(-q));
     let eps = |j: u32| j as f64 * rho;
-    let mut terms = vec![(a - 1.0) * l1q + libm::log(a * q - q + 1.0)];
-    terms.push(ln_binom(alpha, 2) + 2.0 * lq + (a - 2.0) * l1q + eps(2));
+    // Each term with the magnitude of the values it is computed from.
+    let lgammas = |j: u32| {
+        let lg = |x: u32| libm::lgamma(x as f64 + 1.0).abs();
+        lg(alpha) + lg(j) + lg(alpha - j)
+    };
+    // log(aq - q + 1), without rounding 1 + (a-1)q first.
+    let log_first = libm::log1p((a - 1.0) * q);
+    let mut terms = vec![(
+        (a - 1.0) * l1q + log_first,
+        ((a - 1.0) * l1q).abs() + log_first.abs(),
+    )];
+    terms.push((
+        ln_binom(alpha, 2) + 2.0 * lq + (a - 2.0) * l1q + eps(2),
+        lgammas(2) + (2.0 * lq).abs() + ((a - 2.0) * l1q).abs() + eps(2),
+    ));
     for j in 3..=alpha {
         let jf = j as f64;
-        terms.push(
+        terms.push((
             libm::log(3.0) + ln_binom(alpha, j) + jf * lq + (a - jf) * l1q + (jf - 1.0) * eps(j),
-        );
+            2.0 + lgammas(j) + (jf * lq).abs() + ((a - jf) * l1q).abs() + (jf - 1.0) * eps(j),
+        ));
     }
-    logsumexp(&terms) / (a - 1.0)
+    // log(sum e^t) = m + log1p(sum of the others' e^(t - m)).
+    let top = (0..terms.len())
+        .max_by(|&i, &k| terms[i].0.total_cmp(&terms[k].0))
+        .expect("at least two terms");
+    let m = terms[top].0;
+    let w: Vec<f64> = terms.iter().map(|(t, _)| libm::exp(t - m)).collect();
+    let rest: f64 = w
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != top)
+        .map(|(_, w)| w)
+        .sum();
+    let total = 1.0 + rest;
+    let weighted: f64 = terms
+        .iter()
+        .zip(&w)
+        .map(|((_, mag), w)| w / total * mag)
+        .sum();
+    let allowance = rounding_allowance(m.abs() + weighted + terms.len() as f64 * rest / total);
+    (m + libm::log1p(rest) + allowance) / (a - 1.0)
 }
 
-/// One release's RDP curve over [`ORDERS`], rounded up.
+/// One release's RDP curve over [`ORDERS`], rounded up (the subsampled
+/// bound carries its own rounding allowance; `alpha * rho` is exact to an
+/// ulp).
 pub fn release_curve(rho: f64, sampling_rate: Option<f64>) -> [f64; N_ORDERS] {
     let mut c = [0.0; N_ORDERS];
     for (i, &alpha) in ORDERS.iter().enumerate() {
@@ -132,7 +176,7 @@ pub fn compose(curves: &[[f64; N_ORDERS]]) -> [f64; N_ORDERS] {
 }
 
 /// The smallest `ε` such that the composed curve satisfies `(ε, δ)`-DP
-/// (CKS 2020, Proposition 12), rounded up.
+/// (CKS 2020, Proposition 12), rounded up (with the relative margin).
 pub fn epsilon(curve: &[f64; N_ORDERS], delta: f64) -> f64 {
     assert!(delta > 0.0 && delta < 1.0);
     if curve.iter().all(|&r| r == 0.0) {
@@ -141,10 +185,15 @@ pub fn epsilon(curve: &[f64; N_ORDERS], delta: f64) -> f64 {
     let mut best = f64::INFINITY;
     for (i, &alpha) in ORDERS.iter().enumerate() {
         let a = alpha as f64;
+        let (ld, la, lb) = (
+            libm::log(1.0 / delta),
+            (a - 1.0) * libm::log1p(-1.0 / a),
+            libm::log(a),
+        );
         let e = curve[i]
-            + (libm::log(1.0 / delta) + (a - 1.0) * libm::log1p(-1.0 / a) - libm::log(a))
-                / (a - 1.0);
+            + (ld + la - lb) / (a - 1.0)
+            + rounding_allowance(curve[i] + (ld.abs() + la.abs() + lb + 1.0) / (a - 1.0));
         best = best.min(e);
     }
-    up(best.max(0.0), 8)
+    conservative(up(best.max(0.0), 8))
 }

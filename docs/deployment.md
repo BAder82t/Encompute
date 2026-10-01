@@ -46,8 +46,11 @@ services, because each is a different trust boundary.
 
 **People** log in through the organization's OpenID Connect provider. The
 control plane checks each token against the provider's JWKS: signature,
-issuer, audience and expiry. The identity must be registered as a user of an
-organization. A user (`alice@hospital-a.example`) is never the same thing as
+issuer, audience, expiry, not-before, and an issue time (`iat`) that is not
+in the future and at most `ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS` (default
+86400) before the expiry. The identity must be registered as an active user
+of an organization. A user disabled through the API is refused from its
+next request. A user (`alice@hospital-a.example`) is never the same thing as
 a cryptographic party in a program's policy (`hospital-a`).
 
 **Services** have their own Ed25519 keys: the control plane, each evaluator,
@@ -58,7 +61,8 @@ every request and message. The signature covers:
   canonical form) and a hash of the body;
 - the sender and the recipient;
 - a timestamp;
-- a nonce (a replayed request is refused);
+- a nonce (a replayed request is refused; a used nonce is kept for longer
+  than the window in which its request could still be accepted);
 - the IDs the request is about.
 
 A source IP address, a hostname or a private network is never treated as an
@@ -74,8 +78,8 @@ reach.
 
 | Role | Can |
 |---|---|
-| `organization_admin` | Add users and automation accounts, add collaborators to its projects, create projects. |
-| `security_admin` | Propose and approve policies (a different admin must approve), disable service accounts, revoke assets. |
+| `organization_admin` | Add users and automation accounts, remove roles, disable users and service accounts, invite collaborators to its projects and accept invitations, create projects. |
+| `security_admin` | Propose and approve policies (a different admin of the project owner's organization must approve), disable users and service accounts, revoke assets. Held by people only: no route grants it to a service account (see "Upgrading from 0.3.0-rc.3 or earlier" for accounts that already hold it). |
 | `data_owner`, `model_owner` | Register their organization's assets (datasets for data owners; models, adapters and checkpoints for model owners), approve them for a project and purpose, revoke them. Data owners also read and export privacy ledgers, record privacy spending, and authorize SecAgg services to spend. |
 | `ml_developer` | Create projects, plan and submit jobs, complete jobs with their receipts. |
 | `auditor` | Read the audit trail and privacy ledgers. |
@@ -88,8 +92,17 @@ on the control plane.
 **Tenant isolation.** An identity sees only its own organizations'
 resources, plus what an explicit collaboration grants:
 
-- project membership, added by the project owner's admins;
-- an asset's approval for a project and purpose, given by its owner.
+- project membership: the project owner's admins invite an organization,
+  and it becomes a member only once that organization's admins accept;
+- an asset's approval for a project and purpose, given by its owner. It
+  covers the organizations that are members when it is given: an
+  organization that joins later needs a new approval.
+
+Every grant can be withdrawn through the API: a user disabled, a role
+removed, a member removed from a project, an asset approval withdrawn. The
+withdrawal is audited and takes effect from the next request. Removing a
+project member or withdrawing an approval also fails the jobs not yet
+started that depended on it.
 
 Anything else is reported as not found (ENC2603), so looking up another
 tenant's ID does not confirm that the resource exists. Uniqueness conflicts
@@ -111,7 +124,8 @@ CREATED → PLANNING → PLANNED → (WAITING_FOR_APPROVAL) → AUTHORIZED → Q
    - The job names a plan, which the control plane made from the program
      with the planner. It also names a purpose and its source assets.
    - Every asset must be visible, not revoked, and approved by its owner
-     for this project and purpose.
+     for this project and purpose while the submitting organization was a
+     member.
 2. The scheduler places the job on an evaluator that has:
    - registered the job's backend (`openfhe` or `openfhe-exact`) and
      parameter profile (for example `BINFHE_STD128_GINX_BITS_V1`);
@@ -131,8 +145,17 @@ CREATED → PLANNING → PLANNED → (WAITING_FOR_APPROVAL) → AUTHORIZED → Q
    performance estimates, never a security decision.
 
    The control plane signs a job grant for that evaluator.
-3. The client sends its encrypted inputs to the evaluator with the grant.
-   The evaluator:
+3. The client checks the evaluator's receipt key against its own pin set
+   (`--trust-evaluator`, `ENCOMPUTE_TRUSTED_EVALUATORS`, or the SDK's
+   `trusted_evaluators=`) before it sends anything, so the control plane
+   cannot choose the key that verifies a result. A key outside the set is
+   refused (ENC2607), an empty set refuses every evaluator, and without a
+   pin the job is refused (ENC2605). Only in development, the explicit
+   opt-out (`--allow-unpinned-evaluator`, `ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1`)
+   accepts the key the control plane names, and only with
+   `ENCOMPUTE_ENV=development` set explicitly; unset or any other value
+   refuses it. The client then sends its encrypted inputs to the evaluator
+   with the grant. The evaluator:
    - checks the grant against the pinned control-plane key;
    - asks the control plane to start the job, which it refuses if the job
      was cancelled or an asset was revoked;
@@ -149,7 +172,8 @@ evaluator disappears fails, and is not re-run.
 **Draining an evaluator** before an upgrade: an operator sets it to
 `draining` (`POST /v1/evaluators/{id}/status`). The evaluator takes no new
 jobs and its in-flight jobs finish; the operator then replaces it. The
-evaluator's own heartbeats cannot undo a drain.
+evaluator's own heartbeats, and its registering again when it restarts,
+cannot undo a drain.
 
 ## Keys: bring your own key
 
@@ -170,6 +194,26 @@ encrypted assets
   ```
 
   The broker reads `BAO_ADDR` and `BAO_TOKEN_FILE` from the environment.
+  It follows no redirects, so the token never leaves for another host:
+  point `BAO_ADDR` at the server itself. The token file must be a regular
+  file not writable by group or others (0600, or 0644 for a mounted
+  secret). A KEK file (`--kek`) must not be accessible to group or others
+  (0600).
+- **Broker state.** `broker.json` holds the wrapped asset keys and the
+  release policies. It is authenticated: a generation number and an HMAC
+  under a key derived from the KEK. A state file edited outside Encompute (a
+  release policy, the mode, the organization or a key version) does not
+  open; restore it from a backup instead. A backup does restore keys revoked
+  since it was taken (a rollback this check does not detect), so keep
+  backups access-controlled.
+- **Upgrading a broker from 0.3.0-rc.3.** Its state is not authenticated
+  yet and does not open. Run `encompute keys upgrade-state` with the same
+  `--kek`, or `--root-key` and `--organization`, flags the broker runs
+  with. It prints what the state releases, and to whom: check it against
+  your own records, then rerun with `--confirm`.
+- **Attestation keys.** A broker with `--jwks google` refetches Google's
+  Confidential Space key set when a token names an unknown key (at most once
+  a minute) and once the set is an hour old.
 - **What Encompute stores.** Only the key reference, the provider, the root
   key's version and the wrapped KEK: never the master secret.
 - **Rotation.** `encompute keys rotate-root` re-wraps the KEK under the new
@@ -178,11 +222,43 @@ encrypted assets
 - **Revocation.** Revoking an asset on the control plane is immediate: no
   new job may use it, jobs not yet running fail, and its key broker is told
   (a signed message, delivered at least once) to destroy every version of
-  its key.
+  its key. The broker is told only once the revocation is in the state
+  anchor. Revocations for an asset go only to a key broker of the platform
+  or of the asset's organization.
 - **Failures.** A provider that is unavailable, disabled, refuses the
   organization's context, or no longer decrypts a key version releases
   nothing. There is no fallback to local or plaintext keys. Production
   brokers refuse development stores.
+
+## Upgrading from 0.3.0-rc.3 or earlier
+
+- **Service accounts with `security_admin`.** Earlier releases let an
+  organization admin give `security_admin` to an automation account, so
+  one admin could supply both approvals of a policy. 0.3.0 refuses the
+  grant on every path, and never counts a service account as a policy's
+  proposer or approver. It does not strip the role from accounts that
+  already hold it: they keep it for disabling, revoking and reading the
+  audit trail. On every start the control plane logs a
+  `legacy_service_admins` warning naming them, writes one
+  `security.legacy_service_admins` audit event into each affected
+  organization's trail, and sets the `encompute_legacy_service_admins`
+  gauge. Find them with `encompute security legacy-service-admins` (exit
+  1 while any remain) or `GET /v1/security/legacy-service-admins`, and
+  have an organization admin of each organization remove the role:
+  `POST /v1/organizations/{organization}/memberships/remove` with
+  `{"principal": "<service account>", "role": "security_admin"}`. Give the
+  role to people instead. The account keeps its other roles.
+- **Removal window.** 0.3.x accepts these accounts with the warnings
+  above. 0.4.0 will refuse them: either the control plane refuses to
+  start while any remains, or a migration strips the role. Which one will
+  be announced in advance. Run the check before upgrading.
+- **No downgrade.** Take a database backup and a copy of the anchor
+  before upgrading. After the upgrade, schema version 4 refuses an rc.3
+  control plane, and once the new anchor sets (ended jobs, withdrawn
+  approvals, removed memberships and roles) are written an rc.3 binary
+  cannot read the anchor. To roll back, restore the pre-upgrade database
+  backup together with its matching anchor, then start the older
+  release.
 
 ## Privacy state and backups
 
@@ -190,30 +266,61 @@ The privacy ledgers (every charged release) live in PostgreSQL, hash-chained,
 with an exclusive lock per ledger: two spends can never both use the last of
 a budget. A duplicate delivery of the same event is charged once.
 
-After every spend, the control plane signs the ledgers' latest roots, the
-audit chain's root at each checkpoint, and every asset revocation, into the
-**state anchor**. The
-anchor is kept outside the database: on its own volume, or in the customer's
-vault (OpenBao or Vault KV). At every start, the database must extend the
-anchor. If it does not, the control plane refuses to start:
+The control plane signs into the **state anchor**:
+
+- the ledgers' latest roots, after every spend;
+- the audit chain's root, at each checkpoint;
+- every security-negative transition: revoked assets, frozen ledgers,
+  disabled service accounts and users, cancelled and failed jobs,
+  withdrawn asset approvals (including the grants an organization lost by
+  leaving a project), removed project memberships, and organization roles
+  removed from a user or service account.
+
+The anchor is kept outside the database: on its own volume, or in the
+customer's vault (OpenBao or Vault KV). It only moves forward along the
+same chains. Run one control-plane process per anchor.
+
+While the service runs, a spend on a ledger that no longer extends the
+anchor is refused (ENC2202 PRIVACY STATE ROLLBACK), and so is an audit
+checkpoint over a chain that does not extend the anchored one (ENC2202
+AUDIT STATE ROLLBACK). Neither is written into the anchor. Each raises an
+alarm: a `state_rollback_detected` log line and the
+`encompute_state_rollback_total` metric. A ledger frozen in the anchor is
+refused for spending whatever the database says (ENC2201).
+
+At every start, the database must extend the anchor. If it does not, the
+control plane refuses to start:
 
 ```text
 error[ENC2202]: PRIVACY STATE ROLLBACK: ... STARTUP REFUSED
 ```
 
-That happens when an older database backup was restored, or events were
-deleted. Recovery is explicit:
+The same refusal names AUDIT, FREEZE (a frozen ledger shown spendable),
+REVOCATION, SERVICE ACCOUNT, USER, JOB (a cancelled or failed job shown
+live), APPROVAL (a withdrawn asset approval held again), MEMBERSHIP (an
+organization listed again in a project it left) or ROLE (a removed role
+held again) when that is what the database undid. That happens when an older
+database backup was restored, or the database was edited. Recovery is
+explicit:
 
 ```sh
 encompute-control recover --operator NAME
 ```
 
 It **freezes** every rolled-back ledger: the ledger is treated as exhausted,
-so budget the database forgot is never spent again. It re-applies every
-anchored revocation the database forgot (REVOCATION STATE ROLLBACK): the
-asset is revoked again, jobs that had not started fail, and its key broker
-is told again. It records the freeze, the revocations, and any audit gap,
-in the audit trail.
+so budget the database forgot is never spent again. Ledgers the anchor had
+frozen are frozen again. It re-applies every anchored revocation the
+database forgot: the asset is revoked again, jobs that had not started
+fail, and its key broker is told again. Disabled service accounts and users
+are disabled again, and cancelled or failed jobs end again (never run
+twice). Withdrawn asset approvals are withdrawn again, organizations
+that left a project are removed from it again, and removed roles are
+removed again. It records all of this,
+and any audit gap, in the audit trail. If the database lost a frozen
+ledger's row but still holds its asset, recovery re-creates the row,
+frozen, with no entries and a placeholder budget that pays for nothing
+(audited as `privacy.ledger.frozen` with `ledger=recreated_missing_row`);
+that ledger stays exhausted.
 
 **Back up** ([backup.sh](../deploy/docker-compose/backup.sh)):
 
@@ -226,7 +333,9 @@ Large encrypted artifacts use object-store replication. **Restore**
 ([restore.sh](../deploy/docker-compose/restore.sh)) puts back an anchor only
 into an empty anchor volume. An existing anchor is authoritative and is never
 replaced by an older one. The key broker's state is restored the same way, so
-a key destroyed by a revocation after the backup stays destroyed. The backup
+a key destroyed by a revocation after the backup stays destroyed. The
+database is restored in one transaction that stops at the first error, so
+a partial restore fails and leaves the database as it was. The backup
 captures the anchor before the database, so a backup taken while the
 deployment runs always restores.
 
@@ -271,7 +380,7 @@ are read from files only.
 
 | Variable | |
 |---|---|
-| `ENCOMPUTE_ENV` | `production` fails closed (below); default `development` |
+| `ENCOMPUTE_ENV` | required: `production` fails closed (below); `development` for local trials only. Unset or any other value refuses to start. Clients read it too: only `development` lets `jobs run` and the SDK accept an unpinned evaluator |
 | `ENCOMPUTE_LISTEN` | default `127.0.0.1:8770` |
 | `ENCOMPUTE_SERVICE_ID` | the control plane's service ID (default `control-plane`) |
 | `ENCOMPUTE_WORKERS` | HTTP worker threads (default 8) |
@@ -281,6 +390,9 @@ are read from files only.
 | `ENCOMPUTE_OIDC_JWKS_URL` / `_FILE` | its key set (default: `{issuer}/.well-known/jwks.json`) |
 | `ENCOMPUTE_ANCHOR_DIR` or `ENCOMPUTE_ANCHOR_BAO_ADDR` (+ `_MOUNT`, `_PATH`, `_TOKEN_FILE`) | the state anchor |
 | `ENCOMPUTE_AUDIT_CHECKPOINT_EVERY` | events between signed checkpoints (default 100) |
+| `ENCOMPUTE_MAX_TOKEN_LIFETIME_SECS` | longest identity-token lifetime accepted, `exp - iat` (default 86400); must be a positive number |
+| `ENCOMPUTE_METRICS_TOKEN_FILE` / `ENCOMPUTE_METRICS_TOKEN` | a bearer token `GET /metrics` requires (a secret), in either mode |
+| `ENCOMPUTE_METRICS_PUBLIC` | `true` serves `/metrics` without a token in production (without a token, production refuses it); `true` or `false`, anything else refuses to start |
 | `ENCOMPUTE_DEV_TOKEN_SECRET` / `_FILE` | development tokens only; production mode refuses to start when it is set |
 
 Evaluators take `ENCOMPUTE_CONTROL_URL` and `ENCOMPUTE_CONTROL_PUBLIC_KEY`
@@ -295,6 +407,14 @@ most 8) and `ENCOMPUTE_BENCHMARK_PROFILE` (the calibrated cost profile it
 was benchmarked under, for example `openfhe-1.5.1/apple-m3-max`). Key
 brokers and SecAgg coordinators take the same service identity variables.
 
+Clients that run jobs (`encompute jobs run`, the Python SDK) take
+`ENCOMPUTE_TRUSTED_EVALUATORS`, the evaluator receipt keys they trust (hex,
+separated by commas or spaces; set but empty pins nothing and refuses every
+evaluator), and, for development only,
+`ENCOMPUTE_ALLOW_UNPINNED_EVALUATOR=1` (honoured only with
+`ENCOMPUTE_ENV=development` set explicitly; unset or any other value
+refuses it).
+
 Evaluator resource limits:
 
 | Variable | |
@@ -307,8 +427,11 @@ Evaluator resource limits:
 | `ENCOMPUTE_MAX_PROGRAM_BYTES`, `ENCOMPUTE_MAX_INPUT_BYTES` | largest program upload (default 64 MiB) and inputs envelope (default 256 MiB) |
 
 With a control plane configured, an evaluator accepts program and key
-uploads only with the job's grant, as it does jobs; without one (local
-development) uploads need none. Job IDs are 128-bit random.
+uploads only with the job's grant, as it does jobs, and the grant must name
+the uploaded program before it is compiled. Whether a key is registered is
+answered only with a grant for the program, and `GET /v1/info` lists only
+the program a presented grant names. Without a control plane (local
+development) none of this needs a grant. Job IDs are 128-bit random.
 
 OpenFHE exact keys do not depend on the program, so one upload serves every
 exact program on that evaluator. They are still usable only by programs the
@@ -330,7 +453,11 @@ Every refusal is ENC2605.
 
 - **Health.** `GET /live` means the process is up. `GET /ready` means it can
   accept secure work (the database answers). Key brokers serve the same two.
-- **Metrics.** `GET /metrics` (Prometheus text format) exports:
+- **Metrics.** `GET /metrics` (Prometheus text format). In production a
+  scraper presents `Authorization: Bearer <metrics token>`
+  (`ENCOMPUTE_METRICS_TOKEN_FILE`), unless `ENCOMPUTE_METRICS_PUBLIC=true`;
+  otherwise it answers 401. The Compose deployment's `init.sh` creates the
+  token in `secrets/metrics-token`. It exports:
   - jobs by state;
   - job and evaluation durations;
   - queue depth;
@@ -338,7 +465,22 @@ Every refusal is ENC2605.
   - key-release denials;
   - privacy denials;
   - trust failures;
-  - SecAgg round durations.
+  - SecAgg round durations;
+  - state rollbacks found while running (`encompute_state_rollback_total`,
+    labelled `privacy` or `audit`);
+  - service accounts still holding `security_admin`
+    (`encompute_legacy_service_admins`, a gauge that should be 0);
+  - the size of the signed state anchor in bytes
+    (`encompute_anchor_bytes`, a gauge). The anchor keeps every ended job,
+    disable, withdrawal and removal, and is rewritten whole on each
+    update. OpenBao's KV store refuses an entry larger than its raft
+    `max_entry_size` (1 MiB by default, roughly 25,000 to 30,000 ended
+    jobs); from then on anchor writes fail and the control plane fails
+    closed (privacy spends, cancellations and revocation acknowledgements
+    stop). Above 512 KiB every start and every anchor write logs an
+    `anchor_size_warning` line. Alert on `encompute_anchor_bytes >
+    524288`, and raise `max_entry_size` on the vault before the limit is
+    reached.
 
   Labels are closed sets: never identifiers or values.
 - **Evaluator metrics.** Evaluators also serve `GET /metrics`: requests,

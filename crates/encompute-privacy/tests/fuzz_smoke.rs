@@ -47,6 +47,7 @@ fn reserve(i: usize, sampling_rate: Option<f64>) -> PrivacyEvent {
             clip_norm: 1.0,
             noise_multiplier: 5.0,
             sampling_rate,
+            preset: None,
         },
         sensitivity: 4096,
         sigma2: 1 << 30,

@@ -1,5 +1,6 @@
 #include "binfhe.h"
 
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 
@@ -90,11 +91,82 @@ static T deserialize(rust::Slice<const uint8_t> bytes, const char* what) {
   return obj;
 }
 
+namespace {
+const char* const kForeignKeys = "bootstrapping keys are for another parameter set";
+
+// A ring polynomial over exactly `params` (modulus and length), in
+// evaluation form.
+bool poly_matches(const lbcrypto::NativePoly& p, const std::shared_ptr<lbcrypto::ILNativeParams>& params) {
+  if (!p.GetParams() || *p.GetParams() != *params) return false;
+  if (p.GetFormat() != Format::EVALUATION) return false;
+  const auto& v = p.GetValues();  // throws if absent
+  return v.GetLength() == params->GetRingDimension() && v.GetModulus() == params->GetModulus();
+}
+
+// The refresh key is what the accumulator indexes without bounds checks:
+// for GINX, [1][2][n] RGSW keys of (digitsG - 1) * 2 rows of 2 polynomials
+// over the ring (N, Q). Any other method or shape is refused.
+void check_refresh_key(BinFHEContext& cc, const lbcrypto::RingGSWACCKey& bs) {
+  const auto& params = cc.GetParams();
+  const auto& rgsw = params->GetRingGSWParams();
+  const auto& lwe = params->GetLWEParams();
+  if (rgsw->GetMethod() != lbcrypto::GINX)
+    throw std::runtime_error("only GINX bootstrapping keys are vetted: keys are for another parameter set");
+  const size_t n = lwe->Getn();
+  const size_t rows = (rgsw->GetDigitsG() - 1) << 1;
+  const auto& ring = rgsw->GetPolyParams();
+  const auto& k = bs->GetElements();
+  if (k.size() != 1 || k[0].size() != 2) throw std::runtime_error(kForeignKeys);
+  for (const auto& half : k[0]) {
+    if (half.size() != n) throw std::runtime_error(kForeignKeys);
+    for (const auto& ek : half) {
+      if (!ek) throw std::runtime_error(kForeignKeys);
+      const auto& el = ek->GetElements();
+      if (el.size() != rows) throw std::runtime_error(kForeignKeys);
+      for (const auto& row : el) {
+        if (row.size() != 2 || !poly_matches(row[0], ring) || !poly_matches(row[1], ring))
+          throw std::runtime_error(kForeignKeys);
+      }
+    }
+  }
+}
+
+// The switching key maps an LWE key of dimension N to one of dimension n
+// modulo qKS: [N][baseKS][digits] vectors of length n, and as many values.
+void check_switching_key(BinFHEContext& cc, const lbcrypto::LWESwitchingKey& ks) {
+  const auto& lwe = cc.GetParams()->GetLWEParams();
+  const size_t n = lwe->Getn();
+  const size_t big_n = lwe->GetN();
+  const size_t base = lwe->GetBaseKS();
+  const NativeInteger q_ks = lwe->GetqKS();
+  if (base < 2) throw std::runtime_error(kForeignKeys);
+  const size_t digits = static_cast<size_t>(
+      std::ceil(std::log(q_ks.ConvertToDouble()) / std::log(static_cast<double>(base))));
+  const auto& a = ks->GetElementsA();
+  const auto& b = ks->GetElementsB();
+  if (a.size() != big_n || b.size() != big_n) throw std::runtime_error(kForeignKeys);
+  for (size_t i = 0; i < big_n; ++i) {
+    if (a[i].size() != base || b[i].size() != base) throw std::runtime_error(kForeignKeys);
+    for (size_t j = 0; j < base; ++j) {
+      if (a[i][j].size() != digits || b[i][j].size() != digits) throw std::runtime_error(kForeignKeys);
+      for (size_t d = 0; d < digits; ++d) {
+        if (a[i][j][d].GetLength() != n || a[i][j][d].GetModulus() != q_ks || b[i][j][d] >= q_ks)
+          throw std::runtime_error(kForeignKeys);
+      }
+    }
+  }
+}
+}  // namespace
+
 void bin_load_keys(BinContext& ctx, rust::Slice<const uint8_t> refresh,
                    rust::Slice<const uint8_t> switching) {
   std::lock_guard<std::mutex> g(openfhe_mutex());
   auto bs = deserialize<lbcrypto::RingGSWACCKey>(refresh, "BinFHE refresh key");
   auto ks = deserialize<lbcrypto::LWESwitchingKey>(switching, "BinFHE switching key");
+  // The keys' structure is the uploader's word: check every dimension and
+  // modulus against the vetted context before any gate indexes them.
+  check_refresh_key(ctx.impl->cc, bs);
+  check_switching_key(ctx.impl->cc, ks);
   lbcrypto::RingGSWBTKey key;
   key.BSkey = bs;
   key.KSkey = ks;

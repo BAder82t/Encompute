@@ -35,6 +35,13 @@ pub fn capabilities() -> VerificationCapabilities {
         supported_types: [Elem::U8, Elem::U16, Elem::Bool]
             .into_iter()
             .collect::<BTreeSet<_>>(),
+        // Bitwise logic is arithmetic on 0/1 (and = ab, not = 1 - a): the
+        // BGV evaluator runs it on Booleans only, so programs using it on
+        // integers are not selected for BGV.
+        op_types: [And, Or, Xor, Not]
+            .into_iter()
+            .map(|op| (op, BTreeSet::from([Elem::Bool])))
+            .collect(),
     }
 }
 
@@ -59,6 +66,61 @@ pub fn mult_depth(plan: &ExactPlan) -> u32 {
     depth.into_iter().max().unwrap_or(0).max(1)
 }
 
+/// The largest noise multiplier (see [`noise_multiplier`]) a plan may
+/// reach on the BGV profile. OpenFHE sizes the moduli for the plan's
+/// multiplicative depth only; additions are free there but grow the noise.
+/// Calibrated on OpenFHE 1.5.1 (plaintext modulus 65537, 128-bit, FIXEDAUTO,
+/// HYBRID, depths 1 to 3), worst case (one ciphertext added to itself):
+/// multipliers up to 2^17 after a product still decrypt correctly, 2^18 do
+/// not (without products, and at depth 2 or more, the budget is larger).
+/// 2^13 keeps a 16x margin; a plan above it does not run on BGV.
+pub const MAX_NOISE_MULTIPLIER: u128 = 1 << 13;
+
+/// Worst-case growth of the noise of each register, relative to a fresh
+/// (or freshly multiplied) ciphertext, maximized over the plan: sums and
+/// differences add their operands' multipliers, products multiply them
+/// (bitwise logic on Booleans is arithmetic: `or` = a + b − ab), and
+/// operations with public constants keep them. Saturates.
+pub fn noise_multiplier(plan: &ExactPlan) -> u128 {
+    let mut m = vec![1u128; plan.instrs.len()];
+    for (i, instr) in plan.instrs.iter().enumerate() {
+        let g = |r: &crate::plan::Reg| m[*r as usize];
+        use encompute_ir::LogicOp;
+        use ExactInstr::*;
+        m[i] = match instr {
+            Input { .. } | Trivial { .. } => 1,
+            Add(a, b) | Sub(a, b) | Min(a, b) | Max(a, b) => g(a).saturating_add(g(b)),
+            Mul(a, b) | Logic(LogicOp::And, a, b) => g(a).saturating_mul(g(b)),
+            Logic(LogicOp::Or, a, b) => g(a)
+                .saturating_add(g(b))
+                .saturating_add(g(a).saturating_mul(g(b))),
+            Logic(LogicOp::Xor, a, b) => g(a)
+                .saturating_add(g(b))
+                .saturating_add(g(a).saturating_mul(g(b)).saturating_mul(2)),
+            Select(c, a, b) => g(c).saturating_mul(g(a).saturating_add(g(b))),
+            other => other.operands().iter().map(g).max().unwrap_or(1),
+        };
+    }
+    m.into_iter().max().unwrap_or(1)
+}
+
+/// Why `plan` may not run on the BGV profile because of noise, if so.
+pub fn noise_unsupported(plan: &ExactPlan) -> Option<String> {
+    let m = noise_multiplier(plan);
+    (m > MAX_NOISE_MULTIPLIER).then(|| {
+        format!(
+            "noise from additions: a value's noise may grow {}x (the BGV budget is {}x); \
+             fewer or smaller sums, or the BinFHE backend, keep results exact",
+            if m == u128::MAX {
+                "over 10^38".to_owned()
+            } else {
+                m.to_string()
+            },
+            MAX_NOISE_MULTIPLIER
+        )
+    })
+}
+
 /// The parameter profile of a BGV exact plan.
 pub fn profile(plan: &ExactPlan) -> ExactProfile {
     ExactProfile {
@@ -69,7 +131,10 @@ pub fn profile(plan: &ExactPlan) -> ExactProfile {
             mult_depth(plan)
         ),
         security: "128-bit classical".into(),
-        failure_probability: "0 (exact modular arithmetic)".into(),
+        // Exact modular arithmetic once decrypted correctly; decryption
+        // is correct while the noise stays in its budget, which
+        // `noise_unsupported` enforces with a margin (not a proven bound).
+        failure_probability: "negligible (noise budget enforced; not zero)".into(),
         parameter_selector_version: "openfhe-bgv-v1".into(),
     }
 }

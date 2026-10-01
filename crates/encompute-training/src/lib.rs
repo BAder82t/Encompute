@@ -13,14 +13,16 @@ pub mod seal;
 pub mod spec;
 pub mod worker;
 
-pub use adapter::{adapter_policy, check_export, AdapterRecord, SignedAdapterRecord};
+pub use adapter::{
+    adapter_policy, check_export, check_input_adapter, AdapterRecord, SignedAdapterRecord,
+};
 pub use checkpoint::{resume, seal_checkpoint, CheckpointHeader, ResumeExpectation};
 pub use hf::{HfModelPackage, LibraryVersions, PackageFile};
 pub use layout::{tensor_manifest, AdapterLayout, LayoutEntry, TensorEntry, LAYOUT_VERSION};
 pub use seal::{open, open_asset, peek, seal, seal_asset, sha256_hex, AssetHeader};
 pub use spec::{
-    DatasetCommitment, DpSgdConfig, ModelCommitment, PeftConfig, TextPreprocessing, TrainingConfig,
-    TrainingSpec,
+    Architecture, DatasetCommitment, DpSgdConfig, ModelCommitment, PeftConfig, TextPreprocessing,
+    TrainingConfig, TrainingSpec, HF_FACTORY, REFERENCE_FACTORY,
 };
 pub use worker::{SignedWorkerEvidence, WorkerEvidence, WORKER_EVIDENCE_VERSION};
 

@@ -144,6 +144,9 @@ impl fmt::Display for Program {
                 if let Some(q) = dp.sampling_rate {
                     write!(f, " sampling_rate {q:?}")?;
                 }
+                if let Some(level) = &dp.preset {
+                    write!(f, " preset \"{level}\"")?;
+                }
             }
             writeln!(f)?;
         }
@@ -287,11 +290,19 @@ pub fn parse(src: &str) -> Result<Program> {
                 } else {
                     None
                 };
+                c.skip_ws();
+                let preset = if c.rest.starts_with("preset") {
+                    c.keyword("preset")?;
+                    Some(c.string()?)
+                } else {
+                    None
+                };
                 Some(crate::confidentiality::DpMechanism {
                     kind,
                     clip_norm,
                     noise_multiplier,
                     sampling_rate,
+                    preset,
                 })
             } else {
                 None

@@ -26,6 +26,13 @@ encompute keys serve  ◄── challenge ── Confidential Space VM (TDX)
   `BROKER_URL` is also the broker's ID and the audience the workload's token
   must name.
 
+The `encompute-confidential-space` image published with a release is a
+base reference, not a workload you can deploy: it is built without
+`broker-keys`, so it refuses to start ("the image names no broker keys").
+Build your own image with `deploy.sh` below, which writes your broker's
+grant-signing key into it. The image digest your key broker approves is
+your build's digest, not the released one.
+
 ## Run
 
 ```sh
@@ -33,18 +40,24 @@ export PROJECT=my-project BROKER_URL=http://10.128.0.5:8760
 deploy/confidential-space/deploy.sh approved
 ```
 
-The script does four things:
+The script does five things:
 
-1. It builds the image on Cloud Build and pushes it.
-2. It reads the attestation policy out of the image with `encompute attest
+1. It creates the broker (`broker.json`) and writes its grant-signing key
+   into `deploy/confidential-space/broker-keys`, which the image contains:
+   the workload accepts a key grant only under the key its own image
+   names, so whoever sets `BROKER_URLS` chooses where the broker is, never
+   which broker it trusts. `BROKER_URLS` entries carry no key; the
+   workload refuses one that does.
+2. It builds the image on Cloud Build and pushes it.
+3. It reads the attestation policy out of the image with `encompute attest
    policy`. The policy fixes:
    - the execution spec, policy ID and artifact digest;
    - the image digest;
    - Intel TDX;
    - debugging forbidden;
    - a supported TCB.
-3. It protects a random `test-key` in `broker.json`.
-4. It starts the VM from the production (non-debug) `confidential-space`
+4. It protects a random `test-key` in `broker.json`.
+5. It starts the VM from the production (non-debug) `confidential-space`
    image.
 
 Once the script finishes, start the broker where `BROKER_URL` points:

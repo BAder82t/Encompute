@@ -2,7 +2,7 @@
 //! about, and the interface a proof engine implements. Nothing
 //! here produces evidence yet. No FHE library type appears in this API.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use encompute_ir::{Code, Elem, Error, Result};
 
@@ -105,17 +105,25 @@ pub struct VerificationCapabilities {
     pub parameter_profiles: Vec<String>,
     pub supported_ops: BTreeSet<ProofOp>,
     pub supported_types: BTreeSet<Elem>,
+    /// Operations supported on fewer types than `supported_types`: only on
+    /// the types listed here (e.g. BGV runs bitwise logic on Booleans only).
+    pub op_types: BTreeMap<ProofOp, BTreeSet<Elem>>,
 }
 
 impl VerificationCapabilities {
+    /// Whether it proves (and its backend executes) `op` on `ty`.
+    pub fn supports(&self, op: ProofOp, ty: Elem) -> bool {
+        self.supported_ops.contains(&op)
+            && self.supported_types.contains(&ty)
+            && self.op_types.get(&op).is_none_or(|only| only.contains(&ty))
+    }
+
     /// The first instruction of `t` it cannot prove, if any.
     pub fn first_unsupported<'a>(
         &self,
         t: &'a SemanticTranscript,
     ) -> Option<&'a crate::transcript::TranscriptEntry> {
-        t.entries.iter().find(|e| {
-            !(self.supported_ops.contains(&e.op) && self.supported_types.contains(&e.ty.0))
-        })
+        t.entries.iter().find(|e| !self.supports(e.op, e.ty.0))
     }
 
     /// `(covered, total)` instructions of `t` this backend could prove.
@@ -123,9 +131,7 @@ impl VerificationCapabilities {
         let covered = t
             .entries
             .iter()
-            .filter(|e| {
-                self.supported_ops.contains(&e.op) && self.supported_types.contains(&e.ty.0)
-            })
+            .filter(|e| self.supports(e.op, e.ty.0))
             .count();
         (covered, t.entries.len())
     }

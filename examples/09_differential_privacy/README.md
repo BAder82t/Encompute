@@ -60,16 +60,20 @@ how many releases fit); the whole example takes about 30 s.
 ## Expected output
 
 ```text
+  mechanism            discrete_gaussian (clip_norm 1, noise_multiplier 12)
   budget               gradient-a: privacy unit patient, epsilon 1.8 delta 1e-6, one release costs epsilon 0.741; the budget affords 5 releases
+  ...
+  unit bound           each party's whole contribution clipped to L2 norm 1; one privacy unit is charged as if it changed all of it (sensitivity 2 x clip_norm)
+  ...
 Round 1  PERMITTED  epsilon this round 0.741, spent 0.741 of 1.8
-Round 2  PERMITTED  epsilon this round 0.333, spent 1.074 of 1.8
+Round 2  PERMITTED  epsilon this round 0.332, spent 1.074 of 1.8
 Round 3  PERMITTED  epsilon this round 0.261, spent 1.335 of 1.8
-Round 4  PERMITTED  epsilon this round 0.224, spent 1.559 of 1.8
-Round 5  PERMITTED  epsilon this round 0.200, spent 1.759 of 1.8
-Round 6  DENIED     error[ENC2201]: RELEASE DENIED: asset gradient-a has spent epsilon 1.7592 of 1.8; this release would bring it to 1.9419 (delta 1e-6)
+Round 4  PERMITTED  epsilon this round 0.224, spent 1.558 of 1.8
+Round 5  PERMITTED  epsilon this round 0.200, spent 1.758 of 1.8
+Round 6  DENIED     error[ENC2201]: RELEASE DENIED: asset gradient-a has spent epsilon 1.7583 of 1.8; this release would bring it to 1.9409 (delta 1e-6)
 ...
-Round 7  DENIED     error[ENC2201]: RELEASE DENIED: asset gradient-a has spent epsilon 1.7592 of 1.8; this release would bring it to 1.9419 (delta 1e-6)
-Budget after restart: unchanged (epsilon 1.759  (rho 0.06958))
+Round 7  DENIED     error[ENC2201]: RELEASE DENIED: asset gradient-a has spent epsilon 1.7583 of 1.8; this release would bring it to 1.9409 (delta 1e-6)
+Budget after restart: unchanged (epsilon 1.758  (rho 0.06951))
 ```
 
 ## Try breaking it
@@ -109,11 +113,11 @@ Budget after restart: unchanged (epsilon 1.759  (rho 0.06958))
   noise. The guarantee holds against everyone who sees only released
   outputs, not against the coordinator. A coordinator that is not attested
   could release the sum without noise, and nothing here would stop it.
-- DP bounds leakage only at the declared unit (here, one patient) and only
-  if one patient's influence on a hospital's vector is bounded. Encompute
-  clips each hospital's whole contribution to L2 norm 1; per-patient
-  clipping inside the contribution is the training workload's job, and the
-  compiler warns about it.
+- DP bounds leakage at the declared unit (here, one patient). Encompute
+  clips each hospital's whole contribution to L2 norm 1 and charges one
+  patient as if they could change all of it (sensitivity 2 × clip_norm);
+  that is why the example uses noise_multiplier 12. `privacy explain` shows
+  this as the `unit bound` line.
 - The budget covers releases through this program's ledgers only. Anything
   the hospitals publish elsewhere about the same patients is not counted,
   and owners who approve a new policy start a new budget.

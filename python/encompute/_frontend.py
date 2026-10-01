@@ -206,7 +206,10 @@ def _budget(privacy: Any) -> Optional[DP]:
     return DP(e, d)
 
 
-def _mechanism(privacy: Any) -> Optional[DiscreteGaussian]:
+def _mechanism(privacy: Any) -> Any:
+    """A ``DiscreteGaussian``, or a level name: a level's noise depends on
+    the units of the budgets it is charged to, so it is resolved when the
+    program is traced (``_level_rule``)."""
     if privacy is None or isinstance(privacy, DiscreteGaussian):
         return privacy
     if isinstance(privacy, DP):
@@ -216,7 +219,20 @@ def _mechanism(privacy: Any) -> Optional[DiscreteGaussian]:
     levels = _privacy_levels()
     if privacy not in levels:
         raise _err("ENC2203", f"privacy must be one of {', '.join(levels)} or DiscreteGaussian(...), got {privacy!r}")
-    return DiscreteGaussian(1.0, levels[privacy][2])
+    return privacy
+
+
+def _level_rule(level: str, units: Sequence[str]) -> str:
+    """The ``dp`` clause of a named level for budgets of ``units``. The
+    native library scales the level's listed noise for units without
+    per-unit clipping (a patient, record, user or device aggregated without
+    sampling is charged like an organization), and the clause records the
+    level, so ``explain`` shows both."""
+    from . import _native
+
+    _, _, noise = _native.privacy_preset_mechanism(level, sorted(set(units)))
+    return (f" dp discrete_gaussian clip_norm 1.0 noise_multiplier {_num(noise)}"
+            f' preset "{level}"')
 
 
 class Asset:
@@ -317,6 +333,8 @@ class _Output:
         self.dest = dest
         self.party = party
         self.aggregate = aggregate
+        # A named privacy level on the aggregate, resolved at trace time.
+        self.level: Optional[str] = None
 
 
 def reveal(value: Any, to: Party) -> _Output:
@@ -356,9 +374,14 @@ def secure_aggregate(
             raise _err("ENC2106", f"{name} must be a non-negative integer, got {v!r}")
     rule = f"{function} minimum {minimum} colluding {colluding} clip [{_num(lo)}, {_num(hi)}] scale {scale} modulus {modulus_bits}"
     mech = _mechanism(privacy)
-    if mech is not None:
+    level = None
+    if isinstance(mech, str):
+        level = mech
+    elif mech is not None:
         rule += f" dp discrete_gaussian clip_norm {_num(mech.clip_norm)} noise_multiplier {_num(mech.noise_multiplier)}"
-    return _Output(value, f'to "{to.id}"' if to is not None else "", to, aggregate=rule)
+    out = _Output(value, f'to "{to.id}"' if to is not None else "", to, aggregate=rule)
+    out.level = level
+    return out
 
 
 def publish(value: Any) -> _Output:
@@ -1099,7 +1122,11 @@ def trace(
             if v.party is not None:
                 add_party(v.party)
             if v.aggregate is not None:
-                aggregates.append(f'aggregate "{_ident(str(oname))}" {v.aggregate}')
+                rule = v.aggregate
+                if v.level is not None:
+                    units = [a.unit for a in assets.values() if a.privacy is not None]
+                    rule += _level_rule(v.level, units)
+                aggregates.append(f'aggregate "{_ident(str(oname))}" {rule}')
             v = v.value
         if not isinstance(v, Secret):
             raise _err(

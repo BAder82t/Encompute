@@ -19,4 +19,4 @@ pub use ids::{program_id, PlanId};
 pub use model::*;
 pub use planner::{describe, plan, plan_or_fail, tee_unusable, Planned, PLAN_VERSION, PROVIDERS};
 pub use requirements::{derive as derive_requirements, input_asset};
-pub use validate::{verify_plan, verify_plan_against};
+pub use validate::{verify_plan, verify_plan_against, verify_plan_with, PlanFloor};

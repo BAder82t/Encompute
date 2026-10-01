@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use encompute_attestation::AttestationEvidence;
+use encompute_attestation::{public_denial, AttestationEvidence};
 use encompute_ir::{Code, Error};
 use encompute_verification::http;
 
@@ -84,9 +84,22 @@ fn error_reply(e: &Error) -> http::Response {
         Code::KeyRelease if e.message.starts_with("no key for") => 404,
         _ => 403,
     };
+    // A refusal tells the (unauthenticated) caller what its own evidence
+    // shows, never what the asset's policy expects: the full reason goes
+    // to the broker's own log.
+    let message = match e.code {
+        Code::WorkloadPolicy => {
+            let public = public_denial(&e.message);
+            if public != e.message {
+                eprintln!("key broker: refused: {}: {}", e.code, e.message);
+            }
+            public
+        }
+        _ => e.message.clone(),
+    };
     let body = serde_json::to_string(&ErrorBody {
         code: e.code.as_str().into(),
-        message: e.message.clone(),
+        message,
     })
     .unwrap_or_default();
     reply(status, body)
@@ -162,6 +175,7 @@ impl ControlChannel {
             if let Ok(s) = encompute_verification::ServiceSigner::from_seed(&signer.1, &signer.0) {
                 let agent = ureq::AgentBuilder::new()
                     .timeout(std::time::Duration::from_secs(10))
+                    .redirects(0)
                     .build();
                 let _ = encompute_verification::service::signed_call(
                     &agent,

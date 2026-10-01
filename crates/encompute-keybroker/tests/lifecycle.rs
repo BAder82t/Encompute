@@ -321,15 +321,19 @@ fn lifecycle_create_wrap_unwrap_and_rotate_asset_keys() {
     assert!(k3 != KEY && k3 != k2);
     b.save(&state).unwrap();
 
-    // Binding: version 1's wrapped key moved into version 3's slot does not
-    // open (the wrap is bound to asset and version), and nothing else is
-    // released in its place.
+    // Binding: version 1's wrapped key moved into version 3's slot is an
+    // edit of the authenticated state, so the broker does not open; nothing
+    // is released in its place.
     let mut s = read_json(&state);
     s["secrets"]["patients"]["versions"]["3"]["key"] =
         s["secrets"]["patients"]["versions"]["1"]["key"].clone();
     write_json(&state, &s);
-    let mut b = reopen(&state, Box::new(bao.open(&kek, &key).unwrap())).unwrap();
-    assert_eq!(release(&mut b, "patients").err().unwrap(), Code::KeyRelease);
+    assert_eq!(
+        reopen(&state, Box::new(bao.open(&kek, &key).unwrap()))
+            .err()
+            .unwrap(),
+        Code::KeyRelease
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -516,13 +520,20 @@ fn lifecycle_revoked_versions_are_destroyed_for_good() {
     b.save(&state).unwrap();
     assert_eq!(form(&state, "patients", 2), "destroyed");
 
-    // Clearing the revoked flag in the file does not bring the material
-    // back: there is nothing to unwrap.
+    // Clearing the revoked flag in the file is an edit of the
+    // authenticated state: the broker does not open (and there would be
+    // no material to unwrap anyway).
+    let saved = std::fs::read(&state).unwrap();
     let mut s = read_json(&state);
     s["secrets"]["patients"]["versions"]["2"]["revoked"] = false.into();
     write_json(&state, &s);
-    let mut b = reopen(&state, Box::new(bao.open(&kek, &key).unwrap())).unwrap();
-    assert_eq!(release(&mut b, "patients").err().unwrap(), Code::KeyRelease);
+    assert_eq!(
+        reopen(&state, Box::new(bao.open(&kek, &key).unwrap()))
+            .err()
+            .unwrap(),
+        Code::KeyRelease
+    );
+    std::fs::write(&state, &saved).unwrap();
 
     // Root rotation, then a re-wrap under a brand-new root-wrapped KEK:
     // destroyed versions stay destroyed.
@@ -841,7 +852,18 @@ fn assert_production_refuses_development(
         assert!(e.message.contains("cannot move keys"), "{e}");
     }
     b.save(&state).unwrap();
-    assert_eq!(std::fs::read(&state).unwrap(), saved);
+    let unsealed = |b: &[u8]| {
+        let mut v: Value = serde_json::from_slice(b).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("generation");
+        o.remove("mac");
+        v
+    };
+    assert_eq!(
+        unsealed(&std::fs::read(&state).unwrap()),
+        unsealed(&saved),
+        "only the generation and its MAC change"
+    );
     assert_eq!(form(&state, "patients", 1), "wrapped");
 
     // Development policies and development (mock) evidence.

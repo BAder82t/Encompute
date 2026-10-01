@@ -13,4 +13,4 @@ asset "gradient-c" gradient owners ["hospital-c"] readers ["coordinator"] purpos
 %3 = add %0, %1 : secret vector<16>
 %4 = add %3, %2 : secret vector<16>
 output "global_gradient" = %4 to "coordinator"
-aggregate "global_gradient" sum minimum 3 colluding 2 clip [-1.0, 1.0] scale 4096 modulus 40 dp discrete_gaussian clip_norm 1.0 noise_multiplier 6.0
+aggregate "global_gradient" sum minimum 3 colluding 2 clip [-1.0, 1.0] scale 4096 modulus 40 dp discrete_gaussian clip_norm 1.0 noise_multiplier 12.0

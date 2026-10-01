@@ -7,6 +7,8 @@ use clap::{Args, Subcommand};
 use encompute_ir::{Code, Error, Result};
 use encompute_runtime::attestation::AttestationRecord;
 use encompute_runtime::dp::PrivacyReceipt;
+use encompute_runtime::planner::{BackendCatalog, PlanFloor, Profile};
+use encompute_runtime::planning::planning_facts;
 use encompute_runtime::secagg::{AggregationReceipt, AggregationSpec, PartyIdentity};
 use encompute_runtime::trust::{
     node_id, Anchors, Authorization, EdgeKind, NodeKind, ReportOptions, Revocation, TrustGraph,
@@ -150,6 +152,13 @@ pub struct AnchorArgs {
     /// own.
     #[arg(long)]
     pub execution_policy: Option<PathBuf>,
+    /// Accept only production plans: no development attestation, no
+    /// research backend. The default when `ENCOMPUTE_ENV=production`.
+    #[arg(long)]
+    pub production: bool,
+    /// The weakest plan profile accepted: standard, strong or maximum.
+    #[arg(long, default_value = "standard")]
+    pub minimum_profile: String,
 }
 
 /// The bundle and its trust report under `anchors`.
@@ -181,11 +190,49 @@ pub(crate) fn checked(
             ),
             None => None,
         };
+    // A plan's context is its own claim: the verifier recomputes the
+    // program's facts with this build's compiler and applies its own floor.
+    let minimum = Profile::parse(&a.minimum_profile).ok_or_else(|| {
+        Error::new(
+            Code::TrustGraph,
+            format!(
+                "unknown profile {:?}: standard, strong or maximum",
+                a.minimum_profile
+            ),
+        )
+    })?;
+    let production =
+        a.production || std::env::var("ENCOMPUTE_ENV").is_ok_and(|v| v == "production");
+    let plan_floor = if production {
+        PlanFloor {
+            // Every production backend, whatever this build runs; never
+            // a research backend.
+            catalog: Some(BackendCatalog {
+                ckks: true,
+                tfhe: false,
+                openfhe_exact: true,
+                bgv: true,
+                verified_execution: true,
+            }),
+            ..PlanFloor::production(minimum)
+        }
+    } else {
+        PlanFloor {
+            minimum_profile: minimum,
+            ..PlanFloor::default()
+        }
+    };
+    let facts = |p: &encompute_ir::Program| planning_facts(p);
     let r = g.report(&ReportOptions {
         anchors,
         verifier: verifier.as_ref(),
         execution_policy: execution_policy.as_ref(),
         require: a.require.clone(),
+        plan_floor,
+        program_facts: Some(&facts),
+        // The bundle carries no proofs: a receipt that claims one stays
+        // unchecked, never proof of verified execution.
+        proof_check: None,
         ..ReportOptions::default()
     })?;
     Ok((g, r))

@@ -40,7 +40,9 @@ services:
       # The state anchor lives on its own volume: restoring an older
       # database backup cannot rewind it. Back it up separately.
       ENCOMPUTE_ANCHOR_DIR: /var/lib/encompute/anchor
-    secrets: [db-url, control-key]
+      # Production serves /metrics only to a scraper presenting this token.
+      ENCOMPUTE_METRICS_TOKEN_FILE: /run/secrets/metrics-token
+    secrets: [db-url, control-key, metrics-token]
     volumes:
       - anchor:/var/lib/encompute/anchor
       - ./oidc:/etc/encompute/oidc:ro
@@ -110,6 +112,7 @@ secrets:
   evaluator-key: {file: ./secrets/evaluator.key}
   secagg-key: {file: ./secrets/secagg.key}
   bao-token: {file: ./secrets/bao-token}
+  metrics-token: {file: ./secrets/metrics-token}
 
 volumes:
   pgdata:

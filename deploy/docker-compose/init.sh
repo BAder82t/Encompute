@@ -4,7 +4,8 @@
 #   ./init.sh
 #
 # Secrets are random: the database password, the control plane's signing
-# key, each service's identity key, and the development OpenBao token. The
+# key, each service's identity key, the metrics scraper's token, and the
+# development OpenBao token. The
 # directory is 0700; its files are readable by the containers' users (the
 # directory protects them on the host). OIDC settings come from the
 # environment: ENCOMPUTE_OIDC_ISSUER, ENCOMPUTE_OIDC_AUDIENCE, and
@@ -20,6 +21,7 @@ new db-password "$(rand 24)"
 new db-url "postgres://encompute:$(cat secrets/db-password)@postgres:5432/encompute"
 for k in control evaluator secagg keybroker; do new "$k.key" "$(rand 32)"; done
 new bao-token "$(rand 16)"
+new metrics-token "$(rand 32)"
 # Mount only the one key file: the container's user cannot enter the 0700
 # directory (on Linux; Docker Desktop does not enforce it), but a file bind
 # mount is opened directly, as the compose secrets are.

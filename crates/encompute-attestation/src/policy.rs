@@ -111,6 +111,22 @@ impl VerifiedWorkload {
     }
 }
 
+/// The part of an [`AttestationPolicy::check`] denial a workload may be
+/// told: what its own evidence shows, without the values the policy
+/// expects (the execution spec, policy, privacy policy and artifact it
+/// requires, and its minimum TCB). A key broker sends this to the
+/// unauthenticated caller and keeps the full reason in its own log.
+pub fn public_denial(message: &str) -> String {
+    const EXPECTED: &str = ", not ";
+    const MINIMUM: &str = " is below the required ";
+    let at = |m: &str| message.find(m);
+    match (at(EXPECTED), at(MINIMUM)) {
+        (Some(i), m) if m.is_none_or(|j| i < j) => message[..i].to_owned(),
+        (_, Some(j)) => format!("{} is below the policy's minimum", &message[..j]),
+        _ => message.to_owned(),
+    }
+}
+
 fn default_max_age() -> u64 {
     600
 }
@@ -252,5 +268,63 @@ impl AttestationPolicy {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review note KB-n (ENC-SF-2026-063): every denial that names what the policy expects
+    /// loses it in its public form, and keeps what the workload showed.
+    #[test]
+    fn public_denials_withhold_expected_values() {
+        let expected = [
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(32),
+            "44".repeat(32),
+        ];
+        let workload = "ee".repeat(32);
+        let full = [
+            format!(
+                "the workload is bound to execution spec {workload}, not {}",
+                expected[0]
+            ),
+            format!(
+                "the workload is bound to policy {workload}, not {}",
+                expected[1]
+            ),
+            format!(
+                "the workload is bound to policy (none), not {}",
+                expected[1]
+            ),
+            format!(
+                "the workload is bound to privacy policy {workload}, not {}",
+                expected[2]
+            ),
+            format!(
+                "the workload is bound to artifact {workload}, not {}",
+                expected[3]
+            ),
+            format!(
+                "TCB status {} is below the required {}",
+                TcbStatus::OutOfDate,
+                TcbStatus::Current
+            ),
+        ];
+        for m in &full {
+            let p = public_denial(m);
+            assert!(expected.iter().all(|e| !p.contains(e.as_str())), "{p}");
+            assert!(!p.contains("current"), "{p}");
+            assert_ne!(&p, m);
+        }
+        for m in [
+            "workload image sha256:66 is not allowed",
+            "the workload runs with debugging enabled",
+            "TEE mock (development only) is not allowed",
+        ] {
+            assert_eq!(public_denial(m), m);
+        }
     }
 }

@@ -319,8 +319,17 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
     for o in program.outputs() {
         let dest = c.output(&o.name).clone();
         let sources = &policies[o.value.index()].sources;
+        let aggregated = c.aggregation(&o.name).is_some();
         let dp = c.aggregation(&o.name).and_then(|a| a.dp.clone());
-        if let Some(r) = privacy_release(c, &o.name, sources, &dest, dp.as_ref(), &mut warnings)? {
+        if let Some(r) = privacy_release(
+            c,
+            &o.name,
+            sources,
+            &dest,
+            aggregated,
+            dp.as_ref(),
+            &mut warnings,
+        )? {
             privacy_releases.push(r);
         }
         if let Some(rule) = c.aggregation(&o.name) {
@@ -399,13 +408,16 @@ pub fn analyze(program: &Program) -> Result<Option<ConfidentialityReport>> {
 /// Release-boundary detection: an output that leaves confidential
 /// computation (to a party, or public) and derives from budgeted assets is
 /// a privacy release; it must go through a DP mechanism, which charges
-/// every budgeted source. Sealed outputs stay confidential and cost
-/// nothing.
+/// every budgeted source. Sealed outputs of encrypted computation stay
+/// confidential and cost nothing. A secure-aggregation aggregate is always
+/// a release, whatever its destination: the protocol unmasks it to the
+/// coordinator, which writes it out (review finding DP-1).
 fn privacy_release(
     c: &Confidentiality,
     output: &str,
     sources: &BTreeSet<String>,
     dest: &OutputRelease,
+    aggregated: bool,
     dp: Option<&DpMechanism>,
     warnings: &mut Vec<String>,
 ) -> Result<Option<PrivacyRelease>> {
@@ -417,7 +429,19 @@ fn privacy_release(
                 .map(|b| (s.clone(), b))
         })
         .collect();
-    let releases = !matches!(dest, OutputRelease::Sealed);
+    let releases = aggregated || !matches!(dest, OutputRelease::Sealed);
+    if let Some(m) = dp {
+        // A named level's noise must be exactly the level's for the charged
+        // units (review finding DP-4): `explain` and the trust report show
+        // the level, so it may not label other noise.
+        let units: Vec<_> = charged.iter().map(|(_, b)| b.unit.clone()).collect();
+        m.check_preset(&units).map_err(|e| {
+            err(
+                Code::PrivacyPolicy,
+                format!("output {output:?}: {}", e.message),
+            )
+        })?;
+    }
     match (charged.is_empty(), releases, dp) {
         (true, _, Some(_)) => {
             warnings.push(format!(
@@ -431,13 +455,19 @@ fn privacy_release(
             Code::PrivacyPolicy,
             format!(
                 "output {output:?} releases information from privacy-budgeted asset{} {} \
-                 without a privacy mechanism: declare `dp` on its aggregation",
+                 without a privacy mechanism: declare `dp` on its aggregation{}",
                 if charged.len() == 1 { "" } else { "s" },
                 charged
                     .iter()
                     .map(|(a, _)| a.as_str())
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                if aggregated && matches!(dest, OutputRelease::Sealed) {
+                    " (a secure-aggregation aggregate is released to the coordinator even \
+                     when sealed)"
+                } else {
+                    ""
+                }
             ),
         )),
         (false, true, Some(m)) => {
@@ -461,11 +491,17 @@ fn privacy_release(
                     continue;
                 }
                 if !organization {
+                    // Review finding DP-4 (ENC-SF-2026-068): nothing clips one unit inside a
+                    // party's contribution, so a unit is charged as if it
+                    // could change that whole contribution.
                     warnings.push(format!(
-                        "asset {a}'s budget protects each {}: Encompute clips each party's \
-                         contribution to L2 norm {}; bounding one {}'s influence within it is \
-                         the contributing (attested) workload's job",
-                        b.unit, m.clip_norm, b.unit
+                        "asset {a}'s budget protects each {unit}, but only each party's whole \
+                         contribution is clipped (to L2 norm {c}): one {unit} is charged as if \
+                         it could change it entirely (sensitivity 2 x {c}, as for an \
+                         organization). Per-{unit} clipping needs Poisson sampling (DP-SGD) \
+                         in an attested workload",
+                        unit = b.unit,
+                        c = m.clip_norm
                     ));
                 }
             }

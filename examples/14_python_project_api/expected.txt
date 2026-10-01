@@ -3,7 +3,7 @@ ENCOMPUTE PLAN
   alice-data hidden from bob
   gradient-alice-data revealed only inside the aggregate update
   gradient-alice-data: record-level privacy, ε ≤ 3.0, δ ≤ 1e-6
-  across the parties, secure aggregation (threshold 2, colluding ≤ 0) + differential privacy (discrete Gaussian, noise 6.0, clip 1.0)
+  across the parties, secure aggregation (threshold 2, colluding ≤ 0) + differential privacy (discrete Gaussian, noise 12.0, clip 1.0)
 ALL TRUST REQUIREMENTS SATISFIED
   mock TEE, confidential compute (mock, mock) + attestation (mock) + attestation-gated key release
 PlanningFailed ENC2401

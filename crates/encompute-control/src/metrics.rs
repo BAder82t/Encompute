@@ -72,6 +72,21 @@ const HELP: &[(&str, &str, &str)] = &[
         "counter",
         "API requests by status class",
     ),
+    (
+        "encompute_legacy_service_admins",
+        "gauge",
+        "Service accounts still holding security_admin (legacy; refused from 0.4.0)",
+    ),
+    (
+        "encompute_state_rollback_total",
+        "counter",
+        "Database state found behind the state anchor while running (privacy, audit): refused",
+    ),
+    (
+        "encompute_anchor_bytes",
+        "gauge",
+        "Serialized size of the state anchor in bytes (warned above 524288; an OpenBao KV entry is limited to 1 MiB by default)",
+    ),
 ];
 
 fn check_label(v: &str) -> &str {

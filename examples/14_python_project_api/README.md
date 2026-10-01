@@ -70,7 +70,7 @@ gradient-alice-data
   gradient-alice-data: record-level privacy, ε ≤ 3.0, δ ≤ 1e-6
 Selected mechanisms
 aggregate:update
-  across the parties, secure aggregation (threshold 2, colluding ≤ 0) + differential privacy (discrete Gaussian, noise 6.0, clip 1.0)
+  across the parties, secure aggregation (threshold 2, colluding ≤ 0) + differential privacy (discrete Gaussian, noise 12.0, clip 1.0)
 RESULT
 ALL TRUST REQUIREMENTS SATISFIED
 ```
@@ -82,7 +82,7 @@ Training:
 train:alice-data
   mock TEE, confidential compute (mock, mock) + attestation (mock) + attestation-gated key release
 aggregate:update
-  across the parties, secure aggregation (threshold 2, colluding ≤ 0) + differential privacy (discrete Gaussian, noise 6.0, clip 1.0)
+  across the parties, secure aggregation (threshold 2, colluding ≤ 0) + differential privacy (discrete Gaussian, noise 12.0, clip 1.0)
 ALL TRUST REQUIREMENTS SATISFIED
 
 == The same training with no TEE ==

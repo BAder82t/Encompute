@@ -94,27 +94,106 @@ struct GpuDevice {
     hwmodel: String,
 }
 
+/// A refreshed key set is fetched at most this often (seconds), however
+/// many tokens name an unknown key.
+pub const JWKS_MIN_REFRESH_SECS: u64 = 60;
+
+type JwksFetch = Box<dyn Fn() -> Result<String> + Send + Sync>;
+
+/// Refetches the key set: Google rotates its signing keys, and a key it
+/// withdraws must stop being trusted.
+struct Refresh {
+    fetch: JwksFetch,
+    max_age_secs: u64,
+    /// When the keys were last fetched, and when a fetch was last tried.
+    fetched_at: u64,
+    tried_at: Option<u64>,
+}
+
 /// Verifies Confidential Space tokens against a JWKS (Google's published
 /// keys, fetched by the caller from [`JWKS_URL`]). The audience is the
 /// broker's ID.
 pub struct ConfidentialSpaceProvider {
-    keys: JwkSet,
+    keys: std::sync::RwLock<JwkSet>,
     audience: String,
+    refresh: Option<std::sync::Mutex<Refresh>>,
+    clock: Box<dyn Fn() -> u64 + Send + Sync>,
+}
+
+fn parse_jwks(jwks: &str) -> Result<JwkSet> {
+    serde_json::from_str(jwks).map_err(|e| err(Code::Attestation, format!("malformed JWKS: {e}")))
 }
 
 impl ConfidentialSpaceProvider {
     /// `jwks`: the JSON key set; `audience`: the audience the workload
     /// requested (the broker's URL or ID).
     pub fn new(jwks: &str, audience: &str) -> Result<Self> {
-        let keys: JwkSet = serde_json::from_str(jwks)
-            .map_err(|e| err(Code::Attestation, format!("malformed JWKS: {e}")))?;
+        let keys = parse_jwks(jwks)?;
         if audience.is_empty() || audience.len() > 512 {
             return Err(err(Code::Attestation, "audience must be 1-512 bytes"));
         }
         Ok(Self {
-            keys,
+            keys: std::sync::RwLock::new(keys),
             audience: audience.to_owned(),
+            refresh: None,
+            clock: Box::new(crate::unix_now),
         })
+    }
+
+    /// Keeps the key set current with `fetch` (e.g. from [`JWKS_URL`]): it
+    /// is refetched when a token names a key it does not hold (a rotation)
+    /// and once it is older than `max_age_secs` (a withdrawn key stops
+    /// being trusted), at most every [`JWKS_MIN_REFRESH_SECS`]. A failed
+    /// fetch keeps the current keys.
+    pub fn with_refresh(
+        mut self,
+        fetch: impl Fn() -> Result<String> + Send + Sync + 'static,
+        max_age_secs: u64,
+    ) -> Self {
+        self.refresh = Some(std::sync::Mutex::new(Refresh {
+            fetch: Box::new(fetch),
+            max_age_secs,
+            fetched_at: (self.clock)(),
+            tried_at: None,
+        }));
+        self
+    }
+
+    /// Replaces the clock the refresh schedule uses (tests).
+    pub fn with_clock(mut self, clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
+        self.clock = Box::new(clock);
+        if let Some(r) = &self.refresh {
+            r.lock().unwrap_or_else(|p| p.into_inner()).fetched_at = (self.clock)();
+        }
+        self
+    }
+
+    /// Refetches the keys if they are older than their maximum age, or
+    /// (`unknown_kid`) a token names a key they lack; rate-limited.
+    fn refresh(&self, unknown_kid: bool) {
+        let Some(r) = &self.refresh else { return };
+        let mut r = r.lock().unwrap_or_else(|p| p.into_inner());
+        let now = (self.clock)();
+        let stale = now.saturating_sub(r.fetched_at) >= r.max_age_secs;
+        let limited = r
+            .tried_at
+            .is_some_and(|t| now.saturating_sub(t) < JWKS_MIN_REFRESH_SECS);
+        if !(stale || unknown_kid) || limited {
+            return;
+        }
+        r.tried_at = Some(now);
+        if let Ok(keys) = (r.fetch)().and_then(|j| parse_jwks(&j)) {
+            *self.keys.write().unwrap_or_else(|p| p.into_inner()) = keys;
+            r.fetched_at = now;
+        }
+    }
+
+    fn key(&self, kid: &str) -> Option<jsonwebtoken::jwk::Jwk> {
+        self.keys
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .find(kid)
+            .cloned()
     }
 }
 
@@ -179,11 +258,16 @@ impl AttestationProvider for ConfidentialSpaceProvider {
         let kid = header
             .kid
             .ok_or_else(|| bad("attestation token names no signing key".into()))?;
-        let jwk = self
-            .keys
-            .find(&kid)
-            .ok_or_else(|| bad(format!("unknown token signing key {kid:?}")))?;
-        let key = DecodingKey::from_jwk(jwk).map_err(|x| bad(format!("signing key: {x}")))?;
+        self.refresh(false);
+        let jwk = match self.key(&kid) {
+            Some(k) => k,
+            None => {
+                self.refresh(true);
+                self.key(&kid)
+                    .ok_or_else(|| bad(format!("unknown token signing key {kid:?}")))?
+            }
+        };
+        let key = DecodingKey::from_jwk(&jwk).map_err(|x| bad(format!("signing key: {x}")))?;
         let mut v = Validation::new(Algorithm::RS256);
         v.set_issuer(&[ISSUER]);
         v.set_audience(&[&self.audience]);

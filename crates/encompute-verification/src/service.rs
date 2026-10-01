@@ -80,6 +80,18 @@ pub fn canonical_target(target: &str) -> String {
     }
 }
 
+/// Whether the query of `target` names a parameter more than once.
+pub fn repeats_a_query_parameter(target: &str) -> bool {
+    let Some((_, query)) = target.split_once('?') else {
+        return false;
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .any(|p| !seen.insert(p.split_once('=').map_or(p, |(k, _)| k)))
+}
+
 /// A service's signing key and ID.
 pub struct ServiceSigner {
     id: String,
@@ -313,6 +325,11 @@ impl ServiceHeaders {
         }
         if self.nonce.len() != 32 || unhex(&self.nonce).is_none() {
             return Err(auth("malformed request nonce"));
+        }
+        // The signature covers the sorted query, so `?a=1&a=2` and
+        // `?a=2&a=1` sign alike but may parse differently: refuse both.
+        if repeats_a_query_parameter(path) {
+            return Err(auth("the request target names a query parameter twice"));
         }
         verify_signed(
             public_key,
@@ -660,6 +677,35 @@ mod tests {
         );
         bad(&q, "GET", "/v1/audit?limit=10", b"", "control-plane", t);
         bad(&q, "GET", "/v1/audit", b"", "control-plane", t);
+        // Review finding CP-A-8(g) (ENC-SF-2026-060): a repeated parameter is refused even
+        // when it was signed, since recipients may read either value.
+        let d = s
+            .sign_request(
+                "GET",
+                "/v1/audit?limit=1&limit=9",
+                "control-plane",
+                &bind,
+                b"",
+            )
+            .unwrap();
+        bad(
+            &d,
+            "GET",
+            "/v1/audit?limit=1&limit=9",
+            b"",
+            "control-plane",
+            t,
+        );
+        bad(
+            &d,
+            "GET",
+            "/v1/audit?limit=9&limit=1",
+            b"",
+            "control-plane",
+            t,
+        );
+        assert!(!repeats_a_query_parameter("/v1/audit?limit=1&after=1"));
+        assert!(repeats_a_query_parameter("/v1/audit?after&after=2"));
         let mut other = h.clone();
         other.bind.insert("job".into(), "job_2".into());
         bad(&other, "POST", "/v1/messages", b"{}", "control-plane", t);

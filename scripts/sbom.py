@@ -57,7 +57,9 @@ def openfhe_component():
     }
 
 
-def cargo_components(roots_names, features):
+def cargo_graph(roots_names, features):
+    """The packages, resolve nodes, roots and the normal (runtime)
+    dependencies reachable from the roots, from cargo metadata."""
     cmd = ["cargo", "metadata", "--format-version", "1", "--locked"]
     if features:
         cmd += ["--features", features]
@@ -75,6 +77,11 @@ def cargo_components(roots_names, features):
         for d in nodes[i]["deps"]:
             if any(k["kind"] in (None, "normal") for k in d["dep_kinds"]):
                 stack.append(d["pkg"])
+    return pkgs, nodes, roots, seen
+
+
+def cargo_components(roots_names, features):
+    pkgs, nodes, roots, seen = cargo_graph(roots_names, features)
 
     def ref(i):
         p = pkgs[i]

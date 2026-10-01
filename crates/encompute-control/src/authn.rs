@@ -2,8 +2,8 @@
 //!
 //! - **Users**: OpenID Connect ID/access tokens (RS256, ES256, PS256) from a
 //!   configured issuer, checked against its JWKS: signature, issuer,
-//!   audience, expiry. The (issuer, subject) pair must be a registered,
-//!   active user.
+//!   audience, expiry, not-before, issue time and a maximum lifetime. The
+//!   (issuer, subject) pair must be a registered, active user.
 //! - **Development**: HS256 tokens from `ENCOMPUTE_DEV_TOKEN_SECRET`, issuer
 //!   `encompute-development`. Production mode refuses them outright.
 //! - **Services**: Ed25519-signed requests (see
@@ -35,6 +35,15 @@ pub const DEV_ISSUER: &str = "encompute-development";
 pub const DEV_AUDIENCE: &str = "encompute";
 /// Tokens larger than this are refused before parsing.
 const MAX_TOKEN: usize = 16 * 1024;
+/// The longest token lifetime (`exp - iat`) accepted by default.
+pub const DEFAULT_MAX_TOKEN_LIFETIME_SECS: u64 = 24 * 3600;
+/// Clock leeway for token times.
+const LEEWAY_SECS: u64 = 60;
+/// How long a used request nonce is kept beyond the end of the window in
+/// which its request could still be accepted.
+const NONCE_MARGIN_SECS: u64 = 60;
+/// An unknown signing key refetches the issuer's key set at most this often.
+const JWKS_REFRESH_SECS: u64 = 60;
 
 fn unauth(msg: impl Into<String>) -> Error {
     Error::new(Code::Unauthenticated, msg)
@@ -93,48 +102,73 @@ struct Claims {
     iss: String,
     sub: String,
     exp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    iat: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nbf: Option<u64>,
 }
 
 struct IssuerKeys {
     cfg: OidcIssuer,
+    /// The key set, and when a refresh was last started.
     keys: Mutex<(Option<JwkSet>, Option<Instant>)>,
 }
 
 impl IssuerKeys {
-    fn fetch(&self) -> Result<JwkSet> {
+    /// The issuer's key set. What went wrong is logged, not returned: the
+    /// caller is not authenticated yet, and the source (URL, path) and the
+    /// error are the operator's business.
+    fn fetch(&self, service: &str) -> Result<JwkSet> {
         let text = match &self.cfg.jwks {
-            JwksSource::Inline(s) => s.clone(),
-            JwksSource::File(p) => std::fs::read_to_string(p)
-                .map_err(|e| unauth(format!("JWKS {}: {e}", p.display())))?,
+            JwksSource::Inline(s) => Ok(s.clone()),
+            JwksSource::File(p) => {
+                std::fs::read_to_string(p).map_err(|e| format!("JWKS {}: {e}", p.display()))
+            }
             JwksSource::Url(u) => ureq::get(u)
                 .timeout(Duration::from_secs(10))
                 .call()
-                .map_err(|e| unauth(format!("JWKS {u}: {e}")))?
-                .into_string()
-                .map_err(|e| unauth(format!("JWKS {u}: {e}")))?,
+                .map_err(|e| format!("JWKS {u}: {e}"))
+                .and_then(|r| r.into_string().map_err(|e| format!("JWKS {u}: {e}"))),
         };
-        serde_json::from_str(&text).map_err(|e| unauth(format!("malformed JWKS: {e}")))
+        text.and_then(|t| serde_json::from_str(&t).map_err(|e| format!("malformed JWKS: {e}")))
+            .map_err(|detail| {
+                crate::log::LogLine::new(service, "jwks_unavailable")
+                    .field("issuer", &self.cfg.issuer)
+                    .field("error", detail)
+                    .emit();
+                unauth("the identity provider's signing keys are unavailable")
+            })
     }
 
     /// The key for `kid`, refetching the set (at most once a minute) when
-    /// the key is unknown: providers rotate keys.
-    fn key(&self, kid: &str) -> Result<DecodingKey> {
-        let mut g = self.keys.lock().unwrap_or_else(|p| p.into_inner());
+    /// the key is unknown: providers rotate keys. The lock is not held
+    /// during the fetch; requests meanwhile see the set as it was.
+    fn key(&self, kid: &str, service: &str) -> Result<DecodingKey> {
         let found = |s: &Option<JwkSet>| {
             s.as_ref()
                 .and_then(|s| s.find(kid))
                 .map(DecodingKey::from_jwk)
         };
-        if let Some(k) = found(&g.0) {
-            return k.map_err(|e| unauth(format!("signing key: {e}")));
+        let refresh = {
+            let mut g = self.keys.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(k) = found(&g.0) {
+                return k.map_err(|_| unauth("the token's signing key is unusable"));
+            }
+            let due =
+                g.1.is_none_or(|t| t.elapsed() > Duration::from_secs(JWKS_REFRESH_SECS));
+            if due {
+                g.1 = Some(Instant::now());
+            }
+            due
+        };
+        if refresh {
+            let set = self.fetch(service)?;
+            self.keys.lock().unwrap_or_else(|p| p.into_inner()).0 = Some(set);
         }
-        if g.1.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
-            g.1 = Some(Instant::now());
-            g.0 = Some(self.fetch()?);
-        }
+        let g = self.keys.lock().unwrap_or_else(|p| p.into_inner());
         match found(&g.0) {
-            Some(k) => k.map_err(|e| unauth(format!("signing key: {e}"))),
-            None => Err(unauth(format!("unknown token signing key {kid:?}"))),
+            Some(k) => k.map_err(|_| unauth("the token's signing key is unusable")),
+            None => Err(unauth("unknown token signing key")),
         }
     }
 }
@@ -144,6 +178,7 @@ pub struct Authenticator {
     service_id: String,
     issuers: Vec<IssuerKeys>,
     dev_secret: Option<Zeroizing<String>>,
+    max_token_lifetime: u64,
 }
 
 /// What a request presents.
@@ -182,10 +217,13 @@ fn peek_issuer(token: &str) -> Result<String> {
 
 /// A development token for `subject` (tests, local development).
 pub fn dev_token(secret: &str, subject: &str, ttl_secs: u64) -> Result<String> {
+    let now = unix_now();
     let c = Claims {
         iss: DEV_ISSUER.into(),
         sub: subject.into(),
-        exp: unix_now() + ttl_secs,
+        exp: now + ttl_secs,
+        iat: Some(now),
+        nbf: None,
     };
     #[derive(Serialize)]
     struct WithAud<'a> {
@@ -228,7 +266,14 @@ impl Authenticator {
             } else {
                 dev_secret
             },
+            max_token_lifetime: DEFAULT_MAX_TOKEN_LIFETIME_SECS,
         }
+    }
+
+    /// Refuses tokens living longer than `secs` (`exp - iat`).
+    pub fn with_max_token_lifetime(mut self, secs: u64) -> Self {
+        self.max_token_lifetime = secs.max(1);
+        self
     }
 
     /// Verifies a bearer token: (issuer, subject).
@@ -258,7 +303,7 @@ impl Authenticator {
                 .issuers
                 .iter()
                 .find(|i| i.cfg.issuer == iss)
-                .ok_or_else(|| unauth(format!("untrusted token issuer {iss:?}")))?;
+                .ok_or_else(|| unauth("untrusted token issuer"))?;
             if !matches!(
                 header.alg,
                 Algorithm::RS256
@@ -281,14 +326,30 @@ impl Authenticator {
                 .ok_or_else(|| unauth("the token names no signing key"))?;
             let mut v = Validation::new(header.alg);
             v.set_audience(&[&issuer.cfg.audience]);
-            (issuer.key(kid)?, v)
+            (issuer.key(kid, &self.service_id)?, v)
         };
         v.set_issuer(&[&iss]);
-        v.leeway = 60;
+        v.leeway = LEEWAY_SECS;
+        v.validate_nbf = true;
         v.required_spec_claims = ["exp", "iss", "aud", "sub"].map(String::from).into();
         let c = jsonwebtoken::decode::<Claims>(token, &key, &v)
             .map_err(|e| unauth(format!("token rejected: {e}")))?
             .claims;
+        // Issued in the past, and not for longer than allowed: a token
+        // minted for years cannot outlive an identity provider's revocation.
+        let now = unix_now();
+        let iat = c
+            .iat
+            .ok_or_else(|| unauth("token rejected: no issue time (iat)"))?;
+        if iat > now + LEEWAY_SECS {
+            return Err(unauth("token rejected: issued in the future"));
+        }
+        if c.exp.saturating_sub(iat) > self.max_token_lifetime {
+            return Err(unauth(format!(
+                "token rejected: it lives longer than {} s",
+                self.max_token_lifetime
+            )));
+        }
         Ok((c.iss, c.sub))
     }
 
@@ -356,7 +417,11 @@ impl Authenticator {
             &self.service_id,
             now,
         )?;
-        // The nonce is spent now; a replay within the window finds it.
+        // The nonce is spent now; a replay within the window finds it. It
+        // is kept until the request could no longer be accepted (its time
+        // plus the skew, or now if it came from the past) plus a margin,
+        // by this process's clock, which also prunes it.
+        let keep_until = now.max(h.timestamp) + MAX_CLOCK_SKEW_SECS + NONCE_MARGIN_SECS;
         let inserted = c
             .execute(
                 "INSERT INTO request_nonces (sender, nonce, expires_at) VALUES ($1, $2, $3)
@@ -364,7 +429,7 @@ impl Authenticator {
                 &[
                     &h.sender,
                     &h.nonce,
-                    &(SystemTime::now() + Duration::from_secs(2 * MAX_CLOCK_SKEW_SECS)),
+                    &(SystemTime::UNIX_EPOCH + Duration::from_secs(keep_until)),
                 ],
             )
             .map_err(db_err)?;
@@ -394,8 +459,12 @@ pub fn roles_of(c: &mut impl GenericClient, principal: &str) -> Result<BTreeSet<
     .collect()
 }
 
-/// Removes expired nonces (called periodically).
+/// Removes expired nonces (called periodically), by the clock that set
+/// their expiry (this process's, not the database's).
 pub fn prune_nonces(c: &mut impl GenericClient) -> Result<u64> {
-    c.execute("DELETE FROM request_nonces WHERE expires_at < now()", &[])
-        .map_err(db_err)
+    c.execute(
+        "DELETE FROM request_nonces WHERE expires_at < $1",
+        &[&SystemTime::now()],
+    )
+    .map_err(db_err)
 }

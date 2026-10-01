@@ -42,6 +42,7 @@ def __getattr__(name: str):
 
 __all__ = [
     "LoRAConfig",
+    "PrivateDataset",
     "TextDataset",
     "TinyClassifier",
     "apply_lora",
@@ -67,21 +68,45 @@ def wrap_model(factory: str, **kwargs: Any) -> torch.nn.Module:
     return m
 
 
+class PrivateDataset(tuple):
+    """``(inputs, labels[, unit_ids])``, and the number of privacy units its
+    owner approved for publication (``public_units``), if any."""
+
+    public_units: Optional[int] = None
+
+
+def _public_units(n: Optional[int]) -> Optional[int]:
+    if n is None:
+        return None
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ValueError("public_units is a positive integer")
+    return n
+
+
 def private_dataset(x: torch.Tensor, y: torch.Tensor,
-                    unit_ids: Optional[torch.Tensor] = None) -> tuple:
+                    unit_ids: Optional[torch.Tensor] = None, *,
+                    public_units: Optional[int] = None) -> tuple:
     """A participant's dataset: inputs, labels and, for patient-level
     privacy, each record's patient (``unit_ids``, integers): a patient's
     records are grouped and clipped together. Without ``unit_ids`` each
     record is its own unit. The dataset is written only to its owner's
-    worker directory; only its digest (covering the unit IDs) and its number
-    of units are shared."""
+    worker directory; only a salted commitment to it is shared (the salt
+    stays with the owner).
+
+    ``public_units`` is a number of patients the owner approves for
+    publication (for example, rounded); patient-level privacy derives its
+    default sampling rate from it. It is shared in the training spec and is
+    never checked against, or computed from, the data."""
     if len(x) != len(y):
         raise ValueError("inputs and labels differ in length")
     if unit_ids is None:
-        return (x.detach().clone(), y.detach().clone())
-    if len(unit_ids) != len(x) or unit_ids.dtype != torch.int64:
-        raise ValueError("unit_ids needs one int64 ID per record")
-    return (x.detach().clone(), y.detach().clone(), unit_ids.detach().clone())
+        d = PrivateDataset((x.detach().clone(), y.detach().clone()))
+    else:
+        if len(unit_ids) != len(x) or unit_ids.dtype != torch.int64:
+            raise ValueError("unit_ids needs one int64 ID per record")
+        d = PrivateDataset((x.detach().clone(), y.detach().clone(), unit_ids.detach().clone()))
+    d.public_units = _public_units(public_units)
+    return d
 
 
 class TextDataset:
@@ -89,9 +114,10 @@ class TextDataset:
     ``labels`` and ``unit_ids`` tensors, and how it was tokenized (bound
     into the training spec)."""
 
-    def __init__(self, tensors: dict, preprocessing: dict):
+    def __init__(self, tensors: dict, preprocessing: dict, public_units: Optional[int] = None):
         self.tensors = tensors
         self.preprocessing = preprocessing
+        self.public_units = _public_units(public_units)
 
     def __len__(self) -> int:
         return len(self.tensors["labels"])
@@ -99,7 +125,7 @@ class TextDataset:
 
 def private_text_dataset(texts, labels, *, tokenizer, max_length: int = 64,
                          truncation: bool = True, stride: Optional[int] = None,
-                         unit_ids=None) -> TextDataset:
+                         unit_ids=None, public_units: Optional[int] = None) -> TextDataset:
     """Tokenizes a participant's texts with the model package's tokenizer
     (``model.encompute_tokenizer``), padding every record to
     ``max_length``.
@@ -108,6 +134,7 @@ def private_text_dataset(texts, labels, *, tokenizer, max_length: int = 64,
     ``stride``, a long text is split into overlapping chunks, and every
     chunk keeps its text's unit: tokenization never turns one patient into
     several units. Without ``unit_ids``, each text is its own unit.
+    ``public_units`` is as for :func:`private_dataset`.
     """
     texts, labels = list(texts), torch.as_tensor(labels, dtype=torch.int64)
     if len(texts) != len(labels):
@@ -133,4 +160,4 @@ def private_text_dataset(texts, labels, *, tokenizer, max_length: int = 64,
     pre = {"tokenizer_digest": tokenizer.digest, "max_length": int(max_length),
            "truncation": bool(truncation), "padding": "max_length",
            "stride": None if stride is None else int(stride)}
-    return TextDataset(t, pre)
+    return TextDataset(t, pre, public_units)

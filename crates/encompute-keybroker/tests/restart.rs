@@ -42,10 +42,14 @@ fn control() -> ServiceSigner {
     ServiceSigner::from_seed("control-plane", &[42; 32]).unwrap()
 }
 
+/// A directory of its own for each call: the tests run in parallel, and
+/// the clock alone (microseconds on macOS) can give two of them one path.
 fn tmp() -> PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let d = std::env::temp_dir().join(format!(
-        "encompute-kb-restart-{}-{}",
+        "encompute-kb-restart-{}-{}-{}",
         std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

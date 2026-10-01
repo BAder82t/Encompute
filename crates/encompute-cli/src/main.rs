@@ -174,6 +174,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: control::JobsCmd,
     },
+    /// Security checks on the control plane (`security legacy-service-admins`
+    /// exits 1 while any service account still holds security_admin).
+    Security {
+        #[command(subcommand)]
+        cmd: control::SecurityCmd,
+    },
     /// Start an evaluator for a model (runs `encompute-evaluator serve`).
     Serve {
         model: PathBuf,
@@ -679,6 +685,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             control::jobs(cmd, load)?;
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Security { cmd } => control::security(cmd),
         Cmd::Audit {
             model,
             keys,

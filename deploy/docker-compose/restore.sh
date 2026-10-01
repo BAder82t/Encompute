@@ -17,7 +17,9 @@ DIR="$(cd "${1:?usage: restore.sh DIR}" && pwd)"
 docker compose stop control evaluator keybroker >/dev/null 2>&1 || true
 docker compose up -d postgres
 for _ in $(seq 60); do docker compose exec -T postgres pg_isready -U encompute >/dev/null 2>&1 && break; sleep 1; done
-docker compose exec -T postgres psql -q -U encompute encompute < "$DIR/db.sql" >/dev/null
+# One transaction, stopping at the first error: a partial restore fails
+# (and leaves the database as it was) instead of reporting success.
+docker compose exec -T postgres psql -q -v ON_ERROR_STOP=1 --single-transaction -U encompute encompute < "$DIR/db.sql" >/dev/null
 untar() { docker run --rm -v "encompute_$1:/v" -v "$DIR:/b:ro" alpine sh -c "$2"; }
 untar anchor '[ -z "$(ls -A /v)" ] && tar -C /v -xf /b/anchor.tar && echo "anchor restored" || echo "anchor kept (existing anchor is authoritative)"'
 untar broker '[ -z "$(ls -A /v)" ] && tar -C /v -xf /b/broker.tar && echo "broker restored" || echo "broker kept (existing broker state is authoritative)"'

@@ -84,6 +84,10 @@ for _ in $(seq 150); do
 done
 [ "$s" = "['ready']" ] || fail "the evaluator did not register"
 echo "evaluator-1 registered and ready; key broker up"
+# Clients pin the evaluator's receipt key and refuse any other.
+ENCOMPUTE_TRUSTED_EVALUATORS="$(curl -fs http://127.0.0.1:8750/v1/info | jget 'v["evaluator"]["public_key"]')" \
+  || fail "the evaluator's receipt key"
+export ENCOMPUTE_TRUSTED_EVALUATORS
 
 step "exact golden path through the deployment"
 "$E" keys generate "$W/eligibility.encompute" -o "$W/keys" >/dev/null
@@ -113,7 +117,7 @@ run_job smoke-2 17 2>"$W/job2.err" | grep -q '"out": false' || { cat "$W/job2.er
 echo "after the restart: the job, its trust report, and new jobs all work"
 
 step "privacy spending, backup, destroy the environment, restore"
-api a-owner POST "/v1/privacy/$DATASET/events" '{"kind":"reserve","event_id":"smoke-release-1","policy_id":null,"execution_spec_id":null,"round_id":null,"output":"update","mechanism":{"kind":"discrete_gaussian","clip_norm":"1.0","noise_multiplier":"1.0"},"sensitivity":1,"sigma2":200,"vector_len":8,"rng":"csprng"}' >/dev/null
+api a-owner POST "/v1/privacy/$DATASET/events" '{"kind":"reserve","event_id":"smoke-release-1","policy_id":null,"execution_spec_id":null,"round_id":null,"output":"update","mechanism":{"kind":"discrete_gaussian","clip_norm":"1.0","noise_multiplier":"1000.0"},"sensitivity":2,"sigma2":800,"vector_len":1,"rng":"csprng"}' >/dev/null
 SPENT="$(api a-owner GET "/v1/privacy/$DATASET" | jget 'v["spent"]["epsilon"]')"
 ./backup.sh "$W/backup"
 # Everything Encompute runs is destroyed; the customer's KMS (OpenBao) is not.

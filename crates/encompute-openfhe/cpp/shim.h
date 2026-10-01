@@ -39,8 +39,11 @@ uint32_t ring_dimension(const Context& ctx);
 uint32_t log_qp(const Context& ctx);
 
 // Load evaluation keys exported by a client (see the client shim for the
-// framing). Returns the key tag. Throws if they belong to another context.
-rust::String load_evaluation_keys(Context& ctx, rust::Slice<const uint8_t> bytes);
+// framing); `digest` is the SHA-256 (hex) of `bytes`. Returns the key tag.
+// Throws, inserting nothing, if they belong to another context, hold keys
+// of another tag, or name a tag already loaded from different bytes.
+rust::String load_evaluation_keys(Context& ctx, rust::Slice<const uint8_t> bytes,
+                                  rust::Str digest);
 
 std::unique_ptr<Ciphertext> load_ciphertext(const Context& ctx,
                                             rust::Slice<const uint8_t> bytes);

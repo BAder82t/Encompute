@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -15,6 +16,9 @@ pub struct BrokerClient {
     agent: ureq::Agent,
     /// The broker's grant-signing key (hex), if pinned.
     pinned_key: Option<String>,
+    /// Broker ID -> grant-signing key (hex) the workload's attested
+    /// identity names: grants from any other signer are refused.
+    trusted: Option<BTreeMap<String, String>>,
 }
 
 impl BrokerClient {
@@ -25,6 +29,7 @@ impl BrokerClient {
                 .timeout(Duration::from_secs(30))
                 .build(),
             pinned_key: None,
+            trusted: None,
         }
     }
 
@@ -51,6 +56,29 @@ impl BrokerClient {
         }
         self.pinned_key = Some(key.to_owned());
         Ok(self)
+    }
+
+    /// Accepts grants only from a broker `trusted` names (broker ID ->
+    /// hex Ed25519 grant-signing key), taken from the workload's attested
+    /// identity (a training spec), never from whoever supplies the URL.
+    pub fn trusting(mut self, trusted: &BTreeMap<String, String>) -> Result<Self> {
+        let hex64 = |k: &str| {
+            k.len() == 64
+                && k.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        if trusted.is_empty() || trusted.values().any(|k| !hex64(k)) {
+            return Err(Error::new(
+                Code::BadInput,
+                "trusted broker keys must be a non-empty map of 64 lowercase hex characters",
+            ));
+        }
+        self.trusted = Some(trusted.clone());
+        Ok(self)
+    }
+
+    pub fn trusted_brokers(&self) -> Option<&BTreeMap<String, String>> {
+        self.trusted.as_ref()
     }
 
     pub fn url(&self) -> &str {

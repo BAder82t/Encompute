@@ -74,10 +74,15 @@ pub fn sigma2(m: &DpMechanism, codec: &FixedPointCodec) -> Result<u64> {
 /// Neighbouring datasets never change *which* parties contribute (the
 /// contributor list is public and decided by the protocol, not by any one
 /// unit's data):
-/// - a record, user, patient or device lives inside one party's data and
-///   moves that party's (clipped) vector by at most `clip_norm`;
-/// - an organization's whole contribution is replaced by another (fixed
-///   contributors), moving it by at most `2 * clip_norm`.
+/// - with Poisson sampling (DP-SGD), each sampled record, user, patient or
+///   device's gradient is clipped to `clip_norm` by the attested workload
+///   before summation, so one unit moves the sum by at most `clip_norm`;
+/// - otherwise only each party's whole contribution is clipped (to
+///   `clip_norm`). Nothing bounds one unit's influence inside it: one
+///   organization, but also one patient, may move it anywhere in the
+///   clipping ball, by at most `2 * clip_norm`. So every unit is charged
+///   that (review finding DP-4; before, a patient-level budget without
+///   sampling was charged half the true sensitivity).
 ///
 /// Either way the encoding offset `-clip_min * scale` is present in both
 /// sums and cancels, and rounding each coordinate to a code moves each by at
@@ -85,11 +90,7 @@ pub fn sigma2(m: &DpMechanism, codec: &FixedPointCodec) -> Result<u64> {
 /// (Adding or removing a whole party is not a neighbouring dataset here: it
 /// is visible in the public contributor list.)
 pub fn sensitivity(unit: &PrivacyUnit, m: &DpMechanism, codec: &FixedPointCodec, d: usize) -> u64 {
-    let k = if *unit == PrivacyUnit::Organization {
-        2.0
-    } else {
-        1.0
-    };
+    let k = encompute_ir::confidentiality::sensitivity_factor(unit, m.sampling_rate);
     let clip = (k * m.clip_norm * codec.scale as f64).ceil() as u64;
     let mut r = (d as f64).sqrt().floor() as u64;
     while r * r < d as u64 {

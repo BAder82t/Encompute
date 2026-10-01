@@ -32,6 +32,19 @@ fn spec(json: &str) -> PyResult<TrainingSpec> {
     Ok(s)
 }
 
+/// The broker at `url`, trusted only with the grant-signing keys the
+/// training spec names (review finding KB-1): whoever supplies the URL (a
+/// job descriptor) cannot pin, or leave unpinned, a broker of its own.
+fn spec_broker(s: &TrainingSpec, url: &str) -> PyResult<BrokerClient> {
+    if url.contains('#') {
+        return Err(err(Error::new(
+            Code::KeyRelease,
+            "the broker's grant-signing key comes from the training spec, not with its address",
+        )));
+    }
+    BrokerClient::new(url).trusting(&s.key_brokers).map_err(err)
+}
+
 fn seed32(path: &str) -> PyResult<[u8; 32]> {
     std::fs::read(path)
         .map_err(|e| bad(format!("{path}: {e}")))?
@@ -178,8 +191,7 @@ pub fn acquire_session_keys(
     let signer = EvaluatorSigner::from_seed(&seed);
     let session = WorkloadSession::new(&signer.identity())
         .with_privacy_policy(s.privacy_policy_id.as_deref());
-    // `URL#KEY` pins the broker's grant-signing key.
-    let broker = BrokerClient::parse(broker).map_err(err)?;
+    let broker = spec_broker(&s, broker)?;
     let requests: Vec<_> = assets.iter().map(|a| (broker.clone(), a.clone())).collect();
     let got = acquire_keys(
         att.as_ref(),
@@ -203,6 +215,132 @@ pub fn acquire_session_keys(
             .collect(),
         record,
     ))
+}
+
+/// [`TrainingSpec::config_digest`] of a validated spec.
+#[pyfunction]
+pub fn training_config_digest(spec_json: &str) -> PyResult<String> {
+    spec(spec_json)?.config_digest().map_err(err)
+}
+
+/// Refuses a `base_model.architecture` that names a factory outside the
+/// worker image's allowlist, or arguments outside its schema.
+#[pyfunction]
+pub fn training_check_architecture(architecture: &str) -> PyResult<()> {
+    training::Architecture::parse(architecture)
+        .map(|_| ())
+        .map_err(err)
+}
+
+/// Refuses an input adapter other than the spec's initial one (round 1) or
+/// the one the coordinator recorded for the previous round of this run.
+#[pyfunction]
+#[pyo3(signature = (spec_json, run_id, round, adapter_id, adapter_digest, record_json=None))]
+pub fn check_input_adapter(
+    spec_json: &str,
+    run_id: &str,
+    round: u32,
+    adapter_id: &str,
+    adapter_digest: &str,
+    record_json: Option<&str>,
+) -> PyResult<()> {
+    let s = spec(spec_json)?;
+    let record: Option<training::SignedAdapterRecord> = record_json
+        .map(|r| serde_json::from_str(r).map_err(|e| bad(format!("adapter record: {e}"))))
+        .transpose()?;
+    training::check_input_adapter(
+        &s,
+        run_id,
+        round,
+        adapter_id,
+        adapter_digest,
+        record.as_ref(),
+    )
+    .map_err(err)
+}
+
+/// The per-unit clip (codec units) a DP-SGD worker must apply: the approved
+/// plan's, after checking the plan is the spec's (by ID) and its sampling
+/// rate is the spec's, so the worker contributes exactly what the
+/// accountant charges (review finding DP-3).
+#[pyfunction]
+pub fn training_plan_clip(spec_json: &str, plan_json: &str) -> PyResult<String> {
+    use encompute_runtime::planner::{ConfidentialExecutionPlan, Mechanism, StepKind};
+    let s = spec(spec_json)?;
+    let refuse = |m: &str| err(Error::new(Code::PlanInvalid, m.to_owned()));
+    let plan = ConfidentialExecutionPlan::from_bytes(plan_json.as_bytes()).map_err(err)?;
+    if plan.id().map_err(err)?.hex() != s.plan_id {
+        return Err(refuse("the plan is not the training spec's plan"));
+    }
+    let dp = s
+        .config
+        .dp_sgd
+        .as_ref()
+        .ok_or_else(|| refuse("the training spec is not DP-SGD"))?;
+    let mut found = plan
+        .steps
+        .iter()
+        .filter(|st| matches!(st.kind, StepKind::Aggregate { .. }))
+        .flat_map(|st| st.mechanisms.iter())
+        .filter_map(|m| match m {
+            Mechanism::DifferentialPrivacy {
+                clip_norm,
+                sampling_rate,
+                ..
+            } => Some((clip_norm.clone(), sampling_rate.clone())),
+            _ => None,
+        });
+    let (clip, q) = found
+        .next()
+        .ok_or_else(|| refuse("the plan applies no differential privacy to the aggregate"))?;
+    if found.next().is_some() {
+        return Err(refuse(
+            "the plan has more than one differential privacy mechanism",
+        ));
+    }
+    if q.as_deref() != Some(dp.sampling_rate.as_str()) {
+        return Err(refuse(
+            "the plan's sampling rate is not the training spec's: the accountant would charge \
+             another rate than the workers sample at",
+        ));
+    }
+    Ok(clip)
+}
+
+/// Opens (or creates) a key broker state file and returns its
+/// grant-signing key (hex): the key a training spec binds, so it exists
+/// before the spec. `kek` is a production broker's key-encryption key
+/// file; without it, a development broker.
+#[pyfunction]
+#[pyo3(signature = (path, broker_id, kek=None))]
+pub fn training_broker_key(path: &str, broker_id: &str, kek: Option<&str>) -> PyResult<String> {
+    use encompute_runtime::attestation::Verifier;
+    use encompute_runtime::keybroker::{
+        BrokerMode, DevelopmentFileStore, KeyBroker, LocalKekStore, SecretStore,
+    };
+    let store = || -> PyResult<Box<dyn SecretStore>> {
+        Ok(match kek {
+            Some(k) => Box::new(LocalKekStore::open_or_create(Path::new(k)).map_err(err)?),
+            None => Box::new(DevelopmentFileStore),
+        })
+    };
+    let p = Path::new(path);
+    let b = if p.exists() {
+        KeyBroker::load(p, Verifier::new(), store()?).map_err(err)?
+    } else {
+        let mode = if kek.is_some() {
+            BrokerMode::Production
+        } else {
+            BrokerMode::Development
+        };
+        let b = KeyBroker::new(broker_id, mode, Verifier::new(), store()?).map_err(err)?;
+        b.save(p).map_err(err)?;
+        b
+    };
+    if b.id() != broker_id {
+        return Err(bad(format!("{path} is broker {}, not {broker_id}", b.id())));
+    }
+    Ok(b.grant_public_key())
 }
 
 /// An attestation record's ID and its session's ID.
@@ -285,6 +423,19 @@ pub fn hf_check_file(path: &str) -> PyResult<()> {
     training::hf::check_file(path).map_err(err)
 }
 
+/// Refuses a `tokenizer_config.json` with settings outside the allowlist
+/// (custom tokenizer code, unknown keys or classes).
+#[pyfunction]
+pub fn hf_check_tokenizer_config(config_json: &str) -> PyResult<()> {
+    let v: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+        err(Error::new(
+            Code::ModelPackage,
+            format!("tokenizer_config.json: {e}"),
+        ))
+    })?;
+    training::hf::check_tokenizer_config(&v).map_err(err)
+}
+
 /// Refuses a `config.json` naming custom code or an unsupported
 /// architecture; returns its model type.
 #[pyfunction]
@@ -317,8 +468,7 @@ pub fn acquire_training_keys(
     let signer = EvaluatorSigner::from_seed(&seed32(identity)?);
     let session = WorkloadSession::new(&signer.identity())
         .with_privacy_policy(s.privacy_policy_id.as_deref());
-    // `URL#KEY` pins the broker's grant-signing key.
-    let broker = BrokerClient::parse(broker).map_err(err)?;
+    let broker = spec_broker(&s, broker)?;
     let requests: Vec<_> = assets.iter().map(|a| (broker.clone(), a.clone())).collect();
     let got = acquire_keys(
         &attester,
@@ -528,6 +678,12 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hf_tokenizer_digest, m)?)?;
     m.add_function(wrap_pyfunction!(hf_check_index, m)?)?;
     m.add_function(wrap_pyfunction!(hf_check_config, m)?)?;
+    m.add_function(wrap_pyfunction!(hf_check_tokenizer_config, m)?)?;
+    m.add_function(wrap_pyfunction!(training_config_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(training_check_architecture, m)?)?;
+    m.add_function(wrap_pyfunction!(check_input_adapter, m)?)?;
+    m.add_function(wrap_pyfunction!(training_plan_clip, m)?)?;
+    m.add_function(wrap_pyfunction!(training_broker_key, m)?)?;
     m.add_function(wrap_pyfunction!(acquire_training_keys, m)?)?;
     m.add_function(wrap_pyfunction!(sha256_hex, m)?)?;
     m.add_function(wrap_pyfunction!(seal_asset, m)?)?;

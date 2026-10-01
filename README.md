@@ -40,11 +40,11 @@ revealing what each needs to keep private: confidentiality policies are
 enforced by attested key release, secure aggregation and differential
 privacy, and every step leaves verifiable evidence.
 
-**Status: release candidate
-[0.3.0-rc.3](https://github.com/BAder82t/Encompute/releases/tag/v0.3.0-rc.3)
-is published (a pre-release, the frozen target for independent security
-review; no review has been completed yet). The last stable release is
-v0.2.0. This branch is development; the candidate is on `release/0.3`.** What you can rely on is in the
+**Status: release candidate 0.3.0-rc.4, the frozen target for
+independent security review. The first review has reported; its findings
+and their fixes, some partial, are in
+[docs/security-findings.md](docs/security-findings.md)** (last release:
+v0.2.0). What you can rely on is in the
 [support matrix](docs/support-matrix.md); what Encompute does not do is in
 [known limitations](KNOWN_LIMITATIONS.md). See also the
 [release notes](docs/release-notes-rc.md), [changelog](CHANGELOG.md),
@@ -70,7 +70,7 @@ v0.2.0. This branch is development; the candidate is on `release/0.3`.** What yo
 | Docker Compose deployment | **Supported**; its bundled OpenBao runs in development mode |
 | Python SDK | **Supported** |
 | Platforms | Linux x86_64 and macOS arm64 **supported**; Linux arm64 **experimental** |
-| Assurance | 124 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
+| Assurance | 150 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
 | Commercial dependency boundary | Audited: no TFHE-rs in the dependency graph, SBOM, binaries, wheel or container of a production build (`scripts/audit-commercial-build.sh`) |
 
 ## Start here
@@ -274,7 +274,11 @@ grads = [asset(f"gradient-{x}", owner=h, readers=[coordinator], kind="gradient",
 
 `encompute privacy explain` shows each budget, what one release costs and
 how many releases it affords; `encompute privacy budget --ledger DIR` shows
-what has been spent. Each layer answers one question: FHE/MPC keeps the
+what has been spent. A level such as `"strong"` uses twice its listed noise
+for a record, patient, user or device budget, because only each party's
+whole contribution is clipped; `privacy explain` shows it as
+`preset=strong, sensitivity_factor=2, effective_noise_multiplier=12 (2x preset 6.0)`.
+Each layer answers one question: FHE/MPC keeps the
 computation confidential, secure aggregation hides contributions,
 differential privacy bounds what outputs reveal, attestation says which
 workload ran, and execution proofs say it computed correctly.
@@ -429,7 +433,9 @@ and a development-only mock.
 ## Build
 
 Requires Rust (pinned in `rust-toolchain.toml`), CMake, a C++17 compiler
-and, on macOS, `brew install libomp`.
+and, on macOS, `brew install libomp`. On Linux, building the Python wheel
+with OpenFHE also needs `patchelf` (`apt install patchelf`), which maturin
+uses to bundle `libgomp`.
 
 ```sh
 cargo test                               # everything except OpenFHE and TFHE-rs

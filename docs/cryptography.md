@@ -25,6 +25,7 @@ primitives themselves.
 | `chacha20` | 0.10.2 | SecAgg mask PRG, DP noise CSPRNG | `Cargo.lock` |
 | `vsss-rs` | 6.0.1 | Shamir secret sharing (SecAgg) | `crates/encompute-secagg/Cargo.toml` |
 | `sha2` | 0.10.9 | every hash | `Cargo.lock` |
+| `hmac`, `hkdf` | 0.12.1, 0.12.4 | the key broker's state MAC and its key derivation | `crates/encompute-keybroker/Cargo.toml`, `Cargo.lock` |
 | `jsonwebtoken` | 11.1.0 | Confidential Space tokens and OIDC | `Cargo.lock` |
 | `getrandom` | 0.2.17 (also 0.3, 0.4 transitively) | all randomness Encompute draws itself | `Cargo.lock` |
 | `zeroize` | 1.9.0 | wiping key material in memory | `Cargo.lock` |
@@ -32,7 +33,8 @@ primitives themselves.
 
 OpenFHE is statically linked into the client, the evaluator and the Python
 extension. `install-openfhe.sh` builds it from the `v1.5.1` git tag with
-`-DWITH_OPENMP=ON`. The tag is fetched by name, not by commit hash.
+`-DWITH_OPENMP=ON`. The tag is fetched by name, and the build refuses to
+continue unless it resolves to the pinned commit (`OPENFHE_COMMIT`).
 
 ## 2. Homomorphic encryption
 
@@ -160,9 +162,14 @@ What this does **not** establish:
 - **Ciphertext load checks only `n` and `q`.** `bin_load`
   (`binfhe.cc` lines 105-112) refuses a ciphertext whose LWE length or
   modulus differs from the context's. It does not check anything else about
-  the ciphertext. Bootstrapping and key-switching keys are deserialized
-  (`bin_load_keys`) without a parameter check of their own; the envelope's
-  parameter ID is the check.
+  the ciphertext. Bootstrapping and key-switching keys are checked in
+  `bin_load_keys` before any gate indexes them: the refresh key must be a
+  GINX key whose shape (`n` RGSW keys per half, `(digitsG − 1) · 2` rows)
+  and ring polynomials (dimension `N`, modulus `Q`, evaluation form) match
+  the vetted context; the switching key must have dimensions `N`,
+  `baseKS` and the number of digits of `qKS`, vectors of length `n`, and
+  modulus `qKS`. Any other key is refused ("bootstrapping keys are for
+  another parameter set").
 - The shim also accepts `STD128Q` and `STD128_LMKCDEY` (`bin_paramset`),
   but the vetted profile names only `STD128`, and `OpenFheGates::new`
   refuses any other profile.
@@ -199,16 +206,26 @@ Context: `make_bgv_context` in `crates/encompute-openfhe/cpp/shim.cc`
 | Secret key distribution | OpenFHE's default (not set by Encompute) |
 | Multiplicative depth | from the plan (`mult_depth`): each ciphertext product, product by a constant, and Boolean AND/OR/XOR takes a level |
 | Profile name | `BGVRNS_T65537_DEPTH{d}_HEStd128_FIXEDAUTO_HYBRID` |
-| Stated failure probability | `"0 (exact modular arithmetic)"` |
+| Stated failure probability | `"negligible (noise budget enforced; not zero)"` |
+| Noise budget | worst-case noise multiplier at most 2^13 (`MAX_NOISE_MULTIPLIER`) |
 
 The BGV subset: types `u8`, `u16`, `bool`; operations input, `+`, `-`,
-`*`, constant add/sub/mul, constant minus value, `&`, `|`, `^`, `~`
-(`capabilities` in `bgv.rs`). Range analysis proves values never wrap
-modulo 65537.
+`*`, constant add/sub/mul, constant minus value; `&`, `|`, `^`, `~` on
+`bool` only (`capabilities` in `bgv.rs`). Range analysis proves values
+never wrap modulo 65537.
 
-The "0" failure probability is a claim about the arithmetic being exact.
-Decryption correctness still depends on OpenFHE's modulus choice for the
-declared depth; Encompute does not compute a noise bound of its own.
+Decryption is correct while noise stays within the budget. OpenFHE sizes
+the moduli for the plan's multiplicative depth only, so Encompute bounds
+the rest itself: it tracks each value's worst-case noise multiplier (sums
+add, products multiply) and does not run a plan above 2^13 on BGV
+(`noise_multiplier`, `noise_unsupported` in `bgv.rs`). That limit keeps a
+16× margin below the point where OpenFHE 1.5.1 decryption was measured to
+fail (2^18 after a product). The margin is calibrated, not a proven
+bound. The client also refuses any decrypted output outside the interval
+range analysis proves for it (`crates/encompute-runtime/src/client.rs`).
+The BGV subset runs bitwise logic on Booleans only. The failure-probability
+text is part of the profile, so this change gives BGV profiles new
+parameter-set IDs.
 
 Encryption is with the public key (`client.cc`, line 212).
 
@@ -253,6 +270,7 @@ target platform (see the crypto review brief).
 | SecAgg party identity (Ed25519) and per-round X25519 keys | each party | that party | its own shares |
 | Asset keys (32 bytes) | key broker (`KeyMaterial::generate`) | key broker, wrapped; released to attested workloads | the attested workload |
 | Broker KEK (32 bytes) | key broker | broker, wrapped by the root key | n/a |
+| Broker grant-signing key (Ed25519) | key broker | broker, wrapped like the asset keys | n/a (signs key grants) |
 | Customer root key | customer KMS (OpenBao or Vault Transit) | the KMS; never exported | n/a |
 | HPKE session key (X25519) | inside the attested workload | that workload, in memory | grants sealed to it |
 
@@ -337,7 +355,18 @@ Integrity against an active attacker comes from other layers:
   turned into errors; after loading, the CKKS shim checks that a
   ciphertext belongs to the loaded context and to a key whose evaluation
   keys are loaded (`load_ciphertext`, `shim.cc`); the BinFHE shim checks
-  `n` and `q`.
+  a ciphertext's `n` and `q`.
+- Evaluation keys (CKKS, BGV; `load_evaluation_keys`, `shim.cc`) are
+  deserialized into local maps, never straight into OpenFHE's
+  process-wide maps. Every key must carry the key tag it is sent under and
+  consist of polynomials over the context's key-switching modulus (Q·P)
+  in evaluation form;
+  only then are the keys inserted. OpenFHE looks keys up by tag alone, so
+  the shim binds each loaded tag to the SHA-256 of the key material it
+  came from, and refuses an upload that names a loaded tag with other
+  bytes. A tag is shared only by byte-identical key material (INV-171).
+- BinFHE bootstrapping and switching keys are checked against the vetted
+  context before any gate runs (section 2.2).
 - INV-007 tests that Encompute's own parsers never panic on arbitrary
   input. There is no fuzzing of OpenFHE's deserializers.
 - Treat the OpenFHE deserializer as part of the evaluator's attack
@@ -375,10 +404,13 @@ Integrity against an active attacker comes from other layers:
 - **Canonical encoding:** canonical JSON (`crates/encompute-verification/src/canonical.rs`)
   is hashed and signed, never an arbitrary serialization.
 - **Signatures:** Ed25519 (`ed25519-dalek` 2.2) for execution receipts,
-  service requests and messages, job grants, audit checkpoints, the state
-  anchor, owner authorizations and revocations, SecAgg messages and
-  aggregation receipts, privacy receipts, adapter records and mock
-  attestation. SecAgg and mock attestation verify with `verify_strict`.
+  service requests and messages, job grants, key grants, audit
+  checkpoints, the state anchor, owner authorizations and revocations,
+  SecAgg messages and aggregation receipts, privacy receipts, adapter
+  records and mock attestation. SecAgg, key grants and mock attestation
+  verify with `verify_strict`.
+- **MAC:** the key broker's state file is authenticated with HMAC-SHA256
+  (section 7).
 - **Confidential Space tokens:** RS256 JWTs from Google, verified against
   Google's JWKS (`crates/encompute-attestation/src/gcp.rs`).
 
@@ -386,7 +418,7 @@ Integrity against an active attacker comes from other layers:
 
 | Use | Construction | Nonce | Associated data | Source |
 |---|---|---|---|---|
-| Released asset key → attested workload | HPKE (RFC 9180) base mode, X25519-HKDF-SHA256, HKDF-SHA256, ChaCha20-Poly1305 | HPKE | `info = "encompute.key-grant.v1"`; `aad` = canonical grant header (broker, asset, key version, policy, spec, session, binding hash, attestation digest, expiry) | `crates/encompute-attestation/src/grant.rs` |
+| Released asset key → attested workload | HPKE (RFC 9180) base mode, X25519-HKDF-SHA256, HKDF-SHA256, ChaCha20-Poly1305; then signed by the broker (Ed25519) | HPKE | `info = "encompute.key-grant.v1"`; `aad` = canonical grant header (version, broker ID, asset, key version, policy, spec, session, binding hash, attestation digest, expiry, broker's grant-signing key) | `crates/encompute-attestation/src/grant.rs` |
 | Asset key wrapped under the broker KEK | ChaCha20-Poly1305, 32-byte KEK | 12 random bytes | `"encompute.broker-key.v1\0{broker}\0{asset}\0{version}"` | `crates/encompute-keybroker/src/store.rs` |
 | KEK wrapped under the customer root key | OpenBao/Vault Transit `encrypt`/`decrypt` (the key type is set when the Transit key is created, outside Encompute) | Transit | `"encompute.root-wrapped-kek.v1\0{organization}"` as Transit associated data | `crates/encompute-keybroker/src/root.rs` |
 | Development root key | ChaCha20-Poly1305 | 12 random bytes | as above | `root.rs` (`DevelopmentRootKey`, development only) |
@@ -395,9 +427,25 @@ Integrity against an active attacker comes from other layers:
 
 Notes:
 
-- HPKE base mode does not authenticate the sender. The broker does not
-  sign grants. A workload knows a grant opens under its session key, not
-  that the broker produced it.
+- HPKE base mode does not authenticate the sender, so the broker signs
+  each grant: `Ed25519(tagged("encompute.key-grant-signature.v2",
+  canonical {header, encapsulated_key, ciphertext}))`, with its
+  grant-signing key, whose public half is in the header. The workload
+  verifies it (`verify_strict`) before opening the grant, and refuses
+  unsigned (version 1) grants. Because the header names its own signer,
+  the signature authenticates the broker only against a pinned key. The
+  pin comes from the workload's attested identity: the training spec's
+  `key_brokers` (part of the spec ID), or `/app/broker-keys` in the FHE
+  workload's measured image. With any attester other than the development
+  one, an unpinned broker is refused
+  (`crates/encompute-keybroker/src/workload.rs`).
+- **Broker state MAC.** The broker's state file carries
+  `mac = HMAC-SHA256(K, "encompute.broker-state.v1\0" || JSON(state without mac))`
+  with `K = HKDF-SHA256(ikm = KEK, no salt, info = "encompute.broker-state-mac.v1")`,
+  so the KEK itself keys only the wrap. The MAC covers every other field,
+  including a `generation` counter raised on each save. It detects edits,
+  not a rollback to an older state file the broker wrote
+  (`crates/encompute-keybroker/src/lib.rs`, `store.rs`).
 - Key rotation via Transit rewrap is done as decrypt-then-encrypt, because
   Transit's `rewrap` endpoint ignores associated data (`root.rs`).
 - Random-nonce ChaCha20-Poly1305 has a 96-bit nonce; with the number of
@@ -463,19 +511,27 @@ Implementation: `crates/encompute-privacy`; decision records
   - The sampler is not constant-time (rejection loops). Timing side
     channels of noise sampling are out of scope.
 - **Noise and sensitivity** (`release.rs`): σ² = ⌈(z · clip · scale)²⌉;
-  Δ = ⌈k · clip · scale⌉ + ⌈√d⌉, with k = 2 for organization-level units
-  and 1 otherwise; the √d term covers rounding.
+  Δ = ⌈k · clip · scale⌉ + ⌈√d⌉; the √d term covers rounding. k = 1 only
+  for a unit inside a party (record, user, patient, device) with Poisson
+  sampling (DP-SGD), where the attested worker clips each sampled unit's
+  gradient to the clip norm. k = 2 otherwise, including every unsampled
+  unit: only each party's whole contribution is clipped, so one unit may
+  move it anywhere in the clipping ball.
 - **zCDP accounting** (`accountant.rs`): ρ = Δ²/(2σ²) per release (CKS
   2020, Theorem 14); composition by addition; conversion to (ε, δ) with
   CKS Corollary 13, ported from `cdp2adp.py`. Arithmetic uses `libm` so
-  every party gets identical bits, and results round up. Accountant ID
-  `zcdp-cks2020`.
+  every party gets identical bits. Results are rounded up: each epsilon is
+  raised by a relative margin of 1e-12 (`RELATIVE_MARGIN`), then a few
+  ulps, which is above the rounding error measured against 60-digit
+  references. Accountant ID `zcdp-cks2020`.
 - **Rényi DP for Poisson-subsampled releases** (`rdp.rs`, DP-SGD): the
   general upper bound of Zhu and Wang (2019, Theorem 6) for integer orders
   2..256 plus eight larger orders up to 1024, capped by αρ; conversion by
   CKS Proposition 12. The Gaussian-specific bound is deliberately not used,
-  because the noise is discrete. Checked against autodp and an mpmath
-  evaluation on 240 cases (INV-131). Accountant ID `rdp-poisson-zw2019`.
+  because the noise is discrete. Each curve value carries an allowance for
+  its rounding error, and each epsilon the same relative margin. Checked
+  against autodp and an mpmath evaluation on 240 cases (INV-131).
+  Accountant ID `rdp-poisson-zw2019`.
 - **Where noise is added:** central DP. The SecAgg coordinator adds noise
   to the unmasked sum (`round.rs`, `finalize`). It sees the sum before
   noise and is trusted to add it, as far as its attestation (bound to the
@@ -483,19 +539,31 @@ Implementation: `crates/encompute-privacy`; decision records
 - **DP-SGD** (`python/encompute/torch/dpsgd.py`): per-example gradients,
   summed per privacy unit, clipped per unit, Poisson sampling of units,
   noise added by the coordinator to the securely aggregated sum.
-  - Sampling: a `torch.Generator` (Mersenne Twister) seeded with 64 bits
-    from `os.urandom`, then `torch.rand(…) < q` in float32. This is not a
-    CSPRNG stream, and q has float32 resolution. The seed is fresh per call
-    and inside the attested worker (INV-132).
+  - Sampling: one `os.urandom` word per unit, included when its low 63
+    bits are below ⌊q · 2^63⌋ (`_os_bernoulli`), fresh every call, inside
+    the attested worker. No PRNG state exists that the sample could reveal,
+    and the round's seed does not influence it (INV-132). The worker never
+    passes a seeded generator; that parameter exists for tests.
+  - The worker samples at the approved plan's rate and clips each unit to
+    the plan's clip norm; a plan other than the spec's is refused.
 - **Presets** (`crates/encompute-ir/src/confidentiality.rs`), clip norm 1.0:
 
-  | Name | ε | δ | Noise multiplier z |
+  | Name | ε | δ | Noise multiplier z (listed) |
   |---|---|---|---|
   | `standard` | 8.0 | 1e-5 | 2.2 |
   | `strong` | 3.0 | 1e-6 | 6.0 |
   | `maximum` | 1.0 | 1e-7 | 18.0 |
   | `standard-patient` (DP-SGD) | 8.0 | 1e-5 | 1.0 |
   | `strong-patient` (DP-SGD) | 3.0 | 1e-6 | 1.2 |
+
+  The unsampled levels resolve (`preset_mechanism`) to z for an
+  organization and 2z for any unit inside a party: without sampling such a
+  unit's sensitivity is 2 · clip_norm (`sensitivity_factor`), so doubling
+  z keeps each level's zCDP cost per release, ρ = k²/(2z²), what it is for
+  a clipped unit. The mechanism records the level (`preset`) and carries
+  the effective z, which is sampled, charged and receipted; the analysis
+  refuses a preset whose z is not exactly the level's for the charged
+  units. The DP-SGD levels are unchanged (per-unit clipping, k = 1).
 
 - **Ledgers** (`ledger.rs`): hash-chained JSON lines per asset, reserve
   before noise and commit after, exclusive file lock, fsync per append;
@@ -511,7 +579,7 @@ Implementation: `crates/encompute-privacy`; decision records
 | HPKE ephemeral and session keys | `getrandom` via the `hpke` crate |
 | SecAgg DH secrets, self-mask seeds, round nonces, Shamir coefficients | `getrandom` (OS) |
 | DP noise | ChaCha20 under an OS-random key |
-| DP-SGD Poisson sampling | Mersenne Twister seeded from 64 bits of `os.urandom` |
+| DP-SGD Poisson sampling | `os.urandom`, one 64-bit word per unit |
 
 If the OS generator fails, key-generating code returns an error (the
 SecAgg Shamir adapter panics instead).

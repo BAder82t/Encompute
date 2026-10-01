@@ -72,11 +72,17 @@ scripts/release/lock-python.sh --check
 docker build -f Dockerfile.evaluator -t encompute-evaluator:rc .
 docker build -f Dockerfile.control -t encompute-control:rc .
 docker build -f Dockerfile.services -t encompute-services:rc .
+# The Confidential Space workloads (linux/amd64, as released):
+docker buildx build --load --platform linux/amd64 -f deploy/confidential-space/Dockerfile \
+  -t encompute-confidential-space:rc .
+docker buildx build --load --platform linux/amd64 -f deploy/confidential-space-training/Dockerfile \
+  --target production -t encompute-training:rc .
 
 # 4. The one-command release check, with the services and the images.
 ENCOMPUTE_TEST_DATABASE_URL=postgres://... ENCOMPUTE_TEST_BAO_ADDR=http://... \
 ENCOMPUTE_TEST_BAO_TOKEN=... \
-IMAGES="encompute-evaluator:rc encompute-control:rc encompute-services:rc" \
+IMAGES="encompute-evaluator:rc encompute-control:rc encompute-services:rc encompute-confidential-space:rc encompute-training:rc" \
+REQUIRE_IMAGES="encompute-evaluator encompute-control encompute-services encompute-confidential-space encompute-training" \
   scripts/release-check.sh --repro
 ```
 
@@ -99,13 +105,14 @@ IMAGES="encompute-evaluator:rc encompute-control:rc encompute-services:rc" \
 
 8. The `release` workflow (`.github/workflows/release.yml`) runs on the tag:
    the source archive, Linux x86_64 and macOS arm64 binaries and wheels, the
-   three images (pushed to `ghcr.io/<owner>/encompute-*`, private until
-   published), SBOMs, the full release check with the services, signatures
-   and provenance, and finally a **draft** GitHub release.
+   three service images and the two Confidential Space workload images
+   (pushed to `ghcr.io/<owner>/encompute-*`, private until published), SBOMs,
+   the full release check with the services, signatures and provenance, and
+   finally a **draft** GitHub release.
 9. Review the draft: every expected file is there, `SHA256SUMS` lists them,
    the gate reports (workflow artifact `gate-reports`) show PASS, and the
    commands of verify-release.md succeed on the draft's files. Then publish
-   the release and make the three GHCR packages public.
+   the release and make the GHCR packages public.
 
 A failed RC is never re-tagged: fix on the branch and cut `rc.N+1`.
 `workflow_dispatch` runs the same pipeline as a dry run on any branch; it
@@ -117,8 +124,9 @@ Copy into the release PR.
 
 - [ ] `release/0.3` contains only security fixes, critical bug fixes and release docs since the branch point
 - [ ] versions bumped; `scripts/release/check-version.sh vX` passes
-- [ ] base-image digests refreshed (`docker buildx imagetools inspect <image>`) and updated in `Dockerfile.*`
+- [ ] base-image digests refreshed (`docker buildx imagetools inspect <image>`) and updated in `Dockerfile.*` and `deploy/confidential-space*/Dockerfile`
 - [ ] `scripts/release/check-pins.sh --network` passes; `scripts/release/lock-python.sh --check` passes
+- [ ] `python3 scripts/third_party_notices.py --check` passes (after `cargo fetch --locked`): `THIRD_PARTY_NOTICES.md` is current
 - [ ] `scripts/release-check.sh --repro` passes with services and `IMAGES`, no `--allow-skip`
 - [ ] `security/exceptions.toml` reviewed and approved; no exception expires within 30 days
 - [ ] `security/openfhe-review.toml` signed for the pinned version, within 90 days
@@ -171,7 +179,7 @@ Confidential Space checks, which need a GCP project and stay manual.
 | `cargo deny check` | the production feature graph (`deny.toml`): advisories, yanked crates, sources, licenses (a permissive allow-list; Encompute's own crates are AGPL-3.0), and the TFHE-rs ban | any error blocks |
 | `cargo audit` | all of `Cargo.lock` (research crates included) | severity policy |
 | `pip-audit` | `scripts/release/python/constraints.txt` (the SDK extras' pins) | severity policy |
-| trivy (or grype) | each image in `IMAGES` | severity policy |
+| trivy (or grype) | each image in `IMAGES`: in the release workflow the three service images and the two Confidential Space workload images (`encompute-confidential-space`, `encompute-training`, production target); `REQUIRE_IMAGES` makes a missing one fail | severity policy |
 | `python_licenses.py` | licenses of the Python pins, from PyPI | permissive pass; MPL-2.0 passes as reviewed (certifi, tqdm, used unmodified); anything else blocks |
 | OpenFHE review | `security/openfhe-review.toml` | unsigned, stale (over 90 days) or for another version blocks |
 
@@ -180,7 +188,7 @@ Confidential Space checks, which need a GCP project and stay manual.
 | Severity | Rule |
 |---|---|
 | **Critical, High** | Block the release. The only way past one is an approved exception with `status = "not_affected"` and a VEX justification (`vulnerable_code_not_present`, `vulnerable_code_not_in_execute_path`, `vulnerable_code_cannot_be_controlled_by_adversary`, `inline_mitigations_already_exist`, `component_not_present`): an analysis that the flaw cannot be reached, not a waiver. |
-| **Medium** | Blocks unless `security/exceptions.toml` has an approved entry (`accepted_risk` or `not_affected`) with a reason and an expiry. |
+| **Medium** | Blocks unless `security/exceptions.toml` has an approved entry (`accepted_risk` or `not_affected`). |
 | **Low** | Reported in `vulnerabilities.md`. |
 | unknown | Counts as High. |
 
@@ -188,11 +196,37 @@ The severity is the scanner's rating (trivy, grype), else the GitHub
 advisory's rating, else a CVSS v3 base score computed from the advisory's
 vector (through OSV). Exceptions:
 
-- match a finding by any of its IDs (CVE, GHSA, PYSEC, RUSTSEC) and package;
-- carry `reason`, `expires` (at most 183 days away) and an approval, per entry
-  or for the file (`[approval] approved_by`); an unapproved or expired
-  exception blocks again;
+- are narrow: one advisory (`id`: a CVE, GHSA, PYSEC, RUSTSEC, DLA, ...
+  ID, matched against the finding's ID and aliases), one `package`, and the
+  exact installed `version` the scanner reports (a list only for spellings
+  of one release, such as pip-audit's `2.3.1` and trivy's `2.3.1+cpu`). An
+  exception for torch 2.3.1 does not cover torch 2.3.2: a finding whose
+  advisory and package match an exception for another version blocks and
+  says so;
+- are complete: `reason` (and, for `not_affected`, a VEX `justification`),
+  `compensating_controls` (what keeps the code unreachable, stated from the
+  code, with the test or gate that enforces it), `tracking` (the upstream
+  advisory or issue, an https URL), `added` and `expires` (at most 183 days
+  apart and from today);
+- are approved: `[approval] approved_by` and `approved_on` cover the
+  entries added on or before that date; an entry added later needs a new
+  review (move `approved_on`) or its own `approved_by` and `approved_on`.
+  These fields are text in the file, not signatures: an approval counts
+  only through git review. Each change to `approved_by` or `approved_on`
+  must be in a commit authored or reviewed by the release manager, in a
+  pull request the owner named in `approved_by` approved;
+- fail the gate when invalid (a missing field, a wildcard or list where one
+  exact value is required, expired, unapproved), whether or not they match a
+  finding; `scripts/release/test_vuln_policy.py` tests these rules and
+  `scan.sh` runs it first;
 - are reported as stale when nothing matches them, and removed at the next RC.
+
+The torch and transformers exceptions rest on the shipped package never
+calling `torch.load`, `torch.jit`, `torch.compile`, `torch.export`,
+`torch.distributed`, the Transformers `Trainer` or accelerate's
+`load_checkpoint_*`, and never passing `trust_remote_code=True`: the
+"exception controls" row of `scan.sh` greps `python/encompute` and fails
+if any appears.
 
 Base-image OS packages: a Debian package with **no fixed version in the
 distribution** is reported, not blocking; there is nothing to upgrade to.
@@ -224,6 +258,8 @@ so the scanners cannot. For every release:
 | cargo-audit | `rsa` RUSTSEC-2023-0071 (medium, no fix); unmaintained `bincode`, `paste` (research-only, through TFHE-rs) | exception proposed |
 | pip-audit | torch 2.3.1: 2 critical, 8 high; transformers 4.46.3: 13 high; 17 medium; 6 low | exceptions proposed: none of the affected code paths is used (no `torch.load`, no Trainer, only BERT-family models, safetensors only, no Hub kernels in 4.46) |
 | trivy, 3 images (Debian 12) | 1 fixable (tzdata DLA-4792-1); the rest have no Debian fix | exception proposed; unfixed reported |
+| trivy, `encompute-confidential-space` (2026-09-29, linux/amd64) | tzdata DLA-4792-1; 227 with no Debian fix | excepted; unfixed reported |
+| trivy, `encompute-training` production (2026-09-29, linux/amd64) | torch 2.3.1+cpu and transformers 4.46.3 (the pip-audit advisories above); installer tooling from the Python base image: jaraco.context 5.3.0 and wheel 0.45.1 (high, vendored in setuptools), pip 24.0 (5 medium), setuptools 79.0.1 (medium); OpenSSL 3.0.20-1~deb12u2 CMS/CMP (2 medium, fixed in 3.0.22-1~deb12u1); tzdata; 255 with no Debian fix | torch/transformers/tzdata excepted; 12 new exact-version exceptions proposed (not reachable: nothing in the workload runs pip, setuptools, wheel, CMS or CMP), pending approval; follow-ups: drop pip/setuptools/wheel from the production stage, refresh the base digest for OpenSSL |
 | Python licenses | 29 permissive, 2 MPL-2.0 reviewed | PASS |
 
 The ML stack pins (torch 2.3, transformers 4.46, peft 0.12) are what the
@@ -270,10 +306,25 @@ is no key to store or leak.
   signed attestation (`cosign attest --type cyclonedx`).
 - `actions/attest-build-provenance` records SLSA provenance for every file
   (from `SHA256SUMS`) and every image, verifiable with `gh attestation verify`.
+- The Confidential Space workload images, `encompute-confidential-space`
+  (key release) and `encompute-training` (the training worker, `production`
+  target), are built, SBOM'd, audited by `audit-commercial-build.sh`, signed
+  and attested like the service images. Their digests, the ones key brokers'
+  attestation policies approve, are listed in `encompute-<V>-tee-images.txt`
+  (signed with the other files) and in the release notes.
+- The released `encompute-confidential-space` image is a base reference,
+  not a deployable workload: it is built without `broker-keys` (the
+  Dockerfile's `COPY broker-key[s]` is optional), so its `run-workload.sh`
+  refuses to start (the image names no broker keys). A deployment builds
+  its own image with `deploy/confidential-space/deploy.sh`, which writes
+  the broker's grant-signing key into `broker-keys`; the digest its key
+  broker approves is that build's, not the released one. Compare the
+  release digest to check the build inputs, not to approve a workload.
 
 The workflow's permissions are per job: only the jobs that sign get
 `id-token: write`; only the release job gets `contents: write`; only the
-image job gets `packages: write`. Actions are pinned by commit.
+image job gets `packages: write`. Actions are pinned by commit SHA (see
+Pins).
 
 ## Reproducibility
 
@@ -281,12 +332,13 @@ image job gets `packages: write`. Actions are pinned by commit.
 
 | Input | Pinned by | Checked by |
 |---|---|---|
-| Rust | `rust-toolchain.toml` (1.98.1); the workflows use `dtolnay/rust-toolchain@1.98.1`; the images `rust:1.98.1-bookworm@sha256:…` | `check-pins.sh` |
+| Rust | `rust-toolchain.toml` (1.98.1); the workflows use `dtolnay/rust-toolchain@<sha> # 1.98.1` (except `fuzz.yml`, which needs nightly and builds no release artifact); the images `rust:1.98.1-bookworm@sha256:…` | `check-pins.sh` |
 | Rust crates | `Cargo.lock`; every build uses `--locked` | `check-pins.sh`, cargo-deny `sources` |
 | OpenFHE | tag `v1.5.1`, commit `1306d14f…` verified at install | `install-openfhe.sh`, `check-pins.sh --network` |
 | Python | `scripts/release/python/constraints.txt`: hashed pins for CPython 3.11, Linux x86_64, from `requirements-release.in` (which includes the training image's `requirements.txt`) | `lock-python.sh --check`, `check-pins.sh` (the lock must match the image's pins and satisfy pyproject's extras) |
-| Base images | `Dockerfile.*` `FROM …@sha256:` (multi-arch index digests) | `check-pins.sh` |
-| Actions | commit SHAs in `release.yml` | review |
+| Training image Python | `deploy/confidential-space-training/requirements.lock`: every package and file hash for CPython 3.11, Linux x86_64, installed with `pip --require-hashes --no-deps`; the same versions as the release lock. The image's build tools come from `build-requirements.lock`, also hashed | `check-pins.sh` (every pin must be in the release lock) |
+| Base images | `Dockerfile.*` and `deploy/confidential-space*/Dockerfile` `FROM …@sha256:` (multi-arch index digests) | `check-pins.sh` |
+| Actions | every `uses:` in `.github/workflows/*.yml` is `@<40-hex commit SHA> # <version>` | `check-pins.sh` |
 
 **C++ toolchain.** OpenFHE and the cxx bridges are compiled by the host's
 C++ compiler; it is recorded, not pinned. Release Linux builds use the

@@ -34,7 +34,9 @@ def hospital(seed: int, patients: int = PATIENTS, visits: int = 2):
     x = torch.randint(0, 64, (patients * visits, 8), generator=g)
     y = ((x < 32).float().mean(1) > 0.5).long()
     patient_ids = torch.arange(patients).repeat_interleave(visits) + 100_000 * seed
-    return et.private_dataset(x, y, unit_ids=patient_ids)
+    # The hospital approves publishing its number of patients: the sampling
+    # rate is derived from that public figure, never from the data.
+    return et.private_dataset(x, y, unit_ids=patient_ids, public_units=patients)
 
 
 def setup():

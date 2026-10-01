@@ -15,6 +15,7 @@
 """
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -134,6 +135,68 @@ def test_unsafe_repositories_are_refused(repo, tmp_path):
     assert e.value.args[0] == "ENC2504"
 
 
+def test_package_settings_outside_the_allowlist_are_refused(repo, tmp_path):
+    """Review finding TR-4 (ENC-SF-2026-073): a tokenizer configuration with custom code, an
+    unknown class or setting, or a key naming a file, and a model configuration asking for
+    quantization or choosing the attention implementation, are refused at
+    import."""
+    edits = {
+        "tokenizer_config.json": [
+            ("auto_map", {"AutoTokenizer": ["tok.Custom", None]}),
+            ("tokenizer_class", "CustomTokenizer"),
+            ("processor_class", "x.Processor"),
+            # Keys naming a file: Transformers would open whatever path they name.
+            ("tokenizer_file", "/etc/passwd"),
+            ("full_tokenizer_file", "../other/tokenizer.json"),
+            ("special_tokens_map_file", "/home/x/special_tokens_map.json"),
+        ],
+        "config.json": [
+            ("quantization_config", {"quant_method": "bitsandbytes", "load_in_8bit": True}),
+            ("_attn_implementation", "flash_attention_2"),
+            ("_attn_implementation_autoset", True),
+        ],
+    }
+    for f, cases in edits.items():
+        for key, value in cases:
+            d = tmp_path / f"{f}-{key}"
+            shutil.copytree(repo, d)
+            cfg = json.loads((d / f).read_text())
+            cfg[key] = value
+            (d / f).write_text(json.dumps(cfg))
+            refused(lambda d=d: hf.import_model(str(d)))
+    hf.import_model(str(repo))
+
+
+def test_symbolic_links_never_enter_a_package(repo, tmp_path):
+    """Review finding TR-3 (ENC-SF-2026-072): a local model directory's symbolic link would
+    copy whatever file it names (any file the importing user can read) into
+    the package, under an allowed name: refused."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("AWS_SECRET_ACCESS_KEY=hunter2\n")
+    evil = tmp_path / "evil-model"
+    evil.mkdir()
+    for f in os.listdir(repo):
+        if f != "vocab.txt":
+            shutil.copyfile(os.path.join(repo, f), evil / f)
+    os.symlink(secret, evil / "vocab.txt")
+    refused(lambda: hf.import_model(str(evil)), "symbolic link")
+    # A link to another allowed file of the same directory: refused too.
+    (evil / "vocab.txt").unlink()
+    os.symlink(evil / "tokenizer.json", evil / "vocab.txt")
+    refused(lambda: hf.import_model(str(evil)), "symbolic link")
+    # A Hub cache's own links resolve inside the cache: followed; a link
+    # leaving it is refused.
+    root = tmp_path / "hub" / "models--org--tiny"
+    snap = root / "snapshots" / ("a" * 40)
+    (root / "blobs").mkdir(parents=True)
+    snap.mkdir(parents=True)
+    (root / "blobs" / "cfg").write_bytes((repo / "config.json").read_bytes())
+    os.symlink(root / "blobs" / "cfg", snap / "config.json")
+    assert hf._regular(snap, "config.json", root.resolve()) == (root / "blobs" / "cfg").resolve()
+    os.symlink(secret, snap / "vocab.txt")
+    refused(lambda: hf._regular(snap, "vocab.txt", root.resolve()), "outside")
+
+
 def test_hub_revisions_resolve_and_credentials_are_never_stored(repo, monkeypatch):
     """The Hub path, offline: 'main' resolves to the commit, only allowed
     files are fetched, and the token is used for the download only."""
@@ -198,7 +261,7 @@ def test_the_peft_layout_is_canonical(repo):
     assert all(not p.requires_grad for n, p in a.named_parameters()
                if n not in lora.adapter_parameters(a))
     # Rebuilt the way workers do, from the config and weights: the same.
-    rebuilt = hf.from_config(et.huggingface(str(repo)).encompute_kwargs["config"])
+    rebuilt = hf.from_config(**et.huggingface(str(repo)).encompute_kwargs)
     assert lora.layout_digest(hf.apply_peft(rebuilt, pc)) == lora.layout_digest(a)
     for kw in ({"rank": 8}, {"targets": ("query",)}, {"targets": ("key", "query", "value")}):
         assert lora.layout_digest(peft_model(repo, **kw)[0]) != lora.layout_digest(a), kw
@@ -280,7 +343,7 @@ def run(repo, tmp_path_factory):
     for i, owner in enumerate(("hospital-a", "hospital-b")):
         texts, labels = hf.synthetic_notes(i + 1, 400, RISK)
         d = et.private_text_dataset(texts, labels, tokenizer=tok, max_length=16,
-                                    unit_ids=[j // 2 for j in range(400)])
+                                    unit_ids=[j // 2 for j in range(400)], public_units=200)
         data.append(p.data(f"notes-{'ab'[i]}", owner=owner, dataset=d, adapters="public"))
     W = tmp_path_factory.mktemp("hfrun") / "run"
     r = p.finetune(model=m, data=data, method="peft-lora", privacy="strong-patient",

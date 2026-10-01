@@ -113,7 +113,7 @@ free_port() { "$PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)
 sha() { shasum -a 256 "$@"; }
 is_empty_dir() { [ -z "$(ls -A "$1" 2>/dev/null)" ]; }
 reserve_body() { # reserve_body EVENT_ID
-  printf '{"kind":"reserve","event_id":"%s","policy_id":null,"execution_spec_id":null,"round_id":null,"output":"update","mechanism":{"kind":"discrete_gaussian","clip_norm":"1.0","noise_multiplier":"1.0"},"sensitivity":1,"sigma2":200,"vector_len":8,"rng":"csprng"}' "$1"
+  printf '{"kind":"reserve","event_id":"%s","policy_id":null,"execution_spec_id":null,"round_id":null,"output":"update","mechanism":{"kind":"discrete_gaussian","clip_norm":"1.0","noise_multiplier":"1000.0"},"sensitivity":2,"sigma2":800,"vector_len":1,"rng":"csprng"}' "$1"
 }
 commit_body() { # commit_body EVENT_ID
   printf '{"kind":"commit","event_id":"%s","output_commitment":"%s"}' "$1" "$(printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1)"
@@ -312,6 +312,7 @@ fi
 printf '%s' "$BAO_TOKEN" > "$SECRETS/bao-token"
 printf '%s' "$DB_URL" > "$SECRETS/db-url"
 for k in control evaluator keybroker; do "$PY" -c 'import secrets; print(secrets.token_hex(32))' > "$SECRETS/$k.key"; done
+chmod 600 "$SECRETS/"*
 DEV_SECRET="$(rand)"
 # The attestation provider's keys the broker trusts (a throwaway one: no key
 # is released in this drill).
@@ -357,6 +358,13 @@ stop() { # stop PID...
   local p
   for p in "$@"; do if alive "$p"; then kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; fi; done
 }
+# Clients pin the evaluator's receipt key out of band (here: read from the
+# evaluator this script started) and refuse any other.
+pin_evaluator() {
+  ENCOMPUTE_TRUSTED_EVALUATORS="$(curl -fs "http://127.0.0.1:$EVAL_PORT/v1/info" | jget 'v["evaluator"]["public_key"]')" \
+    || return 1
+  export ENCOMPUTE_TRUSTED_EVALUATORS
+}
 start_evaluator() {
   N_START=$((N_START + 1))
   EVAL_LOG="$LOGS/evaluator-$N_START.log"
@@ -367,7 +375,7 @@ start_evaluator() {
   EVAL_PID=$!; PIDS+=("$EVAL_PID")
   local _
   for _ in $(seq 150); do
-    grep -q "registered with the control plane" "$EVAL_LOG" && return 0
+    grep -q "registered with the control plane" "$EVAL_LOG" && { pin_evaluator; return; }
     alive "$EVAL_PID" || return 1
     sleep 0.2
   done
@@ -447,6 +455,7 @@ ok b-admin POST /v1/organizations/modelco/users "{\"issuer\":\"$ISS\",\"subject\
 ok b-admin POST /v1/organizations/modelco/users "{\"issuer\":\"$ISS\",\"subject\":\"b-owner\",\"roles\":[\"model_owner\"]}" >/dev/null
 PROJECT="$(ok b-dev POST /v1/projects '{"organization":"modelco","name":"drill"}' | jget 'v["id"]')"
 ok b-admin POST "/v1/projects/$PROJECT/members" '{"organization":"hospital-a"}' >/dev/null
+ok a-admin POST "/v1/projects/$PROJECT/members" '{"organization":"hospital-a"}' >/dev/null
 BUDGET='{"unit":"patient","epsilon":"3.0","delta":"1e-6"}'
 DS1="$(ok a-owner POST /v1/assets "{\"organization\":\"hospital-a\",\"kind\":\"dataset\",\"name\":\"patients\",\"digest\":\"$(printf 'c%.0s' $(seq 64))\",\"privacy_budget\":$BUDGET}" | jget 'v["id"]')"
 DS2="$(ok a-owner POST /v1/assets "{\"organization\":\"hospital-a\",\"kind\":\"dataset\",\"name\":\"claims\",\"digest\":\"$(printf 'd%.0s' $(seq 64))\",\"privacy_budget\":$BUDGET}" | jget 'v["id"]')"
@@ -467,6 +476,21 @@ output "y" = %1
 EIR
 "$E" compile "$W/score.eir" -o "$W/score.encompute" >/dev/null || die "compile"
 "$E" keys generate "$W/score.encompute" -o "$W/score.keys" >/dev/null || die "keys generate"
+# The same over hospital-a's dataset: a job using another organization's
+# asset runs a program that declares its purpose (the one the owner
+# approved) and reads the asset by its registered ID.
+cat > "$W/score-ds1.eir" <<EIR
+encompute 0.1
+program score precision 0.001 purpose "drill"
+party "hospital-a" "Hospital A"
+party "modelco" "ModelCo"
+asset "$DS1" dataset owners ["hospital-a"] readers ["modelco"] purposes ["drill"] release allowed_parties
+%0 = input "x" [-1.0, 1.0] asset "$DS1" : secret vector<4>
+%1 = mul %0, %0 : secret vector<4>
+output "y" = %1 to "modelco"
+EIR
+"$E" compile "$W/score-ds1.eir" -o "$W/score-ds1.encompute" >/dev/null || die "compile (over DS1)"
+"$E" keys generate "$W/score-ds1.encompute" -o "$W/score-ds1.keys" >/dev/null || die "keys generate (over DS1)"
 # close OUTPUT_JSON WANT...: output y is within 1e-3 of WANT.
 close() {
   echo "$1" | "$PY" -c 'import json,sys; y=json.load(sys.stdin).get("y") or []; w=[float(a) for a in sys.argv[1:]]; print(len(y)==len(w) and max(abs(a-b) for a,b in zip(y,w))<1e-3)' "${@:2}"
@@ -491,21 +515,39 @@ if [ "$BAO_OK" = 1 ]; then
   echo "evaluator-1 registered; key broker up (KEK wrapped by transit/$TAG-modelco)"
 fi
 
-PLAN="$(ok b-dev POST /v1/plans "$("$PY" -c 'import json,sys; print(json.dumps({"project": sys.argv[1], "program": open(sys.argv[2]).read()}))' "$PROJECT" "$W/score.eir")" | jget 'v["id"]')"
+# plan_of FILE: a plan of the program in FILE, in the drill's project.
+plan_of() {
+  ok b-dev POST /v1/plans "$("$PY" -c 'import json,sys; print(json.dumps({"project": sys.argv[1], "program": open(sys.argv[2]).read()}))' "$PROJECT" "$1")" | jget 'v["id"]'
+}
+# A job's sources are exactly the registered assets its program binds, even
+# over modelco's own models: these programs bind their input to each model.
+for m in "$MODEL" "$MODEL2"; do
+  cat > "$W/score-$m.eir" <<EIR
+encompute 0.1
+program score precision 0.001 purpose "drill"
+party "modelco" "ModelCo"
+asset "$m" model owners ["modelco"] readers ["modelco"] purposes ["drill"] release allowed_parties
+%0 = input "x" [-1.0, 1.0] asset "$m" : secret vector<4>
+%1 = mul %0, %0 : secret vector<4>
+output "y" = %1 to "modelco"
+EIR
+done
+PLAN_M7="$(plan_of "$W/score-$MODEL.eir")"
+PLAN_M8="$(plan_of "$W/score-$MODEL2.eir")"
 # A job that runs end to end (client-side encryption, OpenFHE evaluator,
 # signed receipt, trust report).
 export ENCOMPUTE_CONTROL_URL="$CTL_URL"
-OUT="$(ENCOMPUTE_TOKEN="$(tok b-dev)" "$E" jobs run "$W/score.encompute" --project "$PROJECT" --purpose drill \
-  --source "$DS1" --keys "$W/score.keys" --idempotency-key drill-job-1 --input x=0.5,-0.25,0.1,1.0 2>"$W/job1.err")" \
+OUT="$(ENCOMPUTE_TOKEN="$(tok b-dev)" "$E" jobs run "$W/score-ds1.encompute" --project "$PROJECT" --purpose drill \
+  --source "$DS1" --keys "$W/score-ds1.keys" --idempotency-key drill-job-1 --input x=0.5,-0.25,0.1,1.0 2>"$W/job1.err")" \
   || { cat "$W/job1.err" >&2; die "the end-to-end job"; }
 check "job runs end to end (CKKS result correct, trust SATISFIED)" \
   eq "$(close "$OUT" 0.25 0.0625 0.01 1.0) $(grep -c 'Trust report *SATISFIED' "$W/job1.err")" "True 1"
 ok b-dev GET "/v1/jobs?project=$PROJECT" >/dev/null
 JOB_OK="$(body '[j["id"] for j in v if j["state"]=="succeeded"][0]')"
 # Jobs that never start (no client drives them): revocation must fail them.
-QJOB="$(ok b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL\"],\"requested_output\":\"y\"}" drill-queued-1 | jget 'v["id"]')"
-QJOB2="$(ok b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL2\"],\"requested_output\":\"y\"}" drill-queued-2 | jget 'v["id"]')"
-echo "plan $PLAN; job $JOB_OK succeeded; jobs $QJOB, $QJOB2 $(ok b-dev GET "/v1/jobs/$QJOB" | jget 'v["state"]')"
+QJOB="$(ok b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN_M7\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL\"],\"requested_output\":\"y\"}" drill-queued-1 | jget 'v["id"]')"
+QJOB2="$(ok b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN_M8\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL2\"],\"requested_output\":\"y\"}" drill-queued-2 | jget 'v["id"]')"
+echo "plans $PLAN_M7 $PLAN_M8; job $JOB_OK succeeded; jobs $QJOB, $QJOB2 $(ok b-dev GET "/v1/jobs/$QJOB" | jget 'v["state"]')"
 
 step "2. privacy spending (reservations and commits)"
 for ev in r1 r2 r3; do ok a-owner POST "/v1/privacy/$DS1/events" "$(reserve_body "$ev")" >/dev/null; done
@@ -663,7 +705,7 @@ if missing:
     print("      missing:", missing)
 sys.exit(1 if missing else 0)
 PY
-s="$(api b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL\"],\"requested_output\":\"y\"}" drill-after-restore)"
+s="$(api b-dev POST /v1/jobs "{\"project\":\"$PROJECT\",\"plan\":\"$PLAN_M7\",\"purpose\":\"drill\",\"source_assets\":[\"$MODEL\"],\"requested_output\":\"y\"}" drill-after-restore)"
 check "a new job using the revoked model is refused (409)" eq "$s" 409
 if [ "$BAO_OK" = 1 ]; then
   check "key broker: model-7 still destroyed after the restore" eq "$(broker_key_state model-7)" destroyed
