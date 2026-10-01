@@ -1,0 +1,7 @@
+encompute 0.1
+program surveillance precision 0.001 purpose "notifiable-disease-surveillance-2027"
+party "ministry" "Ministry of Health"
+party "region-n" "North Regional Authority"
+asset "counts-n" dataset owners ["region-n"] readers ["ministry"] purposes ["notifiable-disease-surveillance-2027"] release aggregate_only privacy unit "patient" epsilon 1.0 delta 1e-6
+%0 = input "n" [-1.0, 1.0] asset "counts-n" : secret vector<6>
+output "north_counts" = %0 to "ministry"

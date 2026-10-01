@@ -213,6 +213,11 @@ Related: [support matrix](docs/support-matrix.md),
   the program every owner authorizes. Across populations the same person
   is charged in each (that is the multiplication), so budgets of
   different agencies still do not compose against one another.
+- **A reserved release is never refunded.** A governed job reserves its
+  differential-privacy release when it starts, before any noise exists. A
+  job that then fails, is cancelled or is revoked keeps its charge (the
+  release may have happened, and the control plane cannot tell); budget is
+  only ever spent.
 - **A population's cap is allocated once.** It is never raised, lowered or
   closed, and there is no way to withdraw a proposed scope (a mistaken
   proposal stays proposed; propose another with the right cap). Raising a

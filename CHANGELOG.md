@@ -357,7 +357,8 @@ Work toward confidential cross-agency computation
   INV-236 (the control plane can only deny; broker state cannot be
   rolled back), INV-223 (auditors), INV-229 (cross-organization
   views), INV-221 (over-release), INV-227 (release lineage, control-plane
-  part), INV-245 (derived results) and INV-246 (retention); 165
+  part), INV-245 (derived results), INV-246 (retention), INV-230
+  (privacy scopes and populations) and INV-241 (aggregate mode); 167
   invariants.
 
 ## 0.3.0-rc.4 — 2026-09-29

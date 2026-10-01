@@ -1,0 +1,20 @@
+# Lines that must appear in the output (IDs and hashes are left out).
+STATUS        SATISFIED
+layout        6 strata (0-4, 5-17, 18-39, 40-64, 65-79, 80-plus)
+linkage       none: no record linkage is performed
+sources/unit  2: one privacy unit may appear in up to 2 sources
+POPULATION residents-n created
+SCOPES allocated to public-health-statistics
+Week 1  RELEASED  epsilon this week 0.433
+Week 2  RELEASED
+Week 3  RELEASED
+Week 4  RELEASED  epsilon this week 0.129, scope spent 0.906, population spent 0.906 of 1.0
+error[ENC2102]: round 20 is not newer than round 20 already joined (replay)
+error[ENC2103]: only 2 parties advertised keys; the round needs 3
+RELEASED nothing, and nothing was charged to any scope
+error[ENC2201]: RELEASE DENIED: scope scope-e has spent epsilon 0.9056 of 1
+AGGREGATION RECEIPT VERIFIED
+error[ENC2202]: asset residents-e's ledger: the ledger has 4 entries but 8 were already seen
+RELEASE DENIED: population residents-e has spent epsilon 0.9056 of 1
+error[ENC2719]: no privacy scope scope-other-e
+error[ENC2203]: output "north_counts" releases information from privacy-budgeted asset counts-n
