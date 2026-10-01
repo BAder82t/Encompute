@@ -4,6 +4,7 @@
 //! evidence for each, and one trust report over all of it.
 
 pub mod authz;
+pub mod bundle;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixture;
 pub mod governance;
@@ -18,6 +19,11 @@ pub use authz::{
     RevocationV2, SignedAuthorization, SignedAuthorizationV2, SignedReleaseRecord,
     SignedRevocation, SignedRevocationV2, AUTHORIZATION_V2_VERSION, AUTHORIZATION_VERSION,
     RELEASE_RECORD_VERSION,
+};
+pub use bundle::{
+    check_no_plaintext, GovernanceBundle, Manifest, Outcome, Pin, Pins, Provenance,
+    SignatureFinding, SignatureStatus, Verified, VerifyOptions, BUNDLE_FORMAT, EXIT_CODES,
+    MAX_STRING,
 };
 pub use governance::{
     check_audit, AuditEntry, AuditEvidence, AuditFindings, AuditState, AuthorizationCard,

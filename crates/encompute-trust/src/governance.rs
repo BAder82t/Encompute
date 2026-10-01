@@ -743,7 +743,10 @@ fn row_project(j: &Job<'_>) -> GovernanceRow {
         present: true,
         ..Tally::default()
     };
-    for org in &j.participants {
+    // Every organization whose data the job reads accepts the purpose; the
+    // submitter and the recipients need not (their consent is not data).
+    let owners: BTreeSet<&String> = j.binding.inputs.values().map(|i| &i.organization).collect();
+    for org in owners {
         let Some(acc) =
             j.ev.purpose_acceptances
                 .iter()
@@ -1117,8 +1120,14 @@ fn row_mechanism(j: &Job<'_>) -> GovernanceRow {
         present: !plan.steps.is_empty(),
         ..Tally::default()
     };
-    if plan.governance_id.as_deref() != Some(j.gg.governance_id.as_str()) {
-        t.fail("the plan is not bound to this job's governance ID".into());
+    // A plan made before the binding existed carries none; one that
+    // carries a governance ID carries this job's.
+    if plan
+        .governance_id
+        .as_deref()
+        .is_some_and(|g| g != j.gg.governance_id)
+    {
+        t.fail("the plan is bound to another job's governance ID".into());
     }
     for s in &plan.steps {
         t.note(describe_step(s));
