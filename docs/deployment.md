@@ -713,6 +713,61 @@ time the log is checkpointed:
   answer is the control plane's own computation; it is a fact only to a
   reader who runs `verify-audit` with the organizations' keys.
 
+### Governance evidence bundles
+
+A governed job's evidence leaves the platform as one file,
+`<project>-<job>.encgov.json`, that its institution can give to its own
+auditor and verify offline. Everything below is `encompute governance`
+(`export`, `verify`, `report`, `countersign`) and `encompute explain
+--governance`; none of it needs the control plane after the export.
+
+- **Export.** `encompute governance export JOB --pins pins.json --out
+  FILE` fetches `GET /v1/jobs/{id}/governance-bundle` (`--view shared`, the
+  same bytes for every member, or `--view org --organization ORG`),
+  checks it before writing anything (format, section digests, the graph
+  root, the view's rules, the plaintext guard, and everything this machine
+  can verify against the pins) and writes it only if that passes. An
+  existing file is never overwritten. `--sign-key KEY --sign-as ORG` adds
+  the organization's signature (attribution: who vouches for this package;
+  it adds no trust to the evidence inside). `countersign` adds another.
+- **Pins file.** The verifier's own keys, never taken from the bundle or
+  the control plane: `{"organizations": {"tax-agency": {"identity_key":
+  "<64 hex>", "obtained": "published at ..."}}, "control_plane": {"key":
+  "...", "obtained": "..."}, "evaluators": [{"key": "...", "obtained":
+  "..."}]}` (`coordinators`, `linkage_authorities` and `release_signers`
+  are accepted and reserved). `obtained` is required: it records where each
+  key came from, so an auditor can see what a conclusion rests on. Trust
+  in a report is exactly trust in these pins; agencies should publish their
+  governance keys through official channels. Two organizations on one key
+  are refused.
+- **Exit codes** (one table, for `verify`, `report`, `explain
+  --governance` and the check `export` and `countersign` run first):
+
+  | code | meaning |
+  |---|---|
+  | 0 | every row satisfied, or accepted with `--allow-unchecked` / `--allow-unpinned` |
+  | 1 | not satisfied: a row failed, or a pinned key contradicts the evidence; no flag accepts this |
+  | 2 | malformed, forged or refused: not a bundle, an edit, an omission, a reordering, an unknown field, a forged signature, a leak, a bad pins file (ENC2727 to ENC2729) |
+  | 3 | something is unchecked, not evidenced or unpinned (no `--pins`; a key not pinned; a shared view's cards without the owners' disclosures; evidence this release does not have) |
+
+  `--allow-unchecked` accepts unchecked and not-evidenced rows; without
+  `--pins`, `--allow-unpinned` is needed as well. The report always says
+  what was accepted.
+- **Shared views and disclosures.** A shared bundle shows another
+  organization's authorization as a card. Its owner's signature cannot be
+  checked from a card, so everything that rests on it is UNCHECKED until
+  the owner discloses the signed document (`GET /v1/authorizations/{id}`
+  as the owner, then `--disclosure FILE` on `verify`): a disclosed
+  document replaces a card only if it is exactly the document the card
+  names.
+- **Stale revocation heads.** A revocation head says what was revoked as
+  of its own date. By default a bundle is checked for the time of the run
+  (the grant's signed time); `--as-of T` checks it for a later use, and a
+  head dated before `T` is UNCHECKED, never covered.
+- **Limits.** One bundle carries at most 5,000 events of the project's log
+  (a larger log is refused with ENC2730, never truncated); the route is
+  limited to 12 requests a minute per caller.
+
 ## Audit
 
 Every security-sensitive state transition writes an audit event in the same

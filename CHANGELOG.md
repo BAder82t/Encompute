@@ -6,6 +6,20 @@ Work toward confidential cross-agency computation
 ([docs/public-sector.md](docs/public-sector.md)). None of it is part of
 0.3.
 
+- **Cross-agency report, explain and evidence bundle (phase 8).**
+  `TrustGraph::governance_report`: governance rows computed from signed
+  evidence against the caller's pins (a missing anchor, missing evidence
+  or an unverifiable proof is UNCHECKED or NOT EVIDENCED, never a pass;
+  authorizations judged at the grant's signed time; a revocation head
+  covers only up to its own date). `GET /v1/jobs/{id}/governance-bundle`
+  (`view=shared|org`: the same bytes for every member, no other
+  organization's private metadata, capped at 5,000 log events, rate
+  limited). `encompute governance export | verify | report | countersign`
+  with a pins file and one table of exit codes (0 satisfied or accepted, 1
+  not satisfied, 2 malformed or refused, 3 unchecked or unpinned);
+  `encompute explain --governance JOB | --bundle FILE`. ENC2727 to
+  ENC2730; INV-243, INV-244. Standard jobs, `trust report` and `explain`
+  are unchanged. No migration.
 - **Governed projects (phase 1):** governance keys, purposes, owner-signed
   authorizations with four-eyes approval, immutable dataset versions,
   strict validity windows and non-retroactive revocation; migration 0005;

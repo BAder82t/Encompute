@@ -245,9 +245,26 @@ anything derived from it again, its key broker is told, and the evidence
 stays verifiable. Deleting the data itself is the institution's own
 storage's job.
 
+- **Phase 8, the cross-agency report, `explain --governance` and the
+  evidence bundle.** `encompute governance export` fetches a governed
+  job's bundle (one `<project>-<job>.encgov.json`: the trust graph, the
+  grant, the owners' authorizations, the signed release records and the
+  project's whole log with proofs, witnesses and revocation heads),
+  checks it before writing, and `encompute governance verify`, `report`
+  and `explain --governance` verify it offline against keys you pinned
+  yourself and say what it means in plain words. The bundle holds no
+  source records, is the same bytes for every member (another
+  organization's authorization appears as a card until its owner
+  discloses it), and any edit, omission or reordering fails. The report
+  shows "raw data centralized", "ownership retained" and "unauthorized
+  releases" only with signed backing, judges authorizations at the time
+  the job ran, and cannot yet read SATISFIED: who can decrypt a result is
+  not recorded in signed evidence yet, and residency and record linkage
+  are not evidenced until they are built.
+
 Not yet built: placement and operator rules (a broker refuses any
 execution that declares placement until placement can be attested),
-record linkage, the governance report and evidence bundle. The limits of
+record linkage. The limits of
 what exists are in [known limitations](../KNOWN_LIMITATIONS.md).
 
 ## Design records

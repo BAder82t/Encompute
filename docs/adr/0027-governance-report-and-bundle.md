@@ -296,6 +296,67 @@ versions, program, plan, grant and approvals), INV-229 (views), INV-243
 INV-244 (rows from signed evidence only) and INV-247 (split views
 detected). INV-101 and INV-188 apply unchanged.
 
+## As built (phase 8: report, explain and bundle)
+
+Where the build refines or narrows the design above:
+
+- **Typed governance section, not graph version 2.** The trust graph is
+  unchanged (`GRAPH_VERSION` stays 1): the bundle carries the base graph
+  (program, plan, execution receipt) and a typed, `deny_unknown_fields`
+  section of governance evidence beside it (`GovernanceEvidence`: the
+  purpose and the organizations' signed acceptances, the execution spec,
+  the control plane's signed grant, the owners' authorizations, the
+  custodians' signed release records) and `AuditEvidence` (the checkpoint,
+  every event of the project's log with its inclusion proof, the
+  witnesses, each owner's latest revocation head). The governance rows
+  read the base graph after `rebuild()`, and the typed evidence against the
+  caller's pins, so INV-101 holds as before. New node kinds can be added to
+  the graph later without changing the bundle format.
+- **Pins override bundle anchors in the base report too** (the P8
+  prerequisite): `Anchors.governance_keys` replaces whatever governance key
+  a bundle anchors for an organization before a v2 authorization in the
+  graph is re-verified; without a pin the old behaviour (and no counting)
+  stays.
+- **Rows as built.** Project (each data owner's signed acceptance of the
+  purpose; there is no charter object yet), Organizations, Key custody
+  (read from the verified plan's custody requirements and the binding's
+  broker map), Purpose, Source assets, Linkage, Raw data centralized,
+  Decryption control, Ownership retained, Location, Mechanism, Approvals,
+  Authorization window, Unauthorized releases, Privacy policy, Execution
+  evidence and Audit chain, plus a Revocations section. Linkage, Location
+  and Privacy policy are NOT APPLICABLE when the signed binding,
+  purpose and authorizations do not declare the feature (a status of its
+  own that is not a pass of a requirement) and NOT EVIDENCED when they do.
+  Decryption control is always NOT EVIDENCED: the key model is open
+  (K-2) and nothing records it. The base report's version 1 owner
+  authorization row is not counted in a governed report: the version 2
+  rows replace it.
+- **Three verdicts.** SATISFIED, NOT FULLY EVIDENCED (nothing failed, but
+  something is unchecked or not evidenced) and NOT SATISFIED. Exit codes
+  0, 3 and 1; 2 is a malformed or refused bundle.
+- **Shared view: cards and disclosures.** A signed authorization names its
+  approvers, so the shared bundle carries a card (the body without
+  approvals, each approval as a per-project pseudonym, the document's ID)
+  instead, and what rests on it is UNCHECKED until the owner discloses
+  the signed document (`--disclosure`); a disclosed document replaces a card
+  only if its ID is the card's. The organization's own view carries its
+  own signed documents.
+- **Determinism.** `exported_at` is the time of the log state (the latest
+  checkpoint or the grant), `exported_by` the control plane's service ID,
+  so the shared view is the same bytes for every member asking for one
+  state.
+- **Provenance.** The section exists and is committed to by digest, but
+  holds only digests the control plane does not have yet; the report says
+  provenance is not verified.
+- **Limits.** One bundle carries at most 5,000 log events (ENC2730), and
+  the route is limited to 12 requests a minute per caller.
+- **Errors.** ENC2727 (malformed), ENC2728 (refused: unverifiable,
+  forged signature, bad pins), ENC2729 (plaintext or a leaking view),
+  ENC2730 (limits).
+- **Not built here:** `--split DIR`, a `governance report --html`, the
+  per-job approvals as signed evidence, and countersignatures by the
+  control plane.
+
 ## Open decisions
 
 These are recorded in the milestone plan's open decisions and are not

@@ -597,6 +597,28 @@ organization registered, never at a platform broker.
 - **Standard projects.** There the broker trusts the control plane's grant
   as in 0.3.
 
+### 4.10 Evidence bundles and reports (governed projects)
+
+The governance evidence bundle and the cross-agency report are what an
+institution shows its own auditor, so the attacks are on what they say.
+
+| Attack | Defence | Evidence |
+|---|---|---|
+| Edit, omit or reorder part of a bundle, add a field, or re-encode it | The manifest commits to every section by digest and to the trust graph's root; the file must be exactly the canonical encoding of what it parses to; every type refuses unknown fields. An attacker who recomputes the digests changes the BundleId (breaking every signature) and still cannot change what the signed evidence says: each row reads signatures, proofs and pins, not the manifest (ENC2727) | INV-243; `every_single_field_edit_fails`, `omission_and_reordering_fail`, `a_rebuilt_manifest_does_not_launder_an_edit` |
+| Bring your own keys: a bundle that anchors the keys it is verified under | Keys come only from the verifier's pins. A governance key the caller pins replaces whatever the bundle anchors; an unpinned key is UNCHECKED, never a pass | INV-244; `caller_pinned_governance_keys_override_a_bundles_own_anchors`, `missing_anchors_are_unchecked_not_satisfied` |
+| Leak source records or another organization's metadata through an export | Typed sections; data-dependent values only as salted commitments; no string over 256 bytes outside the program, the purpose's description and attestation records; a shared view has no signed authorization (it names the approvers), only cards with per-project pseudonyms; an organization's view has only its own signed documents; the exporter and the verifier both refuse a breach (ENC2729) | INV-243; `no_source_value_appears_in_any_export`, `the_shared_bundle_leaks_no_other_organizations_private_metadata`, `governance_views_canary_scan` |
+| Show a verdict of "no raw data centralized", "ownership retained" or "no unauthorized release" without evidence | Those rows are YES, NO or NONE only with signed backing: the plan's steps, the owners' verified signatures, one signed release record per output within every owner's class and recipients. Anything else is UNKNOWN or NOT EVIDENCED, and the verdict is then "not fully evidenced" | INV-244; `releases_are_none_only_with_signed_records_within_what_owners_allowed`, `ownership_is_retained_only_when_each_owner_signed_for_its_own_version` |
+| Present a stale revocation head as covering a later run, or judge a historical run by today's clock | Authorizations are judged at the grant's signed time; what they say now is shown apart and never fails a historical audit. A head covers only what happened up to its own date; for a later `--as-of` it is UNCHECKED | `a_stale_revocation_head_is_not_covered_for_a_later_run`, `execution_time_validity_never_fails_a_historical_audit` |
+| A control plane that shows members different histories | Members compare BundleIds of the shared view (one state, one id) and witness checkpoints; a bundle whose log is not witnessed by every member is UNCHECKED | INV-247 |
+
+Not covered: the shared view's metadata by design (members, versions used,
+counts, pseudonyms); a card's content, which is the control plane's word
+until the owner discloses the signed document; the key model (who can
+decrypt a result), which is not recorded in signed evidence in this
+release and is shown as NOT EVIDENCED; where the job ran, until placement
+is evidenced; the provenance of the software (not in the bundle yet); and
+whether anything was lawful (every report ends with that boundary).
+
 ## 5. Conditions the deployment must uphold
 
 1. **Decrypted results are never returned to the evaluator.** CKKS is not
