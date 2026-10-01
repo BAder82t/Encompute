@@ -135,6 +135,7 @@ impl Model {
                     charged: vec![],
                     sources_per_unit: bd.max_sources_per_unit.unwrap_or(1),
                     layout_id: None,
+                    job_id: None,
                 };
                 let c = encompute_privacy::Charged::asset(asset.clone(), b.clone());
                 let rho = spec.rho(&c)?;
@@ -444,6 +445,7 @@ impl Model {
                         charged: vec![],
                         sources_per_unit: bd.max_sources_per_unit.unwrap_or(1),
                         layout_id: None,
+                        job_id: None,
                     };
                     let c = encompute_privacy::Charged::asset(asset.clone(), b.clone());
                     spec.rho(&c).and_then(|rho| {

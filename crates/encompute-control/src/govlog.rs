@@ -608,6 +608,13 @@ pub mod extra_kind {
     pub const LEDGER_CHECKPOINT: &str = "privacy.ledger_checkpoint";
     /// A privacy ledger frozen after a detected rollback.
     pub const LEDGER_FROZEN: &str = "ledger.frozen";
+    /// A privacy population was created (its owner's partition: its cap is
+    /// the owner's, not the projects').
+    pub const POPULATION_CREATED: &str = "privacy.population_created";
+    /// A privacy scope was allocated to a project (the project's partition,
+    /// so its members and auditors see it): identifiers, the privacy unit
+    /// and the scope's cap, never a population's spending.
+    pub const SCOPE_ALLOCATED: &str = "privacy.scope_allocated";
     /// A row of a security-negative set the database lost, acknowledged by
     /// recovery (`refs.state` names the set).
     pub const ROW_LOST: &str = "row.lost";

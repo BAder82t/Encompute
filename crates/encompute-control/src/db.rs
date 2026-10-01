@@ -75,6 +75,21 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "governance_log",
         include_str!("../migrations/0013_governance_log.sql"),
     ),
+    (
+        14,
+        "privacy_populations",
+        include_str!("../migrations/0014_privacy_populations.sql"),
+    ),
+    (
+        15,
+        "privacy_scopes",
+        include_str!("../migrations/0015_privacy_scopes.sql"),
+    ),
+    (
+        16,
+        "job_privacy",
+        include_str!("../migrations/0016_job_privacy.sql"),
+    ),
 ];
 
 /// Serializes migrations across control-plane replicas.

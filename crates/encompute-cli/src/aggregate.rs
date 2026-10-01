@@ -240,6 +240,11 @@ pub struct SpecArgs {
     /// spec ID, so every party approves the same allocation.
     #[arg(long)]
     scoping: Option<PathBuf>,
+    /// The governed job this aggregation runs for (its ID from the control
+    /// plane): its reservations take the job's identity, so the control
+    /// plane's reservation at start and the coordinator's are one entry.
+    #[arg(long)]
+    job: Option<String>,
 }
 
 impl SpecArgs {
@@ -275,6 +280,10 @@ impl SpecArgs {
         };
         let plan = match &self.scoping {
             Some(p) => plan.with_scopes(json::<BTreeMap<String, ScopedBudget>>(p)?)?,
+            None => plan,
+        };
+        let plan = match &self.job {
+            Some(j) => plan.with_job(j),
             None => plan,
         };
         let mut spec = AggregationSpec::new(plan, ordered)?;
@@ -1057,6 +1066,7 @@ mod tests {
                 .to_vec(),
             sources_per_unit: 1,
             layout_id: None,
+            job_id: None,
         };
         release(
             &spec,

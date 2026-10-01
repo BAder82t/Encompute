@@ -305,6 +305,7 @@ fn release_round(d: &std::path::Path, round: u64) {
     let rs = ReleaseSpec {
         sources_per_unit: 1,
         layout_id: None,
+        job_id: None,
         round_id: format!("{round:064x}"),
         output: "update".into(),
         policy_id: Some(h('c')),

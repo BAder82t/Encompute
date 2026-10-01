@@ -104,6 +104,10 @@ struct W {
     ben_asset: String,
     ben_key: String,
     ben_user: String,
+    /// Tax's privacy population of its income series, and the project's
+    /// active scope of it.
+    population: String,
+    scope: String,
 }
 
 fn broker_account(t: &T, admin: &As, org: &str, id: &str, seed: u8) {
@@ -401,6 +405,26 @@ fn world() -> Option<W> {
         .as_str()
         .unwrap()
         .to_owned();
+    // Tax's privacy population (the hard cap on its income series) and the
+    // project's scope of it, allocated by two of its security admins.
+    let population = id(&t.ok(
+        &tax_sec1,
+        "POST",
+        "/v1/privacy/populations",
+        Some(json!({"organization": TAX, "series": "income", "budget": budget(1.0)})),
+    ));
+    let scope = id(&t.ok(
+        &tax_sec1,
+        "POST",
+        "/v1/privacy/scopes",
+        Some(json!({"population": population, "project": project, "purpose": PURPOSE, "epsilon": 0.5})),
+    ));
+    t.ok(
+        &tax_sec2,
+        "POST",
+        &format!("/v1/privacy/scopes/{scope}/approve"),
+        None,
+    );
     Some(W {
         t,
         platform,
@@ -434,6 +458,8 @@ fn world() -> Option<W> {
         ben_asset,
         ben_key,
         ben_user,
+        population,
+        scope,
     })
 }
 
@@ -673,6 +699,30 @@ impl W {
                 format!("/v1/privacy/{}/spenders", self.ben_asset),
                 Some(json!({"service": "secagg-1"})),
             ),
+            "/v1/privacy/populations" => (
+                s(pattern),
+                Some(json!({"organization": BEN, "series": "visits", "budget": budget(1.0)})),
+            ),
+            "/v1/privacy/scopes" => (
+                s(pattern),
+                Some(
+                    json!({"population": self.population, "project": p, "purpose": PURPOSE,
+                            "program_id": "audit", "epsilon": 0.1}),
+                ),
+            ),
+            "/v1/privacy/scopes/{}/approve" => {
+                (format!("/v1/privacy/scopes/{}/approve", self.scope), None)
+            }
+            "/v1/privacy/scopes/{}/events" => (
+                format!("/v1/privacy/scopes/{}/events", self.scope),
+                Some(
+                    json!({"kind": "commit", "event_id": "x", "output_commitment": "0".repeat(64)}),
+                ),
+            ),
+            "/v1/privacy/scopes/{}/spenders" => (
+                format!("/v1/privacy/scopes/{}/spenders", self.scope),
+                Some(json!({"service": "secagg-1"})),
+            ),
             "/v1/audit/checkpoints" => (s(pattern), None),
             "/v1/messages" => (s(pattern), Some(json!({}))),
             _ => return None,
@@ -730,6 +780,14 @@ impl W {
             }
             "/v1/jobs" => vec!["/v1/jobs".into(), format!("/v1/jobs?project={p}")],
             "/v1/jobs/{}" => vec![format!("/v1/jobs/{j}")],
+            "/v1/privacy/populations/{}" => {
+                vec![format!("/v1/privacy/populations/{}", self.population)]
+            }
+            "/v1/privacy/scopes/{}" => vec![format!("/v1/privacy/scopes/{}", self.scope)],
+            "/v1/privacy/scopes/{}/ledger" => {
+                vec![format!("/v1/privacy/scopes/{}/ledger", self.scope)]
+            }
+            "/v1/projects/{}/privacy-scopes" => vec![format!("/v1/projects/{p}/privacy-scopes")],
             "/v1/privacy/{}" => vec![format!("/v1/privacy/{v}")],
             "/v1/privacy/{}/ledger" => vec![format!("/v1/privacy/{v}/ledger")],
             "/v1/trust/{}" => vec![format!("/v1/trust/{j}")],

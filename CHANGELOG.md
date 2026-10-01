@@ -321,6 +321,38 @@ Work toward confidential cross-agency computation
   PostgreSQL and a directory anchor (two durable writes instead of one),
   and is unchanged with eight concurrent spenders. INV-160, INV-192,
   INV-193 and INV-226 evidence extended. A spend is also refused before it commits when the log no longer holds the anchored head, spends are limited to 1,200 a minute per actor and asset, and a reservation must charge at least a zCDP cost of 1e-9.
+- **DP scopes, populations and aggregate mode (phase 5).** Differential
+  privacy in a governed project is charged to a **scope**, a share of the
+  **population** of the source's dataset series, never to a per-version
+  ledger that a new version would reset. A population (one organization's
+  series, every version, one privacy unit) carries a hard cap that no
+  scope, project or version raises; a scope serves one project, purpose
+  and optionally program. One security admin of the owner proposes a scope
+  and a different one approves it (four eyes; never an auditor or a
+  service account), and its allocation is an event of the project's log.
+  A release is reserved in the scope and the population and must fit in
+  both: the population is authoritative, and scopes may add up to more
+  than it. A project with no scope cannot spend and inherits nothing
+  (ENC2719); an owner's authorization may pin the scope
+  (`privacy_scope_id`). A governed job whose program releases a
+  differential-privacy aggregate is checked at scheduling and start, and
+  reserves its own release, computed by the control plane from its program,
+  in each source's scope when it starts, before any noise exists: an
+  exhausted scope or population fails it (ENC2201), a coordinator's report
+  of the same release is the same entry and an under-declared one is
+  refused (ENC2721). Scopes and populations are ledgers like an asset's:
+  checkpointed in the governance log before a call returns, refused and
+  frozen when restored behind it. Ledger genesis version 2 (version 1 is
+  unchanged), `scope` in `PrivacyEvent`, `rho_cap`. Aggregations may
+  declare `max_sources_per_unit` (multiplied into the sensitivity; every
+  participant when scoped and undeclared) and a `layout` of strata whose
+  digest every contribution must name (ENC2722); an aggregate always
+  states that it links no records. `encompute privacy population`,
+  `privacy scope` and `aggregate --scoping --job` do the same with file
+  ledgers. New routes under `/v1/privacy/populations` and
+  `/v1/privacy/scopes`; migrations 0014 to 0016; ENC2719 to ENC2722;
+  INV-230, INV-241. Standard projects and assets whose series has no
+  population are unchanged.
 - **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
   INV-236 (the control plane can only deny; broker state cannot be
   rolled back), INV-223 (auditors), INV-229 (cross-organization

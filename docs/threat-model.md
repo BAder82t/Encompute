@@ -304,6 +304,8 @@ DP noise, the coordinator's attestation when the plan requires it.
 | Release a budgeted asset without a control-plane reservation | With a control plane, every budgeted asset must map to its control-plane asset (`--control-asset`) and hold this round's local reservation before anything is sent or released. The control plane refuses a reservation whose declared sensitivity is below what its own noise and mechanism imply for the ledger's unit (ENC2204) (`crates/encompute-cli/src/aggregate.rs`; `crates/encompute-control/src/ops/assets.rs` `check_reservation`) | INV-186; `unmapped_budgeted_assets_release_nothing`, `a_control_plane_coordinator_needs_every_budgeted_mapping_before_the_round`, `a_reservation_cannot_under_declare_its_sensitivity` |
 | Make a party rejoin a round by racing or crashing its state updates | The party's `--state` is updated under an exclusive lock, re-read, only ever raised, and replaced atomically (temporary file, fsync, rename). The last round joined is kept per aggregation spec (`crates/encompute-cli/src/aggregate.rs`) | `concurrent_state_updates_are_never_lost`, `state_is_monotonic_and_per_spec` |
 | Rewrite, truncate or roll back a ledger | Hash-chained ledgers; owners holding a later checkpoint detect rollback (`crates/encompute-privacy/src/ledger.rs`) | INV-066, INV-067 |
+| Spend a series' budget again through a new version, or a project or purpose it was not allocated to (governed projects) | A governed release is charged to a scope and its population: the population is one ledger per series, all versions, with a hard cap no scope raises; a scope serves one project, purpose and program and is allocated with four eyes; the release must fit in both, the population refusing first when scopes add up to more. A project with no scope cannot spend; a release never creates one (`crates/encompute-privacy/src/scoped.rs`, `crates/encompute-control/src/ops/privacy_scopes.rs`) | INV-230 |
+| Under-declare how many sources one privacy unit spans, or the layout of the strata, to be charged less or to sum mismatched values | The sensitivity is multiplied by `max_sources_per_unit` (every participant when undeclared and scoped); it and the layout digest are in the plan every party approves, in each contribution's signed metadata and in the privacy receipts; the control plane refuses a reservation that is not the job's own release (`round.rs`, `ops/privacy_scopes.rs`) | INV-241 |
 | Forge a privacy receipt or aggregation receipt | Ed25519 signatures over every field (`release.rs`, `round.rs`) | INV-068, INV-054 |
 | Run unattested where the plan requires an attested coordinator | Parties check the coordinator's attestation at join (`round.rs`) | INV-043 (`attested_coordinator_round`), INV-112 |
 
@@ -319,10 +321,15 @@ DP noise, the coordinator's attestation when the plan requires it.
   not signed by the coordinator. Protection rests on the party-signed
   contents.
 - Timing side channels of noise sampling.
-- **Exact control-plane charges.** The control plane does not hold the
-  release's codec, so it bounds a reservation's charge instead of
-  recomputing it. The reservation's `noise_multiplier` and
-  `sampling_rate` are the coordinator's own declaration.
+- **Exact control-plane charges for ungoverned releases.** The control
+  plane does not hold the release's codec, so it bounds a reservation's
+  charge instead of recomputing it. The reservation's `noise_multiplier`
+  and `sampling_rate` are the coordinator's own declaration. (A governed
+  job's release is computed by the control plane from its program.)
+- **A coordinator that releases without reporting.** The scopes bound what
+  the platform records and authorizes; a coordinator that never reports a
+  release is stopped only by the parties' own checks (its attestation, the
+  privacy receipts, the ledgers parties compare).
 
 ### 4.5 Compromised user account
 

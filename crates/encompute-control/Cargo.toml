@@ -17,6 +17,7 @@ encompute-analysis.workspace = true
 encompute-ckks.workspace = true
 encompute-exact.workspace = true
 encompute-trust.workspace = true
+encompute-secagg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

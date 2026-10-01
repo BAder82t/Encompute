@@ -197,6 +197,7 @@ fn checkpoint_resume() {
         let rs = ReleaseSpec {
             sources_per_unit: 1,
             layout_id: None,
+            job_id: None,
             round_id: "01".repeat(32),
             output: "update".into(),
             policy_id: s.policy_id.clone(),

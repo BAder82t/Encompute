@@ -401,6 +401,7 @@ fn spec(round: u64, charged: Vec<Charged>, sources: u32) -> ReleaseSpec {
         charged,
         sources_per_unit: sources,
         layout_id: None,
+        job_id: None,
     }
 }
 

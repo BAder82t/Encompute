@@ -33,6 +33,7 @@ fn spec(round: u32, epsilon: f64) -> ReleaseSpec {
     ReleaseSpec {
         sources_per_unit: 1,
         layout_id: None,
+        job_id: None,
         round_id: format!("{round:064x}"),
         output: "global_gradient".into(),
         policy_id: Some("aa".repeat(32)),

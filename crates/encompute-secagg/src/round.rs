@@ -210,6 +210,12 @@ pub struct AggregationPlan {
     /// program declares them: every contribution must name it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_id: Option<String>,
+    /// The governed job this aggregation runs for: its reservations name it
+    /// and take its identity, so the control plane (which reserves a job's
+    /// release when the job starts) and the coordinator charge one entry,
+    /// once. Bound into the spec ID like everything else here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 impl AggregationPlan {
@@ -221,6 +227,7 @@ impl AggregationPlan {
     ) -> Self {
         let a = &b.aggregate_policy;
         Self {
+            job_id: None,
             max_sources_per_unit: b.max_sources_per_unit,
             layout_id: b
                 .layout
@@ -259,6 +266,18 @@ impl AggregationPlan {
             privacy_policy_id: privacy_policy_id.map(str::to_owned),
             execution_plan_id: None,
         }
+    }
+
+    /// This plan, run for governed job `job`.
+    pub fn with_job(mut self, job: &str) -> Self {
+        self.job_id = Some(job.to_owned());
+        self
+    }
+
+    /// The ID releases of a round are identified by: the governed job's, if
+    /// the plan is for one, else the round's `round_id`.
+    pub fn release_id(&self, round_id: &str) -> String {
+        self.job_id.clone().unwrap_or_else(|| round_id.to_owned())
     }
 
     /// This plan, bound to the approved confidential execution plan.
@@ -321,7 +340,8 @@ impl AggregationPlan {
             }
         }
         Ok(Some(ReleaseSpec {
-            round_id: round_id.to_owned(),
+            round_id: self.release_id(round_id),
+            job_id: self.job_id.clone(),
             output: self.output.clone(),
             policy_id: self.policy_id.clone(),
             privacy_policy_id,
@@ -678,7 +698,7 @@ impl AggregationSpec {
     /// Why `other` is not this spec, field by field (for errors).
     pub fn difference(&self, other: &AggregationSpec) -> Option<String> {
         let (a, b) = (&self.plan, &other.plan);
-        let fields: [(&str, bool); 13] = [
+        let fields: [(&str, bool); 14] = [
             ("program", a.program_id != b.program_id),
             ("PolicyID", a.policy_id != b.policy_id),
             ("output", a.output != b.output),
@@ -689,6 +709,7 @@ impl AggregationSpec {
                 "participants (assets, budgets, scopes)",
                 a.participants != b.participants,
             ),
+            ("governed job", a.job_id != b.job_id),
             (
                 "sources per unit or layout",
                 (a.max_sources_per_unit, &a.layout_id) != (b.max_sources_per_unit, &b.layout_id),

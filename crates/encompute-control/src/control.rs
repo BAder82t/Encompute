@@ -78,6 +78,8 @@ pub struct Control {
     /// Privacy spends per actor and asset a minute (each is an event of
     /// the governance log and its mirror).
     pub spend_limit: crate::ops::RateLimit,
+    /// Privacy population and scope allocations per caller a minute.
+    pub scope_limit: crate::ops::RateLimit,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -214,6 +216,7 @@ impl Control {
             node_cache: Default::default(),
             project_log_limit: Default::default(),
             spend_limit: crate::ops::RateLimit::new("privacy spend", crate::ops::SPEND_RATE),
+            scope_limit: crate::ops::RateLimit::new("privacy scope", crate::ops::SCOPE_RATE),
         };
         c.ensure_self_registered()?;
         let existed = match opened {
@@ -379,6 +382,7 @@ impl Control {
             node_cache: Default::default(),
             project_log_limit: Default::default(),
             spend_limit: crate::ops::RateLimit::new("privacy spend", crate::ops::SPEND_RATE),
+            scope_limit: crate::ops::RateLimit::new("privacy scope", crate::ops::SCOPE_RATE),
         })
     }
 

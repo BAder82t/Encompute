@@ -42,9 +42,9 @@ Errors are JSON `{"code": "ENCnnnn", "message": "..."}`:
 |---|---|
 | 400 | ENC1102 malformed request (including a repeated query parameter); ENC1604 receipt problems; ENC2204 a privacy reservation inconsistent with its own mechanism |
 | 401 | ENC2601 unauthenticated (including a disabled user, and `/metrics` without the metrics token); ENC2607 bad service signature, replay |
-| 403 | ENC2602 missing role; ENC2701-ENC2712 refused by governance in a governed project (see [errors.md](errors.md)) |
+| 403 | ENC2602 missing role; ENC2701-ENC2712, ENC2719, ENC2721 refused by governance in a governed project (see [errors.md](errors.md)) |
 | 404 | ENC2603 not found, including other tenants' resources |
-| 409 | ENC2604 conflict (state, idempotency key, revoked asset); ENC2201 privacy budget exceeded, or ledger frozen |
+| 409 | ENC2604 conflict (state, idempotency key, revoked asset); ENC2201 privacy budget exceeded, or ledger frozen; ENC2720 a privacy population or scope allocation refused |
 | 422 | ENC2401 PLANNING FAILED; ENC2402 a plan that does not satisfy its program or the control plane's floor |
 | 500 | ENC2605 insecure configuration; ENC2202 PRIVACY or AUDIT STATE ROLLBACK (the database no longer extends the state anchor) |
 
@@ -144,6 +144,15 @@ broker of the platform or of the asset's organization (409 otherwise). `privacy_
 | `GET /v1/privacy/{asset}/ledger` | auditors and data owners. The full hash-chained ledger |
 | `POST /v1/privacy/{asset}/events` | the owner's data owners and operators, and SecAgg services the owner authorized for this asset. A privacy event (reserve or commit): race-safe, idempotent, anchored before the reply. Refused: a reservation whose declared sensitivity is below what its own noise implies for the ledger's unit, or, in production, not drawn with `csprng` (ENC2204); a ledger that no longer extends the state anchor (ENC2202 PRIVACY STATE ROLLBACK); a ledger frozen in the anchor, whatever the database says (ENC2201) |
 | `POST /v1/privacy/{asset}/spenders` | the owner's data owners and organization admins. `{service}`: authorizes an active SecAgg service to record privacy events for this asset |
+| `POST /v1/privacy/populations` | governed projects: a person (never a service account, ENC2707; never an auditor) of the organization, with `security_admin` or `data_owner`. `{organization, series, budget: {unit, epsilon, delta}}`: creates the privacy population of one of its dataset series, the hard cap on everything released from any version of it, in any project, at one privacy unit. Allocated once per series and never changed (ENC2720 when it exists); its first checkpoint is anchored before the reply. Reply: `{id, organization, series, budget, rho_cap}` (the zCDP cost the cap converts to, rounded down) |
+| `GET /v1/privacy/populations/{id}` | the owning organization's data owners, auditors, organization admins and security admins (anyone else 404): the cap, what the population has spent across every scope, its entries, root, frozen state and its scopes |
+| `POST /v1/privacy/scopes` | a person with `security_admin` of the population's organization, which must be a member of the (governed) project. `{population, project, purpose, program_id?, epsilon}`: proposes a scope of the population for the project's active purpose (by name, so a new revision needs no new allocation) and, optionally, one program (its ID). The cap is at the population's unit and delta and no more than its epsilon (ENC2720: the population is authoritative). Refused for an auditor first (403) and for a standard project (409) |
+| `POST /v1/privacy/scopes/{id}/approve` | a different person with `security_admin` of the same organization (ENC2707 for the proposer, a service account, ENC2602 for an auditor, a data owner or another organization). Creates the scope's ledger and records `privacy.scope_allocated` in the project's log, with the unit and the scope's cap and never a population's spending; both are anchored before the reply. One active scope per population, project, purpose and program (ENC2720) |
+| `GET /v1/privacy/scopes/{id}`, `GET /v1/projects/{id}/privacy-scopes` | the owner: the scope in full (its population, cap, spent, remaining, entries, root, frozen); the project's other members and its auditor organizations: its totals only (cap, spent, remaining, entry count, root). A proposal is the owner's alone; outsiders get 404 |
+| `GET /v1/privacy/scopes/{id}/ledger` | the owner's auditors and data owners, and the project's auditor organizations: the scope's hash-chained entries |
+| `POST /v1/privacy/scopes/{id}/events` | a SecAgg service the owner authorized for the scope, or the owner's data owners and operators (never an auditor). A privacy event of a governed job: a reservation (it names the scope, population and job, and must be exactly the release the control plane computes from the job's program: its sensitivity multiplied by the sources per unit (undeclared: every participant), noise, mechanism, layout and linkage `none`; a smaller number of sources or any other difference is ENC2721; the job must be running, of this project and purpose and program, ENC2719) or the commit of an open one. Appended to the scope's ledger and its population's in one transaction (scope locked first), race-safe, idempotent and anchored (both ledgers) before the reply; ENC2201 when either is exhausted or frozen, ENC2202 PRIVACY STATE ROLLBACK when either no longer extends its checkpoint in the governance log. The control plane itself writes the job's reservation when the job starts, so a coordinator reporting the same release is acknowledged as a duplicate. A `privacy.event` service message with `scope` instead of `asset` takes the same path |
+| `POST /v1/privacy/scopes/{id}/spenders` | the owner's data owners, organization admins and security admins. `{service}`: authorizes an active SecAgg service to report the scope's events |
+| (governed jobs) | a governed job whose program releases a differential-privacy aggregate is checked again at scheduling and at start: every source's series needs a population and an active scope for the job's project, purpose and program (the one an owner's authorization pins, if it names one), and the scope and the population must afford the release, else the job fails and is anchored as ended (ENC2719, ENC2201, ENC2204 for a release too noisy to charge, ENC2202 for a rolled-back ledger). Starting reserves the release in each scope and population before the job runs; a job refused reserves nothing, and a job starts once. A legacy `POST /v1/privacy/{asset}/events` reservation for an asset whose series has a population is refused (ENC2719) |
 
 ### Governed projects
 
@@ -247,7 +256,8 @@ What each organization sees follows one table (`crates/encompute-control/src/vie
 | owner authorizations | real approvers | (organization, role, time) and a pseudonym | same |
 | job spec, program, purpose, `governance_id`, state, evaluator | full | yes | yes |
 | grant, evaluator URL and receipt key, initiator, actors | submitter | labels | labels |
-| privacy ledger | full | no | no |
+| privacy ledger of an asset | full | no | no |
+| privacy scope ledger | full (the population too) | totals | totals, and the entries |
 | audit | own organization | the project's events | the project's events |
 
 The shared view of a record is the same bytes for every organization that

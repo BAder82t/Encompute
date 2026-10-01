@@ -85,6 +85,11 @@ pub struct ReleaseSpec {
     pub sources_per_unit: u32,
     /// The digest of the aggregate's stratum labels, if declared.
     pub layout_id: Option<String>,
+    /// The governed job this release is for, if any: scoped reservations
+    /// name it, and (as the plan's release ID, in place of the round's)
+    /// it makes the reservation's identity the job's, so the control
+    /// plane's and the coordinator's reservations are the same entry.
+    pub job_id: Option<String>,
 }
 
 /// Noise variance in code units: `ceil((noise_multiplier * clip_norm *
@@ -149,7 +154,10 @@ pub fn sensitivity_scaled(
 }
 
 impl ReleaseSpec {
-    fn event_id(&self, asset: &str) -> String {
+    /// The ID of the reservation of this release in `asset`'s ledger (an
+    /// asset, scope or population): a function of the release and the
+    /// ledger, so a replayed or duplicated delivery is the same entry.
+    pub fn event_id(&self, asset: &str) -> String {
         hex(&tagged(
             EVENT,
             &[
@@ -190,11 +198,30 @@ impl ReleaseSpec {
             Box::new(ScopeRef {
                 scope_id: s.scope_id.clone(),
                 population_id: s.population_id.clone(),
-                job_id: None,
+                job_id: self.job_id.clone(),
                 max_sources_per_unit: self.sources_per_unit.max(1),
                 layout_id: self.layout_id.clone(),
                 linkage: LINKAGE_NONE.to_owned(),
             })
+        })
+    }
+
+    /// The reservation of this release in `c`'s ledger, as it is written
+    /// before any noisy output exists; `rng` labels the randomness the
+    /// noise will be drawn with.
+    pub fn reserve_event(&self, c: &Charged, rng: &str) -> Result<PrivacyEvent> {
+        Ok(PrivacyEvent::Reserve {
+            event_id: self.event_id(&c.asset_id),
+            policy_id: self.policy_id.clone(),
+            execution_spec_id: self.execution_spec_id.clone(),
+            round_id: Some(self.round_id.clone()),
+            output: self.output.clone(),
+            mechanism: self.mechanism.clone(),
+            sensitivity: self.sensitivity(c),
+            sigma2: sigma2(&self.mechanism, &self.codec)?,
+            vector_len: self.vector_len,
+            rng: rng.to_owned(),
+            scope: self.scope_ref(c),
         })
     }
 
@@ -369,19 +396,7 @@ pub fn release(
     let mut before = vec![];
     for (l, c) in ledgers.iter_mut().zip(&charged) {
         before.push(l.view().cost()?);
-        l.append(PrivacyEvent::Reserve {
-            event_id: spec.event_id(&c.asset_id),
-            policy_id: spec.policy_id.clone(),
-            execution_spec_id: spec.execution_spec_id.clone(),
-            round_id: Some(spec.round_id.clone()),
-            output: spec.output.clone(),
-            mechanism: spec.mechanism.clone(),
-            sensitivity: spec.sensitivity(c),
-            sigma2: s2,
-            vector_len: spec.vector_len,
-            rng: rng.label().into(),
-            scope: spec.scope_ref(c),
-        })?;
+        l.append(spec.reserve_event(c, rng.label())?)?;
     }
     crate::failpoint("after-reserve");
     // Only now does a noisy output exist.

@@ -421,6 +421,17 @@ fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<Jo
     }))
 }
 
+/// What the privacy scopes need of a job.
+fn privacy_facts(j: &JobRow) -> super::privacy_scopes::JobFacts {
+    super::privacy_scopes::JobFacts {
+        job: j.id.clone(),
+        project: j.project.clone(),
+        purpose: j.purpose.clone(),
+        program: j.program_id.clone(),
+        plan: j.plan.clone(),
+    }
+}
+
 /// Whether `p` may see the job: its organization's members, and the
 /// owners of its source assets; in a governed project everyone taking part
 /// (members and auditor organizations, who get the shared view).
@@ -1888,16 +1899,24 @@ impl Control {
         Ok(r.get::<_, i64>(5).max(0) as u64)
     }
 
-    /// The privacy-budget step of [`Self::revalidate_governed`]: a hook
-    /// that passes until governed privacy scopes and population caps exist,
-    /// when it will check that the job's scope can still pay for it.
+    /// The privacy-budget step of [`Self::revalidate_governed`]: a governed
+    /// job whose program releases a differential-privacy aggregate needs a
+    /// scope (and population) for every source that can pay for the release
+    /// now: no scope (ENC2719) or an exhausted scope or population
+    /// (ENC2201) fails it at scheduling and at start. Read-only: starting
+    /// is what reserves ([`Self::reserve_job_privacy`]). A job that
+    /// releases no such aggregate is not concerned.
     fn governed_privacy_budget(
         &self,
-        _t: &mut Transaction<'_>,
-        _j: &JobRow,
-        _stage: GovernedStage,
+        t: &mut Transaction<'_>,
+        j: &JobRow,
+        stage: GovernedStage,
     ) -> Result<()> {
-        Ok(())
+        if stage == GovernedStage::Approve {
+            return Ok(());
+        }
+        self.check_job_privacy(t, &privacy_facts(j), None, false)
+            .map(|_| ())
     }
 
     /// Revalidates governed job `id` now for `stage`, without changing it:
@@ -2503,8 +2522,14 @@ impl Control {
             return Err(forbidden("only the scheduled evaluator starts a job"));
         }
         let ended = std::cell::Cell::new(false);
+        // What the anchor holds, read before the transaction takes any lock
+        // (the anchor's lock is outermost); and the ledgers the start
+        // reserved in, to anchor once it committed.
+        let anchored = self.anchor.snapshot();
+        let reserved = RefCell::new(BTreeSet::<String>::new());
         let r = self.tx_anchored(|t| {
             ended.set(false);
+            reserved.borrow_mut().clear();
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             if j.evaluator.as_deref() != Some(ctx.actor()) {
                 return Err(not_found("job", id));
@@ -2564,6 +2589,33 @@ impl Control {
                 )?;
                 return Ok(Err(conflict("a source asset was revoked")));
             }
+            // The job's differential-privacy release is reserved in its
+            // sources' scopes and populations before it runs (so before any
+            // noise exists): last, so a job refused above reserves nothing.
+            if j.governance.is_some() {
+                match self.reserve_job_privacy(
+                    t,
+                    ctx.actor(),
+                    &ctx.request_id,
+                    &privacy_facts(&j),
+                    &j.organization,
+                    &anchored,
+                )? {
+                    Ok(keys) => reserved.borrow_mut().extend(keys),
+                    Err(e) => {
+                        self.fail_governed(
+                            t,
+                            ctx.actor(),
+                            &ctx.request_id,
+                            &j,
+                            GovernedStage::Start,
+                            &e,
+                        )?;
+                        ended.set(true);
+                        return Ok(Err(e));
+                    }
+                }
+            }
             self.transition_in(t, ctx.actor(), &ctx.request_id, id, JobState::Running, None)?;
             audit::append(
                 t,
@@ -2574,6 +2626,9 @@ impl Control {
             )?;
             Ok(Ok(json!({"id": id, "state": "running", "grant": g})))
         })?;
+        // The reservations are anchored before the evaluator is told the
+        // job started: committed spending is never forgotten.
+        self.anchor_ledgers(&reserved.borrow())?;
         if ended.get() {
             self.checkpoint_log()?;
         }
@@ -3326,12 +3381,15 @@ impl Control {
             if let Some(v) = self.tx_anchored(|t| duplicate(t))? {
                 return Ok(v);
             }
-            let asset = m.payload["asset"]
-                .as_str()
-                .ok_or_else(|| bad("privacy.event names no asset"))?;
             let event = serde_json::from_value(m.payload["event"].clone())
                 .map_err(|e| bad(format!("event: {e}")))?;
-            let outcome = self.privacy_spend(ctx, asset, event)?;
+            // A governed job's release is charged to a scope (and its
+            // population); anything else to the asset's own ledger.
+            let outcome = match (m.payload["scope"].as_str(), m.payload["asset"].as_str()) {
+                (Some(scope), None) => self.privacy_spend_scoped(ctx, scope, event)?,
+                (None, Some(asset)) => self.privacy_spend(ctx, asset, event)?,
+                _ => return Err(bad("privacy.event names an asset or a scope")),
+            };
             self.db
                 .conn()?
                 .execute(

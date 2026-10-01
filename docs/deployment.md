@@ -481,6 +481,44 @@ explicit:
 encompute-control recover --operator NAME [--governance-log FILE]
 ```
 
+### Privacy populations and scopes (governed projects)
+
+Differential privacy in a governed project is charged to a **scope**, a
+share of the **population** of the source's dataset series. Both are
+privacy ledgers like an asset's (the same tables, under the keys
+`population:<id>` and `scope:<id>`), so everything above applies to them
+unchanged:
+
+- each spend appends one checkpoint per ledger (the scope's and the
+  population's: the key, the entry count and the root, in the platform
+  partition) to the governance log and anchors the log before it is
+  acknowledged; a job's start reserves in every source's scope and
+  population and anchors them all before the evaluator is told the job
+  started;
+- a ledger that does not extend its latest checkpoint is refused at start
+  (PRIVACY STATE ROLLBACK, naming `scope:<id>` or `population:<id>`), and
+  on every spend while running; `encompute-control recover` freezes it,
+  and a frozen scope or population is exhausted;
+- a scope's allocation is an event of its project's log (`privacy.scope_allocated`),
+  anchored before the approval returns.
+
+Schema versions 14 to 16 add the populations, the scopes and a job's
+reservations. Migration 14 drops the foreign key from `privacy_ledgers` to
+`assets` (a population or scope is not an asset) and replaces it with a
+trigger that keeps it for asset ledgers. A control plane that runs
+migrations 14 to 16 cannot be downgraded.
+
+Populations are per organization and series and are allocated once: take
+care over their cap (`POST /v1/privacy/populations`). Scopes are proposed
+and approved by two different security admins of the owning organization.
+A SecAgg coordinator that reports a job's release needs the owner's
+authorization for the scope (`POST /v1/privacy/scopes/{id}/spenders`) and
+is acknowledged when its report is the job's own release, which the
+control plane already reserved when the job started. Capacity: a scoped
+spend or a job's start appends two checkpoint events per ledger touched
+(one in each of the scope and the population), against one for an asset's
+ledger.
+
 ### The governance log mirror
 
 Every checkpoint appends the log's new events to a mirror in the anchor

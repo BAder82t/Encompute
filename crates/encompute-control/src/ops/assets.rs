@@ -1282,6 +1282,32 @@ impl Control {
                 ));
             }
             if let PrivacyEvent::Reserve { mechanism, .. } = &event {
+                // An asset whose series has a privacy population is charged
+                // through a scope of it, never to its own ledger (which a
+                // new version of the series would reset).
+                let population: Option<String> = t
+                    .query_opt(
+                        "SELECT p.id FROM privacy_populations p
+                           JOIN assets a ON a.organization_id = p.organization_id AND a.series = p.series
+                          WHERE a.id = $1",
+                        &[&asset],
+                    )
+                    .map_err(db_err)?
+                    .map(|r| r.get(0));
+                if let Some(p) = population {
+                    return Err(Error::new(
+                        Code::GovernancePrivacyScope,
+                        format!(
+                            "asset {asset}'s series is accounted by privacy population {p}: a release is reserved in a scope of it (POST /v1/privacy/scopes/{{id}}/events), never in the asset's own ledger"
+                        ),
+                    ));
+                }
+                if matches!(&event, PrivacyEvent::Reserve { scope: Some(_), .. }) {
+                    return Err(Error::new(
+                        Code::GovernancePrivacyScope,
+                        "a scoped reservation is reported to its scope, not to an asset's ledger",
+                    ));
+                }
                 check_reservation(&view.genesis, &event, self.env.is_production())?;
                 view.check(event.rho()?, mechanism.sampling_rate)?;
             }
