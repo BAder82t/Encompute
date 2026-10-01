@@ -602,6 +602,7 @@ impl Control {
                     asset_id: id.clone(),
                     budget: budget.clone(),
                     privacy_policy_id: sha256_hex(&canonical_json(&policy)?),
+                    scoping: None,
                 };
                 t.execute(
                     "INSERT INTO privacy_ledgers (asset_id, organization_id, genesis) VALUES ($1, $2, $3)",

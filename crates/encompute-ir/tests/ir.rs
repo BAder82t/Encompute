@@ -292,7 +292,7 @@ fn the_governance_codes_are_the_2701_block() {
         .map(|c| c.as_str())
         .filter(|s| s.starts_with("ENC27"))
         .collect();
-    let expected: Vec<String> = (2701..=2718).map(|n| format!("ENC{n}")).collect();
+    let expected: Vec<String> = (2701..=2722).map(|n| format!("ENC{n}")).collect();
     assert_eq!(block, expected);
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/errors.md"),
@@ -312,6 +312,10 @@ fn the_governance_codes_are_the_2701_block() {
     assert_eq!(Code::GovernanceAuditorSeparation.as_str(), "ENC2716");
     assert_eq!(Code::GovernanceRevocationHead.as_str(), "ENC2717");
     assert_eq!(Code::GovernanceCheckpointWitness.as_str(), "ENC2718");
+    assert_eq!(Code::GovernancePrivacyScope.as_str(), "ENC2719");
+    assert_eq!(Code::GovernancePrivacyAllocation.as_str(), "ENC2720");
+    assert_eq!(Code::GovernanceAggregateDeclaration.as_str(), "ENC2721");
+    assert_eq!(Code::GovernanceAggregateLayout.as_str(), "ENC2722");
 }
 
 fn with_forms(forms: &str) -> String {

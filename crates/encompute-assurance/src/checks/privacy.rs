@@ -23,6 +23,8 @@ pub const VECTOR_LEN: usize = 8;
 /// A release of round `round` charged to `assets` (name, epsilon budget).
 pub fn spec(round: u64, assets: &[(&str, f64)]) -> ReleaseSpec {
     ReleaseSpec {
+        sources_per_unit: 1,
+        layout_id: None,
         round_id: format!("{round:064x}"),
         output: "global_gradient".into(),
         policy_id: Some("aa".repeat(32)),
@@ -51,6 +53,7 @@ pub fn spec(round: u64, assets: &[(&str, f64)]) -> ReleaseSpec {
                     epsilon: *e,
                     delta: 1e-6,
                 },
+                scoped: None,
             })
             .collect(),
     }

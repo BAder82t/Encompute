@@ -921,7 +921,25 @@ pub struct AggregationRule {
     /// Differential privacy applied to the aggregate before release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp: Option<DpMechanism>,
+    /// How many of the aggregation's sources one privacy unit may appear
+    /// in (one person registered with two agencies, say). A unit's
+    /// influence on the released aggregate is multiplied by it, so it is
+    /// multiplied into the sensitivity ([`MAX_SOURCES_PER_UNIT`] bounds it).
+    /// Absent: a governed (scoped) release assumes the worst case, every
+    /// participant; a release outside governed scopes assumes 1 as always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sources_per_unit: Option<u32>,
+    /// The labels of the aggregate vector's strata, in order (its layout).
+    /// A digest of them is bound into every contribution, so a party that
+    /// orders or names its strata differently is refused, not summed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Vec<String>>,
 }
+
+/// The most sources one privacy unit may be declared to appear in.
+pub const MAX_SOURCES_PER_UNIT: u32 = 4096;
+/// The most strata a layout may have, and the longest label.
+pub const MAX_LAYOUT_STRATA: usize = 4096;
 
 /// All confidentiality declarations of a program.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1045,6 +1063,47 @@ impl Confidentiality {
             a.codec.validate()?;
             if let Some(dp) = &a.dp {
                 dp.validate()?;
+            }
+            if let Some(m) = a.max_sources_per_unit {
+                if a.dp.is_none() {
+                    return Err(Error::new(
+                        Code::AggregationPlan,
+                        format!(
+                            "aggregate {:?}: max_sources_per_unit scales a privacy sensitivity, so it needs `dp`",
+                            a.output
+                        ),
+                    ));
+                }
+                if m == 0 || m > MAX_SOURCES_PER_UNIT {
+                    return Err(Error::new(
+                        Code::AggregationPlan,
+                        format!(
+                            "aggregate {:?}: max_sources_per_unit must be 1 to {MAX_SOURCES_PER_UNIT}, got {m}",
+                            a.output
+                        ),
+                    ));
+                }
+            }
+            if let Some(l) = &a.layout {
+                let mut seen = BTreeSet::new();
+                if l.is_empty()
+                    || l.len() > MAX_LAYOUT_STRATA
+                    || l.iter().any(|x| {
+                        x.is_empty()
+                            || x.len() > 128
+                            || x.contains('"')
+                            || x.chars().any(char::is_control)
+                    })
+                    || !l.iter().all(|x| seen.insert(x.as_str()))
+                {
+                    return Err(Error::new(
+                        Code::AggregationPlan,
+                        format!(
+                            "aggregate {:?}: a layout lists 1 to {MAX_LAYOUT_STRATA} distinct, non-empty stratum labels",
+                            a.output
+                        ),
+                    ));
+                }
             }
         }
         Ok(())

@@ -1470,6 +1470,7 @@ fn recreate_frozen_ledger(
         privacy_policy_id: encompute_verification::service::sha256_hex(
             &encompute_verification::canonical::canonical_json(&policy)?,
         ),
+        scoping: None,
     };
     let reason = format!(
         "{reason}; the database had lost this ledger: re-created by recovery with its entries and budget unknown (placeholder budget)"

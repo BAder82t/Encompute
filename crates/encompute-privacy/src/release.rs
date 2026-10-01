@@ -19,8 +19,9 @@ use encompute_verification::canonical::canonical_json;
 use encompute_verification::{hex, unhex};
 
 use crate::accountant::gaussian_rho;
-use crate::ledger::{Genesis, Ledger, LedgerView, PrivacyEvent, LEDGER_VERSION};
+use crate::ledger::{Genesis, Ledger, LedgerView, PrivacyEvent, ScopeRef, LEDGER_VERSION};
 use crate::sampler::{discrete_gaussian, Csprng, CSPRNG};
+use crate::scoped::LINKAGE_NONE;
 use crate::tagged;
 
 pub const RECEIPT_VERSION: u32 = 1;
@@ -34,11 +35,37 @@ fn mech_err(m: impl Into<String>) -> Error {
     Error::new(Code::PrivacyMechanism, m)
 }
 
-/// A budgeted source asset a release is charged to.
+/// A ledger a release is charged to: a budgeted source asset (version 1
+/// ledger), or one of the two ledgers a scoped release is charged to, its
+/// scope and its population (`scoped`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Charged {
+    /// The ledger's subject: the asset, or the scope's or population's ID.
     pub asset_id: String,
     pub budget: PrivacyBudget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped: Option<ChargedScope>,
+}
+
+impl Charged {
+    /// A budgeted source asset's own ledger.
+    pub fn asset(asset_id: impl Into<String>, budget: PrivacyBudget) -> Self {
+        Self {
+            asset_id: asset_id.into(),
+            budget,
+            scoped: None,
+        }
+    }
+}
+
+/// The ledger a scoped release is charged to is a scope's or a
+/// population's: its full genesis (fixed by the owners and bound into the
+/// plan the parties approved), and the scope the release is under.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChargedScope {
+    pub genesis: Genesis,
+    pub scope_id: String,
+    pub population_id: String,
 }
 
 /// Everything that identifies one release.
@@ -53,6 +80,11 @@ pub struct ReleaseSpec {
     pub codec: FixedPointCodec,
     pub vector_len: usize,
     pub charged: Vec<Charged>,
+    /// How many sources one privacy unit may appear in: the sensitivity is
+    /// this many times one source's. 1 outside scopes unless declared.
+    pub sources_per_unit: u32,
+    /// The digest of the aggregate's stratum labels, if declared.
+    pub layout_id: Option<String>,
 }
 
 /// Noise variance in code units: `ceil((noise_multiplier * clip_norm *
@@ -90,13 +122,30 @@ pub fn sigma2(m: &DpMechanism, codec: &FixedPointCodec) -> Result<u64> {
 /// (Adding or removing a whole party is not a neighbouring dataset here: it
 /// is visible in the public contributor list.)
 pub fn sensitivity(unit: &PrivacyUnit, m: &DpMechanism, codec: &FixedPointCodec, d: usize) -> u64 {
+    sensitivity_scaled(unit, m, codec, d, 1)
+}
+
+/// [`sensitivity`] for a privacy unit that may appear in up to
+/// `sources_per_unit` of the aggregation's sources (one person registered
+/// with two agencies, say). Each source's contribution moves by at most
+/// the single-source sensitivity, and the unit can move all of them at
+/// once, so the L2 sensitivity of the sum is that many times larger (the
+/// triangle inequality, tight when the moves align), and the cost in rho
+/// the square of it. A count of 0 is treated as 1, never as "free".
+pub fn sensitivity_scaled(
+    unit: &PrivacyUnit,
+    m: &DpMechanism,
+    codec: &FixedPointCodec,
+    d: usize,
+    sources_per_unit: u32,
+) -> u64 {
     let k = encompute_ir::confidentiality::sensitivity_factor(unit, m.sampling_rate);
     let clip = (k * m.clip_norm * codec.scale as f64).ceil() as u64;
     let mut r = (d as f64).sqrt().floor() as u64;
     while r * r < d as u64 {
         r += 1;
     }
-    clip + r
+    (clip + r).saturating_mul(u64::from(sources_per_unit.max(1)))
 }
 
 impl ReleaseSpec {
@@ -112,25 +161,46 @@ impl ReleaseSpec {
     }
 
     pub fn genesis(&self, c: &Charged) -> Genesis {
-        Genesis {
-            version: LEDGER_VERSION,
-            asset_id: c.asset_id.clone(),
-            budget: c.budget.clone(),
-            privacy_policy_id: self.privacy_policy_id.clone(),
+        match &c.scoped {
+            Some(s) => s.genesis.clone(),
+            None => Genesis {
+                version: LEDGER_VERSION,
+                asset_id: c.asset_id.clone(),
+                budget: c.budget.clone(),
+                privacy_policy_id: self.privacy_policy_id.clone(),
+                scoping: None,
+            },
         }
+    }
+
+    /// The L2 sensitivity this release charges `c`, in code units.
+    pub fn sensitivity(&self, c: &Charged) -> u64 {
+        sensitivity_scaled(
+            &c.budget.unit,
+            &self.mechanism,
+            &self.codec,
+            self.vector_len,
+            self.sources_per_unit,
+        )
+    }
+
+    /// The scope reference the reservation in `c`'s ledger carries.
+    fn scope_ref(&self, c: &Charged) -> Option<Box<ScopeRef>> {
+        c.scoped.as_ref().map(|s| {
+            Box::new(ScopeRef {
+                scope_id: s.scope_id.clone(),
+                population_id: s.population_id.clone(),
+                job_id: None,
+                max_sources_per_unit: self.sources_per_unit.max(1),
+                layout_id: self.layout_id.clone(),
+                linkage: LINKAGE_NONE.to_owned(),
+            })
+        })
     }
 
     /// The zCDP cost this release charges `c`.
     pub fn rho(&self, c: &Charged) -> Result<f64> {
-        gaussian_rho(
-            sensitivity(
-                &c.budget.unit,
-                &self.mechanism,
-                &self.codec,
-                self.vector_len,
-            ),
-            sigma2(&self.mechanism, &self.codec)?,
-        )
+        gaussian_rho(self.sensitivity(c), sigma2(&self.mechanism, &self.codec)?)
     }
 
     /// Checks that `r` is this release's receipt for one of its charged
@@ -155,12 +225,7 @@ impl ReleaseSpec {
                     r.asset_id
                 ))
             })?;
-        let s = sensitivity(
-            &c.budget.unit,
-            &self.mechanism,
-            &self.codec,
-            self.vector_len,
-        );
+        let s = self.sensitivity(c);
         let bound = r.version == RECEIPT_VERSION
             && r.event_id == self.event_id(&c.asset_id)
             && r.round_id == self.round_id
@@ -289,10 +354,14 @@ pub fn release(
     let mut ledgers = vec![];
     for c in &charged {
         crate::check_asset_file_name(&c.asset_id)?;
-        let l = Ledger::open(
-            &dir.join(format!("{}.ledger", c.asset_id)),
-            &spec.genesis(c),
-        )?;
+        let path = dir.join(format!("{}.ledger", c.asset_id));
+        // A population or scope exists before any release: it is allocated
+        // by its owners, never created (with a fresh budget) by a release.
+        let l = if c.scoped.is_some() {
+            Ledger::open_existing(&path, &spec.genesis(c))?
+        } else {
+            Ledger::open(&path, &spec.genesis(c))?
+        };
         spec.check(c, l.view())?;
         ledgers.push(l);
         crate::failpoint("after-lock");
@@ -307,15 +376,11 @@ pub fn release(
             round_id: Some(spec.round_id.clone()),
             output: spec.output.clone(),
             mechanism: spec.mechanism.clone(),
-            sensitivity: sensitivity(
-                &c.budget.unit,
-                &spec.mechanism,
-                &spec.codec,
-                spec.vector_len,
-            ),
+            sensitivity: spec.sensitivity(c),
             sigma2: s2,
             vector_len: spec.vector_len,
             rng: rng.label().into(),
+            scope: spec.scope_ref(c),
         })?;
     }
     crate::failpoint("after-reserve");
@@ -350,12 +415,7 @@ pub fn release(
             execution_spec_id: spec.execution_spec_id.clone(),
             unit: c.budget.unit.clone(),
             mechanism: spec.mechanism.clone(),
-            sensitivity: sensitivity(
-                &c.budget.unit,
-                &spec.mechanism,
-                &spec.codec,
-                spec.vector_len,
-            ),
+            sensitivity: spec.sensitivity(c),
             sigma2: s2,
             rho_cost: num(after.rho - before.rho),
             epsilon_cost: num(after.epsilon - before.epsilon),

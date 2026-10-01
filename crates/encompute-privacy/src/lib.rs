@@ -10,12 +10,13 @@ pub mod ledger;
 pub mod rdp;
 pub mod release;
 pub mod sampler;
+pub mod scoped;
 
 pub use accountant::{Cost, PrivacyAccountant, Zcdp};
-pub use ledger::{Checkpoint, Entry, Genesis, Ledger, LedgerView, PrivacyEvent};
+pub use ledger::{Checkpoint, Entry, Genesis, Ledger, LedgerView, PrivacyEvent, ScopeRef, Scoping};
 pub use release::{
-    release, sensitivity, sigma2, verify_privacy_receipt, Charged, PrivacyReceipt, ReleaseSpec,
-    Released,
+    release, sensitivity, sensitivity_scaled, sigma2, verify_privacy_receipt, Charged,
+    ChargedScope, PrivacyReceipt, ReleaseSpec, Released,
 };
 pub use sampler::{discrete_gaussian, Csprng, CSPRNG};
 
@@ -46,7 +47,7 @@ pub fn failpoint(_name: &str) {
 }
 
 /// Asset IDs name ledger files: refuse anything that is not a plain ID.
-pub(crate) fn check_asset_file_name(id: &str) -> Result<()> {
+pub fn check_asset_file_name(id: &str) -> Result<()> {
     encompute_ir::confidentiality::check_id("asset", id)
         .map_err(|e| Error::new(Code::PrivacyLedger, e.message))
 }

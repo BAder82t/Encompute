@@ -303,6 +303,8 @@ fn dir(name: &str) -> PathBuf {
 
 fn release_round(d: &std::path::Path, round: u64) {
     let rs = ReleaseSpec {
+        sources_per_unit: 1,
+        layout_id: None,
         round_id: format!("{round:064x}"),
         output: "update".into(),
         policy_id: Some(h('c')),
@@ -331,6 +333,7 @@ fn release_round(d: &std::path::Path, round: u64) {
                     epsilon: 3.0,
                     delta: 1e-6,
                 },
+                scoped: None,
             })
             .collect(),
     };

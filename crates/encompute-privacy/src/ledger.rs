@@ -26,6 +26,11 @@ use crate::accountant::{self, Cost};
 use crate::tagged;
 
 pub const LEDGER_VERSION: u32 = 1;
+/// Genesis version 2: a population or a scope (see [`Scoping`]). A version 1
+/// genesis serializes exactly as it always did, so no existing ledger's
+/// hashes change; a version 2 genesis always carries its scoping, and a
+/// version 1 never does.
+pub const LEDGER_VERSION_SCOPED: u32 = 2;
 const ENTRY: &str = "encompute.privacy-ledger.v1";
 /// Largest ledger accepted (entries are ~1 KiB).
 const MAX_LEDGER_BYTES: u64 = 64 << 20;
@@ -39,9 +44,80 @@ fn ledger_err(m: impl Into<String>) -> Error {
 #[serde(deny_unknown_fields)]
 pub struct Genesis {
     pub version: u32,
+    /// What the ledger accounts for: an asset's ID (version 1), or the ID
+    /// of the population or scope (version 2).
     pub asset_id: String,
     pub budget: PrivacyBudget,
     pub privacy_policy_id: String,
+    /// Version 2 only: whether this is a population or one of its scopes,
+    /// and what it is bound to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoping: Option<Scoping>,
+}
+
+/// What a version 2 ledger is.
+///
+/// A **population** is the authoritative ledger of every release that
+/// touches one organization's series of datasets (all versions of it), at
+/// one privacy unit: its budget is a hard cap that no scope can raise and
+/// no new version or project resets. A **scope** is a sub-ledger of one
+/// population for one project, purpose and (optionally) program; its
+/// budget is the share the owners allocated. A release charged to a scope
+/// is charged to its population too, and must fit in both.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Scoping {
+    Population {
+        organization: String,
+        series: String,
+    },
+    Scope {
+        population_id: String,
+        /// The population genesis's digest ([`Genesis::digest`]): the
+        /// scope belongs to exactly this population, never a lookalike.
+        population_digest: String,
+        project: String,
+        purpose: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program: Option<String>,
+    },
+}
+
+impl Genesis {
+    /// The genesis's digest: what the first entry chains to, and what a
+    /// scope names its population by.
+    pub fn digest(&self) -> Result<String> {
+        genesis_hash(self)
+    }
+
+    pub fn is_population(&self) -> bool {
+        matches!(self.scoping, Some(Scoping::Population { .. }))
+    }
+
+    pub fn is_scope(&self) -> bool {
+        matches!(self.scoping, Some(Scoping::Scope { .. }))
+    }
+}
+
+/// What a scoped reservation says about itself, recorded in the entry (and
+/// so in the hash chain of both the scope's and the population's ledger).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRef {
+    pub scope_id: String,
+    pub population_id: String,
+    /// The governed job the release belongs to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// How many sources one privacy unit was assumed to span: the
+    /// reservation's sensitivity already includes this factor.
+    pub max_sources_per_unit: u32,
+    /// The digest of the aggregate's stratum labels, if it declares them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_id: Option<String>,
+    /// The record linkage the aggregate performs: always `none` (an
+    /// aggregate links no records, and says so).
+    pub linkage: String,
 }
 
 /// A release's charge (reserve) or completion (commit).
@@ -63,6 +139,10 @@ pub enum PrivacyEvent {
         vector_len: usize,
         /// `csprng` (production) or an unmistakable testing marker.
         rng: String,
+        /// Set when the release is charged to a scope (and its
+        /// population): the same entry is in both ledgers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Box<ScopeRef>>,
     },
     /// The release happened: its output is committed to.
     Commit {
@@ -135,11 +215,13 @@ impl LedgerView {
     /// reservation per event ID and per (round, output), commits only of
     /// open reservations.
     pub fn verify(&self) -> Result<()> {
-        if self.genesis.version != LEDGER_VERSION {
-            return Err(ledger_err(format!(
-                "ledger version {}",
-                self.genesis.version
-            )));
+        match (self.genesis.version, &self.genesis.scoping) {
+            (LEDGER_VERSION, None) | (LEDGER_VERSION_SCOPED, Some(_)) => {}
+            (v, _) => {
+                return Err(ledger_err(format!(
+                    "ledger version {v} (a version 1 genesis has no scoping, a version 2 one always has)"
+                )))
+            }
         }
         self.genesis.budget.validate()?;
         let mut prev = genesis_hash(&self.genesis)?;
@@ -162,8 +244,10 @@ impl LedgerView {
                     event_id,
                     round_id,
                     output,
+                    scope,
                     ..
                 } => {
+                    self.check_scope_ref(e.seq, scope.as_deref())?;
                     if !reserved.insert(event_id.clone()) {
                         return Err(ledger_err(format!("event {event_id} reserved twice")));
                     }
@@ -185,6 +269,33 @@ impl LedgerView {
             prev = e.hash.clone();
         }
         Ok(())
+    }
+
+    /// A reservation's scope reference must fit the ledger it is in: none in
+    /// a plain asset ledger, this scope's (and its population's) in a
+    /// scope, and one of its own scopes in a population.
+    fn check_scope_ref(&self, seq: u64, scope: Option<&ScopeRef>) -> Result<()> {
+        let g = &self.genesis;
+        let bad = |why: &str| ledger_err(format!("ledger entry {seq}: {why}"));
+        match (&g.scoping, scope) {
+            (None, None) => Ok(()),
+            (None, Some(_)) => Err(bad("a scoped reservation is in a plain asset ledger")),
+            (Some(_), None) => Err(bad(
+                "a population or scope ledger holds scoped reservations only",
+            )),
+            (Some(Scoping::Population { .. }), Some(r)) => {
+                if r.population_id != g.asset_id {
+                    return Err(bad("the reservation is for another population"));
+                }
+                Ok(())
+            }
+            (Some(Scoping::Scope { population_id, .. }), Some(r)) => {
+                if r.scope_id != g.asset_id || &r.population_id != population_id {
+                    return Err(bad("the reservation is for another scope"));
+                }
+                Ok(())
+            }
+        }
     }
 
     /// The ledger with `event` appended: chained, verified (one reservation
@@ -275,10 +386,15 @@ impl LedgerView {
     pub fn check(&self, rho: f64, sampling_rate: Option<f64>) -> Result<Cost> {
         let after = self.cost_after(rho, sampling_rate)?;
         if after.epsilon > self.genesis.budget.epsilon {
+            let what = match &self.genesis.scoping {
+                None => "asset",
+                Some(Scoping::Population { .. }) => "population",
+                Some(Scoping::Scope { .. }) => "scope",
+            };
             return Err(Error::new(
                 Code::PrivacyBudgetExceeded,
                 format!(
-                    "RELEASE DENIED: asset {} has spent epsilon {:.4} of {}; this release \
+                    "RELEASE DENIED: {what} {} has spent epsilon {:.4} of {}; this release \
                      would bring it to {:.4} (delta {:e})",
                     self.genesis.asset_id,
                     self.cost()?.epsilon,
@@ -454,6 +570,29 @@ impl Ledger {
             file,
             view,
         })
+    }
+
+    /// Opens and locks the ledger at `path` that must already exist with
+    /// exactly `genesis`: never creates one. A population or scope is
+    /// allocated by its owners; a release that finds none (an unrelated
+    /// project's, a scope never allocated) is refused, not given a fresh
+    /// budget (ENC2719).
+    pub fn open_existing(path: &Path, genesis: &Genesis) -> Result<Self> {
+        match std::fs::metadata(path) {
+            Ok(m) if m.len() > 0 => {}
+            _ => {
+                return Err(Error::new(
+                    Code::GovernancePrivacyScope,
+                    format!(
+                        "no privacy {} {} at {}: it is allocated by its owners, never created by a release",
+                        if genesis.is_population() { "population" } else { "scope" },
+                        genesis.asset_id,
+                        path.display()
+                    ),
+                ))
+            }
+        }
+        Self::open(path, genesis)
     }
 
     pub fn view(&self) -> &LedgerView {

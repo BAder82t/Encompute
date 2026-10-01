@@ -4,6 +4,7 @@
 //! artifact and the consortium's `parties.json`, and joins only a round of
 //! exactly that spec.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -17,7 +18,7 @@ use encompute_runtime::secagg::service::{
 };
 use encompute_runtime::secagg::{
     identity_of, party_key_from_seed, verify_aggregation_receipt, AggregateAsset,
-    AggregationReceipt, AggregationSpec, PartyIdentity, RoundCoordinator,
+    AggregationReceipt, AggregationSpec, PartyIdentity, RoundCoordinator, ScopedBudget,
 };
 
 use crate::attest::TrustArgs;
@@ -233,6 +234,12 @@ pub struct SpecArgs {
     /// -o`): the round is bound to its ID and must provide its mechanisms.
     #[arg(long)]
     plan: Option<PathBuf>,
+    /// The privacy scopes this aggregation is charged to (from `encompute
+    /// privacy scope`): each budgeted asset's releases are charged to its
+    /// scope and its population instead of its own ledger. Bound into the
+    /// spec ID, so every party approves the same allocation.
+    #[arg(long)]
+    scoping: Option<PathBuf>,
 }
 
 impl SpecArgs {
@@ -264,6 +271,10 @@ impl SpecArgs {
         };
         let plan = match &approved {
             Some((id, _)) => plan.with_execution_plan(id),
+            None => plan,
+        };
+        let plan = match &self.scoping {
+            Some(p) => plan.with_scopes(json::<BTreeMap<String, ScopedBudget>>(p)?)?,
             None => plan,
         };
         let mut spec = AggregationSpec::new(plan, ordered)?;
@@ -1042,11 +1053,10 @@ mod tests {
             },
             vector_len: 4,
             charged: ["gradient-a", "gradient-b"]
-                .map(|a| Charged {
-                    asset_id: a.into(),
-                    budget: budget.clone(),
-                })
+                .map(|a| Charged::asset(a, budget.clone()))
                 .to_vec(),
+            sources_per_unit: 1,
+            layout_id: None,
         };
         release(
             &spec,

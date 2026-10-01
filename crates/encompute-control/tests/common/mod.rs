@@ -805,6 +805,7 @@ pub fn reserve(event: &str, sigma2: u64) -> Value {
         sigma2: 4 * sigma2,
         vector_len: 1,
         rng: encompute_privacy::CSPRNG.into(),
+        scope: None,
     })
     .unwrap()
 }

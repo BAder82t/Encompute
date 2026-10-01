@@ -152,6 +152,19 @@ impl fmt::Display for Program {
                     write!(f, " preset \"{level}\"")?;
                 }
             }
+            if let Some(m) = a.max_sources_per_unit {
+                write!(f, " max_sources_per_unit {m}")?;
+            }
+            if let Some(l) = &a.layout {
+                write!(f, " layout [")?;
+                for (i, x) in l.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"{x}\"")?;
+                }
+                write!(f, "]")?;
+            }
             writeln!(f)?;
         }
         Ok(())
@@ -311,6 +324,21 @@ pub fn parse(src: &str) -> Result<Program> {
             } else {
                 None
             };
+            c.skip_ws();
+            let max_sources_per_unit = if c.rest.starts_with("max_sources_per_unit") {
+                c.keyword("max_sources_per_unit")?;
+                c.skip_ws();
+                Some(u32::try_from(c.usize()?).map_err(|_| err(n, "max_sources_per_unit"))?)
+            } else {
+                None
+            };
+            c.skip_ws();
+            let layout = if c.rest.starts_with("layout") {
+                c.keyword("layout")?;
+                Some(c.strings()?)
+            } else {
+                None
+            };
             c.end()?;
             b.aggregate(crate::confidentiality::AggregationRule {
                 output,
@@ -318,6 +346,8 @@ pub fn parse(src: &str) -> Result<Program> {
                 minimum,
                 colluding,
                 dp,
+                max_sources_per_unit,
+                layout,
                 codec: crate::confidentiality::FixedPointCodec {
                     clip_min: clip[0],
                     clip_max: clip[1],

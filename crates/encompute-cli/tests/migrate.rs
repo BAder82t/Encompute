@@ -399,6 +399,7 @@ fn privacy_ledgers() {
                 asset_id: asset.into(),
                 budget: budget.clone(),
                 privacy_policy_id: "ab".repeat(32),
+                scoping: None,
             },
         )
         .unwrap();
@@ -413,6 +414,7 @@ fn privacy_ledgers() {
             sigma2: 1 << 40,
             vector_len: 4,
             rng: "csprng".into(),
+            scope: None,
         })
         .unwrap();
         l.append(PrivacyEvent::Commit {

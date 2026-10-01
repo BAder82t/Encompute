@@ -133,11 +133,10 @@ impl Model {
                     codec: bd.codec,
                     vector_len: bd.vector_len,
                     charged: vec![],
+                    sources_per_unit: bd.max_sources_per_unit.unwrap_or(1),
+                    layout_id: None,
                 };
-                let c = encompute_privacy::Charged {
-                    asset_id: asset.clone(),
-                    budget: b.clone(),
-                };
+                let c = encompute_privacy::Charged::asset(asset.clone(), b.clone());
                 let rho = spec.rho(&c)?;
                 let q = m.sampling_rate;
                 let epsilon = match (rounds, q) {
@@ -329,6 +328,38 @@ impl Model {
             );
             row(&mut s, "function", b.function.name().to_string());
             row(&mut s, "vector", format!("{} values", b.vector_len));
+            if let Some(l) = &b.layout {
+                row(
+                    &mut s,
+                    "layout",
+                    format!(
+                        "{} strata ({}); every contribution names their digest",
+                        l.len(),
+                        l.join(", ")
+                    ),
+                );
+            }
+            if b.dp.is_some() {
+                row(
+                    &mut s,
+                    "linkage",
+                    "none: no record linkage is performed (an aggregate links no records)".into(),
+                );
+                row(
+                    &mut s,
+                    "sources/unit",
+                    match b.max_sources_per_unit {
+                        Some(m) => format!(
+                            "{m}: one privacy unit may appear in up to {m} source{}; its sensitivity is multiplied by {m}",
+                            if m == 1 { "" } else { "s" }
+                        ),
+                        None => format!(
+                            "1 (not declared; in a governed project's scopes every participant, {})",
+                            parties.len()
+                        ),
+                    },
+                );
+            }
             row(
                 &mut s,
                 "encoding",
@@ -411,11 +442,10 @@ impl Model {
                         codec: bd.codec,
                         vector_len: bd.vector_len,
                         charged: vec![],
+                        sources_per_unit: bd.max_sources_per_unit.unwrap_or(1),
+                        layout_id: None,
                     };
-                    let c = encompute_privacy::Charged {
-                        asset_id: asset.clone(),
-                        budget: b.clone(),
-                    };
+                    let c = encompute_privacy::Charged::asset(asset.clone(), b.clone());
                     spec.rho(&c).and_then(|rho| {
                         let one = encompute_privacy::ledger::cost_of(&[(rho, m.sampling_rate)], b)?;
                         let n = encompute_privacy::ledger::affordable(rho, m.sampling_rate, b)?;
@@ -611,7 +641,43 @@ pub fn privacy_budget_report(dir: &std::path::Path, asset: Option<&str>) -> Resu
         let section = |s: &mut String, t: &str| {
             let _ = write!(s, "\n{t}\n{}\n", "─".repeat(40));
         };
-        section(&mut s, &format!("Asset {}", g.asset_id));
+        let heading = match &g.scoping {
+            None => "Asset",
+            Some(encompute_privacy::Scoping::Population { .. }) => "Population",
+            Some(encompute_privacy::Scoping::Scope { .. }) => "Scope",
+        };
+        section(&mut s, &format!("{heading} {}", g.asset_id));
+        match &g.scoping {
+            Some(encompute_privacy::Scoping::Population {
+                organization,
+                series,
+            }) => {
+                let _ = writeln!(
+                    s,
+                    "  {:<14}{organization}'s series {series}; hard cap rho {:.6}",
+                    "of",
+                    encompute_privacy::accountant::rho_cap(&g.budget)?
+                );
+            }
+            Some(encompute_privacy::Scoping::Scope {
+                population_id,
+                project,
+                purpose,
+                program,
+                ..
+            }) => {
+                let _ = writeln!(
+                    s,
+                    "  {:<14}population {population_id}; project {project}, purpose {purpose}{}",
+                    "of",
+                    program
+                        .as_ref()
+                        .map(|p| format!(", program {p}"))
+                        .unwrap_or_default()
+                );
+            }
+            None => {}
+        }
         let _ = writeln!(s, "  {:<14}{}", "unit", g.budget.unit);
         let _ = writeln!(
             s,
