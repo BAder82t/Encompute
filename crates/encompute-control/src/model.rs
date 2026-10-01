@@ -743,6 +743,11 @@ pub struct RegisterEvaluator {
     /// Worker threads the evaluator uses for one job's gates.
     #[serde(default)]
     pub max_parallel_gates: Option<i32>,
+    /// Where it runs. Its own claim: recorded as self-declared, and never
+    /// enough for a production deployment; a person who is a security
+    /// admin of its operator declares it (`location-declarations`).
+    #[serde(default)]
+    pub location: Option<crate::ops::placement::LocationInput>,
 }
 
 #[derive(Debug, Deserialize)]

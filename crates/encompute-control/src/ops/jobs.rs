@@ -494,14 +494,18 @@ fn actor_label(c: &mut impl GenericClient, ctx: &Ctx, actor: &str) -> Result<Str
 }
 
 impl Control {
-    fn catalog(&self, c: &mut impl GenericClient) -> Result<BackendCatalog> {
+    /// What the deployment offers. A standard project counts only the
+    /// platform's evaluators: an operator-owned one is scheduled for
+    /// governed jobs that admit it, never for a standard job.
+    fn catalog(&self, c: &mut impl GenericClient, governed: bool) -> Result<BackendCatalog> {
         let backends: Vec<String> = c
             .query(
-                // What the deployment offers (a draining or briefly silent
-                // evaluator does not change which plans are possible;
-                // scheduling checks health).
-                "SELECT DISTINCT jsonb_array_elements_text(backends) FROM evaluators",
-                &[],
+                // (A draining or briefly silent evaluator does not change
+                // which plans are possible; scheduling checks health.)
+                "SELECT DISTINCT jsonb_array_elements_text(e.backends)
+                   FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                  WHERE $1 OR s.organization_id IS NULL",
+                &[&governed],
             )
             .map_err(db_err)?
             .iter()
@@ -602,7 +606,7 @@ impl Control {
         };
         let pctx = PlanningContext {
             profile: Profile::Standard,
-            catalog: self.catalog(&mut *c)?,
+            catalog: self.catalog(&mut *c, project.governed())?,
             infrastructure: Infrastructure {
                 evaluators: vec![],
                 tees: vec![],
@@ -2408,8 +2412,11 @@ impl Control {
                             (SELECT COALESCE(sum(GREATEST(x.estimated_gates, 1)), 0)::bigint FROM jobs x
                               WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running')),
                             e.logical_cores, e.max_parallel_gates
-                       FROM evaluators e
-                      WHERE e.status = 'ready'
+                       FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                      WHERE e.status = 'ready' AND s.status = 'active'
+                        -- An operator's own evaluator runs only the governed
+                        -- jobs whose placement admits it.
+                        AND s.organization_id IS NULL
                         AND e.backends ? $1 AND e.profiles ? $2
                         AND e.last_heartbeat > now() - make_interval(secs => $3)
                       ORDER BY e.id",
@@ -3102,6 +3109,12 @@ impl Control {
                 }
             })?
             .get(0);
+            // Its operator (the organization of its service account) and
+            // the location it reports: recorded as its own, self-declared
+            // claim, and a changed location loses any evidence.
+            let operator = super::placement::operator_of(t, &r.id)?
+                .unwrap_or_else(|| PLATFORM_ORG.to_owned());
+            self.register_location(t, ctx, &r.id, &operator, r.location.as_ref())?;
             // An evaluator registers when its process starts: a job it was
             // running and never reported died with the old process. It
             // fails now (never replayed) rather than staying "running"
@@ -3137,7 +3150,7 @@ impl Control {
             }
             let mut d = ctx
                 .draft("evaluator.registered", "evaluator", &r.id, Outcome::Succeeded)
-                .org(PLATFORM_ORG)
+                .org(&operator)
                 .r#ref("backends", r.backends.join("+"))
                 .r#ref("profiles", r.profiles.join("+"))
                 .r#ref("openfhe", r.openfhe_version.clone())
@@ -3216,20 +3229,60 @@ impl Control {
         }
     }
 
+    /// The platform's operators and admins list every evaluator; an
+    /// organization's admins and security admins list the ones it operates.
     pub fn list_evaluators(&self, ctx: &Ctx) -> Result<Value> {
-        require(
-            &ctx.principal,
-            PLATFORM_ORG,
-            &[Role::Operator, Role::OrganizationAdmin],
-            "listing evaluators",
-        )?;
+        let platform = ctx
+            .principal
+            .any_role(PLATFORM_ORG, &[Role::Operator, Role::OrganizationAdmin]);
+        let orgs: Vec<String> = ctx
+            .principal
+            .organizations()
+            .into_iter()
+            .filter(|o| {
+                ctx.principal
+                    .any_role(o, &[Role::OrganizationAdmin, Role::SecurityAdmin])
+            })
+            .collect();
+        // Anyone else is refused as ever: not found for a tenant, forbidden
+        // for a platform member without the role.
+        let refused = || {
+            require(
+                &ctx.principal,
+                PLATFORM_ORG,
+                &[Role::Operator, Role::OrganizationAdmin],
+                "listing evaluators",
+            )
+            .err()
+            .unwrap_or_else(|| forbidden("listing evaluators needs operator or organization_admin"))
+        };
+        if !platform && orgs.is_empty() {
+            return Err(refused());
+        }
         let mut c = self.db.conn()?;
+        if !platform {
+            let operates = c
+                .query_opt(
+                    "SELECT 1 FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                      WHERE s.organization_id = ANY($1) LIMIT 1",
+                    &[&orgs],
+                )
+                .map_err(db_err)?;
+            if operates.is_none() {
+                return Err(refused());
+            }
+        }
         Ok(Value::Array(
             c.query(
-                "SELECT id, url, backends, profiles, openfhe_version, capacity, status,
-                        cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates
-                   FROM evaluators ORDER BY id",
-                &[],
+                "SELECT e.id, e.url, e.backends, e.profiles, e.openfhe_version, e.capacity, e.status,
+                        e.cpu_model, e.logical_cores, e.memory_bytes, e.benchmark_profile, e.max_parallel_gates,
+                        s.organization_id, e.location, e.location_evidence,
+                        e.location_evidence_digest,
+                        floor(extract(epoch FROM e.location_valid_until))::bigint
+                   FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                  WHERE $1 OR s.organization_id = ANY($2)
+                  ORDER BY e.id",
+                &[&platform, &orgs],
             )
                 .map_err(db_err)?
                 .iter()
@@ -3241,7 +3294,12 @@ impl Control {
                            "logical_cores": r.get::<_, Option<i32>>(8),
                            "memory_bytes": r.get::<_, Option<i64>>(9),
                            "benchmark_profile": r.get::<_, Option<String>>(10),
-                           "max_parallel_gates": r.get::<_, Option<i32>>(11)})
+                           "max_parallel_gates": r.get::<_, Option<i32>>(11),
+                           "operator": r.get::<_, Option<String>>(12).unwrap_or_else(|| PLATFORM_ORG.to_owned()),
+                           "location": r.get::<_, Option<Value>>(13),
+                           "location_evidence": r.get::<_, String>(14),
+                           "location_evidence_digest": r.get::<_, Option<String>>(15),
+                           "location_valid_until": r.get::<_, Option<i64>>(16)})
                 })
                 .collect(),
         ))

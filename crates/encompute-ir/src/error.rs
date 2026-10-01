@@ -194,6 +194,8 @@ pub enum Code {
     GovernanceRevocationHead,
     /// A checkpoint witness refused: it does not witness the control plane's stored checkpoint of the project at that size (another size, partition or root), so it cannot count towards it (ENC2718).
     GovernanceCheckpointWitness,
+    /// A location declaration or registration refused: the caller is not a person who is a security admin of the evaluator's operator organization, the location is not one the locations table knows (or its jurisdiction or zone is inconsistent), an attested location is not replaced by a declaration, or location evidence is stale or too weak for the claim (ENC2723).
+    GovernanceLocationEvidence,
 }
 
 impl Code {
@@ -278,13 +280,14 @@ impl Code {
             Code::GovernanceAuditorSeparation => "ENC2716",
             Code::GovernanceRevocationHead => "ENC2717",
             Code::GovernanceCheckpointWitness => "ENC2718",
+            Code::GovernanceLocationEvidence => "ENC2723",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 79] = [
+    pub const ALL: [Code; 80] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -364,6 +367,7 @@ impl Code {
         Code::GovernanceAuditorSeparation,
         Code::GovernanceRevocationHead,
         Code::GovernanceCheckpointWitness,
+        Code::GovernanceLocationEvidence,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {

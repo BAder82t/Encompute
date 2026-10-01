@@ -385,10 +385,11 @@ impl Control {
         let platform = org == PLATFORM_ORG;
         match (r.kind, platform) {
             (ServiceKind::Control, _) => return Err(bad("the control plane registers itself")),
-            (ServiceKind::Evaluator | ServiceKind::Secagg, false) => {
-                return Err(bad(
-                    "evaluators and SecAgg coordinators are platform services",
-                ))
+            // An organization may operate evaluators of its own (it is
+            // then their operator); the platform's scheduler places only
+            // the governed jobs whose placement admits it on them.
+            (ServiceKind::Secagg, false) => {
+                return Err(bad("SecAgg coordinators are platform services"))
             }
             _ => {}
         }

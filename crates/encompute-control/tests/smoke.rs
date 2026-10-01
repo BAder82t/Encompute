@@ -19,8 +19,8 @@ fn world_builds_and_migrations_are_idempotent() {
         None,
     );
     assert_eq!(p["members"], json!(["hospital-a", "modelco"]));
-    assert_eq!(t.control.db.migrate().unwrap(), 13);
-    assert_eq!(t.control.db.schema_version().unwrap(), 13);
+    assert_eq!(t.control.db.migrate().unwrap(), 17);
+    assert_eq!(t.control.db.schema_version().unwrap(), 17);
     let (s, _) = t.call(&As::Nobody, "GET", "/live", None);
     assert_eq!(s, 200);
     let (s, _) = t.call(&As::Nobody, "GET", "/ready", None);

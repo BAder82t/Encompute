@@ -32,6 +32,7 @@
 //! | POST | `/v1/jobs/{id}/cancel`, `/approve`, `/start`, `/complete`, `/receipt` | |
 //! | POST, GET | `/v1/evaluators` | |
 //! | POST | `/v1/evaluators/{id}/status` | |
+//! | POST | `/v1/evaluators/{id}/location-declarations` | a person who is a security admin of the evaluator's operator declares where it runs |
 //! | GET | `/v1/privacy/{asset}`, `/v1/privacy/{asset}/ledger` | |
 //! | POST | `/v1/privacy/{asset}/events` | |
 //! | POST | `/v1/privacy/{asset}/spenders` | owners authorize a SecAgg service |
@@ -133,7 +134,8 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceLinkageMismatch
         | Code::GovernanceReleaseTicket
         | Code::GovernanceCustody
-        | Code::GovernanceAuditorSeparation => 403,
+        | Code::GovernanceAuditorSeparation
+        | Code::GovernanceLocationEvidence => 403,
         Code::NotFound => 404,
         Code::Conflict
         | Code::PrivacyBudgetExceeded
@@ -548,6 +550,9 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "evaluators", id, "status"]) => {
             ok(control.evaluator_status(ctx, id, parse(&r.body)?)?)
         }
+        ("POST", ["v1", "evaluators", id, "location-declarations"]) => {
+            created(control.declare_evaluator_location(ctx, id, parse(&r.body)?)?)
+        }
 
         ("GET", ["v1", "privacy", asset]) => ok(control.privacy_view(ctx, asset)?),
         ("GET", ["v1", "privacy", asset, "ledger"]) => ok(control.privacy_export(ctx, asset)?),
@@ -706,6 +711,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/evaluators"),
     ("GET", "/v1/evaluators"),
     ("POST", "/v1/evaluators/{}/status"),
+    ("POST", "/v1/evaluators/{}/location-declarations"),
     ("GET", "/v1/privacy/{}"),
     ("GET", "/v1/privacy/{}/ledger"),
     ("POST", "/v1/privacy/{}/events"),

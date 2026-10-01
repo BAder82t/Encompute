@@ -292,7 +292,13 @@ fn the_governance_codes_are_the_2701_block() {
         .map(|c| c.as_str())
         .filter(|s| s.starts_with("ENC27"))
         .collect();
-    let expected: Vec<String> = (2701..=2718).map(|n| format!("ENC{n}")).collect();
+    // 2719..=2722 are the privacy-scope block of the parallel P5 work and
+    // 2723..=2726 residency and operators (P6); the merged block is
+    // 2701..=2726.
+    let expected: Vec<String> = (2701..=2718)
+        .chain(2723..=2723)
+        .map(|n| format!("ENC{n}"))
+        .collect();
     assert_eq!(block, expected);
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/errors.md"),
@@ -312,6 +318,7 @@ fn the_governance_codes_are_the_2701_block() {
     assert_eq!(Code::GovernanceAuditorSeparation.as_str(), "ENC2716");
     assert_eq!(Code::GovernanceRevocationHead.as_str(), "ENC2717");
     assert_eq!(Code::GovernanceCheckpointWitness.as_str(), "ENC2718");
+    assert_eq!(Code::GovernanceLocationEvidence.as_str(), "ENC2723");
 }
 
 fn with_forms(forms: &str) -> String {

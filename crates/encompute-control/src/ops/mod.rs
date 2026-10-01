@@ -7,6 +7,7 @@ mod custody;
 pub(crate) mod derived;
 mod governance;
 mod jobs;
+pub mod placement;
 mod policies;
 mod project_log;
 mod retention;

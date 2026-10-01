@@ -665,6 +665,10 @@ impl W {
                 format!("/v1/evaluators/{}/status", self.evaluator.id),
                 Some(json!({"status": "draining"})),
             ),
+            "/v1/evaluators/{}/location-declarations" => (
+                format!("/v1/evaluators/{}/location-declarations", self.evaluator.id),
+                Some(json!({"provider": "gcp", "region": "europe-west3"})),
+            ),
             "/v1/privacy/{}/events" => (
                 format!("/v1/privacy/{}/events", self.ben_asset),
                 Some(reserve("audit-1", 1_000_000)),
@@ -784,6 +788,10 @@ const NOT_PROJECT_ROUTES: &[(&str, &str)] = &[
     ("/v1/jobs/{}/receipt", "the scheduled evaluator"),
     ("/v1/evaluators", "platform evaluators"),
     ("/v1/evaluators/{}/status", "platform evaluators"),
+    (
+        "/v1/evaluators/{}/location-declarations",
+        "the operator's security admins",
+    ),
     ("/v1/audit/checkpoints", "platform operators and auditors"),
     ("/v1/messages", "services"),
 ];
