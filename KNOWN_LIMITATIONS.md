@@ -189,9 +189,67 @@ Related: [support matrix](docs/support-matrix.md),
   in memory until the evaluator restarts.
 - **Trust Graph queries are quadratic** in the number of records.
 - **The control plane bounds privacy reservations, but does not recompute
-  them.** A reservation whose declared sensitivity is below what its own
-  noise implies is refused, but its noise multiplier and sampling rate are
-  the coordinator's declaration.
+  them, except for a governed job's.** A reservation against an asset
+  whose declared sensitivity is below what its own noise implies is
+  refused, but its noise multiplier and sampling rate are the
+  coordinator's declaration. A governed job's release is different: the
+  control plane computes it from the job's program (sensitivity, noise and
+  mechanism), reserves it itself when the job starts, and refuses a
+  coordinator's report that differs.
+- **Privacy scopes and populations bound what the platform records, not
+  what a coordinator releases.** The release is made off the platform by a
+  SecAgg coordinator: the control plane reserves the job's cost before the
+  job runs and refuses one that no scope or population can pay for, but a
+  coordinator that releases without reporting is stopped only by what the
+  parties check themselves (a coordinator's attestation bound to the plan,
+  and the privacy receipts naming the scope and population ledgers). The
+  noise is central: the coordinator sees the sum before noise.
+- **A coordinator that releases something larger and never reports it is
+  not caught by the control plane.** It reserves the cost it computes from
+  the job's program and refuses a job as unaccounted if no commit is
+  reported, but it cannot see a release: what the coordinator actually
+  releases depends on the attested coordinator and the SecAgg parties'
+  checks.
+- **A population's exhaustion is visible through failure text.** A project
+  whose job fails with "population ... has spent" learns that other
+  projects (or versions) used the series' budget, though not how or which.
+  Totals of a scope are shared with the project's members by design.
+- **Creating a population changes asset-ledger behaviour for its series.**
+  Once an organization creates a population, a reservation against the
+  per-asset ledger of any asset of that series is refused (ENC2719, also
+  outside governed projects): a series is accounted by its population or by
+  its assets' own ledgers, never both. Series without a population are
+  unchanged.
+- **Four eyes means two principals, not two humans.** Scope and population
+  approvals compare principal IDs (like job approvals and ADR-023's
+  assumption of one identity per person): one person holding two accounts
+  passes. A superseding population gives a series a fresh cap by the
+  owners' deliberate, four-eyed act; the old population's spending stays on
+  record.
+- **A scope's `max_sources_per_unit` is the owners' claim.** The
+  sensitivity is multiplied by the number of sources one privacy unit may
+  appear in; the control plane does not know how many agencies a person
+  is registered with. Undeclared, a scoped release assumes every
+  participant, which is safe and can waste budget. A person in more
+  sources than declared is charged too little: the declaration is part of
+  the program every owner authorizes. Across populations the same person
+  is charged in each (that is the multiplication), so budgets of
+  different agencies still do not compose against one another.
+- **A reserved release is never refunded.** A governed job reserves its
+  differential-privacy release when it starts, before any noise exists. A
+  job that then fails, is cancelled or is revoked keeps its charge (the
+  release may have happened, and the control plane cannot tell); budget is
+  only ever spent.
+- **A population's cap is allocated once.** It is never raised, lowered or
+  closed, and there is no way to withdraw a proposed scope (a mistaken
+  proposal stays proposed; propose another with the right cap). Raising a
+  cap needs a new series.
+- **Recovery cannot rebuild a population or scope whose rows the database
+  lost.** A missing ledger is refused at start and a frozen one stays
+  frozen; but `recover` re-creates a frozen placeholder only for an asset's
+  ledger, so a lost population or scope needs its rows restored from a
+  backup that holds them (the governance log's checkpoint still refuses
+  every older state).
 - **A key broker without a generation mark can be rolled back to an older
   authenticated copy.** The state file is authenticated under a key derived
   from the KEK, so an edited file does not open. A governed production

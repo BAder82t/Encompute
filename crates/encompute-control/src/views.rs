@@ -11,7 +11,7 @@
 //! | owner authorizations | real approvers | (organization, role, time) and a pseudonym | same |
 //! | job spec, program, purpose, `governance_id`, state, evaluator | full | yes | yes |
 //! | grant, evaluator URL and receipt key, initiator, actors | submitter | labels | labels |
-//! | privacy ledger | full | none yet | none yet |
+//! | privacy scope ledger | full | totals | totals and the entries |
 //! | audit | own organization (others' people labelled) | the project's events | the project's events |
 //!
 //! "Owner" is the organization a record belongs to: the submitter of a
@@ -24,8 +24,11 @@
 //! within a project (two approvals by one person are seen to be one
 //! person's), unlinkable across projects, and not confirmable by someone
 //! who learns a principal ID. Evaluators see a
-//! governed job's grant and nothing else. Privacy ledgers stay the owner's
-//! until privacy scopes give projects their own ledgers.
+//! governed job's grant and nothing else. An asset's privacy ledger stays
+//! the owner's. A project's privacy scope has a ledger of its own: the other
+//! members see its totals (cap, spent, remaining, entry count and root),
+//! the auditor organizations also its entries, and nobody but the owner the
+//! population it belongs to.
 
 use std::collections::BTreeMap;
 
@@ -78,6 +81,10 @@ pub enum Shown {
     Labels,
     OwnOrganization,
     ProjectEvents,
+    /// A scope's cap, spending, entry count and root: never an entry.
+    Totals,
+    /// The totals, and the scope's entries to read.
+    TotalsAndEntries,
 }
 
 /// The table: (data, owner, other participants, auditor organization).
@@ -111,8 +118,8 @@ pub const TABLE: [(Data, Shown, Shown, Shown); 8] = [
     (
         Data::PrivacyLedger,
         Shown::Full,
-        Shown::Hidden,
-        Shown::Hidden,
+        Shown::Totals,
+        Shown::TotalsAndEntries,
     ),
     (
         Data::Audit,
@@ -321,6 +328,16 @@ mod tests {
         ] {
             assert_eq!(TABLE.iter().filter(|(x, ..)| *x == d).count(), 1, "{d:?}");
         }
+        // A scope's ledger: totals to the project's other members, totals
+        // and the entries to its auditor organizations.
+        assert_eq!(
+            shown(Data::PrivacyLedger, Audience::Participant),
+            Shown::Totals
+        );
+        assert_eq!(
+            shown(Data::PrivacyLedger, Audience::Auditor),
+            Shown::TotalsAndEntries
+        );
         // Storage is never shared; approvers are never shared as identities.
         for a in [Audience::Participant, Audience::Auditor] {
             assert_eq!(shown(Data::AssetStorage, a), Shown::Hidden);

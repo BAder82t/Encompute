@@ -839,6 +839,7 @@ dependencies = [
  "encompute-keybroker",
  "encompute-planner",
  "encompute-privacy",
+ "encompute-secagg",
  "encompute-trust",
  "encompute-verification",
  "getrandom 0.2.17",

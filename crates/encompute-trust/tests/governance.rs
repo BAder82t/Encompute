@@ -58,6 +58,7 @@ fn body() -> AuthorizationV2 {
             max_outputs_per_job: None,
             placement: None,
             project_placement_digest: None,
+            max_sources_per_unit: None,
         },
         per_job_four_eyes: false,
         valid_from: 1_000,
@@ -1025,4 +1026,24 @@ fn an_owners_placement_is_signed_and_checked() {
         ..PlacementConstraints::default()
     });
     assert!(bad.check_probing_limits().is_err());
+}
+
+/// The optional `limits.max_sources_per_unit` is skipped when absent: a
+/// document that names no such limit serializes, and so hashes, exactly as
+/// before (existing AuthorizationIds are unchanged), and one that names it
+/// has another ID.
+#[test]
+fn max_sources_per_unit_does_not_change_existing_authorization_ids() {
+    let b = body();
+    let json = serde_json::to_string(&b.limits).unwrap();
+    assert_eq!(
+        json,
+        r#"{"max_executions":10,"max_releases":10,"max_subjects_per_job":1000,"max_evaluations_per_subject":1}"#
+    );
+    // The document as an earlier release serialized it parses to the same body.
+    let old: AuthorizationV2 = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+    assert_eq!(old.id(), b.id());
+    let mut pinned = b.clone();
+    pinned.limits.max_sources_per_unit = Some(1);
+    assert_ne!(pinned.id(), b.id());
 }

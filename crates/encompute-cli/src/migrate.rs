@@ -394,7 +394,16 @@ fn ledger_version(kind: Kind, path: &Path, b: &[u8]) -> Result<u32> {
     let first = b.split(|&c| c == b'\n').next().unwrap_or_default();
     let g: Value =
         serde_json::from_slice(first).map_err(|e| corrupt(kind, path, format!("genesis: {e}")))?;
-    version_of(kind, path, g.get("version").unwrap_or(&Value::Null))
+    let v = version_of(kind, path, g.get("version").unwrap_or(&Value::Null))?;
+    // A population's or scope's genesis (version 2) is a current ledger
+    // format like a per-asset one (version 1): nothing to migrate.
+    Ok(
+        if v == encompute_runtime::dp::ledger::LEDGER_VERSION_SCOPED {
+            encompute_runtime::dp::ledger::LEDGER_VERSION
+        } else {
+            v
+        },
+    )
 }
 
 fn detect_file(path: &Path, b: &[u8]) -> Result<(Kind, u32)> {

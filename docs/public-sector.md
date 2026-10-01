@@ -256,6 +256,20 @@ readable by its members and auditors with proofs, members countersign
 its checkpoints, and each owner signs the revocations it made, so an
 evidence bundle cannot silently omit one.
 
+**Phase 5, privacy scopes and aggregate mode (complete).**
+Differential privacy in a governed project is charged to a scope, a share
+of the population of the source's dataset series, so a new version or a
+new project never resets the budget. The population's cap is the
+authority: the owners allocate scopes with four eyes, a release must fit
+in the scope and the population, and a project with no scope cannot spend.
+A governed job that releases a differential-privacy aggregate reserves its
+own release in every source's scope when it starts, and fails if a scope
+or the population cannot pay for it. An aggregate states how many sources
+one person may appear in (the sensitivity is multiplied by it) and the
+strata it sums, and says that it links no records. Scopes and populations
+are checkpointed in the governance log like any ledger, so a restored
+older one is refused.
+
 **Phase 8, the cross-agency report, `explain --governance` and the
 evidence bundle (complete).** `encompute governance export` fetches a governed
 job's bundle (one `<project>-<job>.encgov.json`: the trust graph, the

@@ -1,0 +1,20 @@
+encompute 0.1
+program surveillance precision 0.001 purpose "notifiable-disease-surveillance-2027"
+party "ministry" "Ministry of Health"
+party "region-n" "North Regional Authority"
+party "region-s" "South Regional Authority"
+party "region-e" "East Regional Authority"
+party "region-w" "West Regional Authority"
+asset "counts-n" dataset owners ["region-n"] readers ["ministry"] purposes ["notifiable-disease-surveillance-2027"] release aggregate_only privacy unit "patient" epsilon 1.0 delta 1e-6
+asset "counts-s" dataset owners ["region-s"] readers ["ministry"] purposes ["notifiable-disease-surveillance-2027"] release aggregate_only privacy unit "patient" epsilon 1.0 delta 1e-6
+asset "counts-e" dataset owners ["region-e"] readers ["ministry"] purposes ["notifiable-disease-surveillance-2027"] release aggregate_only privacy unit "patient" epsilon 1.0 delta 1e-6
+asset "counts-w" dataset owners ["region-w"] readers ["ministry"] purposes ["notifiable-disease-surveillance-2027"] release aggregate_only privacy unit "patient" epsilon 1.0 delta 1e-6
+%0 = input "n" [-1.0, 1.0] asset "counts-n" : secret vector<6>
+%1 = input "s" [-1.0, 1.0] asset "counts-s" : secret vector<6>
+%2 = input "e" [-1.0, 1.0] asset "counts-e" : secret vector<6>
+%3 = input "w" [-1.0, 1.0] asset "counts-w" : secret vector<6>
+%4 = add %0, %1 : secret vector<6>
+%5 = add %4, %2 : secret vector<6>
+%6 = add %5, %3 : secret vector<6>
+output "weekly_counts" = %6 to "ministry"
+aggregate "weekly_counts" sum minimum 3 colluding 1 clip [-1.0, 1.0] scale 256 modulus 40 dp discrete_gaussian clip_norm 1.0 noise_multiplier 40.0 max_sources_per_unit 2 layout ["0-4", "5-17", "18-39", "40-64", "65-79", "80-plus"]

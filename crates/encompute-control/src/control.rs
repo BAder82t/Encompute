@@ -84,6 +84,8 @@ pub struct Control {
     pub bundle_max_events: std::sync::atomic::AtomicU64,
     /// Bundles being built now.
     pub bundle_slots: std::sync::atomic::AtomicUsize,
+    /// Privacy population and scope allocations per caller a minute.
+    pub scope_limit: crate::ops::RateLimit,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -223,6 +225,7 @@ impl Control {
             bundle_limit: crate::ops::RateLimit::new("governance bundle", crate::ops::BUNDLE_RATE),
             bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
             bundle_slots: 0.into(),
+            scope_limit: crate::ops::RateLimit::new("privacy scope", crate::ops::SCOPE_RATE),
         };
         c.ensure_self_registered()?;
         let existed = match opened {
@@ -391,6 +394,7 @@ impl Control {
             bundle_limit: crate::ops::RateLimit::new("governance bundle", crate::ops::BUNDLE_RATE),
             bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
             bundle_slots: 0.into(),
+            scope_limit: crate::ops::RateLimit::new("privacy scope", crate::ops::SCOPE_RATE),
         })
     }
 
@@ -1417,6 +1421,15 @@ impl Control {
         report("schedule", self.schedule_pending());
         report("retention", self.expire_assets().map(|_| ()));
         report("anchor", self.checkpoint_log());
+        // Spends and starts that committed but failed to anchor.
+        // (every fifth pass: it reads every ledger's entry count)
+        static PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if PASSES
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(5)
+        {
+            report("ledgers", self.anchor_pending_ledgers().map(|_| ()));
+        }
         report("outbox", self.deliver_outbox());
         report(
             "nonces",
@@ -1482,6 +1495,7 @@ fn recreate_frozen_ledger(
         privacy_policy_id: encompute_verification::service::sha256_hex(
             &encompute_verification::canonical::canonical_json(&policy)?,
         ),
+        scoping: None,
     };
     let reason = format!(
         "{reason}; the database had lost this ledger: re-created by recovery with its entries and budget unknown (placeholder budget)"

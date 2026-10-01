@@ -556,6 +556,61 @@ As built (retention, phase 3):
   and inherits nothing. Spend composes at the population and
   privacy-unit identity.
 
+**Phase 5 as built (complete).**
+
+- *Ledgers.* Ledger genesis version 2 describes a population (organization
+  and series) or a scope (its population, by the population genesis's
+  digest, project, purpose and optional program). A version 1 genesis and
+  its entries serialize exactly as before, so no existing hash changes. A
+  scope has the population's privacy unit and delta and an epsilon no
+  larger than the population's; each cap is stated in epsilon at a delta and
+  enforced as the zCDP rho it converts to (`rho_cap`), which composes by
+  addition across every scope. A reservation carries a scope reference
+  (scope, population, job, sources per unit, layout, linkage `none`).
+  The same file-ledger code serves coordinators: a scoped release locks
+  every ledger it charges (scope and population ledgers, in one fixed
+  order), checks them all, then reserves, and never creates a scope or
+  population.
+- *Composition.* A scoped release is reserved in the scope **and** its
+  population, and must fit in both; the population is checked first. Scopes
+  may add up to more than the population (the owners over-allocate on
+  purpose), and then the population refuses first. Concurrent spends
+  across scopes serialize on the population's row, and across control
+  planes on the database's row locks.
+- *Control plane.* Populations and scopes keep their ledgers in the asset
+  ledgers' tables (under `population:<id>` and `scope:<id>`), so
+  checkpoints, the rollback checks, the freeze and recovery are the ones
+  that exist. Scope allocation is propose and approve by two distinct
+  security admins of the owning organization (never an auditor or a
+  service account) and is an event of the project's log. A scope's ID is 32
+  random bytes so an owner's authorization may pin it (`privacy_scope_id`).
+  Lock order: the job, then scope rows (sorted), then population rows
+  (sorted), then the governance head, then the audit head.
+- *Governed jobs.* Scheduling and start check that every source's series
+  has a population and an active scope for the job's project, purpose and
+  program (the pinned one if the owner's authorization names a scope) and
+  that both afford the release; start reserves the release in each scope
+  and population, once, before the job runs, and the job is failed and
+  anchored as ended when it cannot. The control plane computes the release
+  itself from the job's program (the aggregation plan with its scopes, the
+  job as the release's identity): a coordinator reporting the same release
+  is the same entry, and an under-declared or otherwise different one is
+  refused.
+- *Aggregate mode.* `max_sources_per_unit` multiplies the sensitivity (the
+  default when scoped is every participant; the cost is quadratic in it),
+  `layout` binds the strata into every contribution, and a reservation
+  states linkage `none`. v1 uses secure aggregation, not CKKS.
+- *Review follow-ups.* A party's layout digest comes from its own labels. A
+  program declaring fewer sources per unit than participants needs every
+  owner's `limits.max_sources_per_unit` pin (an optional limit, absent from
+  existing AuthorizationIds). A population is proposed and approved by two
+  people for a registered series and may be superseded for new scopes; its
+  ledger is created at approval. A job succeeds only if each reserved
+  release has a reported commit; an unanchored start is retried and swept.
+- *Not built:* the SecAgg coordinator is not scheduled by the control plane
+  (the control plane authorizes and accounts; the round runs off the
+  platform), and a cap is allocated once and never changed.
+
 ### 11. Auditor exclusivity (D9)
 
 - The auditor role is exclusive of every other role, in every

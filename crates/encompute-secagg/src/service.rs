@@ -532,6 +532,9 @@ pub fn join(
 /// ledger checkpoint it saw, and a verifier for an attested coordinator.
 #[derive(Default)]
 pub struct PartyState<'a> {
+    /// The stratum labels of this party's own values (see
+    /// [`crate::round::JoinOptions::labels`]).
+    pub labels: Option<Vec<String>>,
     pub attestation: Option<AttestationRecord>,
     pub last_sequence: Option<u64>,
     pub seen: Option<encompute_privacy::Checkpoint>,
@@ -571,6 +574,7 @@ pub fn join_checked(
         identity,
         values,
         crate::round::JoinOptions {
+            labels: state.labels,
             attestation: state.attestation,
             last_sequence: state.last_sequence,
             ledger,

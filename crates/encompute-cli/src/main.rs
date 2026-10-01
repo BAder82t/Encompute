@@ -142,7 +142,7 @@ enum Cmd {
     /// Secure aggregation rounds: coordinate, contribute, verify.
     Aggregate {
         #[command(subcommand)]
-        cmd: aggregate::AggregateCmd,
+        cmd: Box<aggregate::AggregateCmd>,
     },
     /// Inside a TEE: attest and receive asset keys from key brokers.
     Workload {
@@ -375,6 +375,54 @@ enum Cmd {
     },
 }
 
+#[derive(clap::Args)]
+struct PopulationArgs {
+    /// The ledger directory the coordinator serves from.
+    #[arg(long)]
+    ledger: PathBuf,
+    #[arg(long)]
+    id: String,
+    /// The owning organization (a party ID).
+    #[arg(long)]
+    organization: String,
+    /// The dataset series every version of which it accounts for.
+    #[arg(long)]
+    series: String,
+    /// The privacy unit the cap protects (patient, user, record, ...).
+    #[arg(long)]
+    unit: String,
+    #[arg(long)]
+    epsilon: f64,
+    #[arg(long)]
+    delta: f64,
+}
+
+#[derive(clap::Args)]
+struct ScopeArgs {
+    #[arg(long)]
+    ledger: PathBuf,
+    #[arg(long)]
+    population: String,
+    #[arg(long)]
+    id: String,
+    #[arg(long)]
+    project: String,
+    #[arg(long)]
+    purpose: String,
+    #[arg(long)]
+    program: Option<String>,
+    /// The scope's cap: no more than the population's.
+    #[arg(long)]
+    epsilon: f64,
+    /// The asset this scope serves in the aggregation.
+    #[arg(long)]
+    asset: String,
+    /// Add the entry to this `--scoping` file (created if missing)
+    /// instead of printing it.
+    #[arg(long)]
+    scoping: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum PrivacyCmd {
     /// Parties, assets with their derived policies, flows and warnings;
@@ -388,12 +436,38 @@ enum PrivacyCmd {
         /// each budget, before anything runs; exits 1 if over budget.
         #[arg(long)]
         rounds: Option<u64>,
+        /// Estimate for a governed project's scopes: an aggregate that
+        /// declares no `max_sources_per_unit` is charged for every
+        /// participant, as enforcement does.
+        #[arg(long)]
+        scoped: bool,
     },
     /// The confidentiality graph (Graphviz DOT).
     Graph {
         model: PathBuf,
         #[arg(long, default_value = "dot")]
         format: String,
+    },
+    /// Create a privacy population in a ledger directory: the hard cap on
+    /// everything released from one organization's series of datasets,
+    /// whatever the project, purpose or version. It is created once, by the
+    /// owners, and never raised.
+    Population(Box<PopulationArgs>),
+    /// Allocate a scope of a population to one project and purpose (and,
+    /// optionally, program): its releases are charged to the scope and to
+    /// the population, and must fit in both. Prints the entry for the
+    /// `--scoping` file of the aggregation's asset.
+    Scope(Box<ScopeArgs>),
+    /// Create the local ledgers of the populations and scopes a `--scoping`
+    /// file names (a coordinator's, or a party's own copy to check what it
+    /// is shown): idempotent, and refused when a ledger already there is
+    /// another one.
+    Seed {
+        /// The `--scoping` file every party approved.
+        #[arg(long)]
+        scoping: PathBuf,
+        #[arg(long)]
+        ledger: PathBuf,
     },
     /// Differential-privacy budgets: spent, remaining, and every release,
     /// from the privacy ledgers.
@@ -431,6 +505,26 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Creates the ledger of a new population or scope in `dir` (never over an
+/// existing one: a cap is allocated once).
+fn create_ledger(dir: &Path, g: &encompute_runtime::dp::Genesis) -> Result<()> {
+    encompute_runtime::dp::check_asset_file_name(&g.asset_id)?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Error::new(Code::PrivacyLedger, format!("{}: {e}", dir.display())))?;
+    let path = dir.join(format!("{}.ledger", g.asset_id));
+    if path.exists() {
+        return Err(Error::new(
+            Code::GovernancePrivacyAllocation,
+            format!(
+                "{} exists: a population or scope is allocated once, and its cap never changes",
+                path.display()
+            ),
+        ));
+    }
+    drop(encompute_runtime::dp::Ledger::open(&path, g)?);
+    Ok(())
 }
 
 fn load(path: &Path) -> Result<Model> {
@@ -549,15 +643,143 @@ fn run(cli: Cli) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Privacy {
+            cmd: PrivacyCmd::Population(args),
+        } => {
+            let PopulationArgs {
+                ledger,
+                id,
+                organization,
+                series,
+                unit,
+                epsilon,
+                delta,
+            } = *args;
+            let budget = encompute_ir::confidentiality::PrivacyBudget {
+                unit: encompute_ir::confidentiality::PrivacyUnit::parse(&unit)?,
+                epsilon,
+                delta,
+            };
+            let g = encompute_runtime::dp::scoped::population_genesis(
+                &id,
+                &organization,
+                &series,
+                budget,
+            )?;
+            create_ledger(&ledger, &g)?;
+            println!(
+                "POPULATION {id} created: {organization}'s series {series}, epsilon {epsilon} \
+                 delta {delta:e} per {unit} (rho cap {:.6})\ndigest {}",
+                encompute_runtime::dp::accountant::rho_cap(&g.budget)?,
+                g.digest()?
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Privacy {
+            cmd: PrivacyCmd::Seed { scoping, ledger },
+        } => {
+            let all: std::collections::BTreeMap<String, encompute_runtime::secagg::ScopedBudget> =
+                serde_json::from_slice(&std::fs::read(&scoping).map_err(|e| {
+                    Error::new(Code::Artifact, format!("{}: {e}", scoping.display()))
+                })?)
+                .map_err(|e| Error::new(Code::BadInput, format!("{}: {e}", scoping.display())))?;
+            std::fs::create_dir_all(&ledger).map_err(|e| {
+                Error::new(Code::PrivacyLedger, format!("{}: {e}", ledger.display()))
+            })?;
+            for (asset, sb) in &all {
+                encompute_runtime::dp::scoped::check_genesis_pair(&sb.population, &sb.scope)?;
+                for g in [&sb.population, &sb.scope] {
+                    encompute_runtime::dp::check_asset_file_name(&g.asset_id)?;
+                    // Created when missing; an existing ledger must be this
+                    // genesis's own (open checks it).
+                    drop(encompute_runtime::dp::Ledger::open(
+                        &ledger.join(format!("{}.ledger", g.asset_id)),
+                        g,
+                    )?);
+                }
+                println!(
+                    "SEEDED {asset}: population {} and scope {}",
+                    sb.population.asset_id, sb.scope.asset_id
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Privacy {
+            cmd: PrivacyCmd::Scope(args),
+        } => {
+            let ScopeArgs {
+                ledger,
+                population,
+                id,
+                project,
+                purpose,
+                program,
+                epsilon,
+                asset,
+                scoping,
+            } = *args;
+            let pop =
+                encompute_runtime::dp::ledger::read(&ledger.join(format!("{population}.ledger")))
+                    .map_err(|e| {
+                    Error::new(
+                        Code::GovernancePrivacyAllocation,
+                        format!(
+                            "population {population} is not in {}: {}",
+                            ledger.display(),
+                            e.message
+                        ),
+                    )
+                })?;
+            let budget = encompute_ir::confidentiality::PrivacyBudget {
+                epsilon,
+                ..pop.genesis.budget.clone()
+            };
+            let g = encompute_runtime::dp::scoped::scope_genesis(
+                &id,
+                &pop.genesis,
+                &project,
+                &purpose,
+                program.as_deref(),
+                budget,
+            )?;
+            create_ledger(&ledger, &g)?;
+            let entry = encompute_runtime::secagg::ScopedBudget {
+                population: pop.genesis,
+                scope: g,
+            };
+            let mut all: std::collections::BTreeMap<
+                String,
+                encompute_runtime::secagg::ScopedBudget,
+            > = match &scoping {
+                Some(p) if p.exists() => serde_json::from_slice(
+                    &std::fs::read(p)
+                        .map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", p.display())))?,
+                )
+                .map_err(|e| Error::new(Code::BadInput, format!("{}: {e}", p.display())))?,
+                _ => Default::default(),
+            };
+            all.insert(asset.clone(), entry);
+            let text = serde_json::to_string_pretty(&all).expect("serializable");
+            match &scoping {
+                Some(p) => {
+                    std::fs::write(p, format!("{text}\n"))
+                        .map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", p.display())))?;
+                    println!("SCOPE {id} allocated for asset {asset}: {}", p.display());
+                }
+                None => println!("{text}"),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Privacy { cmd } => {
             let (m, out) = match cmd {
                 PrivacyCmd::Explain {
                     model,
                     ledger,
                     rounds: Some(rounds),
+                    scoped,
                 } => {
                     let m = load(&model)?;
-                    let rows = m.privacy_projection(rounds)?;
+                    let rows = m.privacy_projection_in(rounds, scoped)?;
                     let mut out = m.privacy_explain()?.unwrap_or_default();
                     if let Some(dir) = ledger {
                         out.push('\n');
@@ -587,7 +809,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     let out = m.privacy_dot()?;
                     (m, out)
                 }
-                PrivacyCmd::Budget { .. } => unreachable!("handled above"),
+                PrivacyCmd::Budget { .. }
+                | PrivacyCmd::Population(_)
+                | PrivacyCmd::Scope(_)
+                | PrivacyCmd::Seed { .. } => {
+                    unreachable!("handled above")
+                }
             };
             match out {
                 Some(text) => print!("{text}"),
@@ -675,7 +902,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             },
         ),
         Cmd::Attest { cmd } => attest::attest(cmd),
-        Cmd::Aggregate { cmd } => aggregate::aggregate(cmd),
+        Cmd::Aggregate { cmd } => aggregate::aggregate(*cmd),
         Cmd::Trust { cmd } => trust::trust(cmd),
         Cmd::Workload { cmd } => attest::workload(cmd),
         Cmd::Keys {

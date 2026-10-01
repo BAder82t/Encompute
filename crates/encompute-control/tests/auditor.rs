@@ -104,6 +104,10 @@ struct W {
     ben_asset: String,
     ben_key: String,
     ben_user: String,
+    /// Tax's privacy population of its income series, and the project's
+    /// active scope of it.
+    population: String,
+    scope: String,
 }
 
 fn broker_account(t: &T, admin: &As, org: &str, id: &str, seed: u8) {
@@ -401,6 +405,32 @@ fn world() -> Option<W> {
         .as_str()
         .unwrap()
         .to_owned();
+    // Tax's privacy population (the hard cap on its income series) and the
+    // project's scope of it, allocated by two of its security admins.
+    let population = id(&t.ok(
+        &tax_sec1,
+        "POST",
+        "/v1/privacy/populations",
+        Some(json!({"organization": TAX, "series": "income", "budget": budget(1.0)})),
+    ));
+    t.ok(
+        &tax_sec2,
+        "POST",
+        &format!("/v1/privacy/populations/{population}/approve"),
+        None,
+    );
+    let scope = id(&t.ok(
+        &tax_sec1,
+        "POST",
+        "/v1/privacy/scopes",
+        Some(json!({"population": population, "project": project, "purpose": PURPOSE, "epsilon": 0.5})),
+    ));
+    t.ok(
+        &tax_sec2,
+        "POST",
+        &format!("/v1/privacy/scopes/{scope}/approve"),
+        None,
+    );
     Some(W {
         t,
         platform,
@@ -434,6 +464,8 @@ fn world() -> Option<W> {
         ben_asset,
         ben_key,
         ben_user,
+        population,
+        scope,
     })
 }
 
@@ -684,6 +716,34 @@ impl W {
                 format!("/v1/privacy/{}/spenders", self.ben_asset),
                 Some(json!({"service": "secagg-1"})),
             ),
+            "/v1/privacy/populations" => (
+                s(pattern),
+                Some(json!({"organization": BEN, "series": "visits", "budget": budget(1.0)})),
+            ),
+            "/v1/privacy/populations/{}/approve" => (
+                format!("/v1/privacy/populations/{}/approve", self.population),
+                None,
+            ),
+            "/v1/privacy/scopes" => (
+                s(pattern),
+                Some(
+                    json!({"population": self.population, "project": p, "purpose": PURPOSE,
+                            "program_id": "audit", "epsilon": 0.1}),
+                ),
+            ),
+            "/v1/privacy/scopes/{}/approve" => {
+                (format!("/v1/privacy/scopes/{}/approve", self.scope), None)
+            }
+            "/v1/privacy/scopes/{}/events" => (
+                format!("/v1/privacy/scopes/{}/events", self.scope),
+                Some(
+                    json!({"kind": "commit", "event_id": "x", "output_commitment": "0".repeat(64)}),
+                ),
+            ),
+            "/v1/privacy/scopes/{}/spenders" => (
+                format!("/v1/privacy/scopes/{}/spenders", self.scope),
+                Some(json!({"service": "secagg-1"})),
+            ),
             "/v1/audit/checkpoints" => (s(pattern), None),
             "/v1/messages" => (s(pattern), Some(json!({}))),
             _ => return None,
@@ -742,6 +802,14 @@ impl W {
             }
             "/v1/jobs" => vec!["/v1/jobs".into(), format!("/v1/jobs?project={p}")],
             "/v1/jobs/{}" => vec![format!("/v1/jobs/{j}")],
+            "/v1/privacy/populations/{}" => {
+                vec![format!("/v1/privacy/populations/{}", self.population)]
+            }
+            "/v1/privacy/scopes/{}" => vec![format!("/v1/privacy/scopes/{}", self.scope)],
+            "/v1/privacy/scopes/{}/ledger" => {
+                vec![format!("/v1/privacy/scopes/{}/ledger", self.scope)]
+            }
+            "/v1/projects/{}/privacy-scopes" => vec![format!("/v1/projects/{p}/privacy-scopes")],
             "/v1/privacy/{}" => vec![format!("/v1/privacy/{v}")],
             "/v1/privacy/{}/ledger" => vec![format!("/v1/privacy/{v}/ledger")],
             "/v1/trust/{}" => vec![format!("/v1/trust/{j}")],
@@ -808,6 +876,10 @@ const NOT_PROJECT_ROUTES: &[(&str, &str)] = &[
     ),
     ("/v1/audit/checkpoints", "platform operators and auditors"),
     ("/v1/messages", "services"),
+    (
+        "/v1/privacy/populations/{}/approve",
+        "the population's organization (it is not a project's)",
+    ),
 ];
 
 // --- auditors are read-only -------------------------------------------------------
@@ -1694,4 +1766,25 @@ fn auditor_sees_audit_view() {
     );
     assert_eq!(s, 403);
     let _ = (&w.platform, &w.tax_sec2);
+}
+
+/// An auditor organization reads a scope's entries, never which population
+/// (or its digest) the scope belongs to: that is the owner's.
+#[test]
+fn auditor_org_reads_scope_entries_without_the_population() {
+    let Some(w) = world() else { return };
+    let url = format!("/v1/privacy/scopes/{}/ledger", w.scope);
+    let (s, v) = w.t.call(&w.aud_auditor, "GET", &url, None);
+    assert_eq!(s, 200, "{v}");
+    let text = v.to_string();
+    assert!(!text.contains(&w.population), "{text}");
+    assert!(
+        v.pointer("/genesis/scoping/population_digest").is_none(),
+        "{text}"
+    );
+    assert_eq!(v["genesis"]["scoping"]["kind"], "scope");
+    // The owner's own export names it.
+    let (s, v) = w.t.call(&w.tax_owner, "GET", &url, None);
+    assert_eq!(s, 200, "{v}");
+    assert!(v.to_string().contains(&w.population));
 }

@@ -32,6 +32,7 @@ fn genesis() -> Genesis {
             delta: 1e-6,
         },
         privacy_policy_id: "f".repeat(64),
+        scoping: None,
     }
 }
 
@@ -53,6 +54,7 @@ fn reserve(i: usize, sampling_rate: Option<f64>) -> PrivacyEvent {
         sigma2: 1 << 30,
         vector_len: 16,
         rng: "csprng".into(),
+        scope: None,
     }
 }
 

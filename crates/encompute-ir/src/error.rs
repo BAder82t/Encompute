@@ -194,6 +194,14 @@ pub enum Code {
     GovernanceRevocationHead,
     /// A checkpoint witness refused: it does not witness the control plane's stored checkpoint of the project at that size (another size, partition or root), so it cannot count towards it (ENC2718).
     GovernanceCheckpointWitness,
+    /// A privacy scope is missing, not active, or not the job's: a governed release is charged only to a scope allocated (with four-eyes) for its population, project, purpose and program, and an unrelated project has none (ENC2719).
+    GovernancePrivacyScope,
+    /// A privacy population or scope allocation is refused: another organization's or unknown population, a cap above the population's, another privacy unit or delta, a scope already allocated, or a proposal approved by its own submitter (ENC2720).
+    GovernancePrivacyAllocation,
+    /// An aggregate's declarations are refused: a reservation whose sources-per-unit is below what the program declares (or its default, every participant), or a linkage other than none (ENC2721).
+    GovernanceAggregateDeclaration,
+    /// An aggregate's layout is refused: a contribution's stratum layout is not the one the plan declares (ENC2722).
+    GovernanceAggregateLayout,
     /// A location declaration or registration refused: the caller is not a person who is a security admin of the evaluator's operator organization, the location is not one the locations table knows (or its jurisdiction or zone is inconsistent), an attested location is not replaced by a declaration, or location evidence is stale or too weak for the claim (ENC2723).
     GovernanceLocationEvidence,
     /// A project's placement constraints were not changed: the constraints are invalid (an unknown region, an empty allow list), the change is not based on the current version, the project is not governed, or the change loosens them and not every member organization has proposed it yet (ENC2724).
@@ -294,6 +302,10 @@ impl Code {
             Code::GovernanceAuditorSeparation => "ENC2716",
             Code::GovernanceRevocationHead => "ENC2717",
             Code::GovernanceCheckpointWitness => "ENC2718",
+            Code::GovernancePrivacyScope => "ENC2719",
+            Code::GovernancePrivacyAllocation => "ENC2720",
+            Code::GovernanceAggregateDeclaration => "ENC2721",
+            Code::GovernanceAggregateLayout => "ENC2722",
             Code::GovernanceLocationEvidence => "ENC2723",
             Code::GovernancePlacementChange => "ENC2724",
             Code::GovernanceOperatorSeparation => "ENC2725",
@@ -308,7 +320,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 87] = [
+    pub const ALL: [Code; 91] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -388,6 +400,10 @@ impl Code {
         Code::GovernanceAuditorSeparation,
         Code::GovernanceRevocationHead,
         Code::GovernanceCheckpointWitness,
+        Code::GovernancePrivacyScope,
+        Code::GovernancePrivacyAllocation,
+        Code::GovernanceAggregateDeclaration,
+        Code::GovernanceAggregateLayout,
         Code::GovernanceLocationEvidence,
         Code::GovernancePlacementChange,
         Code::GovernanceOperatorSeparation,

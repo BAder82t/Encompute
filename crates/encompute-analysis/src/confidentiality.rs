@@ -222,6 +222,13 @@ pub struct AggregationBoundary {
     pub recipient: OutputRelease,
     /// Differential privacy on the aggregate, if declared.
     pub dp: Option<DpMechanism>,
+    /// How many sources one privacy unit may appear in, if declared
+    /// (multiplied into the sensitivity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_sources_per_unit: Option<u32>,
+    /// The aggregate vector's stratum labels, if declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Vec<String>>,
     /// The joined policy of the contributions (before aggregation).
     pub contribution_policy: Policy,
     /// The aggregate's derived policy: owners and purposes inherited, the
@@ -765,6 +772,14 @@ fn boundary(
         Shape::Vector(n) => n,
         Shape::Matrix(r, c) => r * c,
     };
+    if let Some(l) = &rule.layout {
+        if l.len() != vector_len {
+            return Err(plan_err(format!(
+                "the layout lists {} strata, but the aggregate has {vector_len} values",
+                l.len()
+            )));
+        }
+    }
     // Contributions of one kind (all gradients, say) keep it.
     let kinds: BTreeSet<AssetKind> = contributions
         .iter()
@@ -789,6 +804,8 @@ fn boundary(
         vector_len,
         recipient: dest.clone(),
         dp: rule.dp.clone(),
+        max_sources_per_unit: rule.max_sources_per_unit,
+        layout: rule.layout.clone(),
         contribution_policy: joined,
         aggregate_policy,
     })

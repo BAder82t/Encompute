@@ -4,6 +4,7 @@
 //! artifact and the consortium's `parties.json`, and joins only a round of
 //! exactly that spec.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -17,7 +18,7 @@ use encompute_runtime::secagg::service::{
 };
 use encompute_runtime::secagg::{
     identity_of, party_key_from_seed, verify_aggregation_receipt, AggregateAsset,
-    AggregationReceipt, AggregationSpec, PartyIdentity, RoundCoordinator,
+    AggregationReceipt, AggregationSpec, PartyIdentity, RoundCoordinator, ScopedBudget,
 };
 
 use crate::attest::TrustArgs;
@@ -233,6 +234,17 @@ pub struct SpecArgs {
     /// -o`): the round is bound to its ID and must provide its mechanisms.
     #[arg(long)]
     plan: Option<PathBuf>,
+    /// The privacy scopes this aggregation is charged to (from `encompute
+    /// privacy scope`): each budgeted asset's releases are charged to its
+    /// scope and its population instead of its own ledger. Bound into the
+    /// spec ID, so every party approves the same allocation.
+    #[arg(long)]
+    scoping: Option<PathBuf>,
+    /// The governed job this aggregation runs for (its ID from the control
+    /// plane): its reservations take the job's identity, so the control
+    /// plane's reservation at start and the coordinator's are one entry.
+    #[arg(long)]
+    job: Option<String>,
 }
 
 impl SpecArgs {
@@ -264,6 +276,14 @@ impl SpecArgs {
         };
         let plan = match &approved {
             Some((id, _)) => plan.with_execution_plan(id),
+            None => plan,
+        };
+        let plan = match &self.scoping {
+            Some(p) => plan.with_scopes(json::<BTreeMap<String, ScopedBudget>>(p)?)?,
+            None => plan,
+        };
+        let plan = match &self.job {
+            Some(j) => plan.with_job(j),
             None => plan,
         };
         let mut spec = AggregationSpec::new(plan, ordered)?;
@@ -375,6 +395,11 @@ pub enum AggregateCmd {
         attestation: Option<PathBuf>,
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        /// JSON array of this party's own stratum labels, in the order of
+        /// its values: needed when the plan declares a layout, and checked
+        /// against it (ENC2722).
+        #[arg(long)]
+        labels: Option<PathBuf>,
         /// Providers trusted for the coordinator's attestation.
         #[command(flatten)]
         trust: TrustArgs,
@@ -487,6 +512,23 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 eprintln!("coordinator attested (record {})", short(&record.id()?));
             }
             let round_id = coord.round_id()?;
+            // The release's identity: a governed job's, else the round's;
+            // and the plan's scopes and populations.
+            let release_id = coord.spec.plan.release_id(&round_id);
+            let scopes: Vec<String> = coord
+                .spec
+                .plan
+                .participants
+                .iter()
+                .filter_map(|p| p.scoped.as_ref().map(|s| s.scope.asset_id.clone()))
+                .collect();
+            let populations: Vec<String> = coord
+                .spec
+                .plan
+                .participants
+                .iter()
+                .filter_map(|p| p.scoped.as_ref().map(|s| s.population.asset_id.clone()))
+                .collect();
             // With a control plane, its configuration is checked before the
             // round starts: parties never contribute to a round whose
             // release could not be reserved.
@@ -495,12 +537,14 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                     // Every budgeted contributor's asset must map to its
                     // control-plane asset, or its spend would never be
                     // reserved there (review finding SA-1).
+                    // (A scoped asset is reported through its scope: no
+                    // mapping.)
                     let budgeted: Vec<&str> = coord
                         .spec
                         .plan
                         .participants
                         .iter()
-                        .filter(|p| p.budget.is_some())
+                        .filter(|p| p.budget.is_some() && p.scoped.is_none())
                         .map(|p| p.asset.as_str())
                         .collect();
                     control_mapping(&control_assets, &budgeted)?;
@@ -540,10 +584,11 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                     .iter()
                     .map(|p| p.asset_id.as_str())
                     .collect();
-                let sent = release_after_reserve(
-                    &round_id,
+                let sent = release_scoped_after_reserve(
+                    &release_id,
                     ledger.as_deref(),
                     &control_assets,
+                    (&scopes, &populations),
                     &charged,
                     started.elapsed().as_millis() as u64,
                     sender,
@@ -620,6 +665,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
             state,
             attestation,
             timeout,
+            labels,
             trust,
         } => {
             let approved = spec.spec()?;
@@ -646,6 +692,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                 None => None,
             };
             let identity = key_file(&key)?;
+            let labels_own: Option<Vec<String>> = labels.as_deref().map(json).transpose()?;
             let client = ParticipantClient::new(&coordinator, Duration::from_secs(timeout));
             // Checked and recorded under the state's lock: two concurrent
             // joins cannot both accept the same round (review finding
@@ -661,6 +708,7 @@ pub fn aggregate(cmd: AggregateCmd) -> Result<ExitCode> {
                     identity,
                     &values,
                     PartyState {
+                        labels: labels_own.clone(),
                         attestation,
                         last_sequence: st.last_sequence(&spec_id),
                         seen,
@@ -883,17 +931,57 @@ fn control_mapping<'a>(
 /// noisy aggregate is dropped with the process. If a later message fails,
 /// the release exists but its spend is already recorded as reserved; the
 /// error says so, and resending is safe.
+#[cfg(test)]
 fn release_after_reserve(
     round_id: &str,
     ledger: Option<&Path>,
     control_assets: &[String],
     charged: &[&str],
     duration_ms: u64,
+    send: impl FnMut(&str, serde_json::Value) -> Result<()>,
+    write_output: impl FnOnce() -> Result<()>,
+) -> Result<usize> {
+    release_scoped_after_reserve(
+        round_id,
+        ledger,
+        control_assets,
+        (&[], &[]),
+        charged,
+        duration_ms,
+        send,
+        write_output,
+    )
+}
+
+/// [`release_after_reserve`] for plans whose assets are charged to scopes:
+/// `scoped` is the plan's (scope IDs, population IDs). A scope's events are
+/// reported as `{"scope": ID, "event": ...}` (the control plane appends
+/// them to the scope's ledger and its population's, so the population's own
+/// are not sent) and need no `--control-asset` mapping; every other charged
+/// asset is mapped and reported as before. `round_id` is the release's
+/// identity: the governed job's when the plan is for one.
+#[allow(clippy::too_many_arguments)]
+fn release_scoped_after_reserve(
+    round_id: &str,
+    ledger: Option<&Path>,
+    control_assets: &[String],
+    scoped: (&[String], &[String]),
+    charged: &[&str],
+    duration_ms: u64,
     mut send: impl FnMut(&str, serde_json::Value) -> Result<()>,
     write_output: impl FnOnce() -> Result<()>,
 ) -> Result<usize> {
     use encompute_runtime::dp::PrivacyEvent;
-    let map = control_mapping(control_assets, charged)?;
+    let (scopes, populations) = scoped;
+    let plain: Vec<&str> = charged
+        .iter()
+        .copied()
+        .filter(|c| !scopes.iter().chain(populations).any(|s| s == c))
+        .collect();
+    let map = control_mapping(control_assets, &plain)?;
+    // (local ledger, the payload's key, the control plane's ID)
+    let mut ledgers: Vec<(&str, &str, &str)> = map.iter().map(|(l, r)| (*l, "asset", *r)).collect();
+    ledgers.extend(scopes.iter().map(|s| (s.as_str(), "scope", s.as_str())));
     let (mut reserves, mut commits) = (vec![], vec![]);
     let mut reserved = std::collections::BTreeSet::new();
     if !charged.is_empty() && ledger.is_none() {
@@ -903,7 +991,7 @@ fn release_after_reserve(
         ));
     }
     if let Some(dir) = ledger {
-        for (local, remote) in &map {
+        for (local, key, remote) in &ledgers {
             let path = dir.join(format!("{local}.ledger"));
             if !path.exists() {
                 if charged.contains(local) {
@@ -933,7 +1021,7 @@ fn release_after_reserve(
                 .collect();
             for e in &view.entries {
                 if mine.contains(e.event.event_id()) {
-                    let m = serde_json::json!({"asset": remote, "event": e.event});
+                    let m = serde_json::json!({*key: remote, "event": e.event});
                     match e.event {
                         PrivacyEvent::Reserve { .. } => {
                             reserved.insert(*local);
@@ -945,12 +1033,12 @@ fn release_after_reserve(
             }
         }
     }
-    // The reserved assets are exactly the charged ones, or nothing is
-    // released.
+    // The reserved ledgers are exactly the charged ones (a scope's
+    // population is reserved through its scope), or nothing is released.
     let unreserved: Vec<&str> = charged
         .iter()
         .copied()
-        .filter(|a| !reserved.contains(a))
+        .filter(|a| !reserved.contains(a) && !populations.iter().any(|p| p == a))
         .collect();
     if !unreserved.is_empty() {
         return Err(Error::new(
@@ -1042,11 +1130,11 @@ mod tests {
             },
             vector_len: 4,
             charged: ["gradient-a", "gradient-b"]
-                .map(|a| Charged {
-                    asset_id: a.into(),
-                    budget: budget.clone(),
-                })
+                .map(|a| Charged::asset(a, budget.clone()))
                 .to_vec(),
+            sources_per_unit: 1,
+            layout_id: None,
+            job_id: None,
         };
         release(
             &spec,
@@ -1194,6 +1282,122 @@ mod tests {
         assert!(control_mapping(&assets[..1], &CHARGED).is_err());
         assert!(control_mapping(&["gradient-a".to_owned()], &[]).is_err());
         assert_eq!(control_mapping(&assets, &CHARGED).unwrap().len(), 2);
+    }
+
+    /// A scoped plan's release is reported through its scope: the scope's
+    /// reservation and commit go to the control plane as scope events (the
+    /// control plane appends them to the population too, so the
+    /// population's are not sent), no `--control-asset` mapping is needed,
+    /// and a release whose scope has no reservation of the job releases
+    /// nothing.
+    #[test]
+    fn a_scoped_release_is_reported_through_its_scope_only() {
+        use encompute_runtime::dp::scoped::{population_genesis, scope_genesis};
+        let d = std::env::temp_dir().join(format!("encompute-cli-scoped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let budget = PrivacyBudget {
+            unit: PrivacyUnit::Patient,
+            epsilon: 10.0,
+            delta: 1e-6,
+        };
+        let pop = population_genesis("pop-a", "region-a", "residents", budget.clone()).unwrap();
+        let scope = scope_genesis("scp-a", &pop, "proj", "purpose", None, budget.clone()).unwrap();
+        for g in [&pop, &scope] {
+            drop(
+                encompute_runtime::dp::Ledger::open(&d.join(format!("{}.ledger", g.asset_id)), g)
+                    .unwrap(),
+            );
+        }
+        let charge = |g: &encompute_runtime::dp::Genesis| Charged {
+            asset_id: g.asset_id.clone(),
+            budget: g.budget.clone(),
+            scoped: Some(encompute_runtime::dp::ChargedScope {
+                genesis: g.clone(),
+                scope_id: "scp-a".into(),
+                population_id: "pop-a".into(),
+            }),
+        };
+        let spec = ReleaseSpec {
+            round_id: "job-9".into(),
+            output: "g".into(),
+            policy_id: None,
+            privacy_policy_id: "bb".repeat(32),
+            execution_spec_id: None,
+            mechanism: DpMechanism {
+                kind: DpKind::DiscreteGaussian,
+                clip_norm: 1.0,
+                noise_multiplier: 5.0,
+                sampling_rate: None,
+                preset: None,
+            },
+            codec: FixedPointCodec {
+                clip_min: -1.0,
+                clip_max: 1.0,
+                scale: 256,
+                modulus_bits: 32,
+            },
+            vector_len: 4,
+            charged: vec![charge(&scope), charge(&pop)],
+            sources_per_unit: 2,
+            layout_id: None,
+            job_id: Some("job-9".into()),
+        };
+        release(
+            &spec,
+            &d,
+            &[1, 2, 3, 4],
+            &mut Csprng::from_os().unwrap(),
+            &ed25519_dalek::SigningKey::from_bytes(&[4; 32]),
+        )
+        .unwrap();
+        let (scopes, pops) = (["scp-a".to_owned()], ["pop-a".to_owned()]);
+        let recorded = RefCell::new(vec![]);
+        let released = RefCell::new(false);
+        let sent = release_scoped_after_reserve(
+            "job-9",
+            Some(&d),
+            &[],
+            (&scopes, &pops),
+            &["scp-a", "pop-a"],
+            7,
+            |kind: &str, p: serde_json::Value| {
+                recorded.borrow_mut().push((kind.to_owned(), p));
+                Ok(())
+            },
+            || {
+                *released.borrow_mut() = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(*released.borrow());
+        assert_eq!(sent, 2, "a reservation and a commit, of the scope only");
+        let rec = recorded.borrow();
+        for (kind, p) in rec.iter().filter(|(k, _)| k == "privacy.event") {
+            assert_eq!(kind, "privacy.event");
+            assert_eq!(p["scope"], "scp-a", "{p}");
+            assert!(p.get("asset").is_none(), "{p}");
+        }
+        assert_eq!(rec.len(), 3, "and the round's completion");
+        // The reservation names the job and declares what the control plane
+        // recomputes: two sources per unit, no linkage.
+        let reserve = rec.iter().find(|(_, p)| is_reserve(p)).unwrap();
+        assert_eq!(reserve.1["event"]["scope"]["job_id"], "job-9");
+        assert_eq!(reserve.1["event"]["scope"]["max_sources_per_unit"], 2);
+        assert_eq!(reserve.1["event"]["scope"]["linkage"], "none");
+        // Another job's round finds no reservation: nothing is released.
+        let r = release_scoped_after_reserve(
+            "job-10",
+            Some(&d),
+            &[],
+            (&scopes, &pops),
+            &["scp-a", "pop-a"],
+            7,
+            |_: &str, _: serde_json::Value| Ok(()),
+            || panic!("released without a reservation"),
+        );
+        assert!(r.is_err());
     }
 
     fn state_path(name: &str) -> PathBuf {

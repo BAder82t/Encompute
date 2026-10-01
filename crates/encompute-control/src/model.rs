@@ -665,6 +665,34 @@ pub struct KeyRef {
     pub key_version: u64,
 }
 
+/// A privacy population: the hard cap on every release from one
+/// organization's series of datasets (all versions, every project).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePopulation {
+    pub organization: String,
+    pub series: String,
+    pub budget: encompute_ir::confidentiality::PrivacyBudget,
+    /// The active population of the series this one replaces for new scopes.
+    #[serde(default)]
+    pub supersedes: Option<String>,
+}
+
+/// A proposed privacy scope: a share of a population for one project,
+/// purpose (by name) and, optionally, program.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposeScope {
+    pub population: String,
+    pub project: String,
+    pub purpose: String,
+    #[serde(default)]
+    pub program_id: Option<String>,
+    /// The scope's cap, at the population's unit and delta: no more than
+    /// the population's.
+    pub epsilon: f64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApproveAsset {

@@ -34,6 +34,14 @@
 //! | POST | `/v1/evaluators/{id}/status` | |
 //! | POST | `/v1/evaluators/{id}/location-declarations` | a person who is a security admin of the evaluator's operator declares where it runs |
 //! | GET, POST | `/v1/projects/{id}/placement` | governed projects: the project's placement constraints (members and auditors read them); a member's security admin tightens them at once, and loosening needs every member |
+//! | POST | `/v1/privacy/populations` | governed projects: a person of the owning organization creates the privacy population (the hard cap) of one of its dataset series |
+//! | GET | `/v1/privacy/populations/{id}` | the owning organization: its cap, spending across scopes, scopes |
+//! | POST | `/v1/privacy/scopes` | a security admin of the population's organization proposes a scope of it for a project, purpose and program |
+//! | POST | `/v1/privacy/scopes/{id}/approve` | a different security admin of that organization approves (four eyes) |
+//! | GET | `/v1/privacy/scopes/{id}`, `/v1/projects/{id}/privacy-scopes` | the owner in full; the project's members and auditors its totals |
+//! | GET | `/v1/privacy/scopes/{id}/ledger` | the owner's auditors and data owners, the project's auditor organizations: the scope's entries |
+//! | POST | `/v1/privacy/scopes/{id}/events` | a SecAgg service the owner authorized, or the owner's data owners: a governed job's reservation or commit |
+//! | POST | `/v1/privacy/scopes/{id}/spenders` | the owner authorizes a SecAgg service to report a scope's events |
 //! | GET | `/v1/privacy/{asset}`, `/v1/privacy/{asset}/ledger` | |
 //! | POST | `/v1/privacy/{asset}/events` | |
 //! | POST | `/v1/privacy/{asset}/spenders` | owners authorize a SecAgg service |
@@ -138,13 +146,16 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceAuditorSeparation
         | Code::GovernanceLocationEvidence
         | Code::GovernanceOperatorSeparation
-        | Code::GovernanceClientPlacement => 403,
+        | Code::GovernanceClientPlacement
+        | Code::GovernancePrivacyScope
+        | Code::GovernanceAggregateDeclaration => 403,
         Code::NotFound => 404,
         Code::Conflict
         | Code::PrivacyBudgetExceeded
         | Code::GovernanceRevocationHead
         | Code::GovernanceCheckpointWitness
-        | Code::GovernancePlacementChange => 409,
+        | Code::GovernancePlacementChange
+        | Code::GovernancePrivacyAllocation => 409,
         Code::PlanningFailed | Code::PlanInvalid | Code::GovernanceBundleLimit => 422,
         Code::Scheduling => 503,
         Code::Remote | Code::InsecureConfiguration | Code::PrivacyLedger => 500,
@@ -564,6 +575,34 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
             ok(control.set_project_placement(ctx, id, parse(&r.body)?)?)
         }
 
+        ("POST", ["v1", "privacy", "populations"]) => {
+            created(control.create_population(ctx, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "privacy", "populations", id]) => ok(control.get_population(ctx, id)?),
+        ("POST", ["v1", "privacy", "populations", id, "approve"]) => {
+            ok(control.approve_population(ctx, id)?)
+        }
+        ("POST", ["v1", "privacy", "scopes"]) => {
+            created(control.propose_scope(ctx, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "privacy", "scopes", id]) => ok(control.get_scope(ctx, id)?),
+        ("GET", ["v1", "privacy", "scopes", id, "ledger"]) => {
+            ok(control.scope_ledger_export(ctx, id)?)
+        }
+        ("POST", ["v1", "privacy", "scopes", id, "approve"]) => ok(control.approve_scope(ctx, id)?),
+        ("POST", ["v1", "privacy", "scopes", id, "events"]) => {
+            ok(control.privacy_spend_scoped(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "privacy", "scopes", id, "spenders"]) => {
+            let v: Value = parse(&r.body)?;
+            let svc = v["service"]
+                .as_str()
+                .ok_or_else(|| bad("name the SecAgg service"))?;
+            ok(control.authorize_scope_spender(ctx, id, svc)?)
+        }
+        ("GET", ["v1", "projects", id, "privacy-scopes"]) => {
+            ok(control.list_project_scopes(ctx, id)?)
+        }
         ("GET", ["v1", "privacy", asset]) => ok(control.privacy_view(ctx, asset)?),
         ("GET", ["v1", "privacy", asset, "ledger"]) => ok(control.privacy_export(ctx, asset)?),
         ("POST", ["v1", "privacy", asset, "events"]) => {
@@ -733,6 +772,16 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/evaluators/{}/location-declarations"),
     ("GET", "/v1/projects/{}/placement"),
     ("POST", "/v1/projects/{}/placement"),
+    ("POST", "/v1/privacy/populations"),
+    ("GET", "/v1/privacy/populations/{}"),
+    ("POST", "/v1/privacy/populations/{}/approve"),
+    ("POST", "/v1/privacy/scopes"),
+    ("GET", "/v1/privacy/scopes/{}"),
+    ("GET", "/v1/privacy/scopes/{}/ledger"),
+    ("POST", "/v1/privacy/scopes/{}/approve"),
+    ("POST", "/v1/privacy/scopes/{}/events"),
+    ("POST", "/v1/privacy/scopes/{}/spenders"),
+    ("GET", "/v1/projects/{}/privacy-scopes"),
     ("GET", "/v1/privacy/{}"),
     ("GET", "/v1/privacy/{}/ledger"),
     ("POST", "/v1/privacy/{}/events"),

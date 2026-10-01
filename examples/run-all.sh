@@ -14,7 +14,9 @@ set -uo pipefail
 cd "$(dirname "$0")"
 MODE="${1:-quick}"
 
-QUICK="01 02 04 06 08 09 10 11 13 14 15"
+# Path entries run an example by its directory (the public-sector ones).
+PS_B="public-sector/public-health-statistics"
+QUICK="01 02 04 06 08 09 10 11 13 14 15 $PS_B"
 STANDARD="$QUICK 03 07 12 16 17 18 20"
 CRYPTO="01 03 05 19 20"
 case "$MODE" in
@@ -28,8 +30,13 @@ export EXAMPLES_MODE="$MODE"
 
 pass=0; fail=0; skipped=0
 for n in $(echo $LIST | tr ' ' '\n' | sort -u); do
-  dir="$(ls -d ${n}_*/ 2>/dev/null | head -n 1)"
-  dir="${dir%/}"
+  case "$n" in
+    */*) dir="$n" ;;
+    *)
+      dir="$(ls -d ${n}_*/ 2>/dev/null | head -n 1)"
+      dir="${dir%/}"
+      ;;
+  esac
   [ -n "$dir" ] || { echo "no example $n" >&2; fail=$((fail + 1)); continue; }
   start=$(date +%s)
   out="$(bash "$dir/run.sh" 2>&1)"
