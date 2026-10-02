@@ -574,7 +574,6 @@ contains no Encompute key-generation, encryption or decryption code.
   parallel gate evaluation, BGV or BinFHE per program by calibrated cost.
   Functional bootstrapping was measured and not adopted.
 - ✓ Release 0.3.0.
-- → An independent review of the 0.3.0 fixes.
 - → `encompute migrate` for artifact formats
   ([docs/compatibility.md](docs/compatibility.md)).
 - → Multi-machine orchestration.
