@@ -194,13 +194,22 @@ thread_local! {
     pub static RETRY_CHECKPOINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn is_deny(kind: &str) -> bool {
-    kind != kind::AUTHORIZATION_ISSUED
-        && kind != kind::MEMBERSHIP_ADDED
-        && kind != kind::REVOCATION_HEAD_SIGNED
-        && kind != extra_kind::ANCHOR_GENESIS
-        && kind != extra_kind::LEDGER_CHECKPOINT
-        && !kind.starts_with(extra_kind::MIGRATED)
+/// Whether `kind` (with `refs`) is a security deny event: an allowlist, so
+/// a kind added later is not forced into a synchronous checkpoint unless it
+/// is listed. Every transition of a negative set and its re-application
+/// (recovery's too), a row recovery recorded as lost, a project's placement
+/// tightening and an evaluator's location evidence lost are; so is nothing
+/// that grants or merely records (an issued authorization, a member added,
+/// a head signed, a ledger checkpoint, a population or scope allocated, a
+/// declared location, a loosened placement, the migration's events).
+pub fn is_deny(kind: &str, refs: &BTreeMap<String, String>) -> bool {
+    NegSet::ALL
+        .iter()
+        .any(|s| s.transition_kinds().contains(&kind) || s.reapplied_kind() == kind)
+        || kind == extra_kind::ROW_LOST
+        || kind == crate::ops::placement::kind::EVALUATOR_LOCATION_CHANGED
+        || (kind == crate::ops::placement::PLACEMENT_CHANGED
+            && refs.get("change").is_some_and(|c| c == "tighten"))
 }
 
 /// Appends one event inside the caller's transaction.
@@ -245,7 +254,7 @@ pub fn append(t: &mut impl GenericClient, d: Draft) -> Result<Recorded> {
         at: now_secs(),
         refs: d.refs,
     };
-    if is_deny(&event.kind) {
+    if is_deny(&event.kind, &event.refs) {
         DENY_PENDING.with(|d| d.set(true));
     }
     insert(t, head + 1, &prev, event, Some(siblings))

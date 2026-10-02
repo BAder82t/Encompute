@@ -513,6 +513,281 @@ impl Control {
     }
 }
 
+// --- rollback: what a restore must not undo ---------------------------------------------
+
+/// The state a restore may have dropped or rewritten though the
+/// governance log records it: a version of a project's placement
+/// constraints (every tightening is an event naming its version and
+/// digest) or an evaluator's location evidence (its declarations and
+/// losses are events). Found at startup, like the negative sets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlacementLoss {
+    /// Version `version` of `project`'s constraints, with `digest`, as the
+    /// log records it, is not what the database holds.
+    Version {
+        project: String,
+        version: i32,
+        digest: String,
+        shows: &'static str,
+    },
+    /// The log's last word on `evaluator`'s location evidence is
+    /// `logged`; the database shows operator-declared evidence that `shows`.
+    Evidence {
+        evaluator: String,
+        logged: String,
+        shows: &'static str,
+    },
+}
+
+/// The `row.lost` state that acknowledges a lost version of a project's
+/// constraints (subject `<project>@<version>`).
+pub const LOST_PLACEMENT: &str = "project_placement";
+
+impl PlacementLoss {
+    /// The state a rollback refusal names.
+    pub fn state(&self) -> &'static str {
+        match self {
+            PlacementLoss::Version { .. } => "PLACEMENT",
+            PlacementLoss::Evidence { .. } => "LOCATION EVIDENCE",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            PlacementLoss::Version {
+                project,
+                version,
+                digest,
+                shows,
+            } => format!(
+                "version {version} of project {project}'s placement constraints (digest {digest}) is in the governance log, but the database {shows}"
+            ),
+            PlacementLoss::Evidence {
+                evaluator,
+                logged,
+                shows,
+            } => format!(
+                "the governance log records {logged} for evaluator {evaluator}'s location, but the database shows operator-declared evidence that {shows}"
+            ),
+        }
+    }
+}
+
+/// Every [`PlacementLoss`], in order. A lost version that recovery
+/// acknowledged (`row.lost`) is not reported again.
+pub fn placement_losses(c: &mut impl GenericClient) -> Result<Vec<PlacementLoss>> {
+    let mut out = vec![];
+    // Every placement version the log records: the database must hold it
+    // with the logged digest, and its constraints must still hash to it.
+    for r in c
+        .query(
+            "SELECT DISTINCT e.subject_id, (e.body #>> '{refs,version}')::int, e.body #>> '{refs,digest}'
+               FROM governance_events e
+              WHERE e.kind = $1
+                AND NOT EXISTS (SELECT 1 FROM governance_events l
+                                 WHERE l.kind = $2 AND l.subject_id = e.subject_id || '@' || (e.body #>> '{refs,version}')
+                                   AND l.body #>> '{refs,state}' = $3)
+              ORDER BY 1, 2",
+            &[&PLACEMENT_CHANGED, &govlog::extra_kind::ROW_LOST, &LOST_PLACEMENT],
+        )
+        .map_err(db_err)?
+    {
+        let (project, version, digest): (String, i32, String) = (r.get(0), r.get(1), r.get(2));
+        let held = c
+            .query_opt(
+                "SELECT digest, constraints FROM project_placements WHERE project_id = $1 AND version = $2",
+                &[&project, &version],
+            )
+            .map_err(db_err)?;
+        let shows = match held {
+            None => Some("no longer holds that version"),
+            Some(h) if h.get::<_, String>(0) != digest => Some("holds that version with another digest"),
+            Some(h) => {
+                let ok = serde_json::from_value::<PlacementConstraints>(h.get(1))
+                    .is_ok_and(|x| x.digest() == digest);
+                (!ok).then_some("holds constraints that no longer hash to that digest")
+            }
+        };
+        if let Some(shows) = shows {
+            out.push(PlacementLoss::Version {
+                project,
+                version,
+                digest,
+                shows,
+            });
+        }
+    }
+    // An evaluator's location evidence: its latest event says what the
+    // database may still show. Evidence the log records lost, or another
+    // declaration than the latest, or one whose record is gone, is not
+    // evidence a restore may bring back.
+    for r in c
+        .query(
+            "SELECT DISTINCT ON (e.subject_id) e.subject_id, e.kind, e.body #>> '{refs,evidence_digest}'
+               FROM governance_events e
+              WHERE e.kind = ANY($1)
+              ORDER BY e.subject_id, e.gseq DESC",
+            &[&vec![
+                kind::EVALUATOR_LOCATION_DECLARED,
+                kind::EVALUATOR_LOCATION_CHANGED,
+            ]],
+        )
+        .map_err(db_err)?
+    {
+        let (evaluator, last, logged): (String, String, Option<String>) =
+            (r.get(0), r.get(1), r.get(2));
+        let Some(row) = c
+            .query_opt(
+                "SELECT location, location_evidence, location_evidence_digest FROM evaluators WHERE id = $1",
+                &[&evaluator],
+            )
+            .map_err(db_err)?
+        else {
+            continue;
+        };
+        if row.get::<_, String>(1) != LocationEvidence::OperatorDeclared.as_str() {
+            continue;
+        }
+        let (location, shown): (Option<Value>, Option<String>) = (row.get(0), row.get(2));
+        let (logged, shows) = if last == kind::EVALUATOR_LOCATION_CHANGED {
+            (
+                "that its evidence was lost".to_owned(),
+                Some("is still in force"),
+            )
+        } else if shown != logged {
+            (
+                "a declaration".to_owned(),
+                Some("is not that declaration's"),
+            )
+        } else {
+            let declared: Option<Option<Value>> = c
+                .query_opt(
+                    "SELECT location FROM evaluator_location_declarations
+                      WHERE evaluator_id = $1 AND evidence_digest = $2",
+                    &[&evaluator, &shown],
+                )
+                .map_err(db_err)?
+                .map(|d| d.get(0));
+            (
+                "a declaration".to_owned(),
+                match declared {
+                    None => Some("has no declaration on record"),
+                    Some(l) if l != location => Some("is for another location than declared"),
+                    Some(_) => None,
+                },
+            )
+        };
+        if let Some(shows) = shows {
+            out.push(PlacementLoss::Evidence {
+                evaluator,
+                logged,
+                shows,
+            });
+        }
+    }
+    Ok(out)
+}
+
+impl Control {
+    /// Recovery's answer to [`placement_losses`]: a lost or rewritten
+    /// version of a project's constraints cannot be restored (the log holds
+    /// only its digest), so recovery records it as lost, in the project's
+    /// own log where every member sees it, and the project is held to the
+    /// version the database has until a member's security admin tightens it
+    /// again (at once); evidence a restore brought back is taken back to
+    /// self-declared and logged. Returns what it did.
+    pub(crate) fn recover_placement(&self, operator: &str) -> Result<Vec<String>> {
+        let losses = {
+            let mut c = self.db.conn()?;
+            placement_losses(&mut *c)?
+        };
+        let mut notes = vec![];
+        for loss in losses {
+            match loss {
+                PlacementLoss::Version {
+                    project,
+                    version,
+                    digest,
+                    ..
+                } => {
+                    self.db.tx(|t| {
+                        govlog::append(
+                            t,
+                            govlog::Draft::new(
+                                Partition::Project(project.clone()),
+                                govlog::extra_kind::ROW_LOST,
+                                &format!("{project}@{version}"),
+                            )
+                            .r#ref("state", LOST_PLACEMENT)
+                            .r#ref("digest", digest.clone()),
+                        )?;
+                        audit::append(
+                            t,
+                            audit::AuditDraft::new(
+                                operator,
+                                "recovery",
+                                "project.placement_lost",
+                                "project",
+                                &project,
+                                Outcome::Succeeded,
+                            )
+                            .project(&project)
+                            .r#ref("version", version.to_string())
+                            .r#ref("digest", digest.clone()),
+                        )?;
+                        Ok(())
+                    })?;
+                    notes.push(format!(
+                        "project {project}: placement version {version} (digest {digest}) is lost with the restored database and recorded as lost; the project is held to the constraints the database has until a member's security admin sets them again"
+                    ));
+                }
+                PlacementLoss::Evidence { evaluator, .. } => {
+                    self.db.tx(|t| {
+                        let operator_org =
+                            operator_of(t, &evaluator)?.unwrap_or_else(|| PLATFORM_ORG.to_owned());
+                        t.execute(
+                            "UPDATE evaluators SET location_evidence = 'self_declared',
+                                    location_evidence_digest = NULL, location_valid_until = NULL,
+                                    location_updated_at = now()
+                              WHERE id = $1",
+                            &[&evaluator],
+                        )
+                        .map_err(db_err)?;
+                        audit::append(
+                            t,
+                            audit::AuditDraft::new(
+                                operator,
+                                "recovery",
+                                "evaluator.location_changed",
+                                "evaluator",
+                                &evaluator,
+                                Outcome::Succeeded,
+                            )
+                            .org(&operator_org)
+                            .r#ref("reason", "restored_evidence_withdrawn")
+                            .r#ref("evidence", LocationEvidence::SelfDeclared.as_str()),
+                        )?;
+                        append_evaluator_event(
+                            t,
+                            kind::EVALUATOR_LOCATION_CHANGED,
+                            &evaluator,
+                            &operator_org,
+                            &[(
+                                "evidence",
+                                LocationEvidence::SelfDeclared.as_str().to_owned(),
+                            )],
+                        )
+                    })?;
+                    notes.push(format!(
+                        "evaluator {evaluator}: location evidence the log records as lost or replaced was shown again; taken back to self-declared (declare it again)"
+                    ));
+                }
+            }
+        }
+        Ok(notes)
+    }
+}
+
 // --- project constraints -------------------------------------------------------------
 
 /// The governance-log kind of a change to a project's placement.

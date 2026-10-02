@@ -523,6 +523,14 @@ impl Control {
         if let Some((set, id, shows)) = undone(&mut *c)? {
             return Err(rollback(set.state(), undone_message(set, &id, &shows)));
         }
+        // A project's placement tightenings and an evaluator's location
+        // evidence are events of the log too.
+        if let Some(loss) = crate::ops::placement::placement_losses(&mut *c)?
+            .into_iter()
+            .next()
+        {
+            return Err(rollback(loss.state(), loss.message()));
+        }
         Ok(())
     }
 
@@ -1108,6 +1116,9 @@ impl Control {
                 ));
             }
         }
+        // Placement versions and location evidence the restore dropped or
+        // brought back.
+        notes.extend(self.recover_placement(operator)?);
         // The frozen ledgers' floors move to where the database holds them
         // now (a forward step along the log, like every checkpoint), so the
         // next start accepts the recovered database.

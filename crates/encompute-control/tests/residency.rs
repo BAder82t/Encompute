@@ -1717,3 +1717,147 @@ fn all_members_can_admit_a_named_operator() {
     let (_, _, _, j) = g.job("2026-q1", |_| {});
     assert_eq!(g.view(&id(&j))["evaluator"], "aaa-stranger");
 }
+
+// --- INV-226: a restore must not undo placement state the log records -----------------
+
+/// The control plane stopped: its environment.
+fn stop(t: T) -> Env0 {
+    let env0 = t.env0;
+    drop(t.control);
+    env0
+}
+
+/// The start is refused as a state rollback naming `what` and `who`.
+fn refused_start(env0: &Env0, what: &str, who: &str) {
+    let e = env0
+        .start()
+        .err()
+        .unwrap_or_else(|| panic!("started although {what} was expected"));
+    assert_eq!(e.code.as_str(), "ENC2202", "{e}");
+    assert!(
+        e.message.contains(what) && e.message.contains(who),
+        "{what} {who}: {e}"
+    );
+}
+
+/// Placement tightenings and location evidence are events of the
+/// governance log, so a database that shows them undone (a tightening
+/// dropped or rewritten, or evidence the log records lost shown again) is
+/// refused at start, naming it. Recovery records a lost version of the
+/// constraints as lost (it cannot restore their content; a member's
+/// security admin tightens again, at once) and takes the evidence back to
+/// self-declared.
+#[test]
+fn a_restore_that_undoes_a_tightening_or_location_evidence_is_refused_and_recovered() {
+    let Some(g) = world() else { return };
+    // Two versions of the project's constraints: a first set and a
+    // tightening of it.
+    assert_eq!(
+        g.constrain(&g.tax_sec1, allow_regions(&["DE", "FR"])).0,
+        200
+    );
+    let (s, v) = g.constrain(&g.ben_sec, allow_regions(&["DE"]));
+    assert_eq!((s, v["change"].as_str()), (200, Some("tighten")), "{v}");
+    let project = g.project.clone();
+    // An evaluator whose location the platform declared, then lost.
+    let e = g.platform_evaluator("ev-rollback", Some("europe-west3"), true);
+    let (location, digest): (Value, String) = {
+        let mut c = g.t.control.db.conn().unwrap();
+        let r = c
+            .query_one(
+                "SELECT location, location_evidence_digest FROM evaluators WHERE id = 'ev-rollback'",
+                &[],
+            )
+            .unwrap();
+        (r.get(0), r.get(1))
+    };
+    assert_eq!(g.register(&e, Some(gcp("us-central1"))).0, 201);
+    // A start settles the log's checkpoint: the backup is of that state.
+    let env0 = stop(stop(g.t).started());
+    let url = env0.url.clone();
+    let good = format!("{}_plbk", db_name(&url));
+    backup_database(&url, &good);
+    let revert_evidence = format!(
+        "UPDATE evaluators SET location = '{location}'::jsonb, location_evidence = 'operator_declared',
+                location_evidence_digest = '{digest}', location_valid_until = now() + interval '30 days'
+          WHERE id = 'ev-rollback'"
+    );
+    let drop_v2 =
+        format!("DELETE FROM project_placements WHERE project_id = '{project}' AND version = 2");
+    // Each one undone alone (the log intact) is refused, naming it.
+    for (table, sql, what, who) in [
+        ("project_placements", drop_v2.clone(), "PLACEMENT", project.as_str()),
+        (
+            "project_placements",
+            format!(
+                "UPDATE project_placements SET constraints = '{{}}'::jsonb WHERE project_id = '{project}' AND version = 2"
+            ),
+            "PLACEMENT",
+            project.as_str(),
+        ),
+        (
+            "project_placements",
+            format!(
+                "UPDATE project_placements SET digest = '{}' WHERE project_id = '{project}' AND version = 2",
+                "9".repeat(64)
+            ),
+            "PLACEMENT",
+            project.as_str(),
+        ),
+        ("evaluators", revert_evidence.clone(), "LOCATION EVIDENCE", "ev-rollback"),
+    ] {
+        attacker(&url, &[table], &sql);
+        refused_start(&env0, what, who);
+        restore_database(&good, &url);
+    }
+    // Recovery after a dropped tightening records the loss, and the
+    // project is as the surviving version says until a member tightens it
+    // again.
+    attacker(&url, &["project_placements"], &drop_v2);
+    refused_start(&env0, "PLACEMENT", &project);
+    let notes = run_recovery(&env0);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains(&project) && n.contains("placement version 2")),
+        "{notes:?}"
+    );
+    let t = env0.started();
+    let lost: i64 = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM governance_events WHERE kind = 'row.lost' AND subject_id = $1",
+            &[&format!("{project}@2")],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(lost, 1);
+    let env0 = stop(t);
+    // Recovery after reverted evidence: the evaluator is self-declared
+    // again, and says so in the log.
+    attacker(&url, &["evaluators"], &revert_evidence);
+    refused_start(&env0, "LOCATION EVIDENCE", "ev-rollback");
+    let notes = run_recovery(&env0);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("ev-rollback") && n.contains("self-declared")),
+        "{notes:?}"
+    );
+    let t = env0.started();
+    let evidence: String = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT location_evidence FROM evaluators WHERE id = 'ev-rollback'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(evidence, "self_declared");
+}

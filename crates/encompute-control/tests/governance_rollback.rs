@@ -1977,3 +1977,58 @@ fn cancel_job_is_anchored() {
     w.t.ok(&w.b_dev, "POST", &format!("/v1/jobs/{job}/cancel"), None);
     assert!(anchored(&w.t, NegSet::EndedJobs, &job));
 }
+
+// --- which events force a synchronous checkpoint ----------------------------------------
+
+/// Only a security deny event is checkpointed before its call returns: an
+/// allowlist of the transitions a rollback must not undo, never every kind
+/// there is. Events that grant or merely record (an issued authorization,
+/// a declared location, an allocated scope, a loosened placement, a kind
+/// this release does not know) wait for the background pass.
+#[test]
+fn only_a_security_deny_event_forces_a_synchronous_checkpoint() {
+    let Some(t) = setup() else { return };
+    let appended = |kind: &str, refs: &[(&str, &str)]| -> bool {
+        govlog::DENY_PENDING.with(|d| d.set(false));
+        t.control
+            .db
+            .tx(|c| {
+                let mut d = Draft::new(Partition::Platform, kind, "subject-1");
+                for (k, v) in refs {
+                    d = d.r#ref(k, *v);
+                }
+                govlog::append(c, d)?;
+                Ok(())
+            })
+            .unwrap();
+        govlog::DENY_PENDING.with(|d| d.replace(false))
+    };
+    for (kind, refs, deny) in [
+        ("asset.revoked", vec![], true),
+        ("asset.expired", vec![], true),
+        ("job.failed", vec![], true),
+        ("membership.removed", vec![], true),
+        ("authorization.revoked", vec![], true),
+        ("authorization.revoked.reapplied", vec![], true),
+        ("ledger.frozen", vec![], true),
+        ("row.lost", vec![("state", "revoked")], true),
+        (
+            "evaluator.location_changed",
+            vec![("evidence", "self_declared")],
+            true,
+        ),
+        ("placement.changed", vec![("change", "tighten")], true),
+        ("placement.changed", vec![("change", "loosen")], false),
+        ("evaluator.location_declared", vec![], false),
+        ("privacy.population_created", vec![], false),
+        ("privacy.scope_allocated", vec![], false),
+        ("privacy.ledger_checkpoint", vec![], false),
+        ("authorization.issued", vec![], false),
+        ("membership.added", vec![], false),
+        ("revocation_head.signed", vec![], false),
+        ("migrated.revoked", vec![], false),
+        ("future.something_new", vec![], false),
+    ] {
+        assert_eq!(appended(kind, &refs), deny, "{kind} {refs:?}");
+    }
+}

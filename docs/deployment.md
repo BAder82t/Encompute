@@ -688,7 +688,16 @@ revoked, again, each at its originally recorded time. Each
 re-application is a log event of its own (`<kind>.reapplied`, or the
 transition's own kind where the usual path re-applies it), a row the
 database lost is recorded lost (`row.lost`; its ID stays blocked), and a
-ledger frozen is `ledger.frozen`. It records all of this,
+ledger frozen is `ledger.frozen`. A version of a project's placement
+constraints the restore dropped or rewrote (the log holds its number and
+digest, not its content) is recorded lost in the project's own log
+(`row.lost`, subject `<project>@<version>`; startup refused it as
+`PLACEMENT STATE ROLLBACK`) and the project is held to the version the
+database has until a member's security admin tightens it again, which takes
+effect at once; location evidence a restore brought back after the log
+recorded it lost, or another than the latest declaration, is taken back to
+self-declared (`LOCATION EVIDENCE STATE ROLLBACK` refused the start) and the
+operator declares it again. It records all of this,
 and any audit gap, in the audit trail, then checkpoints the log. If the database lost a frozen
 ledger's row but still holds its asset, recovery re-creates the row,
 frozen, with no entries and a placeholder budget that pays for nothing
