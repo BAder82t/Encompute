@@ -1351,6 +1351,11 @@ impl Control {
         // (source, authorizing organization) → (row, document).
         let mut chosen: BTreeMap<(String, String), (String, SignedAuthorizationV2)> =
             BTreeMap::new();
+        // A scope pin is consulted only by a job that releases a
+        // differential-privacy aggregate (the same test the job's
+        // reservations use): for any other job a conflict between pins
+        // changes nothing and refuses nothing.
+        let releases_dp = super::privacy_scopes::program_releases_dp(s.program)?;
         for a in &sources {
             let (owner, version, _) = &versions[a];
             let mut orgs = vec![owner.clone()];
@@ -1430,14 +1435,22 @@ impl Control {
                         Ok(()) => {
                             // Two usable authorizations of one source that
                             // pin different privacy scopes (or only one of
-                            // them does) are refused, never resolved by
-                            // the order of their IDs.
+                            // them does) are refused for a job that releases
+                            // a differential-privacy aggregate, never
+                            // resolved by the order of their IDs.
                             if let Some((other, c)) = chosen.get(&key) {
-                                if c.body.privacy_scope_id != signed.body.privacy_scope_id {
-                                    return Err(gov(
-                                        Code::GovernancePrivacyScope,
-                                        format!(
-                                            "authorizations {other} and {row} of the same source pin different privacy scopes (or only one does): refused, not resolved by chance"
+                                if releases_dp
+                                    && c.body.privacy_scope_id != signed.body.privacy_scope_id
+                                {
+                                    return Err(deny(
+                                        "asset",
+                                        a,
+                                        "scope_pin_conflict",
+                                        gov(
+                                            Code::GovernancePrivacyScope,
+                                            format!(
+                                                "authorizations {other} and {row} of the same source pin different privacy scopes (or only one does): refused, not resolved by chance"
+                                            ),
                                         ),
                                     ));
                                 }

@@ -614,14 +614,30 @@ impl Control {
                 }
             })?;
             // The project's log: its members and auditors see that a share
-            // was allocated (the cap, never a population's spending).
+            // was allocated (the cap, never a population's spending). The
+            // purpose is named by its ID: a name is free text, and the log
+            // carries identifiers only.
+            let purpose_id: String = t
+                .query_opt(
+                    "SELECT id FROM purposes WHERE project_id = $1 AND name = $2
+                      ORDER BY (status = 'active') DESC, revision DESC LIMIT 1",
+                    &[&row.project, &row.purpose],
+                )
+                .map_err(db_err)?
+                .ok_or_else(|| {
+                    allocation(format!(
+                        "project {} has no purpose {:?}",
+                        row.project, row.purpose
+                    ))
+                })?
+                .get(0);
             let mut d = govlog::Draft::new(
                 govlog::for_project(t, &row.project, Some(&row.organization))?,
                 extra_kind::SCOPE_ALLOCATED,
                 id,
             )
             .org(&row.organization)
-            .r#ref("purpose", row.purpose.clone())
+            .r#ref("purpose", purpose_id)
             .r#ref("unit", genesis.budget.unit.to_string())
             .r#ref("epsilon", format!("{:?}", genesis.budget.epsilon))
             .r#ref("delta", format!("{:?}", genesis.budget.delta));
@@ -1203,6 +1219,13 @@ pub(crate) struct Prepared {
     /// (scope, asset, event, scope seq) per reservation made now.
     reservations: Vec<(String, String, String, u64)>,
     keys: BTreeSet<String>,
+}
+
+/// Whether `program` releases a differential-privacy aggregate: what makes
+/// a job spend from a scope.
+pub(crate) fn program_releases_dp(program: &encompute_ir::Program) -> Result<bool> {
+    Ok(encompute_analysis::confidentiality::analyze(program)?
+        .is_some_and(|report| report.aggregations.iter().any(|b| b.dp.is_some())))
 }
 
 impl Control {

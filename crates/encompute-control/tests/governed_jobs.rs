@@ -1718,6 +1718,23 @@ fn ticket_refused_for_a_queued_governed_job() {
     assert_eq!(s, 201, "{t}");
 }
 
+/// A scope pin matters to a job that releases a differential-privacy
+/// aggregate; one that releases none never consults a scope, so an owner's
+/// pinned authorization beside an unpinned one does not refuse it.
+#[test]
+fn a_scope_pin_conflict_does_not_refuse_a_job_that_releases_no_dp() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let program = program(&[&v.asset], PURPOSE, BEN);
+    let mut pinned = g.body(&v, &program);
+    pinned.privacy_scope_id = Some("1".repeat(64));
+    g.authorize(pinned);
+    g.authorize(g.body(&v, &program));
+    let plan = g.plan(&g.ben_dev, &program);
+    let (s, j) = g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k-pins");
+    assert_eq!(s, 201, "{j}");
+}
+
 #[test]
 fn ticket_uses_only_the_jobs_own_authorizations() {
     let Some(g) = world() else { return };

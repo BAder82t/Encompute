@@ -823,7 +823,8 @@ fn scope_allocation_needs_four_eyes_of_the_owner() {
         .find(|e| e["kind"] == "privacy.scope_allocated")
         .unwrap_or_else(|| panic!("no allocation event in {ev:?}"));
     assert_eq!(e["subject"], scope);
-    assert_eq!(e["refs"]["purpose"], PURPOSE);
+    // By the purpose's ID: a name is free text, which no log event carries.
+    assert_eq!(e["refs"]["purpose"], g.main.purpose.as_str());
     assert!(!e.to_string().contains(&r.population), "{e}");
     let mut c = g.t.control.db.conn().unwrap();
     let cps: i64 = c
@@ -1981,6 +1982,17 @@ fn two_authorizations_that_pin_different_scopes_are_refused() {
     let (s, v) = g.job(&[va, vb], &prog, "k1");
     assert_eq!(s, 403, "{v}");
     assert_eq!(v["code"], "ENC2719", "{v}");
+    // And audited, like every other refusal of a submission.
+    let mut c = g.t.control.db.conn().unwrap();
+    let n: i64 = c
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'job.denied'
+                AND refs->>'reason' = 'scope_pin_conflict'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
 }
 
 #[test]
