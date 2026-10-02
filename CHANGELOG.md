@@ -17,8 +17,18 @@ reviewers.
   `fuzz/Cargo.lock` (0.8.3 was yanked upstream and failed the supply-chain
   gate). No other third-party package moved.
 - **Third-party notices** regenerated.
-- Version and release documents updated. No source, test, migration or
-  configuration change.
+- **`restore.sh`** waits for a query over TCP, which only the final
+  PostgreSQL server accepts, instead of `pg_isready`, which the image's
+  temporary start-up server also answers. A restore into a fresh volume
+  could fail ("the database system is shutting down", "database does not
+  exist"); it failed loudly and worked on a second try.
+- **Tests and examples:** the signed-request freshness test uses 310
+  seconds, not 301, so a clock tick cannot put it on the accepted edge of
+  the server's 300-second window (the server's rule is unchanged); example
+  17 requires an accuracy gain above 0.02 instead of 0.1, which noise that
+  is random by design made fail about one run in five.
+- Version and release documents updated. No product runtime code,
+  migration, configuration default or build feature changed.
 
 ## 0.3.0-rc.4 — 2026-09-29
 

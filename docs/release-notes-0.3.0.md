@@ -2,8 +2,10 @@
 
 This is the first stable release of 0.3. Its content is that of
 0.3.0-rc.4 ([rc.4 notes](release-notes-rc.md)), which went through the
-release gate and an 8-hour soak, plus a dependency lock bump and release
-metadata (see "What changed since 0.3.0-rc.4?").
+release gate and an 8-hour soak, plus a dependency lock bump, release
+metadata and three robustness fixes to a script, a test and an example (see
+"What changed since 0.3.0-rc.4?"). The gate and the 8-hour soak were run
+again on this exact content.
 
 The independent security review of 0.3.0-rc.3
 ([security-review/](../security-review/)) and a follow-up review of its
@@ -23,8 +25,9 @@ fine-tuning and an enterprise control plane.
 
 ## What changed since 0.3.0-rc.4?
 
-Only the dependency lock and release metadata. No source, test, migration,
-configuration default or build feature changed.
+The dependency lock, release metadata, and three robustness fixes found
+while gating 0.3.0. No product runtime code, migration, configuration
+default or build feature changed.
 
 - **Dependency lock:** `yoke-derive` moves from 0.8.3 to 0.8.4, because
   0.8.3 was yanked upstream and the supply-chain gate (`cargo deny`)
@@ -33,6 +36,22 @@ configuration default or build feature changed.
 - **Third-party notices** regenerated for that bump.
 - **Version and status text:** 0.3.0 in the workspace, the Python package
   and the documentation.
+- **`restore.sh` waits for the real database server.** It used to wait
+  with `pg_isready`, which the PostgreSQL image's temporary start-up
+  server answers before it creates the database and restarts, so a restore
+  into a fresh volume could fail with "the database system is shutting
+  down" or "database does not exist". It failed loudly, restored nothing
+  and worked on a second try. It now waits for a query over TCP, which only
+  the final server accepts.
+- **The signed-request freshness test** compared timestamps 301 seconds
+  away from now a moment later, so a one-second clock tick put one of them
+  exactly on the 300-second edge, which the server accepts by design. The
+  test now uses 310 seconds. The server's rule is unchanged.
+- **Example 17** (Hugging Face and PEFT) checked that the accuracy gain was
+  above 0.1. The noise of secure aggregation and differential privacy is
+  random by design, the gain ranged from 0.034 to 0.166 over 17 runs, and
+  that threshold failed about one run in five. It now requires a gain above
+  0.02. The privacy and verification checks of the example are unchanged.
 
 ## What can I safely use?
 
