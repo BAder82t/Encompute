@@ -128,8 +128,10 @@ pub fn status_of(code: Code) -> u16 {
     match code {
         Code::Unauthenticated | Code::ServiceAuthentication => 401,
         Code::Forbidden | Code::ExportDenied => 403,
-        // Governance refusals (ENC2701..ENC2712): the request is understood
-        // and refused by an owner's authorization, purpose or key state.
+        // Governance refusals (ENC2701..ENC2712, ENC2715..ENC2716,
+        // ENC2719, ENC2721..ENC2723, ENC2725): the request is understood
+        // and refused by an owner's authorization, purpose, key state,
+        // placement or aggregate declaration.
         Code::GovernanceAuthorizationMissing
         | Code::GovernancePurposeMismatch
         | Code::GovernanceProgramNotAuthorized
@@ -148,7 +150,8 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceOperatorSeparation
         | Code::GovernanceClientPlacement
         | Code::GovernancePrivacyScope
-        | Code::GovernanceAggregateDeclaration => 403,
+        | Code::GovernanceAggregateDeclaration
+        | Code::GovernanceAggregateLayout => 403,
         Code::NotFound => 404,
         Code::Conflict
         | Code::PrivacyBudgetExceeded
@@ -156,7 +159,15 @@ pub fn status_of(code: Code) -> u16 {
         | Code::GovernanceCheckpointWitness
         | Code::GovernancePlacementChange
         | Code::GovernancePrivacyAllocation => 409,
-        Code::PlanningFailed | Code::PlanInvalid | Code::GovernanceBundleLimit => 422,
+        // A governance evidence bundle the request could not produce or
+        // accept as it is: malformed, unverifiable, carrying plaintext, or
+        // over its limits.
+        Code::PlanningFailed
+        | Code::PlanInvalid
+        | Code::GovernanceBundleMalformed
+        | Code::GovernanceBundleUnverified
+        | Code::GovernanceBundlePlaintext
+        | Code::GovernanceBundleLimit => 422,
         Code::Scheduling => 503,
         Code::Remote | Code::InsecureConfiguration | Code::PrivacyLedger => 500,
         _ => 400,

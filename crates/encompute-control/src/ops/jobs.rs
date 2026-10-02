@@ -2788,6 +2788,42 @@ impl Control {
             // it fails and is anchored as ended.
             if j.governance.is_some() {
                 if let Err(e) = self.revalidate_governed(t, &j, GovernedStage::Start, now()) {
+                    // The evidence for its evaluator's location was renewed
+                    // since scheduling and nothing else changed (the check
+                    // without the recorded placement passes): not a moved
+                    // machine, so the job is scheduled again, not failed.
+                    if e.code == Code::GovernanceResidency {
+                        let rec = g.governance.as_ref().and_then(|x| x.placement.as_ref());
+                        let binding = j.governance.as_ref().map(|x| &x.binding);
+                        if let (Some(rec), Some(binding)) = (rec, binding) {
+                            if self.check_job_placement(t, &j.id, binding, Some(ctx.actor()), None).is_ok()
+                                && self.placement_only_renewed(t, &j.id, binding, ctx.actor(), rec)?
+                            {
+                                t.execute(
+                                    "UPDATE jobs SET evaluator_id = NULL, job_grant = NULL, estimated_ms = NULL WHERE id = $1",
+                                    &[&id],
+                                )
+                                .map_err(db_err)?;
+                                self.transition_in(
+                                    t,
+                                    ctx.actor(),
+                                    &ctx.request_id,
+                                    id,
+                                    JobState::Authorized,
+                                    Some(&e.message),
+                                )?;
+                                audit::append(
+                                    t,
+                                    ctx.draft("job.requeued", "job", id, Outcome::Denied)
+                                        .org(&j.organization)
+                                        .project(&j.project)
+                                        .r#ref("reason", "location_evidence_renewed")
+                                        .r#ref("stage", GovernedStage::Start.as_str()),
+                                )?;
+                                return Ok(Err(e));
+                            }
+                        }
+                    }
                     self.fail_governed(
                         t,
                         ctx.actor(),

@@ -40,12 +40,12 @@ Errors are JSON `{"code": "ENCnnnn", "message": "..."}`:
 
 | HTTP | Codes |
 |---|---|
-| 400 | ENC1102 malformed request (including a repeated query parameter); ENC1604 receipt problems; ENC2204 a privacy reservation inconsistent with its own mechanism |
+| 400 | ENC1102 malformed request (including a repeated query parameter); ENC1604 receipt problems; ENC2204 a privacy reservation inconsistent with its own mechanism; ENC2713 broker state rollback and ENC2714 an authorization limit exhausted (as the control plane answers them today) |
 | 401 | ENC2601 unauthenticated (including a disabled user, and `/metrics` without the metrics token); ENC2607 bad service signature, replay |
-| 403 | ENC2602 missing role; ENC2701-ENC2712, ENC2719, ENC2721 refused by governance in a governed project (see [errors.md](errors.md)) |
+| 403 | ENC2602 missing role; ENC2701-ENC2712, ENC2715, ENC2716, ENC2719, ENC2721-ENC2723, ENC2725, ENC2726 refused by governance in a governed project (see [errors.md](errors.md)) |
 | 404 | ENC2603 not found, including other tenants' resources |
-| 409 | ENC2604 conflict (state, idempotency key, revoked asset); ENC2201 privacy budget exceeded, or ledger frozen; ENC2720 a privacy population or scope allocation refused |
-| 422 | ENC2401 PLANNING FAILED; ENC2402 a plan that does not satisfy its program or the control plane's floor |
+| 409 | ENC2604 conflict (state, idempotency key, revoked asset); ENC2201 privacy budget exceeded, or ledger frozen; ENC2717 a revocation head and ENC2718 a checkpoint witness refused; ENC2720 a privacy population or scope allocation refused; ENC2724 a project's placement constraints not changed |
+| 422 | ENC2401 PLANNING FAILED; ENC2402 a plan that does not satisfy its program or the control plane's floor; ENC2727-ENC2730 a governance evidence bundle that is malformed, unverifiable, carries plaintext or is over its limits |
 | 500 | ENC2605 insecure configuration; ENC2202 PRIVACY or AUDIT STATE ROLLBACK (the database no longer extends the state anchor) |
 
 ## Idempotency

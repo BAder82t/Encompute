@@ -1926,6 +1926,29 @@ fn a_population_needs_four_eyes_a_known_series_and_may_be_superseded() {
     let job2 = id(&g.job(&v2, &p2, "k2").1);
     assert_eq!(g.state(&job2), "failed");
     assert_eq!(g.failure(&job2), "ENC2719");
+    // The old population is superseded but still active: a version's own
+    // ledger is still refused for the series (ENC2719, not a failure to
+    // pick one of two populations).
+    let own = g.t.ok(
+        &r.owner,
+        "POST",
+        "/v1/assets",
+        Some(json!({"organization": A, "kind": "dataset", "name": format!("{SERIES}@legacy"),
+                    "series": SERIES, "version": "legacy", "digest": "e".repeat(64),
+                    "privacy_budget": budget(3.0), "ir_policy": registered_dp(A, "1.0")["ir_policy"],
+                    "release_class": "dp-aggregate-only",
+                    "key_ref": {"broker": "region-a-broker", "provider": "openbao-transit",
+                                "key_ref": "counts-legacy", "key_version": 1}})),
+    );
+    refused(
+        g.t.call(
+            &r.owner,
+            "POST",
+            &format!("/v1/privacy/{}/events", id(&own)),
+            Some(reserve("legacy-1", 4_000_000_000)),
+        ),
+        "ENC2719",
+    );
 }
 
 #[test]

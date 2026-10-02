@@ -611,7 +611,11 @@ these limits:
   is then "not fully evidenced" and `verify` exits 3 (`--allow-unchecked`
   accepts that). Rows for residency, record linkage and privacy scopes
   read NOT APPLICABLE only when the signed binding shows they are not
-  declared, and NOT EVIDENCED when they are declared. There is no separate
+  declared, and NOT EVIDENCED when they are declared; the privacy row of a
+  job whose program releases a differential-privacy aggregate is NOT
+  EVIDENCED whether or not an authorization pins a scope, because the
+  release is charged to a project's scope and the sources' populations and
+  nothing in this release's evidence shows those ledgers. There is no separate
   project charter: the Project row shows each data owner's signed
   acceptance of the purpose.
 - **A shared view's authorizations are cards.** The signed document of
@@ -630,6 +634,35 @@ these limits:
   The job's owners and its submitter must witness the checkpoint;
   recipients that are neither need not. `exported_at` is the time of the log
   state, not of the request. The plaintext guard is a heuristic.
+- **Starting a job spends its privacy budget before its first key
+  ticket.** Start reserves the job's release in its scopes and populations
+  last, and a key ticket is asked for after it. If the evidence for the
+  evaluator's location lapses, or the placement or a quorum changes, between
+  the two, the ticket is refused and the job fails with the budget already
+  spent. That errs toward spending too much, never too little; nothing
+  refunds it.
+- **A start can race the revocation of one of its sources.** Start locks the
+  job and then its source rows; a revocation and a key ticket lock the
+  source first and the job second, so two of them can deadlock. PostgreSQL
+  aborts one, the control plane retries the transaction (up to three times;
+  a start resets what it had done at each attempt) and the outcome is as if
+  they had run one after the other. A caller that loses all three attempts
+  sees an error and retries.
+- **An evaluator's location events cost a scan.** Finding the governed
+  projects that plan or run on an evaluator reads every plan's document, and
+  each event is appended once per such project while the evaluator's row is
+  locked. Fine for tens of projects and evaluators; a deployment with many
+  more would want an index of the plans' admissible sets.
+- **A scope's allocation shows its cap to every member.** The event in the
+  project's log names the purpose (by its ID), the privacy unit, epsilon
+  and delta of the scope, and is read by every member organization and
+  auditor of the project, by design: members see what the project may
+  spend, never a population's spending or another organization's ledger.
+- **A restore cannot bring back a lost placement version.** The log holds a
+  version's number and digest, not its constraints, so recovery records the
+  loss in the project's log and the project is held to the version the
+  database has until a member's security admin tightens it again; the
+  owners' own constraints in their signed authorizations are unaffected.
 
 ## Compatibility and upgrades
 

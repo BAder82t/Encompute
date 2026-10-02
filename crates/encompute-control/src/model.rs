@@ -264,6 +264,9 @@ impl JobState {
             // before it was scheduled (an approver disabled, or no longer
             // holding the role) waits for approval again.
             (Authorized, WaitingForApproval) => true,
+            // A scheduled governed job whose evaluator's evidence was only
+            // renewed (same machine, same location) is scheduled again.
+            (Queued, Authorized) => true,
             (Authorized, Queued) | (Queued, Running) | (Running, Verifying) => true,
             (Verifying, Succeeded) => true,
             // Any live job can fail or be cancelled; finished ones cannot.

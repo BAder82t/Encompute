@@ -1420,3 +1420,35 @@ fn a_governed_dp_release_is_not_evidenced_never_a_budget_pass_or_fail() {
         Verdict::Satisfied
     );
 }
+
+/// An owner up the lineage of a source authorizes it without owning an
+/// input of the binding: an evaluator that organization operates breaks
+/// operator separation all the same, and the row says so.
+#[test]
+fn a_lineage_owner_operating_the_evaluator_breaks_separation() {
+    let operated_by_other = |lineage_owner| {
+        show(&Fixture::with(Knobs {
+            placement: true,
+            lineage_owner,
+            grant_placement: Some(grant_at(OTHER, "europe-west3", LocationEvidence::Attested)),
+            ..Knobs::default()
+        }))
+    };
+    // Nobody up the lineage: the operator owns nothing here.
+    assert!(operated_by_other(false)
+        .row("Location")
+        .unwrap()
+        .details
+        .iter()
+        .any(|d| d.starts_with("operator separation:")));
+    // A lineage owner's own evaluator.
+    let r = operated_by_other(true);
+    let loc = r.row("Location").unwrap();
+    assert_eq!(loc.status, Status::Failed, "{loc:?}");
+    assert!(
+        loc.details
+            .iter()
+            .any(|d| d.contains("operator separation is broken")),
+        "{loc:?}"
+    );
+}

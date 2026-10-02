@@ -938,6 +938,12 @@ fn no_release_ticket_goes_to_an_evaluator_outside_the_constraints() {
     quiet_platform_default(&g);
     let ev = g.platform_evaluator("ev-us", Some("us-central1"), true);
     let (v, _, job) = queued(&g, "2026-q1");
+    // Start is the gate: only a running job asks for a ticket.
+    assert_eq!(
+        g.t.call(&ev.service, "POST", &format!("/v1/jobs/{job}/start"), None)
+            .0,
+        200
+    );
     let ticket = |g: &G| {
         g.t.call(
             &ev.service,
@@ -979,6 +985,38 @@ fn an_evaluator_that_moves_after_scheduling_fails_the_job() {
     let (s, r) = g.register(&e, Some(gcp("europe-west1")));
     assert_eq!(s, 201, "{r}");
     start_refused_by(&g, &e.service, &job, "ENC2710");
+}
+
+/// Another security admin renewing the declaration of the same location
+/// changes the evidence's digest (it names the declarer) and nothing about
+/// the machine: the job goes back to be scheduled, with a grant that
+/// records the renewed evidence, instead of failing for good.
+#[test]
+fn a_renewed_declaration_requeues_a_scheduled_job_instead_of_failing_it() {
+    let Some(g) = world() else { return };
+    quiet_platform_default(&g);
+    let e = g.platform_evaluator("ev-de", Some("europe-west3"), true);
+    let (_, _, job) = queued(&g, "2026-q1");
+    let before = g.view(&job)["placement"]["evidence_digest"].clone();
+    assert_ne!(before, Value::Null);
+    // A second security admin of the operator declares the same location.
+    let other = user(&g.t, &g.platform, "platform", "p-sec2", &["security_admin"]);
+    let (s, v) = g.declare(&other, "ev-de", "europe-west3");
+    assert_eq!(s, 201, "{v}");
+    // Start refuses (the grant names the old evidence) but does not fail
+    // the job: it waits to be scheduled again.
+    let (s, v) =
+        g.t.call(&e.service, "POST", &format!("/v1/jobs/{job}/start"), None);
+    assert_eq!((s, code(&v)), (403, "ENC2710"), "{v}");
+    assert_eq!(g.state(&job), "authorized");
+    assert!(g.view(&job)["evaluator"].is_null(), "{}", g.view(&job));
+    g.t.control.schedule_pending().unwrap();
+    assert_eq!(g.state(&job), "queued");
+    let after = g.view(&job)["placement"]["evidence_digest"].clone();
+    assert_ne!(after, before);
+    let (s, v) =
+        g.t.call(&e.service, "POST", &format!("/v1/jobs/{job}/start"), None);
+    assert_eq!(s, 200, "{v}");
 }
 
 #[test]
@@ -1320,6 +1358,9 @@ fn location_changes_reach_every_project_that_uses_the_evaluator() {
     let before = g.log_kinds().len();
     let (s, r) = g.declare(&g.plat_sec, "ev-de", "europe-west1");
     assert_eq!(s, 201, "{r}");
+    // A declaration grants; it is checkpointed by the background pass, not
+    // before its call returns.
+    g.t.control.checkpoint_log().unwrap();
     let kinds = g.log_kinds();
     assert_eq!(kinds.len(), before + 1, "{kinds:?}");
     let (k, refs) = kinds.last().unwrap();
@@ -1412,6 +1453,11 @@ fn a_release_ticket_carries_the_constraints_its_binding_names() {
     let constraints = allow_regions(&["DE"]);
     assert_eq!(g.constrain(&g.tax_sec1, constraints.clone()).0, 200);
     let (v, _, job) = queued(&g, "2026-q1");
+    assert_eq!(
+        g.t.call(&ev.service, "POST", &format!("/v1/jobs/{job}/start"), None)
+            .0,
+        200
+    );
     let (s, r) = g.t.call(
         &ev.service,
         "POST",
@@ -1438,6 +1484,7 @@ fn a_release_ticket_carries_the_constraints_its_binding_names() {
 fn a_release_ticket_without_project_constraints_carries_none() {
     let Some(g) = world() else { return };
     let (v, _, job) = queued(&g, "2026-q1");
+    assert_eq!(g.start(&job).0, 200);
     let (s, r) = g.t.call(
         &g.evaluator.service,
         "POST",

@@ -555,6 +555,16 @@ impl AuthorizationV2 {
         if self.valid_from >= self.valid_until {
             return Err(err("an authorization's window must end after it starts"));
         }
+        // The number an owner accepts being charged for scales a privacy
+        // sensitivity: as bounded as the program's own declaration.
+        if let Some(n) = self.limits.max_sources_per_unit {
+            let max = encompute_ir::confidentiality::MAX_SOURCES_PER_UNIT;
+            if n == 0 || n > max {
+                return Err(err(format!(
+                    "limits.max_sources_per_unit must be 1 to {max}, got {n}"
+                )));
+            }
+        }
         if self.nonce.len() != 32 || unhex(&self.nonce).is_none() {
             return Err(err("the nonce is 16 bytes of lowercase hex"));
         }

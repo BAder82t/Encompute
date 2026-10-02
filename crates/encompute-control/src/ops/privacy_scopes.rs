@@ -37,6 +37,14 @@
 //! Lock order: the job, then scope rows (sorted), then population rows
 //! (sorted), then the governance head and the audit head. A single spend
 //! locks its scope, then its population.
+//!
+//! One cycle is known and retried, not removed: start locks the job and then
+//! share-locks its source rows, while a revocation (and a key ticket) lock
+//! the source first and the job second, the order revocation has always
+//! taken. A start racing the revocation of one of its sources can therefore
+//! deadlock; PostgreSQL aborts one of the two (40P01), [`crate::db::Db::tx`]
+//! runs it again (at most three times) and the start's closure resets its
+//! state at every attempt, so the result is as if they had run in turn.
 
 use std::collections::{BTreeMap, BTreeSet};
 

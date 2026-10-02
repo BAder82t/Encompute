@@ -1335,6 +1335,35 @@ impl Control {
         Ok(())
     }
 
+    /// Whether the only reason governed job `job` may not start on
+    /// `evaluator` is that the evidence for its location was renewed after
+    /// scheduling: the evaluator is still admitted and is the same machine
+    /// (operator, location, evidence level, endpoint), and the grant's
+    /// placement differs from what the registry holds now in the evidence's
+    /// digest alone (another person of the operator declared the same
+    /// location again). Such a job is scheduled again, with a grant that
+    /// records the renewed evidence, instead of failing for good.
+    pub(crate) fn placement_only_renewed(
+        &self,
+        t: &mut Transaction<'_>,
+        job: &str,
+        binding: &GovernanceBinding,
+        evaluator: &str,
+        recorded: &GrantPlacement,
+    ) -> Result<bool> {
+        let adm = self.admission_for_job(t, job, binding)?;
+        let Some(now_admitted) = adm.admitted.iter().find(|a| a.id == evaluator) else {
+            return Ok(false);
+        };
+        let current = grant_placement(now_admitted);
+        Ok(current != *recorded
+            && current
+                == GrantPlacement {
+                    evidence_digest: current.evidence_digest.clone(),
+                    ..recorded.clone()
+                })
+    }
+
     /// The evaluators governed job `job` may run on **now**: every
     /// constraint, the owners' authorizations it runs under, and the
     /// registry as it is (see [`Control::job_admission`]).

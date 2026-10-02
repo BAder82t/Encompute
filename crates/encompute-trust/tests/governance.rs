@@ -1047,3 +1047,22 @@ fn max_sources_per_unit_does_not_change_existing_authorization_ids() {
     pinned.limits.max_sources_per_unit = Some(1);
     assert_ne!(pinned.id(), b.id());
 }
+
+/// `limits.max_sources_per_unit` scales a privacy sensitivity, so it is
+/// bounded as the program's own declaration is: 1 to 4096. Zero (a release
+/// charged for no source) and an absurd number are not authorizations.
+#[test]
+fn max_sources_per_unit_is_bounded() {
+    let mut b = body();
+    for ok in [1, 2, 4096] {
+        b.limits.max_sources_per_unit = Some(ok);
+        b.check().unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    for bad in [0, 4097, u32::MAX] {
+        b.limits.max_sources_per_unit = Some(bad);
+        let e = b.check().unwrap_err();
+        assert!(e.message.contains("max_sources_per_unit"), "{bad}: {e}");
+    }
+    b.limits.max_sources_per_unit = None;
+    b.check().unwrap();
+}

@@ -116,6 +116,10 @@ pub struct Knobs {
     pub privacy_policy: bool,
     /// The program releases a differential-privacy aggregate ([`DP_PROGRAM`]).
     pub dp_aggregate: bool,
+    /// Another organization (`OTHER`) owns data up the lineage of a source
+    /// and authorizes it too (its authorization names no input of the
+    /// binding).
+    pub lineage_owner: bool,
     /// The submitting organization.
     pub submitter: &'static str,
     /// Events of other jobs before the authorizations were issued.
@@ -147,6 +151,7 @@ impl Default for Knobs {
             owner_project_pin: None,
             privacy_policy: false,
             dp_aggregate: false,
+            lineage_owner: false,
             submitter: OTHER,
             filler: 0,
             late: vec![],
@@ -314,9 +319,11 @@ impl Fixture {
         let plan_hex = plan.id().unwrap().hex();
 
         let mut docs = vec![];
-        for (org, key_, version, commitment) in
-            [(TAX, &tax, &v_tax, h('c')), (BEN, &ben, &v_ben, h('d'))]
-        {
+        let mut signers = vec![(TAX, &tax, &v_tax, h('c')), (BEN, &ben, &v_ben, h('d'))];
+        if k.lineage_owner {
+            signers.push((OTHER, &other, &v_tax, h('c')));
+        }
+        for (org, key_, version, commitment) in signers {
             let mut b = AuthorizationV2 {
                 version: 2,
                 party: org.into(),
@@ -481,7 +488,12 @@ impl Fixture {
             submitter: Some("psn_submitter".into()),
         };
 
-        let audit = Self::log(&k, &control, &tax, &ben, &other, &ids, &[TAX, BEN]);
+        let parties: &[&str] = if k.lineage_owner {
+            &[TAX, BEN, OTHER]
+        } else {
+            &[TAX, BEN]
+        };
+        let audit = Self::log(&k, &control, &tax, &ben, &other, &ids, parties);
         Self {
             graph,
             evidence,

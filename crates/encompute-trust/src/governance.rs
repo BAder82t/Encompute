@@ -1561,11 +1561,15 @@ fn row_location(j: &Job<'_>) -> GovernanceRow {
                 .into(),
         );
     }
+    // Whose data the job reads: the binding's inputs' owners and every
+    // organization that authorized one (an owner up the lineage of a derived
+    // source authorizes it without owning an input of the binding).
     let owners: BTreeSet<&str> = j
         .binding
         .inputs
         .values()
         .map(|i| i.organization.as_str())
+        .chain(j.auths.iter().map(|a| a.body.party.as_str()))
         .collect();
     let recipients = j.recipients();
     if owners.contains(p.operator.as_str()) || recipients.contains(&p.operator) {
