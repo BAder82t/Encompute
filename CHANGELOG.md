@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0 — 2026-10-02
+
+The first stable 0.3 release. Its content is that of 0.3.0-rc.4 (see that
+section below for every change, the security fixes for findings
+ENC-SF-2026-033 to 094 and the breaking and behaviour changes). Several of
+those fixes are only partial; the remainders are in the "Open" list of
+`docs/security-findings.md` and in `KNOWN_LIMITATIONS.md`. The fixes have
+been checked by two internal adversarial review passes, the release gate
+and an 8-hour soak; they have not been reviewed by the independent
+reviewers.
+
+### Changes since 0.3.0-rc.4
+
+- **Dependency lock:** `yoke-derive` 0.8.3 to 0.8.4 in `Cargo.lock` and
+  `fuzz/Cargo.lock` (0.8.3 was yanked upstream and failed the supply-chain
+  gate). No other third-party package moved.
+- **Third-party notices** regenerated.
+- Version and release documents updated. No source, test, migration or
+  configuration change.
+
 ## 0.3.0-rc.4 — 2026-09-29
 
 - **Fine-tuning resume after a coordinator crash.** Every aggregation

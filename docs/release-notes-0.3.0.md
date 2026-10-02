@@ -1,14 +1,18 @@
-# Encompute 0.3.0-rc.4: release notes
+# Encompute 0.3.0: release notes
 
-> Historical notes for 0.3.0-rc.4. The stable release is described in [release-notes-0.3.0.md](release-notes-0.3.0.md).
+This is the first stable release of 0.3. Its content is that of
+0.3.0-rc.4 ([rc.4 notes](release-notes-rc.md)), which went through the
+release gate and an 8-hour soak, plus a dependency lock bump and release
+metadata (see "What changed since 0.3.0-rc.4?").
 
-This is the second published release candidate of
-0.3.0. The independent security review of 0.3.0-rc.3
-([security-review/](../security-review/)) has been completed: it and a
-follow-up review of the fixes reported 62 findings, ENC-SF-2026-033 to
-094, and all are fixed in this release candidate, several of them only
-partly (see "What is still open?"). Features are frozen; only fixes go in
-before 0.3.0.
+The independent security review of 0.3.0-rc.3
+([security-review/](../security-review/)) and a follow-up review of its
+fixes reported 62 findings, ENC-SF-2026-033 to 094. All are fixed in
+0.3.0, several of them only partly (see "What is still open?"). The fixes
+themselves were checked by two internal adversarial review passes, the
+release gate and the soak. They have not been reviewed by the independent
+reviewers. Experimental and unsupported features are unchanged from
+rc.4.
 
 Encompute compiles ordinary Python into encrypted computation, and lets
 several organizations build AI together without revealing what each must
@@ -16,6 +20,19 @@ keep private. 0.3 is the first release with exact programs on OpenFHE,
 execution receipts, confidentiality policies, attested key release, secure
 aggregation, differential privacy, a trust graph, a planner, confidential
 fine-tuning and an enterprise control plane.
+
+## What changed since 0.3.0-rc.4?
+
+Only the dependency lock and release metadata. No source, test, migration,
+configuration default or build feature changed.
+
+- **Dependency lock:** `yoke-derive` moves from 0.8.3 to 0.8.4, because
+  0.8.3 was yanked upstream and the supply-chain gate (`cargo deny`)
+  refused it. It is the only third-party package that moved, in
+  `Cargo.lock` and `fuzz/Cargo.lock`.
+- **Third-party notices** regenerated for that bump.
+- **Version and status text:** 0.3.0 in the workspace, the Python package
+  and the documentation.
 
 ## What can I safely use?
 
@@ -65,7 +82,7 @@ Research only, never in production builds:
 The mock attestation provider and the development-mode OpenBao in Docker
 Compose are for development and trials. They protect nothing.
 
-## What changed since 0.3.0-rc.3?
+## What is in 0.3.0 compared with 0.3.0-rc.3?
 
 Security fixes for every finding of the review, each listed with its
 commits, regression test and invariant in
