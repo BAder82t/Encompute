@@ -441,6 +441,20 @@ impl C {
             asset_brokers: BTreeMap::new(),
         };
         let spec = reading_spec(&r.asset).governed(&binding);
+        let plan_hash = plan["plan_id"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("encplan1:")
+            .unwrap()
+            .to_owned();
+        // What the real submission stores, so the job revalidates like one.
+        let governance = json!({
+            "binding": binding,
+            "governance_id": binding.id().hex(),
+            "plan_hash": plan_hash,
+            "authorization_set_id": AuthorizationSetId::of([r.authorization_id.clone()]).unwrap().hex(),
+            "authorizations": {r.authorization_row.clone(): r.authorization_id.clone()},
+        });
         let job = format!("job_{}", hex(&rand16()));
         let signer = &self.t.control.signer;
         let mut g = JobGrant {
@@ -459,7 +473,7 @@ impl C {
             issuer: signer.id().into(),
             issuer_public_key: signer.public_key_hex(),
             governance: Some(GrantGovernance {
-                plan_hash: "e".repeat(64),
+                plan_hash: plan_hash.clone(),
                 purpose_id: r.purpose.clone(),
                 governance_id: binding.id().hex(),
                 binding,
@@ -477,9 +491,9 @@ impl C {
         c.execute(
             "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, purpose,
                  source_assets, requested_output, scheme, backend, profile, state, evaluator_id,
-                 job_grant, initiated_by, idempotency_key, request_digest)
+                 job_grant, initiated_by, idempotency_key, request_digest, governance, purpose_id)
              VALUES ($1, $2, $3, $4, $5, $6, 'benefits-eligibility', $7, 'out', $8, $9, $10, $11,
-                     $12, $13, 't-dev', $1, 'fixture')",
+                     $12, $13, 't-dev', $1, 'fixture', $14, $15)",
             &[
                 &job,
                 &TAX,
@@ -494,6 +508,8 @@ impl C {
                 &state,
                 &self.evaluator.id,
                 &serde_json::to_value(&g).unwrap(),
+                &governance,
+                &r.purpose,
             ],
         )
         .unwrap();
@@ -864,7 +880,7 @@ fn ticket_only_for_scheduled_evaluator() {
     let Some(c) = world() else { return };
     let r = c.ready();
     let far = now() + 3600;
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", far, far);
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", far, far);
     // Nobody but the scheduled evaluator: not a person, not another
     // evaluator.
     refused(c.ticket(&c.tax_dev, &job, &r.version), "ENC2602");
@@ -891,7 +907,7 @@ fn ticket_only_for_scheduled_evaluator() {
         "ENC2604",
     );
     // Not for a grant the control plane did not sign.
-    let forged = c.governed_job(&r, &r.asset, &r.version, "queued", far, far);
+    let forged = c.governed_job(&r, &r.asset, &r.version, "running", far, far);
     c.t.control
         .db
         .conn()
@@ -905,8 +921,14 @@ fn ticket_only_for_scheduled_evaluator() {
         c.ticket(&c.evaluator.service, &forged, &r.version),
         "ENC2604",
     );
-    // Not once the owner revoked its authorization: the revocation fails
-    // the queued job, and a running one gets no ticket (ENC2706).
+    // Not for a queued job: start is the gate, and it has not run (ENC2604).
+    let queued = c.governed_job(&r, &r.asset, &r.version, "queued", far, far);
+    refused(
+        c.ticket(&c.evaluator.service, &queued, &r.version),
+        "ENC2604",
+    );
+    // Not once the owner revoked its authorization: a running job gets no
+    // ticket (ENC2706), and the revocation fails a queued one.
     let running = c.governed_job(&r, &r.asset, &r.version, "running", far, far);
     c.t.ok(
         &c.tax_sec1,
@@ -914,10 +936,14 @@ fn ticket_only_for_scheduled_evaluator() {
         &format!("/v1/authorizations/{}/revoke", r.authorization_row),
         Some(json!({"reason": "withdrawn"})),
     );
-    refused(c.ticket(&c.evaluator.service, &job, &r.version), "ENC2604");
+    refused(c.ticket(&c.evaluator.service, &job, &r.version), "ENC2706");
     refused(
         c.ticket(&c.evaluator.service, &running, &r.version),
         "ENC2706",
+    );
+    refused(
+        c.ticket(&c.evaluator.service, &queued, &r.version),
+        "ENC2604",
     );
 }
 
@@ -937,19 +963,19 @@ fn ticket_ttl_capped_by_grant_not_after() {
     assert_eq!(t.not_after - t.not_before, 300);
     // Capped by the governed window of the grant...
     let soon = now() + 120;
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", soon, far);
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", soon, far);
     let t = ticket_of(&c.ticket(&c.evaluator.service, &job, &r.version).1);
     assert_eq!(t.not_after, soon);
     // ... and by the grant's expiry.
     let soon = now() + 100;
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", far, soon);
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", far, soon);
     let t = ticket_of(&c.ticket(&c.evaluator.service, &job, &r.version).1);
     assert_eq!(t.not_after, soon);
     // A window closing within the skew gets no ticket; one that ended, none
     // either.
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", now() + 30, far);
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", now() + 30, far);
     refused(c.ticket(&c.evaluator.service, &job, &r.version), "ENC2712");
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", now() - 1, far);
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", now() - 1, far);
     refused(c.ticket(&c.evaluator.service, &job, &r.version), "ENC2705");
 }
 
@@ -958,7 +984,7 @@ fn ticket_is_verifiable_by_the_broker() {
     let Some(c) = world() else { return };
     let r = c.ready();
     let far = now() + 3600;
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", far, far);
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", far, far);
     let (s, v) = c.ticket(&c.evaluator.service, &job, &r.version);
     assert_eq!(s, 201, "{v}");
     let t = ticket_of(&v);
@@ -1048,7 +1074,7 @@ fn sovereign_ticket_refuses_a_platform_held_source() {
     );
     c.authorization(&r.purpose, &version, &r.governance_key);
     let far = now() + 3600;
-    let job = c.governed_job(&r, &asset, &version, "queued", far, far);
+    let job = c.governed_job(&r, &asset, &version, "running", far, far);
     refused(c.ticket(&c.evaluator.service, &job, &version), "ENC2715");
 }
 
@@ -1372,7 +1398,7 @@ fn governance_rows_are_never_deleted() {
     let Some(c) = world() else { return };
     let r = c.ready();
     let far = now() + 3600;
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", far, far);
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", far, far);
     assert_eq!(c.ticket(&c.evaluator.service, &job, &r.version).0, 201);
     let mut db = c.t.control.db.conn().unwrap();
     for table in [
@@ -1422,7 +1448,7 @@ fn a_ticket_waits_for_a_concurrent_revocation() {
     let Some(c) = world() else { return };
     let r = c.ready();
     let far = now() + 3600;
-    let job = c.governed_job(&r, &r.asset, &r.version, "queued", far, far);
+    let job = c.governed_job(&r, &r.asset, &r.version, "running", far, far);
     let mut db = postgres::Client::connect(&c.t.env0.url, postgres::NoTls).unwrap();
     let mut tx = db.transaction().unwrap();
     tx.execute(

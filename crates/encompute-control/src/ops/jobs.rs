@@ -328,6 +328,9 @@ pub enum GovernedStage {
     Approve,
     Schedule,
     Start,
+    /// A release or export ticket for a running job: everything start
+    /// checks except the privacy budget (start has reserved it already).
+    Ticket,
 }
 
 impl GovernedStage {
@@ -336,6 +339,7 @@ impl GovernedStage {
             GovernedStage::Approve => "approve",
             GovernedStage::Schedule => "schedule",
             GovernedStage::Start => "start",
+            GovernedStage::Ticket => "ticket",
         }
     }
 }
@@ -1777,7 +1781,7 @@ impl Control {
                 "the job's plan is not the one it was bound to".into(),
             ));
         }
-        if stage == GovernedStage::Start {
+        if matches!(stage, GovernedStage::Start | GovernedStage::Ticket) {
             let grant = j.grant.as_ref().ok_or_else(|| conflict("no grant"))?;
             let pk = self.signer.public_key_hex();
             let bound = grant.governance.as_ref().is_some_and(|x| {
@@ -1907,20 +1911,21 @@ impl Control {
         //    and is still the machine the grant recorded (ENC2710,
         //    ENC2725).
         if stage != GovernedStage::Approve {
-            let (evaluator, recorded) = if stage == GovernedStage::Start {
-                let ev = j.evaluator.as_deref().ok_or_else(|| {
-                    Error::new(Code::GovernanceResidency, "the job has no evaluator")
-                })?;
-                (
-                    Some(ev),
-                    j.grant
-                        .as_ref()
-                        .and_then(|x| x.governance.as_ref())
-                        .and_then(|x| x.placement.as_ref()),
-                )
-            } else {
-                (None, None)
-            };
+            let (evaluator, recorded) =
+                if matches!(stage, GovernedStage::Start | GovernedStage::Ticket) {
+                    let ev = j.evaluator.as_deref().ok_or_else(|| {
+                        Error::new(Code::GovernanceResidency, "the job has no evaluator")
+                    })?;
+                    (
+                        Some(ev),
+                        j.grant
+                            .as_ref()
+                            .and_then(|x| x.governance.as_ref())
+                            .and_then(|x| x.placement.as_ref()),
+                    )
+                } else {
+                    (None, None)
+                };
             self.check_job_placement(t, &j.id, &g.binding, evaluator, recorded)?;
         }
         // 7. The window, strictly.
@@ -2059,11 +2064,19 @@ impl Control {
         j: &JobRow,
         stage: GovernedStage,
     ) -> Result<()> {
-        if stage == GovernedStage::Approve {
+        if matches!(stage, GovernedStage::Approve | GovernedStage::Ticket) {
             return Ok(());
         }
         self.check_job_privacy(t, &privacy_facts(j), None, false)
             .map(|_| ())
+    }
+
+    /// Everything start checks, except the privacy budget (start reserved
+    /// it), for a release or export ticket of running governed job `id`, in
+    /// the caller's transaction. Returns `not_after`.
+    pub(super) fn revalidate_for_ticket(&self, t: &mut Transaction<'_>, id: &str) -> Result<u64> {
+        let j = job_row(t, id, false)?.ok_or_else(|| not_found("job", id))?;
+        self.revalidate_governed(t, &j, GovernedStage::Ticket, now())
     }
 
     /// Revalidates governed job `id` now for `stage`, without changing it:

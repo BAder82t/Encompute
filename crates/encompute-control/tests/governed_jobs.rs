@@ -903,7 +903,16 @@ fn governed_job_runs_end_to_end_with_v2_grant_and_v4_receipt() {
             now(),
         )
         .unwrap();
-    // A release ticket for the real job's source.
+    // Start (the single gate), the ticket, the evaluator's v4 receipt, the
+    // client's completion.
+    let s = g.t.ok(
+        &g.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{job}/start"),
+        None,
+    );
+    assert_eq!(s["state"], "running");
+    // A release ticket for the real job's source, once it runs.
     let t = g.t.ok(
         &g.evaluator.service,
         "POST",
@@ -917,14 +926,6 @@ fn governed_job_runs_end_to_end_with_v2_grant_and_v4_receipt() {
     assert!(ticket.not_after <= gov.not_after);
     let spec = base_spec(&program).governed(&gov.binding);
     assert_eq!(ticket.execution_spec_id, spec.id().hex());
-    // Start, the evaluator's v4 receipt, the client's completion.
-    let s = g.t.ok(
-        &g.evaluator.service,
-        "POST",
-        &format!("/v1/jobs/{job}/start"),
-        None,
-    );
-    assert_eq!(s["state"], "running");
     let started: Option<i64> =
         g.t.control
             .db
@@ -1691,11 +1692,38 @@ fn ticket(g: &G, job: &str, version: &str) -> (u16, Value) {
     )
 }
 
+/// Start is the single gate: a queued governed job has been through neither
+/// the start revalidation nor the privacy reservation, so no key is released
+/// for it; once it runs, the ticket is issued.
+#[test]
+fn ticket_refused_for_a_queued_governed_job() {
+    let Some(g) = world() else { return };
+    let (v, _a, _program, j) = g.job("2026-q1", |_| {});
+    let job = id(&j);
+    assert_eq!(g.state(&job), "queued");
+    let (s, t) = ticket(&g, &job, &v.version);
+    assert_eq!(s, 409, "{t}");
+    assert!(t["message"].as_str().unwrap().contains("running"), "{t}");
+    let mut c = g.t.control.db.conn().unwrap();
+    let n: i64 = c
+        .query_one(
+            "SELECT count(*) FROM release_tickets WHERE job_id = $1",
+            &[&job],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 0);
+    assert_eq!(g.start(&job).0, 200);
+    let (s, t) = ticket(&g, &job, &v.version);
+    assert_eq!(s, 201, "{t}");
+}
+
 #[test]
 fn ticket_uses_only_the_jobs_own_authorizations() {
     let Some(g) = world() else { return };
     let (v, a, program, j) = g.job("2026-q1", |_| {});
     let job = id(&j);
+    assert_eq!(g.start(&job).0, 200);
     // A second authorization for the same version, broader (tax as a
     // recipient too) and valid for longer.
     let mut broader = g.body(&v, &program);
@@ -1734,6 +1762,7 @@ fn ticket_refused_when_jobs_authorization_superseded() {
     refused(ticket(&g, &job, &v.version), "ENC2706");
     // A job's authorization rewritten in the database is refused too.
     let (v2, a2, _, j2) = g.job("2026-q2", |_| {});
+    assert_eq!(g.start(&id(&j2)).0, 200);
     attacker(
         &g.t.env0.url,
         &["authorizations"],
@@ -1754,6 +1783,7 @@ fn ticket_refuses_four_eyes_authorization_not_bound_to_job() {
     let mut four = g.body(&v, &program);
     four.per_job_four_eyes = true;
     let f = g.authorize(four);
+    assert_eq!(g.start(&id(&j)).0, 200);
     let (s, t) = ticket(&g, &id(&j), &v.version);
     assert_eq!(s, 201, "{t}");
     let ids: BTreeSet<String> =
@@ -2621,6 +2651,28 @@ fn approver_removed_from_org_no_longer_counts() {
     assert_eq!(e.code.as_str(), "ENC2707", "{}", e.message);
 }
 
+/// A ticket for a running job re-checks what start checked: an approver
+/// removed after start no longer counts, so the quorum the job started
+/// under has lapsed and no key is released (ENC2707).
+#[test]
+fn ticket_revalidates_the_four_eyes_quorum_after_start() {
+    let Some(g) = world() else { return };
+    let (v, _, job) = four_eyes_job(&g, "2026-q1");
+    for who in [&g.tax_owner, &g.tax_sec1] {
+        g.t.ok(who, "POST", &format!("/v1/jobs/{job}/approve"), None);
+    }
+    assert_eq!(g.start(&job).0, 200);
+    assert_eq!(g.state(&job), "running");
+    let sec1 = principal_id(&g, &g.tax_sec1);
+    g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/memberships/remove"),
+        Some(json!({"principal": sec1})),
+    );
+    refused(ticket(&g, &job, &v.version), "ENC2707");
+}
+
 /// An approval rule naming `auditor` could never be met (auditors never
 /// approve): the database refuses it, on insert and on update.
 #[test]
@@ -3042,6 +3094,7 @@ fn never_output_is_released_to_nobody() {
     let out = &grant.governance.unwrap().binding.outputs["out"];
     assert_eq!(out.release_class, ReleaseClass::Never);
     assert!(out.recipients.is_empty());
+    assert_eq!(g.start(&job).0, 200);
     let (s, t) = ticket(&g, &job, &v.version);
     assert_eq!(s, 201, "{t}");
     let t: encompute_verification::ticket::ReleaseTicket =

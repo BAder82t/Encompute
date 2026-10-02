@@ -325,11 +325,12 @@ impl Control {
 
     /// The scheduled evaluator of a governed job asks for a release ticket
     /// for one of its sources (by dataset version): signed with the
-    /// control plane's key, stored and audited. The job must be queued or
-    /// running on it with a governed grant the control plane signed; the
-    /// source must be a live source of the job, its key held by a broker
-    /// custody allows, and at least one owner authorization for it usable
-    /// now. `not_after = min(now + 300 s, the grant's governed not_after,
+    /// control plane's key, stored and audited. The job must be running on
+    /// it (start is the single gate, so a queued job gets nothing) with a
+    /// governed grant the control plane signed, and must still pass what
+    /// start checked; the source must be a live source of the job, its key
+    /// held by a broker custody allows, and at least one owner authorization
+    /// for it usable now. `not_after = min(now + 300 s, the grant's governed not_after,
     /// the grant's expiry, the authorizations' valid_until)`.
     pub fn issue_release_ticket(
         &self,
@@ -384,9 +385,12 @@ impl Control {
             if j.get::<_, Option<String>>(4).as_deref() != Some(ctx.actor()) {
                 return Err(not_found("job", id));
             }
-            if !matches!(state.as_str(), "queued" | "running") {
+            // Start is the single gate: it revalidates the job and reserves
+            // its privacy budget. A queued job has passed neither, so no key
+            // is released for it.
+            if state != "running" {
                 return Err(conflict(format!(
-                    "job {id} is {state}: release tickets are for queued or running jobs"
+                    "job {id} is {state}: release tickets are issued only for running jobs (start is the gate)"
                 )));
             }
             let p = project_row(t, &project)?.ok_or_else(|| not_found("project", &project))?;
@@ -430,6 +434,9 @@ impl Control {
             // not admit now, or that is no longer the machine the grant
             // recorded (ENC2710, ENC2725).
             self.check_job_placement(t, id, &g.binding, Some(ctx.actor()), g.placement.as_ref())?;
+            // And nothing start checked has lapsed since: four-eyes quorum,
+            // authorization windows and revocations, execution limits.
+            self.revalidate_for_ticket(t, id)?;
             let at = now();
             if at >= grant.expires_at {
                 return Err(conflict("the job's grant expired"));
