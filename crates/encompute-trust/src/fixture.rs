@@ -57,6 +57,22 @@ asset \"claims\" dataset owners [\"benefits-agency\"] readers [\"benefits-agency
 output \"out\" = %2
 ";
 
+/// A program that releases a differential-privacy aggregate of the two
+/// agencies' vectors to tax, as a governed job's budget is charged to a
+/// project's scope and the sources' populations.
+pub const DP_PROGRAM: &str = "encompute 0.1
+program adult precision 0.001 purpose \"eligibility\"
+party \"tax-agency\" \"Tax\"
+party \"benefits-agency\" \"Benefits\"
+asset \"income\" dataset owners [\"tax-agency\"] readers [\"tax-agency\"] purposes [\"eligibility\"] release aggregate_only privacy unit \"patient\" epsilon 1.0 delta 1e-6
+asset \"claims\" dataset owners [\"benefits-agency\"] readers [\"tax-agency\"] purposes [\"eligibility\"] release aggregate_only privacy unit \"patient\" epsilon 1.0 delta 1e-6
+%0 = input \"age\" [-1.0, 1.0] asset \"income\" : secret vector<4>
+%1 = input \"min\" [-1.0, 1.0] asset \"claims\" : secret vector<4>
+%2 = add %0, %1 : secret vector<4>
+output \"out\" = %2 to \"tax-agency\"
+aggregate \"out\" sum minimum 2 colluding 0 clip [-1.0, 1.0] scale 4096 modulus 40 dp discrete_gaussian clip_norm 1.0 noise_multiplier 40.0
+";
+
 pub fn h(c: char) -> String {
     c.to_string().repeat(64)
 }
@@ -98,6 +114,8 @@ pub struct Knobs {
     /// The project constraint digest each owner's authorization pins.
     pub owner_project_pin: Option<String>,
     pub privacy_policy: bool,
+    /// The program releases a differential-privacy aggregate ([`DP_PROGRAM`]).
+    pub dp_aggregate: bool,
     /// The submitting organization.
     pub submitter: &'static str,
     /// Events of other jobs before the authorizations were issued.
@@ -128,6 +146,7 @@ impl Default for Knobs {
             owner_placement: None,
             owner_project_pin: None,
             privacy_policy: false,
+            dp_aggregate: false,
             submitter: OTHER,
             filler: 0,
             late: vec![],
@@ -150,7 +169,7 @@ pub struct Fixture {
     pub knobs: Knobs,
 }
 
-fn context() -> PlanningContext {
+fn context(approximate: bool) -> PlanningContext {
     PlanningContext {
         profile: Profile::Standard,
         catalog: BackendCatalog {
@@ -169,7 +188,7 @@ fn context() -> PlanningContext {
         },
         preferences: Preferences::default(),
         facts: ProgramFacts {
-            semantics: "exact".into(),
+            semantics: if approximate { "approximate" } else { "exact" }.into(),
             fhe_supported: true,
             proof_covered: false,
             operations: 1,
@@ -226,7 +245,7 @@ impl Fixture {
         let other = key(3);
         let control = ServiceSigner::from_seed("encompute-control", &[9u8; 32]).unwrap();
         let evaluator = EvaluatorSigner::from_seed(&[7; 32]);
-        let program = parse(PROGRAM).unwrap();
+        let program = parse(if k.dp_aggregate { DP_PROGRAM } else { PROGRAM }).unwrap();
         let program_text = program.to_string();
         let program_id = crate::program_id(&program_text);
         let c = program.confidentiality().unwrap();
@@ -289,7 +308,7 @@ impl Fixture {
             ]),
         };
         let gov_id = binding.id().hex();
-        let plan = plan_or_fail(&program, &context())
+        let plan = plan_or_fail(&program, &context(k.dp_aggregate))
             .unwrap()
             .governed(&gov_id);
         let plan_hex = plan.id().unwrap().hex();

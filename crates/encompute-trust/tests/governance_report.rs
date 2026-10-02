@@ -1386,3 +1386,37 @@ fn report_location_row_uses_signed_grant_placement_only_when_present() {
     }));
     assert_eq!(status(&r, "Location"), Status::NotApplicable);
 }
+
+/// A governed job that releases a differential-privacy aggregate is charged
+/// to a project's scope and its sources' populations, not to the sources'
+/// own ledgers that the per-asset budget row reads: the report says the
+/// budget is not evidenced (never a pass, and never a failure for a budget
+/// no program declares), whether or not an authorization pins the scope.
+#[test]
+fn a_governed_dp_release_is_not_evidenced_never_a_budget_pass_or_fail() {
+    for privacy_policy in [false, true] {
+        let r = show(&Fixture::with(Knobs {
+            dp_aggregate: true,
+            privacy_policy,
+            ..Knobs::default()
+        }));
+        assert_eq!(status(&r, "Privacy policy"), Status::NotPresent);
+        let d = details(&r, "Privacy policy");
+        assert!(
+            d.contains("scope") && d.contains("population") && d.contains("not evidenced"),
+            "{d}"
+        );
+        assert_eq!(
+            r.row("Privacy policy").unwrap().value.as_deref(),
+            Some("NOT EVIDENCED")
+        );
+    }
+    assert_ne!(
+        show(&Fixture::with(Knobs {
+            dp_aggregate: true,
+            ..Knobs::default()
+        }))
+        .verdict,
+        Verdict::Satisfied
+    );
+}

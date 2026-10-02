@@ -1946,10 +1946,25 @@ fn row_privacy(j: &Job<'_>, base: &TrustReport) -> GovernanceRow {
     let scoped = j.auths.iter().any(|a| a.body.privacy_scope_id.is_some());
     let budgeted = j.ev.spec.privacy_policy_id.is_some()
         || j.auths.iter().any(|a| a.body.privacy_policy_id.is_some());
-    if scoped {
+    // A governed job that releases a differential-privacy aggregate is
+    // charged to a project's scope and its sources' populations, never to
+    // the sources' own ledgers that the base report's per-asset budget row
+    // reads (a scope found by lookup is as scoped as one an authorization
+    // pins). Nothing in this release's evidence shows those ledgers, so the
+    // row claims nothing about them: not evidenced.
+    let dp_release = j
+        .program
+        .as_ref()
+        .and_then(|p| p.confidentiality())
+        .is_some_and(|c| c.aggregations.iter().any(|a| a.dp.is_some()));
+    if scoped || dp_release {
         return not_present(
             "Privacy policy",
-            "an authorization names a privacy scope; scoped budgets are not evidenced in this release",
+            if scoped {
+                "an authorization names a privacy scope; scoped budgets are not evidenced in this release"
+            } else {
+                "the job releases a differential-privacy aggregate, charged to a project's privacy scope and its sources' populations: scope and population budgets are not evidenced in this release"
+            },
         );
     }
     if !budgeted && !all_signed(j) {
