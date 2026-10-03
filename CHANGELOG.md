@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.0 — 2026-10-02
+
+The first stable 0.3 release. Its content is that of 0.3.0-rc.4 (see that
+section below for every change, the security fixes for findings
+ENC-SF-2026-033 to 094 and the breaking and behaviour changes). Several of
+those fixes are only partial; the remainders are in the "Open" list of
+`docs/security-findings.md` and in `KNOWN_LIMITATIONS.md`. The fixes have
+been checked by two internal adversarial review passes, the release gate
+and an 8-hour soak; they have not been reviewed by the independent
+reviewers.
+
+### Changes since 0.3.0-rc.4
+
+- **Dependency lock:** `yoke-derive` 0.8.3 to 0.8.4 in `Cargo.lock` and
+  `fuzz/Cargo.lock` (0.8.3 was yanked upstream and failed the supply-chain
+  gate). No other third-party package moved.
+- **Third-party notices** regenerated.
+- **`restore.sh`** waits for a query over TCP, which only the final
+  PostgreSQL server accepts, instead of `pg_isready`, which the image's
+  temporary start-up server also answers. A restore into a fresh volume
+  could fail ("the database system is shutting down", "database does not
+  exist"); it failed loudly and worked on a second try.
+- **Tests and examples:** the signed-request freshness test uses 310
+  seconds, not 301, so a clock tick cannot put it on the accepted edge of
+  the server's 300-second window (the server's rule is unchanged); example
+  17 requires an accuracy gain above 0.02 instead of 0.1, which noise that
+  is random by design made fail about one run in five.
+- Version and release documents updated. No product runtime code,
+  migration, configuration default or build feature changed.
+
 ## 0.3.0-rc.4 — 2026-09-29
 
 - **Fine-tuning resume after a coordinator crash.** Every aggregation
