@@ -320,7 +320,9 @@ fn signed_requests_are_fresh_single_use_and_bound() {
     assert!(v["message"].as_str().unwrap().contains("replayed"), "{v}");
 
     // Expired or from the future (beyond ±300 s); inside the window is fine.
-    for (i, ts) in [(2, now() - 301), (3, now() + 301), (4, now() - 3600)] {
+    // (310 s, not 301: the server compares against its own clock a moment
+    // later, so a one-second tick must not move a timestamp inside the window.)
+    for (i, ts) in [(2, now() - 310), (3, now() + 310), (4, now() - 3600)] {
         let v = refused(
             get(&signed(s, "GET", "/v1/whoami", b"", ts, &nonce(i))),
             401,

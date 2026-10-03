@@ -26,11 +26,14 @@ if [ "$#" -eq 0 ]; then
   set -- $(cargo +nightly fuzz list)
 fi
 
-cargo +nightly fuzz build -O -s "$sanitizer" || exit 1
+# Always the host triple: a prebuilt musl cargo-fuzz defaults to the musl
+# target, which AddressSanitizer cannot link statically.
+triple="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+cargo +nightly fuzz build -O -s "$sanitizer" --target "$triple" || exit 1
 failed=0
 for t in "$@"; do
   mkdir -p "$work/corpus/$t" "$work/artifacts/$t"
-  cargo +nightly fuzz run -O -s "$sanitizer" "$t" "$work/corpus/$t" "corpus/$t" -- \
+  cargo +nightly fuzz run -O -s "$sanitizer" --target "$triple" "$t" "$work/corpus/$t" "corpus/$t" -- \
     -max_total_time="$secs" -rss_limit_mb=4096 -timeout=30 -print_final_stats=1 \
     -artifact_prefix="$work/artifacts/$t/" >"$work/$t.log" 2>&1
   status=$?

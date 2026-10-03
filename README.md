@@ -40,14 +40,13 @@ revealing what each needs to keep private: confidentiality policies are
 enforced by attested key release, secure aggregation and differential
 privacy, and every step leaves verifiable evidence.
 
-**Status: release candidate 0.3.0-rc.4, the frozen target for
-independent security review. The first review has reported; its findings
-and their fixes, some partial, are in
+**Status: release 0.3.0. The independent review of 0.3.0-rc.3 has
+reported; its findings and their fixes, some partial, are in
 [docs/security-findings.md](docs/security-findings.md)** (last release:
 v0.2.0). What you can rely on is in the
 [support matrix](docs/support-matrix.md); what Encompute does not do is in
 [known limitations](KNOWN_LIMITATIONS.md). See also the
-[release notes](docs/release-notes-rc.md), [changelog](CHANGELOG.md),
+[release notes](docs/release-notes-0.3.0.md), [changelog](CHANGELOG.md),
 [performance](docs/performance.md), [compatibility](docs/compatibility.md),
 [API stability](docs/api-stability.md), [threat model](docs/threat-model.md),
 [cryptography](docs/cryptography.md) and [error codes](docs/errors.md).
@@ -576,7 +575,7 @@ contains no Encompute key-generation, encryption or decryption code.
 - ✓ OpenFHE performance and hybrid optimization: optimized circuits,
   parallel gate evaluation, BGV or BinFHE per program by calibrated cost.
   Functional bootstrapping was measured and not adopted.
-- → Release candidate 0.3.0 and an independent security review.
+- ✓ Release 0.3.0.
 - → `encompute migrate` for artifact formats
   ([docs/compatibility.md](docs/compatibility.md)).
 - → Multi-machine orchestration.

@@ -16,7 +16,11 @@ DIR="$(cd "${1:?usage: restore.sh DIR}" && pwd)"
 ( cd "$DIR" && shasum -a 256 -c SHA256SUMS >/dev/null ) || { echo "backup checksums do not match" >&2; exit 1; }
 docker compose stop control evaluator keybroker >/dev/null 2>&1 || true
 docker compose up -d postgres
-for _ in $(seq 60); do docker compose exec -T postgres pg_isready -U encompute >/dev/null 2>&1 && break; sleep 1; done
+# Wait for the real server, not the image's temporary start-up server: that one
+# listens only on the Unix socket, answers pg_isready and then restarts, and
+# creates the database late. A query over TCP succeeds only once the final
+# server is up and the database exists.
+for _ in $(seq 120); do docker compose exec -T postgres psql -h 127.0.0.1 -q -U encompute -d encompute -c 'select 1' >/dev/null 2>&1 && break; sleep 1; done
 # One transaction, stopping at the first error: a partial restore fails
 # (and leaves the database as it was) instead of reporting success.
 docker compose exec -T postgres psql -q -v ON_ERROR_STOP=1 --single-transaction -U encompute encompute < "$DIR/db.sql" >/dev/null

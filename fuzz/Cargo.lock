@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-analysis"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "encompute-ir",
  "serde",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-attestation"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "ed25519-dalek",
  "encompute-ir",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-backend"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "encompute-ckks",
  "encompute-ir",
@@ -483,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-ckks"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "encompute-analysis",
  "encompute-ir",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-control"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-evaluator"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "encompute-analysis",
  "encompute-attestation",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-exact"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "encompute-analysis",
  "encompute-backend",
@@ -577,14 +577,14 @@ dependencies = [
 
 [[package]]
 name = "encompute-ir"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "encompute-keybroker"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-planner"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "encompute-analysis",
  "encompute-ir",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-privacy"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "chacha20",
  "ed25519-dalek",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-protocol"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "encompute-ir",
  "serde",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-runtime"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "encompute-analysis",
  "encompute-attestation",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-secagg"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "chacha20",
  "chacha20poly1305",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-training"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-trust"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "ed25519-dalek",
  "encompute-attestation",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-verification"
-version = "0.3.0-rc.4"
+version = "0.3.0"
 dependencies = [
  "ed25519-dalek",
  "encompute-ir",
@@ -2542,9 +2542,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
