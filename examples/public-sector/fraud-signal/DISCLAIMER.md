@@ -1,15 +1,14 @@
 # Read this first
 
-This example is synthetic: the agencies, the people and the numbers are
-invented, and the thresholds mean nothing.
+This example uses synthetic data to demonstrate confidential
+cross-organization computation and governed release of a bounded risk
+signal.
 
-It is not a fraud-detection method, a risk score or a basis for any
-decision about a person. A "review suggested" category here means only that
-an invented number crossed an invented threshold. It is not evidence that
-anyone did anything wrong.
+It is not a production fraud-detection model, does not define an
+appropriate public-sector decision policy, and should not be used to make
+eligibility, enforcement, benefits, or other consequential decisions about
+real people.
 
-A real use of a signal like this would need its own legal basis, a human
-who reviews it, and the rights of the people concerned (access, correction,
-objection and appeal). Encompute enforces what the institutions technically
-authorize and records the evidence; it does not decide whether a purpose is
-lawful, proportionate or fair, and it provides none of those rights.
+Any real deployment requires an independently approved policy, validated
+data and model assumptions, applicable legal authority, appropriate human
+oversight, and jurisdiction-specific governance.
