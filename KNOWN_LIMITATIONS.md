@@ -14,7 +14,7 @@ Related: [support matrix](docs/support-matrix.md),
 - **No formal proof of the whole system.** The cryptographic building
   blocks (CKKS, BinFHE, BGV, Ed25519, HPKE, secure aggregation, the
   discrete Gaussian) have published analyses. Their composition in
-  Encompute has none. The assurance suite tests 159 security invariants
+  Encompute has none. The assurance suite tests 175 security invariants
   (150 in 0.3; the rest cover the public-sector governance work below)
   with positive, negative, adversarial and end-to-end evidence. A passing
   report means those invariants held for the tested cases. It does not
@@ -221,8 +221,8 @@ Related: [support matrix](docs/support-matrix.md),
   its assets' own ledgers, never both. Series without a population are
   unchanged.
 - **Four eyes means two principals, not two humans.** Scope and population
-  approvals compare principal IDs (like job approvals and ADR-023's
-  assumption of one identity per person): one person holding two accounts
+  approvals compare principal IDs (like job approvals, and
+  with the same assumption of one identity per person): one person holding two accounts
   passes. A superseding population gives a series a fresh cap by the
   owners' deliberate, four-eyed act; the old population's spending stays on
   record.
@@ -663,6 +663,50 @@ these limits:
   loss in the project's log and the project is held to the version the
   database has until a member's security admin tightens it again; the
   owners' own constraints in their signed authorizations are unaffected.
+- **Governed aggregates are central DP.** A differentially private
+  aggregate released in a governed project is noised by the coordinator,
+  which sees the exact aggregate first (see "Differential privacy" above).
+  Each institution's budget is accounted in its own scope and population,
+  but the noise is not added by anyone the institutions do not trust with
+  the sum. The governance report does not evidence the privacy row of such
+  a job.
+- **Record linkage is not built, and when it is it will be pseudonymous,
+  not anonymous.** The design (a proposal, with its open decisions and an
+  external review scope) lets whoever holds a linkage key, or a linkage
+  authority, recompute the pseudonym of any person it can identify, and
+  lets an institution that colludes with the evaluator's operator learn
+  which of its people appear in another institution's records. Until it is
+  built and has been through external cryptographic review, nothing in
+  Encompute links records across institutions, and the per-subject limits
+  an authorization can carry (`max_subjects_per_job`,
+  `max_evaluations_per_subject`) are not enforced.
+- **A recipient-held decryption key would rest on non-collusion.** In the
+  key model planned for record-level exact computation, the recipient
+  institution holds the key that decrypts the result; confidentiality of
+  the inputs against it then depends on the evaluator's operator not
+  colluding with it, and the report is to say so wherever it applies. That
+  model is not built. In this release who holds the key to a governed
+  result is not recorded in signed evidence, and the report row
+  "Decryption control" reads NOT EVIDENCED.
+- **No threshold or multi-key decryption.** One holder decrypts a result;
+  OpenFHE's threshold support is not used, and it is unverified for the
+  BinFHE scheme that exact programs run on. A stronger profile (an
+  attested decryptor, or threshold keys) is research.
+- **The attack suite refuses single actors, not coalitions.**
+  `scripts/governance-attacks.sh` shows each attack refused with its code
+  and its trail. It does not show what an institution colluding with the
+  evaluator's operator, or with another member, learns from what both can
+  see; the sections above and the threat model say what that is.
+- **A request refused before any job is looked up leaves no audit event.**
+  A person asking for a release ticket is refused (ENC2602) and appears
+  in the request log; a refused ticket request by a job's own scheduled
+  evaluator is audited (`release_ticket.denied`).
+- **Every governed use rests on the institutions' own declarations.**
+  Encompute binds a computation to the dataset version an owner
+  registered, by digest, and to the purpose it declared. It does not check
+  that the data is true, that the purpose is lawful, or that the people it
+  concerns were told (see "Technical enforcement and legal authority" in
+  [docs/public-sector.md](docs/public-sector.md)).
 
 ## Compatibility and upgrades
 

@@ -166,7 +166,11 @@ release); `--list` prints each row's command.
 | security scans | `scripts/release/scan.sh` (below) | cargo-deny, cargo-audit, pip-audit; trivy or grype for images |
 
 Reported rows (a FAIL fails the check, a SKIP does not): fine-tuning E2E,
-examples, enterprise E2E, Compose deployment, build pins, reproducibility
+examples (the public-sector examples must run: a skipped one fails the row),
+governance attacks (`scripts/governance-attacks.sh`, which needs the same
+services as the control plane row and runs 27 attacks against the governance
+surface, each of which must be refused with its ENC code and leave its
+trail), enterprise E2E, Compose deployment, build pins, reproducibility
 (`--repro`), TFHE-rs research, the Confidential Space image, and the live
 Confidential Space checks, which need a GCP project and stay manual.
 

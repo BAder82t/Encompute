@@ -111,6 +111,8 @@ The auditor role is read-only and cannot be combined with any other role.
 
 ## Technical enforcement and legal authority
 
+In short: technical enforcement is not legal authority.
+
 Encompute enforces a declared technical policy. Each institution in a
 project signs what may happen to its data: which program may run over which
 dataset version, for which declared purpose, until when, with which
@@ -169,6 +171,26 @@ Every governance report ends with a one-line form of this boundary.
   not jurisdiction: a region says where a machine is, not whose law
   reaches it, so constraints also name the operators they accept.
 - **Released results cannot be recalled.**
+- **A recipient-held decryption key rests on non-collusion.** (Planned for
+  record-level exact computation; not built.) If one institution holds the
+  key that decrypts a result, the confidentiality of the inputs against
+  that institution depends on the evaluator's operator not colluding with
+  it. The report is to say so wherever it applies; today its "Decryption
+  control" row reads NOT EVIDENCED.
+- **There is no threshold or multi-key decryption.** One holder decrypts a
+  result. A stronger profile (an attested decryptor, or threshold keys) is
+  research.
+- **Differential privacy is central.** In aggregate mode the coordinator
+  adds the noise and sees the exact sum first. Each institution's budget
+  is accounted in its own scope and population, but nobody the
+  institutions do not trust with the sum is guaranteed to add the noise.
+- **Linkage is not built, and will not be anonymous.** When it is, whoever
+  holds a linkage key can recompute the pseudonym of a person it can
+  identify, and an institution colluding with the evaluator's operator can
+  learn which of its people appear in another institution's records.
+- **The attack suite tests single actors.** It shows each attack refused
+  with its code and its trail; it does not show what a coalition of
+  institutions learns together.
 
 ## Non-goals
 
@@ -306,8 +328,29 @@ never accepts a location the machine reported about itself. Evaluators
 and brokers of an institution's own can be registered, and a plan can
 prefer the way that releases least.
 
-Not yet built: record linkage. The limits of what exists are in
-[known limitations](../KNOWN_LIMITATIONS.md).
+**Phase 9, assurance, attacks and examples (complete for what is built).**
+`scripts/governance-attacks.sh` runs the governance attacks against the
+real service and library and checks that each is refused with its ENC code
+and leaves a trail (an audit event, an anchored log event or a refused
+start, and no job, ticket, key release or budget). The assurance catalog
+holds the governance invariants with their evidence; three checks judge
+the strict validity window, the order of the release classes and the
+narrowing of placement constraints against independent models. The record
+linkage invariants are reserved and claim nothing.
+
+Two examples run in `examples/run-all.sh quick` and are required by the
+release check: [public health statistics](../examples/public-sector/public-health-statistics/)
+(four regional authorities, secure aggregation with differential privacy,
+a shared budget) and a [bounded signal](../examples/public-sector/fraud-signal/)
+(a category released to one agency, never the value behind it; one source,
+no linkage). The cross-agency eligibility example and the flagship
+demonstration wait for record linkage.
+
+Not yet built: record linkage, and with it record-level exact
+computation across institutions. It goes through external cryptographic
+review before it ships. No part of this work has been externally
+reviewed. The limits of what exists are in [known
+limitations](../KNOWN_LIMITATIONS.md).
 
 ## Design records
 

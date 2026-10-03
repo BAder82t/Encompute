@@ -6,6 +6,27 @@ Work toward confidential cross-agency computation
 ([docs/public-sector.md](docs/public-sector.md)). None of it is part of
 0.3.
 
+- **Assurance, attacks and examples (phase 9).** The attack suite
+  `scripts/governance-attacks.sh` runs 27 attacks on the governance
+  surface (forged or edited authorizations, expired or revoked ones, wrong
+  purpose, program or source, over-release, early, forged or replayed
+  tickets, scope-pin conflicts, residency and operator violations, auditor
+  separation, a service account approving, lineage consent, a rolled-back
+  database or broker state, skipped or replayed log numbers, edited
+  bundles) and checks each is refused with its ENC code and leaves its
+  trail. A refused release-ticket request by a job's scheduled evaluator is
+  now audited (`release_ticket.denied`). Three assurance checks
+  (`governance_authorization_property`, `governance_release_class_order`,
+  `governance_placement_property`) judge shared functions against
+  independent models; INV-240 (authorization limits bound repeated
+  queries; per-subject limits are not enforced) and INV-242 (the minimize
+  objective) are new, end-to-end evidence is added for INV-222, INV-228 and
+  INV-231, and INV-224, 225, 237, 238 and 239 stay reserved for record
+  linkage. Example C, a bounded signal released to one agency (single
+  source, no linkage), joins example B in `examples/run-all.sh`;
+  `scripts/release-check.sh` requires both and runs the attack suite.
+  The threat model, known limitations and support matrix cover the
+  collusion, central-DP, linkage and decryption-key limits.
 - **Cross-agency report, explain and evidence bundle (phase 8).**
   `TrustGraph::governance_report`: governance rows computed from signed
   evidence against the caller's pins (a missing anchor, missing evidence

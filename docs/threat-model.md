@@ -643,6 +643,65 @@ release and is shown as NOT EVIDENCED; where the job ran, until placement
 is evidenced; the provenance of the software (not in the bundle yet); and
 whether anything was lawful (every report ends with that boundary).
 
+### 4.11 Member institutions, auditors and the attack suite (governed projects)
+
+This section describes the public-sector governance work, which is not
+part of Encompute 0.3.
+
+The attacker is an institution taking part in a governed project (a data
+owner, the submitter, a recipient), an auditor organization, or a person
+or service account in one of them. It holds valid credentials of its own.
+It tries to use another institution's data beyond what that institution
+signed, to act where it may not, or to leave no trace.
+
+**Protected assets:** every owner's data, keys and authorizations; what
+may be released and to whom; the project's audit trail.
+
+**Trusted components:** each owner's own governance key, key broker and
+KMS; the control plane for availability and for the audit trail it writes
+(its signed grants, tickets and checkpoints are checked by the others).
+
+**Assumptions:** one identity per person (see KNOWN_LIMITATIONS); the
+institutions' own approvals are not coerced.
+
+`scripts/governance-attacks.sh` runs each attack below against the real
+service or library, and checks the ENC code and the trail it leaves (an
+audit event, an anchored log event or a refused start, and no job, ticket,
+key release or budget).
+
+| Attack | Defence | Refused with | Evidence |
+|---|---|---|---|
+| Activate an authorization the owner did not sign: a foreign key, an edited body, a malformed signature | Verified under the owner's own governance key, over the approved body; any edit changes the ID and voids the signature | ENC2701 | INV-218; `attack_a_forged_or_tampered_owner_signature_activates_nothing`, `governance_authorization_property` |
+| Run a job under another purpose, program or dataset version than the owner signed | The purpose, program, policies and version are bound through the authorization, the job's spec and its GovernanceId | ENC2702, ENC2703, ENC2704 | INV-219, INV-231; `attack_a_job_outside_what_the_owners_signed_is_refused_and_audited` |
+| Use an authorization after its window, after its owner revoked it, or after its key was revoked | Strict window (no margin), checked at submission, scheduling, start, ticket and export; revocation is anchored before it is acknowledged | ENC2705, ENC2706, ENC2708 | INV-220; `attack_an_expired_or_revoked_authorization_is_refused_and_audited`, `governance_authorization_property` |
+| Release a result wider than the owners allowed, or to a recipient they did not name | Release classes are an order every layer decides with; the compiler proves the form of each output | ENC2709, ENC1907 | INV-221; `governance_release_class_order`, `attack_a_job_outside_what_the_owners_signed_is_refused_and_audited` |
+| Act as an auditor, or hold an auditor role with another | Every mutating route refuses an auditor; no key or ticket is ever issued for one; combinations are refused | ENC2716 | INV-223; `auditor_org_cannot_submit_or_receive` |
+| Approve as a service account, as the submitter, or as one person with two keys | Four eyes count distinct people of the approving organization only | ENC2707 | INV-228; `a_four_eyes_job_runs_only_after_two_distinct_people_of_the_owner_approve_it`, `service_account_cannot_approve_2707` |
+| Get a key by asking for a ticket early, for another job's source, or by replaying or forging one | A ticket is issued only to the scheduled evaluator of a running job, for one of its sources; the broker also needs the owner's installed authorization; a refused request is audited | ENC2604, ENC2704, ENC2712 | INV-232, INV-236; `attack_a_release_ticket_for_a_job_that_is_not_running_is_refused`, `forged_ticket_refused`, `replayed_ticket_refused` |
+| Spend privacy budget through a conflicting scope, or without one | A release is charged to a scope its owners allocated under the population's cap; conflicting pins are refused at submission | ENC2719 | INV-230; `two_authorizations_that_pin_different_scopes_are_refused`, `a_job_with_no_scope_cannot_spend` |
+| Run where an owner's data may not go, or on a machine operated by a source owner or a decryptor | Placement is intersected (a prohibited place wins), judged at submission, scheduling, start and every ticket; operators are separated | ENC2710, ENC2725 | INV-233, INV-234; `governance_placement_property`, `a_data_owner_operated_evaluator_gets_no_job_start_or_ticket` |
+| Use a derived result without every lineage owner's consent, or export it after a source was revoked | Every use walks the ancestors; the custodian's broker needs each lineage owner's authorization | ENC2701, ENC2706 | INV-245; `derived_source_needs_every_lineage_owners_authorization`, `export_of_derived_asset_whose_source_was_revoked_2706` |
+| Undo a revocation or a spend by restoring an older database, or an older broker state | The anchor holds the governance log's head; the broker's state is guarded by a generation mark in the owner's KMS | ENC2202, ENC2713 | INV-226, INV-236; `restores_resurrecting_governed_state_are_refused_and_recovered`, `broker_state_rollback_refused_by_kms_generation` |
+| Skip or replay a revocation head's number to hide a revocation | Heads are numbered one past the previous, under the owner's active key | ENC2717 | INV-247; `skipped_or_replayed_seq_refused` |
+| Edit an evidence bundle or a report | The manifest and signatures are checked against the verifier's own pins; a cached or edited value changes nothing | ENC2727 | INV-243, INV-244; `every_single_field_edit_fails`, `a_tampered_report_or_cached_attribute_changes_nothing` |
+
+**Residual (see KNOWN_LIMITATIONS):**
+
+- **Anything inside an authorization.** Within what an owner signed, the
+  submitter chooses which question to ask, and repeated boolean questions
+  add up. Authorization limits bound how often (INV-240); they do not
+  prevent it. Per-subject limits are not enforced: they need record
+  linkage, which is not built.
+- **Collusion.** A member institution colluding with the evaluator's
+  operator, or with another member, learns what each of them can see
+  together. The attack suite refuses single actors, not coalitions.
+- **An owner lying about its own data.** Encompute binds a computation to
+  the version an owner registered, by digest. It does not check that the
+  version's contents are true.
+- **A person who is two identities.** Four eyes count identities.
+- **A request refused before any job is looked up** (a person asking for a
+  release ticket) leaves the request log, not an audit event.
+
 ## 5. Conditions the deployment must uphold
 
 1. **Decrypted results are never returned to the evaluator.** CKKS is not
@@ -708,3 +767,24 @@ What the evaluator holds:
 - Noise added by a coordinator that is not attested (central DP).
 - Poisoning of training or aggregation.
 - Denial of service.
+- Whether a computation is lawful: the legal basis, the legitimacy or
+  proportionality of a purpose, retention required by law, the rights of
+  the people concerned. Encompute enforces what institutions declare and
+  sign (see [public-sector.md](public-sector.md), "Technical enforcement
+  and legal authority").
+- Erasure of results already released. Revocation blocks new use and
+  lists what was derived; it recalls nothing.
+- Inference beyond the caps: repeated authorized queries, and the
+  combination of released results with outside information.
+- Re-identification through record linkage. Linkage is not built. When it
+  is, whoever holds a linkage key can recompute the pseudonym of a person
+  it can identify, and an institution colluding with the evaluator's
+  operator can learn which of its people appear in another institution's
+  records (see KNOWN_LIMITATIONS).
+- Collusion between a result's decryptor and the evaluator's operator
+  where one institution holds the decryption key: confidentiality of the
+  inputs against that institution then rests on the operator not
+  colluding with it. This is a property of the recipient-held key model
+  planned for record-level exact computation, which is not built.
+- Threshold or multi-key decryption: one holder decrypts a result.
+- An owner's registered data being true.
