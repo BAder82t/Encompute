@@ -12,8 +12,10 @@
 # OpenFHE Exact, optimized/reference diff, remote execution, SecAgg, DP,
 # patient DP-SGD, HF/PEFT, control plane, tenant isolation, backup/restore,
 # assurance, commercial dependency, SBOM, security scans. The other rows
-# (fine-tuning, examples, deployment, Confidential Space, TFHE-rs research,
-# pins) are reported; a FAIL there still fails the check, a SKIP does not.
+# (fine-tuning, examples, governance attacks, deployment, Confidential Space,
+# TFHE-rs research, pins) are reported; a FAIL there still fails the check,
+# a SKIP does not. The examples row requires the public-sector examples to
+# run (a skipped one fails it).
 #
 # What each row needs when it is not SKIPPED:
 #   OpenFHE rows        scripts/install-openfhe.sh (.deps/openfhe) or OPENFHE_ROOT
@@ -215,15 +217,17 @@ check "Fine-tuning E2E" pytest_ python/tests/test_finetune.py \
   python/tests/test_finetune_matrix.py python/tests/test_finetune_leakage.py \
   python/tests/test_finetune_crash.py python/tests/test_training_contract.py \
   python/tests/test_confidential_job.py
-check "Examples" env EXAMPLES_REQUIRE="15 16 17 18" examples/run-all.sh standard
+check "Examples" env EXAMPLES_REQUIRE="15 16 17 18 public-sector/public-health-statistics public-sector/fraud-signal" examples/run-all.sh standard
 
 # --- Enterprise ------------------------------------------------------------------
 if [ "$SERVICES" = 1 ]; then
   check "control plane" env ENCOMPUTE_REQUIRE_SERVICES=1 cargo test -q -p encompute-control -p encompute-keybroker -p encompute-verification
   check "tenant isolation" env ENCOMPUTE_REQUIRE_SERVICES=1 cargo test -q -p encompute-control --test isolation
+  check "governance attacks" scripts/governance-attacks.sh
 else
   skip "control plane" "$NO_SERVICES"
   skip "tenant isolation" "$NO_SERVICES"
+  skip "governance attacks" "$NO_SERVICES"
 fi
 # Backup and restore: the dedicated drill when present, else the enterprise
 # E2E (database backup, restore, an older backup refused), else the Compose
