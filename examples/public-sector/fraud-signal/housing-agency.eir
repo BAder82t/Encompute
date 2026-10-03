@@ -1,0 +1,15 @@
+encompute 0.1
+program fraud_signal precision 0.001 purpose "benefit-integrity-2027"
+party "tax-agency" "Tax Agency"
+party "integrity-unit" "Benefit Integrity Unit"
+party "housing-agency" "Housing Agency"
+asset "income-gap" dataset owners ["tax-agency"] readers ["integrity-unit"] purposes ["benefit-integrity-2027"] release allowed_parties forms [bounded_category 2]
+%0 = input "gap" [0.0, 100000.0] asset "income-gap" : secret u32
+%1 = const [2000.0] : public u32
+%2 = const [8000.0] : public u32
+%3 = ge %0, %1 : secret bool
+%4 = ge %0, %2 : secret bool
+%5 = cast %3 : secret u8
+%6 = cast %4 : secret u8
+%7 = add %5, %6 : secret u8
+output "signal" = %7 to "housing-agency"

@@ -11,6 +11,7 @@ does not decide what is lawful.
 | Example | What it shows |
 |---|---|
 | [`public-health-statistics/`](public-health-statistics/) | Four regional authorities release weekly notifiable-disease counts to the ministry by secure aggregation with differential privacy. The population's budget is shared across weeks, versions and projects; a week the budget cannot pay for is refused. |
+| [`fraud-signal/`](fraud-signal/) | The Tax Agency's records give a bounded category (none, low, review suggested) to one integrity unit, never the income gap behind it, for one declared purpose. Releasing the gap, widening the categories, another purpose and another recipient do not compile. This is the single-source form: no record linkage, because linkage is not built yet. Read its `DISCLAIMER.md` first. |
 
 Each example has a `run.sh` (the story, ending with attacks that must
 fail), an `expected.txt` (lines that must appear in its output) and, where

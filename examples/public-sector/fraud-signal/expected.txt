@@ -1,0 +1,15 @@
+# Lines that must appear in the output (IDs and hashes are left out).
+Read this first
+SYN-0001  category 0
+SYN-0002  category 0
+SYN-0003  category 1
+SYN-0005  category 1
+SYN-0006  category 2
+SYN-0008  category 2
+ATTACK   The Tax Agency's income gap is released to the integrity unit
+ENC1907
+ATTACK   A program widens the categories to four
+ATTACK   A program uses the data for debt collection
+ENC1903
+ATTACK   A program releases the signal to the Housing Agency
+ENC1902
