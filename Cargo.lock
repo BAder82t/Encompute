@@ -761,6 +761,7 @@ dependencies = [
  "encompute-protocol",
  "encompute-runtime",
  "encompute-secagg",
+ "encompute-trust",
  "encompute-verification",
  "getrandom 0.2.17",
  "serde",

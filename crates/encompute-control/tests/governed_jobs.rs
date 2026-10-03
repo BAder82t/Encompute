@@ -6268,3 +6268,202 @@ fn attack_a_release_ticket_for_a_job_that_is_not_running_is_refused() {
     assert_eq!(s, 201, "{t}");
     assert_eq!(tickets(&g), 1);
 }
+
+// --- end to end: the properties that outlive a whole job ----------------------------
+
+/// Four eyes, through a whole job: a job under an authorization that asks
+/// for per-job approval waits; the submitter's own organization, a service
+/// account and one person approving twice never make a quorum; two distinct
+/// people of the owner do, and the job then runs to success with a trust
+/// report that holds.
+#[test]
+fn a_four_eyes_job_runs_only_after_two_distinct_people_of_the_owner_approve_it() {
+    let Some(g) = world() else { return };
+    let (_, _, program, j) = g.job("2026-q1", |b| b.per_job_four_eyes = true);
+    let job = id(&j);
+    assert_eq!(j["state"], "waiting_for_approval", "{j}");
+    // The submitter (benefits) is not the owner: its approval is no vote.
+    let (s, v) = approve(&g, &g.ben_dev, &job);
+    assert!(s >= 400, "{v}");
+    // A service account never counts.
+    let signer = std::sync::Arc::new(ServiceSigner::from_seed("tax-robot", &[9; 32]).unwrap());
+    g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/organizations/{TAX}/service-accounts"),
+        Some(
+            json!({"id": "tax-robot", "kind": "automation", "public_key": signer.public_key_hex(),
+                    "roles": ["organization_admin", "data_owner"]}),
+        ),
+    );
+    refused(approve(&g, &As::Service(signer), &job), "ENC2707");
+    assert!(approvals(&g, &job).is_empty());
+    // One person approving twice is one approval.
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    let _ = approve(&g, &g.tax_sec1, &job);
+    assert_eq!(approvals(&g, &job).len(), 1);
+    assert_eq!(g.state(&job), "waiting_for_approval");
+    assert!(g.start(&job).0 >= 400);
+    // A second, distinct person of the owner completes the quorum.
+    let v = g.t.ok(
+        &g.tax_owner,
+        "POST",
+        &format!("/v1/jobs/{job}/approve"),
+        None,
+    );
+    assert_eq!(v["state"], "queued", "{v}");
+    let who: BTreeSet<(String, String)> = approvals(&g, &job)
+        .into_iter()
+        .map(|a| (a.0, a.1))
+        .collect();
+    assert_eq!(who.len(), 2, "{who:?}");
+    assert!(who.iter().all(|(_, org)| org == TAX), "{who:?}");
+    // And the approved job runs through to a report that holds.
+    run(&g, &program, &job);
+    let tr = g.t.ok(&g.ben_dev, "GET", &format!("/v1/trust/{job}"), None);
+    assert_eq!(tr["verdict"], "SATISFIED", "{tr}");
+}
+
+/// Ownership, through a whole job: after a governed job ran and released,
+/// the source is still its owner's (organization, broker, authorization),
+/// and neither the submitter and recipient nor anyone else outside the
+/// owner can revoke, register or authorize on its behalf; the owner still
+/// can.
+#[test]
+fn ownership_is_unchanged_after_a_governed_job_and_no_collaborator_takes_it() {
+    let Some(g) = world() else { return };
+    let r = succeeded(&g, "2026-q1", |_| {});
+    let owner = |g: &G| -> (String, Value) {
+        let row =
+            g.t.control
+                .db
+                .conn()
+                .unwrap()
+                .query_one(
+                    "SELECT organization_id, key_ref FROM assets WHERE id = $1",
+                    &[&r.v.asset],
+                )
+                .unwrap();
+        (row.get(0), row.get(1))
+    };
+    let (org, key_ref) = owner(&g);
+    assert_eq!(org, TAX);
+    assert_eq!(key_ref["broker"], "tax-broker");
+    let ben_admin = As::User("b-admin".into());
+    let other_admin = As::User("o-admin".into());
+    let status = |g: &G, row: &str| -> String {
+        g.t.ok(
+            &g.tax_sec1,
+            "GET",
+            &format!("/v1/authorizations/{row}"),
+            None,
+        )["status"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let before = status(&g, &r.a.row);
+    // Benefits (the submitter and recipient), its admin, and a bystander
+    // member cannot revoke tax's authorization or its dataset version.
+    for who in [&g.ben_dev, &ben_admin, &g.other_dev, &other_admin] {
+        let (s, v) = g.t.call(
+            who,
+            "POST",
+            &format!("/v1/authorizations/{}/revoke", r.a.row),
+            Some(json!({"reason": "withdrawn"})),
+        );
+        assert!(s >= 400, "{v}");
+        let (s, v) = g.t.call(
+            who,
+            "POST",
+            &format!("/v1/assets/{}/revoke", r.v.asset),
+            None,
+        );
+        assert!(s >= 400, "{v}");
+    }
+    // Nor register a version in tax's name, or propose an authorization of
+    // tax's data.
+    let mut other = json!({"organization": TAX, "kind": "dataset", "name": "income@2026-q9",
+                           "series": "income", "version": "2026-q9",
+                           "digest": "c".repeat(64), "project": g.project});
+    if let (Value::Object(b), Value::Object(e)) = (&mut other, registered(TAX)) {
+        b.extend(e);
+    }
+    let (s, v) = g.t.call(&g.ben_dev, "POST", "/v1/assets", Some(other));
+    assert!(s >= 400, "{v}");
+    let p = program(&[&r.v.asset], PURPOSE, BEN);
+    let (s, v) = g.t.call(
+        &g.ben_dev,
+        "POST",
+        "/v1/authorizations",
+        Some(json!({"body": g.body(&r.v, &p)})),
+    );
+    assert!(s >= 400, "{v}");
+    // Nothing moved.
+    assert_eq!(owner(&g), (org, key_ref));
+    assert_eq!(status(&g, &r.a.row), before);
+    // The owner still can: its revocation takes effect.
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{}/revoke", r.a.row),
+        Some(json!({"reason": "withdrawn"})),
+    );
+    assert_eq!(status(&g, &r.a.row), "revoked");
+}
+
+/// Dataset versions are immutable, through a whole job: a version a job
+/// ran over keeps its one digest; registering the label again with another
+/// digest, or editing the row, is refused; and the next job over it binds
+/// the same version and commitment, so its GovernanceId is the first job's.
+#[test]
+fn a_dataset_version_stays_what_it_was_through_a_governed_job() {
+    let Some(g) = world() else { return };
+    let r = succeeded(&g, "2026-q1", |_| {});
+    let first = g.grant(&r.job).governance.unwrap();
+    // The label again, with another digest.
+    let mut again = json!({"organization": TAX, "kind": "dataset", "name": "income@2026-q1",
+                           "series": "income", "version": "2026-q1",
+                           "digest": "f".repeat(64), "project": g.project,
+                           "key_ref": {"broker": "tax-broker", "provider": "openbao-transit",
+                                       "key_ref": "income-2026-q1", "key_version": 1}});
+    if let (Value::Object(b), Value::Object(e)) = (&mut again, registered(TAX)) {
+        b.extend(e);
+    }
+    refused(
+        g.t.call(&g.tax_owner, "POST", "/v1/assets", Some(again)),
+        "ENC2704",
+    );
+    // The row itself cannot change.
+    let mut c = g.t.control.db.conn().unwrap();
+    let e = c
+        .execute(
+            "UPDATE assets SET digest = $2 WHERE id = $1",
+            &[&r.v.asset, &"f".repeat(64)],
+        )
+        .unwrap_err();
+    assert!(
+        e.as_db_error()
+            .is_some_and(|d| d.message().contains("dataset version")),
+        "{e:?}"
+    );
+    drop(c);
+    // The same version, program and authorization: the same binding.
+    let p = program(&[&r.v.asset], PURPOSE, BEN);
+    let plan = g.plan(&g.ben_dev, &p);
+    let (s, j) = g.submit(&g.ben_dev, g.request(&plan, &[&r.v.asset], &[BEN]), "again");
+    assert_eq!(s, 201, "{j}");
+    let second = g.grant(&id(&j)).governance.unwrap();
+    assert_eq!(second.binding.inputs, first.binding.inputs);
+    assert_eq!(second.governance_id, first.governance_id);
+    assert_eq!(second.binding.inputs["x0"].asset_version_id, r.v.version);
+    assert_eq!(
+        second.binding.inputs["x0"].digest_commitment,
+        "d".repeat(64)
+    );
+}
