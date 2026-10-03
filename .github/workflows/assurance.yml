@@ -91,6 +91,9 @@ jobs:
       - name: PostgreSQL client
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null
       - run: ./scripts/install-openfhe.sh
+      - run: ./scripts/test-full-selftest.sh
+      # Cold databases: the nightly run that exercises every migration and the
+      # bootstrap from empty, whatever the pull-request runs used.
       - run: ./scripts/release-check.sh
 
   supply-chain:
