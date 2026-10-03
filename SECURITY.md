@@ -4,7 +4,8 @@
 
 | Release | Status | Security fixes |
 |---|---|---|
-| 0.3.0 release candidates (`0.3.0-rc.N`) | release candidate; the review package for independent reviewers is in [security-review/](security-review/). No independent review has been completed yet | yes, in the next release candidate |
+| 0.3.x | current stable release. The independent review of 0.3.0-rc.3 reported findings that are fixed in 0.3.0, several only partly; the fixes themselves have not been independently reviewed. The review package is in [security-review/](security-review/) | yes |
+| 0.3.0 release candidates (`0.3.0-rc.N`) | historical; superseded by 0.3.0 | no: upgrade to 0.3.0 |
 | `main` | development | yes |
 | 0.2.x | superseded | no: upgrade to 0.3 |
 | 0.1.x | superseded | no |

@@ -400,7 +400,7 @@ arm64, Apple clang 21:
   images are identified by the digests recorded in the release, not rebuilt.
 - **Linux vs. macOS.** Different targets; never expected to match.
 
-## Known issues (0.3 release candidates)
+## Known issues (0.3)
 
 - **macOS: OpenMP.** The macOS binaries built with OpenFHE link Homebrew's
   `libomp` by absolute path (`/opt/homebrew/opt/libomp/lib/libomp.dylib`), so
