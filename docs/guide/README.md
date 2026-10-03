@@ -1,5 +1,10 @@
 # Encompute guide
 
+Across organizations, Encompute lets parties build AI together without
+revealing what each needs to keep private: confidentiality policies are
+enforced by attested key release, secure aggregation and differential
+privacy, and every step leaves verifiable evidence.
+
 Three paths, depending on why you are here. Each path page is short and
 links to the detail.
 
