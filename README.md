@@ -1,584 +1,142 @@
 # Encompute
 
-Encompute compiles ordinary Python into encrypted computation. You declare
-which values are secret and their ranges; Encompute picks the encryption
-scheme from the types, builds a plan, chooses 128-bit parameters, runs it
-on an evaluator that never sees your data, and checks the encrypted result
-against plaintext.
+Encompute lets you compute on data that stays encrypted, and lets several
+organizations work together without showing each other their data.
 
-Two kinds of programs share one API:
+You write ordinary Python and mark which values are secret. Encompute
+encrypts them, runs the program on a machine that never holds the key, and
+checks the answer against plain Python.
 
-```python
-import numpy as np
-import encompute
-from encompute import secret, Tensor, u8, u16, u32
+## Who it is for
 
-# Approximate: real numbers, CKKS (OpenFHE), within a declared precision.
-w, b = np.random.default_rng(0).normal(0, 0.3, 32), 0.1
+- **Developers** who need to compute on data they must not see.
+- **Security and compliance leads** who need to know what is protected,
+  against whom, and what evidence is left.
+- **Institutions** that want several parties to train or analyze together
+  under rules each party can check.
 
-@encompute.compile(precision=1e-3)
-def score(x: secret[Tensor[32], -1.0:1.0]):
-    return encompute.sigmoid(encompute.dot(w, x) + b)
+## What it guarantees, and what it does not
 
-# Exact: integers and Booleans, comparisons, encrypted selection.
-@encompute.compile()
-def approve(age: secret[u8, 0:120], income: secret[u32, 0:1_000_000],
-            debt: secret[u32, 0:500_000], risk: secret[u16, 0:1000]):
-    return (age >= 18) & (debt * 100 < income * 40) & (risk <= 650)
+It guarantees, for the supported features
+([support matrix](docs/support-matrix.md)):
 
-x = np.random.default_rng(1).uniform(-1, 1, 32)
-score(x)                                   # plaintext reference
-score(x, mode="encrypted")                 # CKKS on OpenFHE
-approve(35, 100_000, 20_000, 400, mode="mock")   # True, exactly
-print(approve.test(cases=1000))            # 1000 matches, 0 mismatches
-print(score.explain())                     # plan, parameters, precision, verification
-score.save("score.encompute")              # reproducible artifact, no keys
+- The machine that does the computing never gets the secret key. It sees
+  encrypted values, not your data.
+- Unsafe programs are refused when they are compiled: branching on a secret,
+  printing it, or a number that could overflow.
+- Encrypted results are checked against plain Python, within a precision you
+  declare.
+- Between organizations, rules about who may learn what are checked by the
+  compiler. Keys can be released only to a workload that proves what it is
+  (experimental on Google Confidential Space).
+
+It does **not**:
+
+- Hide the program. The computing machine sees the operations, public
+  constants, shapes, declared ranges, timing and data sizes.
+- Prove that the computing machine did the work honestly. A receipt is a
+  signed claim. Proofs exist only in a research build.
+- Protect data after you decrypt it and share it.
+- Come with a proof of security for the whole system. The
+  [known limitations](KNOWN_LIMITATIONS.md) list the rest. Read them before
+  you use real data.
+- Run fast. Encrypted computation costs far more than plain computation
+  ([performance](docs/performance.md)).
+
+Terms used here. **FHE** (fully homomorphic encryption): computing on
+encrypted data. **CKKS**: an FHE scheme for real numbers, correct to a
+declared precision. **SecAgg** (secure aggregation): parties add their
+private vectors so that only the sum is revealed. **DP** (differential
+privacy): added noise that limits what published results reveal about any
+one person. **TEE** (trusted execution environment): hardware that can prove
+what software it runs.
+
+## Try it in five minutes
+
+You need Python 3.11 or later. This installs the released package (macOS on
+Apple silicon shown; the [release](https://github.com/BAder82t/Encompute/releases/tag/v0.3.0)
+has a wheel for Linux x86_64 too) and runs the starter,
+[example 00](examples/00_hello_encrypted/):
+
+```sh
+git clone https://github.com/BAder82t/Encompute && cd Encompute
+python3 -m venv .hello && . .hello/bin/activate
+gh release download v0.3.0 -R BAder82t/Encompute -p 'encompute-0.3.0-cp311-abi3-macosx_11_0_arm64.whl'
+pip install ./encompute-0.3.0-cp311-abi3-macosx_11_0_arm64.whl
+examples/00_hello_encrypted/run.sh
 ```
 
-Across organizations, Encompute lets parties build AI together without
-revealing what each needs to keep private: confidentiality policies are
-enforced by attested key release, secure aggregation and differential
-privacy, and every step leaves verifiable evidence.
+Real output from that wheel (sizes and timings vary from run to run; the
+last step, three refusals of unsafe actions, is left out here):
 
-**Status: release 0.3.0. The independent review of 0.3.0-rc.3 has
-reported; its findings and their fixes, some partial, are in
-[docs/security-findings.md](docs/security-findings.md)** (last release:
-v0.2.0). What you can rely on is in the
-[support matrix](docs/support-matrix.md); what Encompute does not do is in
-[known limitations](KNOWN_LIMITATIONS.md). See also the
+```text
+== Score four private test results without revealing them ==
+Step 1. The clinic's private data (the evaluator never sees this)
+  panel = [0.62, 0.18, 0.91, 0.4]
+
+Step 2. What the risk service is told: the program, not the data
+  scheme    CKKS (approximate), 128-bit classical
+  the evaluator can see:
+    - program structure (operations and their order)
+    - public constants (weights, coefficients)
+    - input and output shapes
+    - declared input ranges
+  evaluator receives the secret key: no
+
+Step 3. Encrypt, compute while encrypted, decrypt
+  (the sizes below come from a second encrypted run with fresh keys)
+  the clinic made a secret key and public keys, and encrypted the panel
+  the evaluator received 1,574,609 bytes of ciphertext
+    and 18,882,955 bytes of evaluation keys (no secret key)
+  the evaluator computed sigmoid(weights . panel + bias) on ciphertext
+  it returned 526,087 bytes: one ciphertext only the clinic can open
+  the clinic decrypted it (timings in ms: keygen 460, encrypt 21, evaluate 94, decrypt 11)
+
+Step 4. Check the answer against plain Python
+  plain result      0.77171
+  encrypted result  0.77161
+  difference        0.00010  (allowed: 0.00100)
+```
+
+A clinic's four private numbers were encrypted, scored by a service that
+never saw them in the clear, and decrypted. The scoring side held no secret
+key.
+The example's README explains each step and what it does not show.
+
+## Pick your path
+
+| You are | Read | Then run |
+|---|---|---|
+| Developer | [Developer path](docs/guide/developer.md) | [01](examples/01_ckks_private_inference/), [02](examples/02_exact_private_logic/) |
+| Security or compliance lead | [Security and compliance path](docs/guide/security-and-compliance.md) | [06](examples/06_confidentiality_policy/), [13](examples/13_assurance_suite/) |
+| Institution deploying it | [Institution path](docs/guide/institutions.md) | [11](examples/11_automatic_planner/), [12](examples/12_confidential_collaboration/) |
+
+Every capability has a runnable example; [examples/](examples/README.md)
+has a table by goal. All topics are in the [guide](docs/guide/README.md):
+[confidentiality policies](docs/guide/confidentiality-policies.md),
+[secure aggregation](docs/guide/secure-aggregation.md),
+[differential privacy](docs/guide/differential-privacy.md),
+[planner](docs/guide/planner.md),
+[confidential fine-tuning](docs/guide/confidential-fine-tuning.md),
+[trust graph](docs/guide/trust-graph.md),
+[attested key release](docs/guide/attested-key-release.md),
+[verification](docs/guide/verification.md),
+[remote evaluation](docs/guide/remote-evaluation.md) and
+[building from source](docs/guide/build.md).
+
+## Status and support
+
+Release 0.3.0. What is supported, what is a subset, and what is
+experimental, research only or unsupported is in the
+[support matrix](docs/support-matrix.md), with a short
+[summary](docs/guide/status-summary.md). Also: [known limitations](KNOWN_LIMITATIONS.md),
 [release notes](docs/release-notes-0.3.0.md), [changelog](CHANGELOG.md),
-[performance](docs/performance.md), [compatibility](docs/compatibility.md),
-[API stability](docs/api-stability.md), [threat model](docs/threat-model.md),
-[cryptography](docs/cryptography.md) and [error codes](docs/errors.md).
-
-| Area | Status |
-|---|---|
-| Approximate programs on OpenFHE CKKS | **Supported** (production) |
-| Exact programs on OpenFHE exact (BinFHE) | **Supported** (production): optimized circuits, parallel gates |
-| Exact programs on OpenFHE BGV | **Supported subset**: arithmetic-only `u8`/`u16`/`bool` programs, chosen by calibrated cost |
-| TFHE-rs | **Research only** (`research-tfhe-rs`); production builds refuse it |
-| Remote evaluator, worker processes | **Supported**, single node |
-| Signed execution receipts | **Supported** (signed claims, not proofs) |
-| Verified execution (execution proofs) | **Research only** (`vfhe-research`): re-execution on BGV, small exact subset |
-| Confidentiality policies, planner, trust graph | **Supported** |
-| Secure aggregation | **Supported** |
-| Differential privacy: organization level, patient-level DP-SGD | **Supported** |
-| PyTorch LoRA; Hugging Face Transformers + PEFT | **Supported subset**: sequence classification with BERT or DistilBERT |
-| Attested key release on Google Confidential Space | **Experimental**: rehearsed locally and in CI, live GCP run pending. The mock is for development only |
-| Control plane: PostgreSQL, OIDC, OpenBao/Vault BYOK, API v1 (frozen) | **Supported** |
-| Docker Compose deployment | **Supported**; its bundled OpenBao runs in development mode |
-| Python SDK | **Supported** |
-| Platforms | Linux x86_64 and macOS arm64 **supported**; Linux arm64 **experimental** |
-| Assurance | 150 invariants with positive, negative, adversarial and end-to-end evidence; a release gate in CI ([docs/assurance.md](docs/assurance.md)) |
-| Commercial dependency boundary | Audited: no TFHE-rs in the dependency graph, SBOM, binaries, wheel or container of a production build (`scripts/audit-commercial-build.sh`) |
-
-## Start here
-
-Every capability has a runnable example, with its threat model and what it
-does and does not protect ([examples/](examples/)):
-
-| Time | Example |
-|---|---|
-| 5 minutes | [Private inference](examples/01_ckks_private_inference/) |
-| 10 minutes | [Multi-party secure aggregation](examples/08_secure_aggregation/) |
-| 15 minutes | [Automatic confidential planning](examples/11_automatic_planner/) |
-| Full demo | [Confidential collaboration](examples/12_confidential_collaboration/) |
-| AI flagship | [Confidential LoRA fine-tuning](examples/15_confidential_lora/) |
-| Patient privacy | [Patient-level DP-SGD](examples/16_patient_private_lora/) |
-| Hugging Face | [Transformers + PEFT fine-tuning](examples/17_huggingface_peft/) |
-| Confidential Space | [A training step in a hardware-attested workload](examples/18_confidential_space_hf/) |
-
-```sh
-cargo build --bins && maturin develop -m crates/encompute-py/Cargo.toml
-examples/run-all.sh quick
-```
-
-## What Encompute does
-
-**Privacy types.** `secret[float, lo:hi]` and `secret[Tensor[n], lo:hi]`
-(approximate); `secret[u8, lo:hi]` … `secret[u64, lo:hi]`,
-`secret[i8, lo:hi]` … `secret[i64, lo:hi]` and `secret[bool_]` (exact).
-Using a secret in `if`, `print`, `int()` or as a divisor is a compile-time
-error with a stable code, not a silent leak. Exact values at the API are
-integers within ±2^53, because values cross the API as
-64-bit floats.
-
-**Operations.**
-- Approximate: `+ - *`, `sum`, `dot`, public-matrix `@`, `poly`, `sigmoid`,
-  `x ** k`, division by public values.
-- Exact: `+ - *`, comparisons, `& | ^ ~`, shifts, `//` and `%` by constants,
-  `encompute.select`, `minimum`/`maximum`, `lookup`, `cast`.
-
-**Compiler.** The program's types choose the scheme: approximate programs
-lower to CKKS (SIMD packing, hybrid diagonal matrix–vector products,
-Chebyshev approximation of `sigmoid` to the requested precision, parameters
-checked against the HE Standard 128-bit table); exact programs lower to a
-backend-independent plan, with integer range analysis proving that no
-operation overflows (a possible overflow is ENC1303). Programs mixing both
-kinds are refused: one encrypted scheme per program.
-
-**Runtime.** `clear`, `mock` and `encrypted` modes. Client and evaluator
-are separate roles talking only through versioned, checksummed envelopes
-bound to scheme, backend, parameters, program and key; the evaluator never
-receives the secret key and its binary links no client crypto. Locally both
-roles run in one process; `run --remote` puts a network between them.
-
-**Testing.** `test()` / `encompute test` compares encrypted and plaintext
-results: within the precision for approximate programs, exactly (matches
-and mismatches, boundary values first) for exact ones.
-
-**Backends.**
-- **OpenFHE CKKS: production.** OpenFHE v1.5.1, statically linked, for
-  approximate programs.
-- **OpenFHE exact: production.** OpenFHE BinFHE (STD128, one ciphertext
-  per bit, bootstrapped gates) for exact programs, run as an optimized
-  circuit with parallel gates. OpenFHE BGV runs verified exact programs,
-  and unverified programs whose operations are all in the BGV subset when
-  it is estimated no slower.
-- **TFHE-rs: research only.** TFHE-rs 1.8.1, behind the off-by-default
-  `research-tfhe-rs` feature, for research and differential testing only:
-  Zama requires a patent license for commercial use of its technology.
-  Production builds cannot select it (BACKEND UNAVAILABLE), and
-  `scripts/audit-commercial-build.sh` checks that none of it is linked.
-- A plaintext mock for both kinds, for development and tests.
-
-## Verification
-
-Every evaluation (local or remote) returns an **execution receipt** signed
-with the evaluator's Ed25519 identity. It binds the execution spec (program,
-plan, parameters, scheme, backend), the key, and the exact encrypted request
-and response. Clients verify it before decrypting; the evaluator's key is
-pinned on first use or given with `--trust-evaluator`.
-
-For exact programs the receipt also binds a **semantic transcript**: the
-canonical list of operations connecting the request to the result
-(`encompute transcript model.encompute`). It fixes what a future execution
-proof must establish.
-
-Encompute keeps three verification states apart:
-
-| State | Meaning |
-|---|---|
-| `UNVERIFIED` | No receipt. |
-| `RECEIPT VERIFIED` | This evaluator signed a statement binding this spec, key, request and response. |
-| `EXECUTION VERIFIED` | A proof shows the response is a correct homomorphic evaluation of the transcript over the request. Research build, small exact subset. |
-
-A receipt does **not** prove that the evaluator computed honestly, that the
-result is correct, or that it was not fabricated: an evaluator can sign a
-lie. Only an execution proof rules that out.
-
-**Verified execution (research).** Programs compiled with
-`verification="required"` run on OpenFHE BGV (u8, u16, bool; `+ - *`,
-constants, `& | ^ ~`) and every result carries an execution proof. The
-client re-runs the computation over the exact ciphertexts it sent, with its
-own evaluation keys, and decrypts only if the response matches byte for
-byte: no proof, no decryption. A malicious evaluator returning a random,
-replayed, skipped, substituted or mutated result, even with a valid signed
-receipt, is rejected. This proof is sound but not succinct: verifying costs
-about one evaluation. A succinct proof is next.
-
-```python
-@encompute.compile(verification="required")
-def precheck(income: secret[u16, 0:5000], member: secret[bool_], flagged: secret[bool_]):
-    return {"score": income * 3 + 7, "ok": member & ~flagged}
-```
-
-Build with `--features vfhe-research` (implies `openfhe`) for the verifier;
-`encompute run --remote` then prints `VERIFIED PRIVATE EXECUTION`, and
-`encompute verify ... --proof exchange/proof.bin --evaluation-keys KEYS/eval.keys`
-re-checks a saved result.
-
-## Confidentiality policies
-
-Programs can say who owns each input, who may learn what, what the
-computation is for, and how results may be released; Encompute derives the
-policy of every value and rejects illegal flows at compile time.
-
-```python
-from encompute import Party, asset, confidential, secret, Tensor
-
-hospital, modelco, coordinator = Party("hospital-a"), Party("modelco"), Party("coordinator")
-patients = asset("patients", owner=hospital, readers=[hospital], purposes=["disease-training"],
-                 derive={"gradient": ("aggregate_only", [coordinator])})
-weights = asset("weights", owner=modelco, readers=[modelco], purposes=["disease-training"],
-                kind="model", derive={"gradient": ("aggregate_only", [coordinator])})
-
-@encompute.compile(purpose="disease-training", precision=1e-2)
-def step(x: secret[Tensor[4], -1.0:1.0, patients], w: secret[Tensor[4], -1.0:1.0, weights]):
-    return confidential(x * w, kind="gradient", release="aggregate_only")
-
-print(step.privacy())   # parties, assets, derived policies, flows, warnings
-```
-
-Neither owner may learn the other's asset; the gradient may leave only as
-part of an aggregate, to the coordinator; revealing it directly is ENC1905.
-The policy's ID is part of the execution spec, so receipts and proofs bind
-it. The compiler checks these requirements; attested key release (below)
-enforces who may run the program.
-
-## Secure aggregation
-
-Several parties contribute private vectors; only the aggregate is released,
-and only if enough parties took part. An `aggregate_only` asset
-can reach its recipient only through this boundary.
-
-```python
-from encompute import Party, Tensor, asset, secret, secure_aggregate
-
-coordinator = Party("coordinator")
-a, b, c = (asset(f"gradient-{x}", owner=Party(f"hospital-{x}"), readers=[coordinator],
-                 purposes=["disease-training"], kind="gradient", release="aggregate_only")
-           for x in "abc")
-
-@encompute.compile(purpose="disease-training")
-def fedavg(ga: secret[Tensor[4096], -1.0:1.0, a], gb: secret[Tensor[4096], -1.0:1.0, b],
-           gc: secret[Tensor[4096], -1.0:1.0, c]):
-    return secure_aggregate(ga + gb + gc, to=coordinator, minimum=3, colluding=2,
-                            clip=(-1, 1), scale=65536, modulus_bits=32)
-```
-
-```sh
-encompute aggregate serve fedavg.encompute --parties parties.json --key coordinator.key
-encompute aggregate join fedavg.encompute --parties parties.json --coordinator URL \
-    --party hospital-a --key a.key --values gradient-a.json --state a.round
-```
-
-The protocol is Bonawitz et al.'s secure aggregation (malicious-coordinator
-variant): the coordinator sees masked vectors only, even if it colludes
-with up to the declared `colluding` parties; dropouts are tolerated down to
-the threshold. Every party's message is signed and bound to its round;
-the coordinator's own broadcasts are not signed, and its signed aggregation
-receipt binds the round's outcome. Quantization is explicit and checked for
-overflow at compile time. `--state` records each round a party joins; a
-failed round is not rejoined, but replaced by a new one. Secure
-aggregation hides contributions, not what the aggregate reveals: that needs
-differential privacy.
-
-## Differential privacy
-
-Secure aggregation hides each party's contribution; differential privacy
-limits what the released aggregates reveal, across every round.
-Budgets belong to assets; the compiler finds every release of a budgeted
-asset and requires a mechanism; the runtime charges each release to a
-tamper-evident ledger and refuses releases over budget.
-
-```python
-grads = [asset(f"gradient-{x}", owner=h, readers=[coordinator], kind="gradient",
-               release="aggregate_only", privacy="strong", unit="patient")
-         for x, h in zip("abc", hospitals)]
-...
-    return secure_aggregate(ga + gb + gc, to=coordinator, minimum=3, colluding=2,
-                            clip=(-1, 1), scale=4096, modulus_bits=40, privacy="strong")
-```
-
-`encompute privacy explain` shows each budget, what one release costs and
-how many releases it affords; `encompute privacy budget --ledger DIR` shows
-what has been spent. A level such as `"strong"` uses twice its listed noise
-for a record, patient, user or device budget, because only each party's
-whole contribution is clipped; `privacy explain` shows it as
-`preset=strong, sensitivity_factor=2, effective_noise_multiplier=12 (2x preset 6.0)`.
-Each layer answers one question: FHE/MPC keeps the
-computation confidential, secure aggregation hides contributions,
-differential privacy bounds what outputs reveal, attestation says which
-workload ran, and execution proofs say it computed correctly.
-
-## Planner
-
-Declare who owns what, who must not see it, what may be released and
-whether results must be verifiable; Encompute chooses the mechanisms, or
-refuses.
-
-```python
-project = encompute.Project("medical-training",
-                            parties=["hospital-a", "hospital-b", "modelco"])
-a = project.data("patients-a", owner="hospital-a")
-b = project.data("patients-b", owner="hospital-b")
-model = project.model("base-model", owner="modelco")
-run = project.train(model=model, data=[a, b], privacy="strong",
-                    infrastructure={"tees": [{"tee": "intel-tdx",
-                                              "provider": "gcp-confidential-space"}],
-                                    "key_broker": True})
-print(run.explain())   # requirement → mechanism → reason → evidence
-```
-
-```sh
-encompute plan step.encompute -o plan.json   # or PLANNING FAILED, with reasons
-encompute check step.encompute               # program, policy, privacy, plan
-encompute explain step.encompute --deep      # candidates, rejections, assumptions
-```
-
-An independent validator checks every plan; its `encplan1:` ID binds
-aggregation rounds (`--plan`) and the trust graph, whose report says
-whether observed execution matched the plan.
-
-## Confidential fine-tuning
-
-PyTorch does the computation; Encompute decides who may hold what, and
-proves it. One call fine-tunes a private model on several
-parties' private data:
-
-```python
-import encompute.torch as et
-base = project.model("base-model", owner="modelco",
-                     module=et.wrap_model("encompute.torch.models:tiny_classifier"))
-a = project.data("patients-a", owner="hospital-a", dataset=et.private_dataset(xa, ya))
-b = project.data("patients-b", owner="hospital-b", dataset=et.private_dataset(xb, yb))
-adapter = project.finetune(model=base, data=[a, b], method="lora",
-                           privacy="standard", verification="required")
-adapter.infer(x); adapter.lineage(); adapter.export_adapter()   # EXPORT DENIED
-```
-
-Each hospital's training worker attests before it receives the model key.
-LoRA updates leave it only through secure aggregation with differential
-privacy (organization-level: each hospital's clipped update). Adapters and
-checkpoints are sealed; resuming can never roll back spent budget; every
-adapter's lineage is signed and checked by the trust report. PyTorch runs
-in plaintext inside the attested workload: the TEE, not PyTorch, protects
-data in use. See [examples/15_confidential_lora](examples/15_confidential_lora/).
-
-For patient-level privacy, pass each record's patient and ask for DP-SGD:
-
-```python
-a = project.data("patients-a", owner="hospital-a",
-                 dataset=et.private_dataset(xa, ya, unit_ids=patient_ids_a))
-adapter = project.finetune(model=base, data=[a, b], privacy="strong-patient")
-```
-
-Each worker clips every patient's gradient, with all of the patient's
-records grouped, and samples patients at random. The coordinator adds
-noise to the securely aggregated sum. A Rényi DP accountant, checked
-against an independent reference, charges each hospital's budget. A run
-that would exceed the budget is denied before training, and the trust
-report refuses a patient-level claim from organization-level training. See
-[examples/16_patient_private_lora](examples/16_patient_private_lora/).
-
-### Hugging Face Transformers + PEFT
-
-```python
-base = et.huggingface("org/model", revision="<commit>")   # or a local directory
-notes = et.private_text_dataset(texts, labels, tokenizer=base.encompute_tokenizer,
-                                unit_ids=patient_ids)
-model = project.model("clinical-model", owner="modelco", module=base)
-adapter = project.finetune(model=model, data=[a, b], method="peft-lora",
-                           privacy="strong-patient")
-adapter.export_peft("adapter/")   # standard PEFT files, only if every owner permits
-```
-
-The model owner imports the model once into a content-addressed package:
-- the revision is resolved to an immutable commit;
-- only safetensors, configuration and tokenizer files are kept;
-- remote code and pickled weights are refused;
-- credentials are used for that download only.
-
-Workers never download anything. They rebuild the Transformers-native
-class, load the sealed weights, and add PEFT LoRA.
-
-The training spec binds:
-- the package (every file's digest);
-- the tokenizer and each dataset's tokenization;
-- the PEFT configuration and the adapter layout.
-
-A patient's records keep their patient through tokenization and chunking.
-Transformers supplies the architecture, PEFT the adapters and PyTorch the
-training; Encompute supplies the confidentiality, privacy and evidence. See
-[examples/17_huggingface_peft](examples/17_huggingface_peft/).
-
-## Trust graph
-
-Every mechanism leaves evidence; the trust graph joins it into one bundle
-and answers one question: can I trust what happened to my data?
-Owners sign approvals of the program itself, and can revoke an asset,
-which lists everything derived from it.
-
-```sh
-encompute trust init step.encompute --parties parties.json
-encompute trust authorize --party hospital-a --key a.key
-encompute aggregate serve step.encompute ... --trust-bundle trust.json
-encompute trust report --parties parties.json --coordinator-key <hex>
-```
-
-The report rebuilds the graph from the signed evidence and checks every
-signature against the keys you pass, never against keys in the bundle;
-what it cannot check is reported as unchecked, and then it does not say
-SATISFIED.
-
-## Attested key release
-
-Owners release asset keys only to a workload that proves, with hardware
-attestation, that it runs the approved artifact under the approved
-execution spec and policy, in an approved TEE, for a fresh session. The
-key is sealed to a session key generated inside the TEE: the cloud
-operator relays it but cannot open it.
-
-```sh
-# Owner: an attestation policy for the artifact, and a protected key.
-encompute attest policy model.encompute --image sha256:… --tee intel_tdx > policy.json
-encompute keys protect --asset weights --policy policy.json --broker-id https://broker.modelco.example
-encompute keys serve --jwks google --listen 0.0.0.0:8760   # behind a TLS proxy
-
-# Workload, inside Confidential Space: attest, receive, serve.
-encompute workload keys model.encompute --key weights@https://broker.modelco.example --identity eval.id
-encompute-evaluator serve model.encompute --identity eval.id --attestation attestation.json
-```
-
-A wrong image, spec or policy, a debug build, an outdated TCB, stale,
-replayed, tampered or expired evidence, a substituted session or evaluator
-key, or a revoked key: no key. Receipts from an attested evaluator bind the
-attestation, and `encompute verify --attestation …` checks the chain
-hardware → workload → evaluator key → receipt. Providers: Google
-Confidential Space ([deploy/confidential-space](deploy/confidential-space/))
-and a development-only mock.
-
-## Build
-
-Requires Rust (pinned in `rust-toolchain.toml`), CMake, a C++17 compiler
-and, on macOS, `brew install libomp`. On Linux, building the Python wheel
-with OpenFHE also needs `patchelf` (`apt install patchelf`), which maturin
-uses to bundle `libgomp`.
-
-```sh
-cargo test                               # everything except OpenFHE and TFHE-rs
-./scripts/install-openfhe.sh             # builds OpenFHE v1.5.1 (static) into .deps/openfhe
-cargo test --workspace --features encompute-runtime/openfhe,encompute-evaluator/openfhe,encompute-cli/openfhe
-```
-
-Set `OPENFHE_ROOT` to use another static OpenFHE v1.5.1 install.
-
-Exact programs on OpenFHE exact, and the commercial build audit:
-
-```sh
-cargo build --release -p encompute-cli -p encompute-evaluator \
-  --features encompute-cli/openfhe,encompute-evaluator/openfhe
-scripts/exact-demo.sh                        # encrypted eligibility decision via a separate evaluator
-scripts/audit-commercial-build.sh target/release   # no TFHE-rs anywhere in the build
-```
-
-The control plane (PostgreSQL and OpenBao for the service tests; any dev
-servers will do):
-
-```sh
-ENCOMPUTE_TEST_DATABASE_URL=postgres://USER:PASS@127.0.0.1:5432/postgres \
-ENCOMPUTE_TEST_BAO_ADDR=http://127.0.0.1:8200 ENCOMPUTE_TEST_BAO_TOKEN=root \
-  cargo test -p encompute-control -p encompute-keybroker
-scripts/enterprise-e2e.sh              # the commercial golden path in production mode
-deploy/docker-compose/smoke.sh         # the same through the Compose deployment
-```
-
-TFHE-rs (research feature; never in commercial builds):
-
-```sh
-cargo test --release -p encompute-runtime --features research-tfhe-rs --test research_tfhe
-cargo test --release -p encompute-runtime --features openfhe,research-tfhe-rs --test cross_backend
-```
-
-### Python
-
-```sh
-python -m venv .venv && . .venv/bin/activate
-pip install maturin pytest numpy
-maturin develop --release --features openfhe   # omit --features for mock only
-pytest -q
-examples/run-all.sh quick   # or: python examples/01_ckks_private_inference/model.py
-```
-
-### CLI
-
-```sh
-cargo build --release --features openfhe -p encompute-cli
-encompute compile model.py:score -o score.encompute     # or a .eir file
-encompute run score.encompute --input x=0.1,0.2,... --mode encrypted
-encompute test score.encompute --cases 1000 --mode encrypted
-encompute explain score.encompute --measure 100 --mode encrypted
-encompute bench score.encompute --mode encrypted
-encompute audit score.encompute
-encompute transcript approve.encompute          # exact programs
-encompute privacy explain step.encompute        # confidentiality graph
-```
-
-### Remote evaluation
-
-```sh
-cargo build --release --features openfhe -p encompute-cli -p encompute-evaluator
-encompute keys generate score.encompute -o score.keys          # secret.key stays here
-encompute-evaluator serve score.encompute --listen 127.0.0.1:8750 --identity evaluator.key
-# a TLS proxy on the evaluator host forwards https://EVALUATOR to 127.0.0.1:8750
-encompute run score.encompute --remote https://EVALUATOR --keys score.keys --input x=... \
-  --save-receipt result.receipt.json --save-envelopes exchange/
-encompute verify result.receipt.json --model score.encompute \
-  --request exchange/request.bin --response exchange/response.bin --trust-evaluator KEY
-```
-
-`verify` exits 0 only when every binding was checked (the trusted
-evaluator key, the artifact, the backend, the transcript, the evidence
-kind, the key ID, the request and the response) and any proof the receipt
-names was verified; 3 when some bindings were not supplied or a named
-proof was not checked (a `NOT CHECKED:` line lists them); 1 when any
-check fails; and 2 on an error such as a missing file or a bad argument. An attestation the receipt binds is checked only with
-`--attestation` and `--attestation-policy`, and exit 0 does not require
-it. The evaluator speaks plain HTTP: keep it on `127.0.0.1` or a private
-network behind a TLS proxy, as above. `--listen 0.0.0.0:…` exposes it
-unencrypted on every interface. On one machine, `--remote
-http://127.0.0.1:8750` works without a proxy.
-`scripts/audit-evaluator-binary.sh` checks that the evaluator binary
-contains no Encompute key-generation, encryption or decryption code.
-
-## Layout
-
-| Path | Role |
-|---|---|
-| `crates/encompute-ir` | Scheme-independent SSA IR, `.eir` text form, reference semantics |
-| `crates/encompute-analysis` | Range, overflow and privacy analyses |
-| `crates/encompute-ckks` | Lowering to CKKS plans; Chebyshev approximation; parameter selection |
-| `crates/encompute-exact` | Exact plans: lowering, validation, execution, semantic transcripts |
-| `crates/encompute-backend` | Client and evaluator traits; mock backends |
-| `crates/encompute-protocol` | Versioned, checksummed envelopes |
-| `crates/encompute-verification` | Execution specs, signed receipts, transcripts, proofs and proof interfaces (no FHE dependency) |
-| `crates/encompute-attestation` | Provider-neutral workload attestation, bindings, attestation policies, sealed key grants |
-| `crates/encompute-keybroker` | Policy-gated key release to attested workloads (library, HTTP server, client) |
-| `crates/encompute-secagg` | Secure aggregation (Bonawitz et al.) bound to policies, rounds and receipts |
-| `crates/encompute-privacy` | Differential privacy: budgets, discrete Gaussian noise, zCDP accounting, ledger, receipts |
-| `crates/encompute-training` | Confidential fine-tuning: training specs, sealed assets and checkpoints, adapter records, export control |
-| `python/encompute/torch` | PyTorch integration: LoRA, attested training and inference workers, `Project.finetune` |
-| `crates/encompute-planner` | Planner: trust requirements, mechanism selection, plan validator, PlanIds |
-| `crates/encompute-trust` | Trust graph: authorizations, revocations, lineage, evidence, trust report |
-| `crates/encompute-assurance` | Assurance suite: invariant catalog, adversarial checks, release-gate report (not published) |
-| `crates/encompute-vfhe` | Re-execution proof verifier on OpenFHE BGV (research) |
-| `crates/encompute-openfhe`, `-openfhe-client` | OpenFHE evaluator side; client side (keys, encryption, decryption), CKKS and BinFHE |
-| `crates/encompute-openfhe-exact` | OpenFHE exact backend: envelopes, parameter profile, gate binding |
-| `crates/encompute-tfhe`, `-tfhe-client` | TFHE-rs evaluator side; client side (research feature, never in commercial builds) |
-| `crates/encompute-control` | Control plane: API v1, identities, tenancy, jobs, scheduler, privacy ledgers, state anchor, audit |
-| `crates/encompute-evaluator` | Evaluator sessions and HTTP service; never links client crypto |
-| `crates/encompute-runtime` | Execution, differential testing, explain, bench, audit, artifacts |
-| `crates/encompute-cli` | `encompute` command |
-| `crates/encompute-py`, `python/encompute` | Python SDK: extension module and tracing frontend |
-| `examples/` | Runnable examples for every capability, `run-all.sh` ([examples/README.md](examples/README.md)) |
-
-## Roadmap
-
-- **Succinct proofs**: a zkVM proof of the same relation, starting with
-  a cost benchmark of one BGV ciphertext multiplication.
-- ✓ Patient-level DP-SGD (per-patient clipping, Poisson sampling, Rényi DP
-  accounting).
-- ✓ Hugging Face Transformers + PEFT LoRA (sequence classification).
-- ✓ Confidential Space training worker: a Hugging Face workload, hardware
-  attestation gating the model and dataset keys. It is rehearsed locally and
-  in CI; the live GCP run needs a project.
-- ✓ OpenFHE CKKS (approximate programs).
-- ✓ OpenFHE exact (BinFHE): the production exact backend, with a commercial
-  build audit.
-- ✓ TFHE-rs isolated to research builds.
-- ✓ Enterprise deployment foundation: control plane, OIDC and service
-  identities, tenant isolation, customer-managed keys, durable privacy
-  state, audit, API v1, Compose deployment.
-- ✓ OpenFHE performance and hybrid optimization: optimized circuits,
-  parallel gate evaluation, BGV or BinFHE per program by calibrated cost.
-  Functional bootstrapping was measured and not adopted.
-- ✓ Release 0.3.0.
-- → `encompute migrate` for artifact formats
-  ([docs/compatibility.md](docs/compatibility.md)).
-- → Multi-machine orchestration.
-- → A message-broker adapter, if needed; then Kubernetes.
-- → Commercial UI.
+[threat model](docs/threat-model.md), [security findings](docs/security-findings.md),
+[repository layout](docs/guide/layout.md) and [roadmap](docs/guide/roadmap.md).
+
+An independent review of 0.3.0-rc.3 reported findings that are fixed in
+0.3.0, some only partly. The reviewers have not reviewed the fixes.
+Security reports: [SECURITY.md](SECURITY.md).
 
 ## License
 
@@ -586,4 +144,3 @@ AGPL-3.0-only, with commercial licenses available: see [LICENSING.md](LICENSING.
 Encompute statically links OpenFHE (BSD 2-Clause); research builds with the
 `research-tfhe-rs` feature also link TFHE-rs (BSD-3-Clause-Clear, plus Zama's patent
 terms); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-Security reports: [SECURITY.md](SECURITY.md).
