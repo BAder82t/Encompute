@@ -48,7 +48,7 @@ has() {
 }
 
 need() {
-  has "$1" || skip "$1 unavailable in this build (see README: Build)"
+  has "$1" || skip "$1 unavailable in this build (see docs/guide/build.md)"
 }
 
 # A scratch directory, removed with every background process on exit.

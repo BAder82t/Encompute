@@ -97,7 +97,7 @@ Encrypted result        accepted (receipt only)
 RECEIPT VERIFIED
 EXECUTION PROOF NOT PRESENT
 SKIPPED
-Reason: verified-execution unavailable in this build (see README: Build)
+Reason: verified-execution unavailable in this build (see docs/guide/build.md)
 ```
 
 In the research build, `run.sh` requires `VERIFIED PRIVATE EXECUTION` from
