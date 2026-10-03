@@ -73,6 +73,9 @@ fn state_machine_is_explicit() {
         // A governed job whose per-job approvals lapsed before scheduling.
         (Authorized, WaitingForApproval),
         (Authorized, Queued),
+        // A scheduled governed job whose evaluator's location evidence was
+        // only renewed is scheduled again at start (audited as job.requeued).
+        (Queued, Authorized),
         (Queued, Running),
         (Running, Verifying),
         (Verifying, Succeeded),
