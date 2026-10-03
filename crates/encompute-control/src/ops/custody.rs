@@ -347,19 +347,21 @@ impl Control {
             return Err(bad("asset_version_id must be 32 bytes of lowercase hex"));
         }
         // The plan's spec, compiled before the transaction takes any lock.
-        let plan: String = {
+        let (plan, job_org, job_project): (String, String, String) = {
             let mut c = self.db.conn()?;
-            c.query_opt(
-                "SELECT plan_id FROM jobs WHERE id = $1 AND evaluator_id = $2",
-                &[&id, &ctx.actor()],
-            )
-            .map_err(db_err)?
-            .ok_or_else(|| not_found("job", id))?
-            .get(0)
+            let row = c
+                .query_opt(
+                    "SELECT plan_id, organization_id, project_id FROM jobs
+                      WHERE id = $1 AND evaluator_id = $2",
+                    &[&id, &ctx.actor()],
+                )
+                .map_err(db_err)?
+                .ok_or_else(|| not_found("job", id))?;
+            (row.get(0), row.get(1), row.get(2))
         };
         let base_spec = self.cached_plan_spec(&plan)?;
         let version_mismatch = |m: String| Error::new(Code::GovernanceAssetVersionMismatch, m);
-        let ticket = self.tx_anchored(|t| {
+        let issued = self.tx_anchored(|t| {
             // The source first, then the job (the order revocation takes).
             let a = t
                 .query_opt(
@@ -620,7 +622,25 @@ impl Control {
                 &orgs,
                 &[("owner", owner.clone())],
             )
-        })?;
+        });
+        // A refused request is part of the trail too (the refused
+        // transaction rolled back): what was asked for, and why not.
+        let ticket = match issued {
+            Ok(t) => t,
+            Err(e) if e.code != Code::Remote => {
+                self.metrics
+                    .inc("encompute_key_release_denied_total", "release_ticket");
+                self.audit_denied(
+                    ctx.draft("release_ticket.denied", "job", id, Outcome::Denied)
+                        .org(&job_org)
+                        .project(&job_project)
+                        .r#ref("asset_version", r.asset_version_id.clone())
+                        .r#ref("reason", e.code.as_str()),
+                );
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         Ok(json!({"ticket": ticket}))
     }
 

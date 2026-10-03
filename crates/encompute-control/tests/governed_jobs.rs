@@ -5868,3 +5868,403 @@ fn the_log_is_never_partially_exported_and_the_route_is_rate_limited() {
     }
     assert_eq!(last, 503);
 }
+
+// --- attack suite -------------------------------------------------------------------
+//
+// Each attack below is refused with its documented code and leaves a trail:
+// a `job.denied` event in the audit chain naming why (or, for an attack on
+// a signature, nothing active and no row changed), and no job, ticket or
+// budget. `scripts/governance-attacks.sh` runs these with the attack tests
+// of the other surfaces and prints one line per attack.
+
+/// What the audit chain recorded as denied jobs, oldest first: the reason
+/// each names.
+fn denial_reasons(g: &G) -> Vec<String> {
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .query(
+            "SELECT refs->>'reason' FROM audit_events WHERE action = 'job.denied' ORDER BY seq",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect()
+}
+
+fn count(g: &G, sql: &str) -> i64 {
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(sql, &[])
+        .unwrap()
+        .get(0)
+}
+
+/// One attack at submission: `run` is refused with `want`, the chain gains
+/// one `job.denied` event naming `reason`, and no job exists for it.
+fn attack(g: &G, what: &str, want: &str, reason: &str, run: impl FnOnce() -> (u16, Value)) {
+    let jobs = count(g, "SELECT count(*) FROM jobs");
+    let before = denial_reasons(g);
+    refused(run(), want);
+    let after = denial_reasons(g);
+    assert_eq!(after.len(), before.len() + 1, "{what}: not audited");
+    assert_eq!(after.last().unwrap(), reason, "{what}");
+    assert_eq!(count(g, "SELECT count(*) FROM jobs"), jobs, "{what}");
+    println!("ATTACK {what} -> {want} (audit job.denied reason={reason}; no job)");
+}
+
+/// Proposed and approved by two people, not yet signed.
+fn approved_unsigned(g: &G, body: &AuthorizationV2) -> String {
+    let row = id(&g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/authorizations",
+        Some(json!({"body": body})),
+    ));
+    for (who, role) in [
+        (&g.tax_owner, "data_owner"),
+        (&g.tax_sec1, "security_admin"),
+    ] {
+        g.t.ok(
+            who,
+            "POST",
+            &format!("/v1/authorizations/{row}/approve"),
+            Some(json!({"role": role})),
+        );
+    }
+    row
+}
+
+#[test]
+fn attack_a_forged_or_tampered_owner_signature_activates_nothing() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    let body = g.body(&v, &p);
+    let row = approved_unsigned(&g, &body);
+    let doc: AuthorizationV2 = serde_json::from_value(
+        g.t.ok(
+            &g.tax_sec1,
+            "GET",
+            &format!("/v1/authorizations/{row}"),
+            None,
+        )["body"]
+            .clone(),
+    )
+    .unwrap();
+    let post = |s: &encompute_trust::authz::Signed<AuthorizationV2>| {
+        g.t.call(
+            &g.tax_sec1,
+            "POST",
+            &format!("/v1/authorizations/{row}/signature"),
+            Some(json!({"public_key": s.public_key, "signature": s.signature})),
+        )
+    };
+    let status = |g: &G| -> String {
+        g.t.ok(
+            &g.tax_sec1,
+            "GET",
+            &format!("/v1/authorizations/{row}"),
+            None,
+        )["status"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let approved = status(&g);
+    // Signed by a key that is not tax's governance key.
+    let by_stranger = doc.clone().sign(&key(99)).unwrap();
+    let (s, r) = post(&by_stranger);
+    assert!(s >= 400, "{r}");
+    println!(
+        "ATTACK a signature by a key tax never registered -> {}",
+        code(&r)
+    );
+    assert_eq!(code(&r), "ENC2701", "{r}");
+    // Signed by tax's key, over a wider body than the one approved.
+    let mut wider = doc.clone();
+    wider.recipients = [BEN.to_string(), TAX.to_string()].into();
+    let tampered = wider.sign(&g.tax_key).unwrap();
+    let (s, r) = post(&tampered);
+    assert!(s >= 400, "{r}");
+    println!(
+        "ATTACK a signature over a body wider than the approved one -> {}",
+        code(&r)
+    );
+    assert_eq!(code(&r), "ENC2701", "{r}");
+    // Garbage in place of a signature.
+    let (s, r) = g.t.call(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{row}/signature"),
+        Some(json!({"public_key": pk(&g.tax_key), "signature": "zz"})),
+    );
+    assert!(s >= 400, "{r}");
+    println!("ATTACK a malformed signature -> {}", code(&r));
+    // Nothing changed, nothing is active: the job is refused.
+    assert_eq!(status(&g), approved);
+    let plan = g.plan(&g.ben_dev, &p);
+    attack(
+        &g,
+        "a job under an authorization whose signature was forged",
+        "ENC2701",
+        "not_authorized",
+        || g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "k1"),
+    );
+}
+
+#[test]
+fn attack_a_job_outside_what_the_owners_signed_is_refused_and_audited() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let good = program(&[&v.asset], PURPOSE, BEN);
+    let plan = g.plan(&g.ben_dev, &good);
+    // Approved by two people but never signed: not an authorization.
+    approved_unsigned(&g, &g.body(&v, &good));
+    attack(
+        &g,
+        "a job under an authorization the owner never signed",
+        "ENC2701",
+        "not_authorized",
+        || g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "a1"),
+    );
+    g.authorize(g.body(&v, &good));
+    // Another purpose than the one authorized.
+    attack(
+        &g,
+        "a job naming another purpose",
+        "ENC2702",
+        "purpose_mismatch",
+        || {
+            let mut body = g.request(&plan, &[&v.asset], &[BEN]);
+            body["purpose"] = json!("fraud-detection");
+            g.submit(&g.ben_dev, body, "a2")
+        },
+    );
+    // Another program than the one authorized.
+    let other = good.replace("[18.0]", "[21.0]");
+    let other_plan = g.plan(&g.ben_dev, &other);
+    attack(
+        &g,
+        "a different program over the same version",
+        "ENC2703",
+        "program_not_authorized",
+        || {
+            g.submit(
+                &g.ben_dev,
+                g.request(&other_plan, &[&v.asset], &[BEN]),
+                "a3",
+            )
+        },
+    );
+    // Another recipient than the owner released to.
+    attack(
+        &g,
+        "a result released to a recipient the owner did not name",
+        "ENC2709",
+        "release",
+        || g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN, TAX]), "a4"),
+    );
+    // A wider release class than the owner allowed.
+    attack(
+        &g,
+        "a result released in a wider class",
+        "ENC2709",
+        "release_class",
+        || {
+            let mut body = g.request(&plan, &[&v.asset], &[BEN]);
+            body["outputs"]["out"]["release_class"] = json!("aggregate-only");
+            g.submit(&g.ben_dev, body, "a5")
+        },
+    );
+    // A source that is not a registered dataset version.
+    let loose = id(&g.t.ok(
+        &g.tax_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": TAX, "kind": "dataset", "name": "income-unversioned",
+                    "digest": "e".repeat(64), "project": g.project,
+                    "key_ref": {"broker": "tax-broker", "provider": "openbao-transit",
+                                "key_ref": "income-unversioned", "key_version": 1}}),
+        ),
+    ));
+    let loose_program = program(&[&loose], PURPOSE, BEN);
+    let loose_plan = g.plan(&g.ben_dev, &loose_program);
+    attack(
+        &g,
+        "a source that is not a registered version",
+        "ENC2704",
+        "not_a_version",
+        || g.submit(&g.ben_dev, g.request(&loose_plan, &[&loose], &[BEN]), "a6"),
+    );
+    // The same request, inside what the owner signed, runs.
+    let (s, j) = g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "a7");
+    assert_eq!(s, 201, "{j}");
+}
+
+#[test]
+fn attack_an_expired_or_revoked_authorization_is_refused_and_audited() {
+    let Some(g) = world() else { return };
+    // Expired: strict, at valid_until it is over.
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    let until = now() + 3;
+    let mut body = g.body(&v, &p);
+    body.valid_until = until;
+    g.authorize(body);
+    let plan = g.plan(&g.ben_dev, &p);
+    after(until);
+    attack(
+        &g,
+        "a job after its authorization expired",
+        "ENC2705",
+        "unusable_authorization",
+        || g.submit(&g.ben_dev, g.request(&plan, &[&v.asset], &[BEN]), "e1"),
+    );
+    // Revoked by its owner: the next job is refused.
+    let v2 = g.version("2026-q2", json!({}));
+    let p2 = program(&[&v2.asset], PURPOSE, BEN);
+    let a2 = g.authorize(g.body(&v2, &p2));
+    let plan2 = g.plan(&g.ben_dev, &p2);
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{}/revoke", a2.row),
+        Some(json!({"reason": "withdrawn"})),
+    );
+    attack(
+        &g,
+        "a job after its authorization was revoked",
+        "ENC2706",
+        "revoked_authorization",
+        || g.submit(&g.ben_dev, g.request(&plan2, &[&v2.asset], &[BEN]), "e2"),
+    );
+    // A job queued before the revocation fails with it, anchored.
+    let (_, a3, _, j3) = g.job("2026-q3", |_| {});
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{}/revoke", a3.row),
+        Some(json!({"reason": "withdrawn"})),
+    );
+    assert_eq!(g.state(&id(&j3)), "failed");
+    assert!(g
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &id(&j3))
+        .unwrap());
+    refused(g.start(&id(&j3)), "ENC2604");
+    println!("ATTACK starting a job its owner's revocation already failed -> ENC2604 (failed, anchored as ended)");
+    // A job that waited past the window is refused at start and fails.
+    let until = now() + 6;
+    let (_, _, _, j4) = g.job("2026-q4", |b| b.valid_until = until);
+    after(until);
+    let v = start_refused(&g, &id(&j4), "ENC2705");
+    assert!(v["message"].as_str().unwrap().contains("valid"), "{v}");
+    println!("ATTACK starting a job after its window closed -> ENC2705 (audit job.failed stage=start, anchored as ended)");
+    // A revoked governance key stops every authorization it signed.
+    let v5 = g.version("2026-q5", json!({}));
+    let p5 = program(&[&v5.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v5, &p5));
+    let plan5 = g.plan(&g.ben_dev, &p5);
+    let keys = g.t.ok(
+        &g.tax_sec1,
+        "GET",
+        &format!("/v1/organizations/{TAX}/governance-keys"),
+        None,
+    );
+    let k = keys[0]["id"].as_str().unwrap().to_owned();
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/organizations/{TAX}/governance-keys/{k}/revoke"),
+        None,
+    );
+    after(now());
+    attack(
+        &g,
+        "a job under a revoked governance key",
+        "ENC2708",
+        "unusable_authorization",
+        || g.submit(&g.ben_dev, g.request(&plan5, &[&v5.asset], &[BEN]), "e5"),
+    );
+}
+
+#[test]
+fn attack_a_release_ticket_for_a_job_that_is_not_running_is_refused() {
+    let Some(g) = world() else { return };
+    let (v, _a, _program, j) = g.job("2026-q1", |_| {});
+    let job = id(&j);
+    let tickets = |g: &G| count(g, "SELECT count(*) FROM release_tickets");
+    // The refusals so far: the codes the audit chain recorded.
+    let denied = |g: &G| -> Vec<String> {
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query(
+                "SELECT refs->>'reason' FROM audit_events
+                  WHERE action = 'release_ticket.denied' ORDER BY seq",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
+    };
+    // Queued: start is the single gate, and it has not run.
+    let (s, t) = ticket(&g, &job, &v.version);
+    println!(
+        "ATTACK a ticket for a queued job -> {} (audit release_ticket.denied reason={}; no ticket)",
+        code(&t),
+        code(&t)
+    );
+    assert_eq!(s, 409, "{t}");
+    assert_eq!(tickets(&g), 0);
+    assert_eq!(denied(&g), vec!["ENC2604"]);
+    // A version the job does not read.
+    assert_eq!(g.start(&job).0, 200);
+    let other = g.version("2026-q2", json!({}));
+    let (s, t) = ticket(&g, &job, &other.version);
+    println!("ATTACK a ticket for a version the running job does not read -> {} (audit release_ticket.denied reason={}; no ticket)", code(&t), code(&t));
+    assert!(s >= 400, "{t}");
+    assert_eq!(tickets(&g), 0);
+    assert_eq!(denied(&g), vec!["ENC2604", "ENC2704"]);
+    // A job that ended gets none either.
+    let (v2, a2, _, j2) = g.job("2026-q3", |_| {});
+    g.t.ok(
+        &g.tax_sec1,
+        "POST",
+        &format!("/v1/authorizations/{}/revoke", a2.row),
+        Some(json!({"reason": "withdrawn"})),
+    );
+    assert_eq!(g.state(&id(&j2)), "failed");
+    let (s, t) = ticket(&g, &id(&j2), &v2.version);
+    println!(
+        "ATTACK a ticket for a failed job -> {} (audit release_ticket.denied reason={}; no ticket)",
+        code(&t),
+        code(&t)
+    );
+    assert_eq!(s, 409, "{t}");
+    assert_eq!(tickets(&g), 0);
+    assert_eq!(denied(&g), vec!["ENC2604", "ENC2704", "ENC2604"]);
+    // Anyone but the job's scheduled evaluator is refused.
+    let (s, t) = g.t.call(
+        &g.ben_dev,
+        "POST",
+        &format!("/v1/jobs/{job}/release-ticket"),
+        Some(json!({"asset_version_id": v.version})),
+    );
+    println!("ATTACK a ticket requested by a person -> {} (refused before any job is looked up: request log only, no audit event; no ticket)", code(&t));
+    assert!(s == 403 || s == 404, "{t}");
+    assert_eq!(tickets(&g), 0);
+    // The running job's own evaluator gets one, once per request.
+    let (s, t) = ticket(&g, &job, &v.version);
+    assert_eq!(s, 201, "{t}");
+    assert_eq!(tickets(&g), 1);
+}
