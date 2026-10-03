@@ -1,0 +1,12 @@
+# Lines that must appear in the output (values that vary are left out).
+Step 1. The clinic's private data
+Step 2. What the risk service is told
+evaluator receives the secret key: no
+Step 4. Check the answer against plain Python
+plain result      0.77171
+(allowed: 0.00100)
+Step 5. What Encompute refuses to do
+ENC1102
+ENC1003
+ENC1004
+PASS
