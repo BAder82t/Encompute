@@ -53,18 +53,45 @@ jobs:
       - run: examples/run-all.sh full
 
   # From a clean checkout to a trusted adapter, with documented commands only.
+  #
+  # Every row the release check requires must run: it needs OpenFHE and the
+  # control-plane services, as the release workflow's job has, or a required
+  # row is skipped and the job fails.
   release-check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 240
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: encompute
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: encompute
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+      openbao:
+        image: openbao/openbao:2.1.0
+        env:
+          BAO_DEV_ROOT_TOKEN_ID: ci-root
+          BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+        options: --cap-add IPC_LOCK
+    env:
+      ENCOMPUTE_TEST_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
+      ENCOMPUTE_TEST_BAO_ADDR: http://127.0.0.1:8200
+      ENCOMPUTE_TEST_BAO_TOKEN: ci-root
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: scripts/release-check.sh
+      - name: PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null
+      - run: ./scripts/install-openfhe.sh
+      - run: ./scripts/release-check.sh
 
   supply-chain:
     runs-on: ubuntu-24.04
