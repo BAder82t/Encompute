@@ -278,7 +278,24 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy -p encompute-control -p encompute-keybroker -p encompute-verification --all-targets -- -D warnings
-      - run: cargo test -p encompute-control -p encompute-keybroker -p encompute-verification
+      # The runner must itself fail when a service is down or a suite is empty.
+      - run: ./scripts/test-full-selftest.sh
+      # Fast mode: every database-backed test gets a clone of a sealed template.
+      # The runner checks the services first and fails on a skipped, empty or
+      # short required suite (scripts/test-manifest.json).
+      - name: control plane and CLI suites (template databases)
+        run: ./scripts/test-full.sh --mode template --runs control-plane,cli
+      # Cold mode: the migrations, the upgrade tests and the crash and restart
+      # suites on empty databases the control plane migrates itself, on every
+      # pull request, so a template can never hide a broken migration. The
+      # whole suite runs cold in the nightly assurance and the release check.
+      - name: migrations, upgrades and crash suites (cold databases)
+        run: ./scripts/test-full.sh --release --runs cold-core
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-full-summary
+          path: target/test-full/*.json
 
   enterprise-e2e:
     name: enterprise golden path (production mode, OpenFHE)

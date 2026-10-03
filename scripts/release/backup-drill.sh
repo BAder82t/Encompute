@@ -203,6 +203,9 @@ fi
 # =============================================================================
 # LOCAL MODE
 # =============================================================================
+# The drill always starts from an empty database, migrated by the real
+# binaries, and restores through the real pg_dump/psql path: it never uses the
+# test template databases (ENCOMPUTE_TEST_DB_MODE), which are for `cargo test`.
 ADMIN_URL="${ENCOMPUTE_TEST_DATABASE_URL:-postgres://encompute:encompute-test@127.0.0.1:55432/encompute}"
 BAO_ADDR="${ENCOMPUTE_TEST_BAO_ADDR:-http://127.0.0.1:58200}"
 BAO_TOKEN="${ENCOMPUTE_TEST_BAO_TOKEN:-dev-root}"
