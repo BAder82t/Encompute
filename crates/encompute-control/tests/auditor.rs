@@ -650,6 +650,10 @@ impl W {
             "/v1/jobs/{}/cancel" => (format!("/v1/jobs/{j}/cancel"), None),
             "/v1/jobs/{}/approve" => (format!("/v1/jobs/{j}/approve"), None),
             "/v1/jobs/{}/start" => (format!("/v1/jobs/{j}/start"), None),
+            "/v1/jobs/{}/upload-grants" => (
+                format!("/v1/jobs/{j}/upload-grants"),
+                Some(json!({"kind": "program"})),
+            ),
             "/v1/jobs/{}/release-ticket" => (
                 format!("/v1/jobs/{j}/release-ticket"),
                 Some(json!({"asset_version_id": self.version})),
