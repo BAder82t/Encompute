@@ -158,6 +158,10 @@ pub enum Code {
     /// A service request or message is unsigned, from an unknown service,
     /// for another recipient, expired or replayed (ENC2607).
     ServiceAuthentication,
+    /// An evaluator upload grant was presented again after an upload with it
+    /// succeeded (or while one with it is still running): each grant admits
+    /// exactly one upload (ENC2608).
+    UploadGrantReplayed,
     /// A governed project's source has no active owner-signed authorization, or an authorization's owner signature does not verify against the organization's active governance key (ENC2701).
     GovernanceAuthorizationMissing,
     /// The purpose of a governed job, program or authorization differs from the governed purpose, or the purpose is not active or not accepted (ENC2702).
@@ -284,6 +288,7 @@ impl Code {
             Code::InsecureConfiguration => "ENC2605",
             Code::Scheduling => "ENC2606",
             Code::ServiceAuthentication => "ENC2607",
+            Code::UploadGrantReplayed => "ENC2608",
             Code::GovernanceAuthorizationMissing => "ENC2701",
             Code::GovernancePurposeMismatch => "ENC2702",
             Code::GovernanceProgramNotAuthorized => "ENC2703",
@@ -320,7 +325,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 91] = [
+    pub const ALL: [Code; 92] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -382,6 +387,7 @@ impl Code {
         Code::InsecureConfiguration,
         Code::Scheduling,
         Code::ServiceAuthentication,
+        Code::UploadGrantReplayed,
         Code::GovernanceAuthorizationMissing,
         Code::GovernancePurposeMismatch,
         Code::GovernanceProgramNotAuthorized,

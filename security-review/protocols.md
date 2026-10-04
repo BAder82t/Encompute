@@ -229,12 +229,41 @@ header:   Encompute-Job-Grant: hex(JSON grant)
 `JobGrant::verify` does not itself compare `spec_id`, `backend` or
 `profile` with anything; they are covered by the signature.
 
-With a control plane, the evaluator also needs a grant naming the program
-for a program upload (checked before anything is compiled or loaded), a
-key upload and a key lookup, and `GET /v1/info` lists only the program a presented
-grant names (`crates/encompute-evaluator/src/server.rs`). The control
-plane returns the evaluator's URL and receipt key only to the submitting
-organization.
+A job grant runs a job. It opens no upload: the whole submitting
+organization can read it and it names no key. A program upload, a key
+upload and a key lookup carry an **upload grant**
+(`service.rs` `UploadGrant`; `POST /v1/jobs/{id}/upload-grants`;
+`crates/encompute-evaluator/src/control.rs` `begin_upload`):
+
+```text
+UploadGrant = { version (=1), grant_id (128 random bits, hex), kind ("program" | "keys"),
+  organization, project, job_id, client, evaluator, program_id, key_id (keys only),
+  issued_at, expires_at (issued_at + 3600, at most the job grant's), issuer, issuer_public_key,
+  signature = Ed25519(tagged("encompute.upload-grant.v1", canonical grant with signature "")) }
+header:   Encompute-Upload-Grant: hex(JSON grant)
+```
+
+1. Only the principal that submitted the job gets one (the control plane
+   authenticates it), while the job is queued with an unexpired grant. The
+   key ID is the SHA-256 of the key material, which holds the key tag.
+2. The evaluator verifies the signature under the pinned key, that it is the
+   evaluator named, the kind, the program ID (from the parsed program before
+   anything is compiled) and, for keys, the key ID (read from the
+   envelope's header before the keys are loaded, and checked against the
+   material when they are).
+3. In one step under one lock it refuses a grant ID already used or in use
+   (ENC2608) and marks it in use. The upload then spends it; an upload that
+   fails frees it. Reads (`GET /v1/info`, the key lookup) check the grant
+   but spend nothing.
+4. Spent grants are kept in memory (one node). A restart forgets them, so the
+   evaluator refuses any grant issued at or before its start: a spent grant
+   is never valid again while unexpired. This assumes the control plane's
+   clock is not ahead of the evaluator's by more than the time between a
+   grant's use and the restart.
+
+`GET /v1/info` lists only the program a presented upload grant names
+(`crates/encompute-evaluator/src/server.rs`). The control plane returns the
+evaluator's URL and receipt key only to the submitting organization.
 
 ## 6. Attested key release
 

@@ -16,6 +16,22 @@ Work toward confidential cross-agency computation
   compacted. Recovery's import writes 1,000 events per statement in one
   transaction (107,600 events: 160 s, was 1,011 s on the same
   loaded machine). INV-251.
+- **Evaluator uploads need a one-time upload grant bound to the client.**
+  With a control plane, a program or key upload took the job's grant,
+  which names no client or key, is visible to the whole submitting
+  organization, and was never spent. The control plane now issues an upload
+  grant (`POST /v1/jobs/{id}/upload-grants`) only to the principal that
+  submitted the job, signed over the evaluator, the program ID, the key ID
+  and a random grant ID. The evaluator spends it atomically: one upload per
+  grant, a replay is refused with ENC2608, a failed upload spends nothing,
+  and it accepts no grant issued before it started (spent grants are kept
+  in memory, one node). **Migration:** a job grant no longer opens an
+  upload; it is refused with a message naming the upload grant. The CLI
+  and both SDKs ask for one grant per upload; a client of an earlier build
+  must be upgraded together with its evaluator and control plane. The key
+  upload of a co-tenant that knows a victim's key tag no longer blocks the
+  victim's own: the shim keeps each set under its own tag. INV-248, INV-171
+  and INV-202 (extended).
 - **Assurance, attacks and examples (phase 9).** The attack suite
   `scripts/governance-attacks.sh` runs 27 attacks on the governance
   surface (forged or edited authorizations, expired or revoked ones, wrong

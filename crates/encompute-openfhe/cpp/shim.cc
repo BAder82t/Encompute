@@ -66,12 +66,20 @@ std::map<std::string, int>& tag_counts() {
   return m;
 }
 
-// The key material each loaded tag was inserted from: SHA-256 (hex) of the
-// uploaded evaluation keys. A later upload under the same tag must carry the
-// same bytes; OpenFHE looks keys up by tag alone.
-std::map<std::string, std::string>& tag_digests() {
+// A loaded evaluation-key set lives in OpenFHE's process-wide maps under its
+// own tag: the client's key tag and the SHA-256 of the uploaded bytes. This
+// is the loaded copy's tag, never the client's. The maps find keys by the
+// ciphertext's tag alone and keep the first keys inserted under a tag, so
+// under the client's tag, whoever uploads first would own it (the key-tag
+// squat). Under a tag that names the bytes, two uploads never meet.
+// `external_tags` maps a loaded copy's tag back to the client's tag.
+std::map<std::string, std::string>& external_tags() {
   static std::map<std::string, std::string> m;
   return m;
+}
+
+std::string loaded_tag(const std::string& tag, const std::string& sha) {
+  return tag + "#" + sha;
 }
 }  // namespace
 
@@ -82,7 +90,7 @@ void release_key_tag(const std::string& tag) {
   if (it == tag_counts().end()) return;
   if (--it->second == 0) {
     tag_counts().erase(it);
-    tag_digests().erase(tag);
+    external_tags().erase(tag);
     lbcrypto::CryptoContextImpl<DCRTPoly>::ClearEvalMultKeys(tag);
     lbcrypto::CryptoContextImpl<DCRTPoly>::ClearEvalAutomorphismKeys(tag);
   }
@@ -90,7 +98,10 @@ void release_key_tag(const std::string& tag) {
 
 struct ContextImpl {
   lbcrypto::CryptoContext<DCRTPoly> cc;
+  // The loaded copies' tags (released with the context), and the client's
+  // key tag each ciphertext's tag is mapped to.
   std::vector<std::string> key_tags;
+  std::map<std::string, std::string> loaded_by_client_tag;
   uint32_t slots = 0;
 };
 
@@ -244,18 +255,6 @@ T deserialize_keys(std::istringstream& in, const char* what) {
   return keys;
 }
 
-// Keys this process generated itself (a client's keygen in the same
-// process) have no recorded digest: compare their serialization, made as
-// the client exports it, with the upload.
-bool same_as_generated(const std::string& tag, const std::string& mult, const std::string& rot) {
-  std::ostringstream m;
-  if (!CC::SerializeEvalMultKey(m, lbcrypto::SerType::BINARY, tag) || m.str() != mult) return false;
-  const auto& autos = CC::GetAllEvalAutomorphismKeys();
-  if (autos.find(tag) == autos.end()) return rot.empty();
-  std::ostringstream r;
-  CC::SerializeEvalAutomorphismKey(r, lbcrypto::SerType::BINARY, tag);
-  return r.str() == rot;
-}
 }  // namespace
 
 rust::String load_evaluation_keys(Context& ctx, rust::Slice<const uint8_t> bytes,
@@ -271,28 +270,25 @@ rust::String load_evaluation_keys(Context& ctx, rust::Slice<const uint8_t> bytes
 
   // OpenFHE finds keys by the ciphertext's key tag alone, in process-wide
   // maps where the first keys inserted under a tag stay. So nothing is
-  // inserted until the upload is fully checked, and a tag already loaded
-  // is only ever shared by byte-identical key material: another client's
-  // keys relabelled with a victim's tag are refused, never used.
+  // inserted until the upload is fully checked, and the keys are inserted
+  // under a tag of their own (the client's tag and the SHA-256 of the
+  // upload): another client's keys relabelled with a victim's tag land
+  // beside the victim's, never in front of them, and a ciphertext runs only
+  // under the keys of the context that loaded them.
+  const std::string itag = loaded_tag(tag, sha);
   const auto& loaded_mult = CC::GetAllEvalMultKeys();
   const auto& loaded_rot = CC::GetAllEvalAutomorphismKeys();
-  const bool present = loaded_mult.find(tag) != loaded_mult.end() ||
-                       loaded_rot.find(tag) != loaded_rot.end();
+  const bool present = loaded_mult.find(itag) != loaded_mult.end() ||
+                       loaded_rot.find(itag) != loaded_rot.end();
   if (present) {
-    auto d = tag_digests().find(tag);
-    const bool same = d != tag_digests().end() ? d->second == sha
-                                               : same_as_generated(tag, mult_bytes, rot_bytes);
-    if (!same)
-      throw std::runtime_error(
-          "evaluation keys under this key tag are already loaded with different key material");
-    // The same keys again: they were checked when first inserted.
-    auto mk = loaded_mult.find(tag);
+    // The same bytes again: they were checked when first inserted.
+    auto mk = loaded_mult.find(itag);
     if (mk == loaded_mult.end() || mk->second.empty() ||
         mk->second[0]->GetCryptoContext() != ctx.impl->cc)
       throw std::runtime_error(kForeignKeys);
-    tag_digests()[tag] = sha;
-    retain_key_tag(tag);
-    ctx.impl->key_tags.push_back(tag);
+    retain_key_tag(itag);
+    ctx.impl->key_tags.push_back(itag);
+    ctx.impl->loaded_by_client_tag[tag] = itag;
     return rust::String(tag);
   }
 
@@ -317,11 +313,16 @@ rust::String load_evaluation_keys(Context& ctx, rust::Slice<const uint8_t> bytes
     rot = rots.begin()->second;
   }
 
-  CC::InsertEvalMultKey(mult.begin()->second, tag);
-  if (rot) CC::InsertEvalAutomorphismKey(rot, tag);
-  tag_digests()[tag] = sha;
-  retain_key_tag(tag);
-  ctx.impl->key_tags.push_back(tag);
+  // Every key now carries the loaded copy's tag, as the maps are keyed by it.
+  for (auto& k : mult.begin()->second) k->SetKeyTag(itag);
+  if (rot)
+    for (auto& entry : *rot) entry.second->SetKeyTag(itag);
+  CC::InsertEvalMultKey(mult.begin()->second, itag);
+  if (rot) CC::InsertEvalAutomorphismKey(rot, itag);
+  external_tags()[itag] = tag;
+  retain_key_tag(itag);
+  ctx.impl->key_tags.push_back(itag);
+  ctx.impl->loaded_by_client_tag[tag] = itag;
   return rust::String(tag);
 }
 
@@ -335,16 +336,32 @@ std::unique_ptr<Ciphertext> load_ciphertext(const Context& ctx,
   if (!ct) throw std::runtime_error("ciphertext could not be deserialized");
   if (ct->GetCryptoContext() != ctx.impl->cc)
     throw std::runtime_error("ciphertext belongs to another parameter set");
-  const auto& tags = ctx.impl->key_tags;
-  if (std::find(tags.begin(), tags.end(), ct->GetKeyTag()) == tags.end())
+  // The client's tag names the keys this context loaded under it; the loaded
+  // copy's tag is what OpenFHE looks the keys up by.
+  const auto& loaded = ctx.impl->loaded_by_client_tag;
+  auto it = loaded.find(ct->GetKeyTag());
+  if (it == loaded.end())
     throw std::runtime_error("ciphertext is under a key whose evaluation keys are not loaded");
+  ct->SetKeyTag(it->second);
   return wrap(ct);
 }
 
 rust::Vec<uint8_t> store_ciphertext(const Ciphertext& ct) {
   Guard lock(openfhe_mutex());
   std::ostringstream s;
-  lbcrypto::Serial::Serialize(ct.impl->ct, s, lbcrypto::SerType::BINARY);
+  // A ciphertext leaves under the client's key tag (its client checks it),
+  // not the loaded copy's. Every shim call holds the lock, so the tag is
+  // put back before anyone else sees the ciphertext.
+  const std::string loaded = ct.impl->ct->GetKeyTag();
+  auto client = external_tags().find(loaded);
+  if (client != external_tags().end()) ct.impl->ct->SetKeyTag(client->second);
+  try {
+    lbcrypto::Serial::Serialize(ct.impl->ct, s, lbcrypto::SerType::BINARY);
+  } catch (...) {
+    ct.impl->ct->SetKeyTag(loaded);
+    throw;
+  }
+  ct.impl->ct->SetKeyTag(loaded);
   std::string str = s.str();
   rust::Vec<uint8_t> out;
   out.reserve(str.size());

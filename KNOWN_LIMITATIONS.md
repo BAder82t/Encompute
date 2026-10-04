@@ -208,10 +208,20 @@ Related: [support matrix](docs/support-matrix.md),
   in memory until the evaluator restarts.
 - **Trust Graph queries are quadratic** in the number of records.
 - **The control plane bounds privacy reservations, but does not recompute
-  them, except for a governed job's.** A reservation against an asset
-  whose declared sensitivity is below what its own noise implies is
-  refused, but its noise multiplier and sampling rate are the
-  coordinator's declaration. A governed job's release is different: the
+  them, except for a governed job's.** A reservation against an asset is
+  charged by the control plane's own accountant from its declared
+  sensitivity and noise variance (never from a declared epsilon). It is
+  refused when the declared sensitivity is below what its own noise
+  implies for the ledger's unit, when its mechanism is inconsistent (a
+  privacy level with other noise, no noise, a cost below the floor,
+  Poisson sampling claimed for an organization-level ledger), or when it
+  is not drawn with the production generator. What stays the
+  coordinator's declaration is the noise multiplier, the clip norm and the
+  sampling rate of a release the control plane did not plan: the
+  multiplier only sets the floor on the sensitivity, so a reservation that
+  over-declares it lowers its own floor, bounded below by the minimum
+  reservation cost, and a sampling rate is the amplification the
+  coordinator's attested workload vouches for. A governed job's release is different: the
   control plane computes it from the job's program (sensitivity, noise and
   mechanism), reserves it itself when the job starts, and refuses a
   coordinator's report that differs.
@@ -282,12 +292,14 @@ Related: [support matrix](docs/support-matrix.md),
   generation and MAC (`--expect-generation`, `--expect-state-mac`).
   Revocation does not crypto-shred: an old state file plus the unchanged
   KEK still yields the revoked keys. Keep broker backups access-controlled.
-- **Evaluator upload grants are reusable** until they expire, and are not
-  bound to a client.
-- **A co-tenant can block a victim's evaluation-key upload.** A client that
-  knows another client's key tag (it is in every ciphertext) can upload
-  keys under it first; the victim's upload is then refused until that
-  entry is evicted. The victim never gets a wrong result.
+- **Spent upload grants are remembered in memory, one node.** An upload
+  grant admits one upload; the evaluator keeps the spent ones until they
+  expire and, after a restart, refuses every grant issued before it
+  started (the grants not yet used are asked for again). That holds if the
+  control plane's clock is not ahead of the evaluator's by more than the
+  time between a grant's use and the restart. Several evaluator replicas
+  behind one address would each keep their own memory: one grant could be
+  spent once on each.
 - **Secrets have environment-variable fallbacks.** `*_FILE` is preferred,
   but production mode also accepts the plain variable (for example
   `ENCOMPUTE_DATABASE_URL`, `BAO_TOKEN`).

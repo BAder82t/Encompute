@@ -93,6 +93,16 @@ fn grant() -> serde_json::Value {
     .unwrap()
 }
 
+/// A (well-formed, unsigned) upload grant: the client only forwards it.
+fn upload_grant() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1, "grant_id": "ab".repeat(16), "kind": "program",
+        "organization": "o", "project": "prj_1", "job_id": "job_1", "client": "usr_1",
+        "evaluator": "evaluator-1", "program_id": "p".repeat(64), "key_id": "",
+        "issued_at": 0, "expires_at": 1, "issuer": "control-plane",
+        "issuer_public_key": "", "signature": ""})
+}
+
 /// A control plane scheduling every job on `evaluator` with `receipt_key`.
 fn control_plane(evaluator: &str, receipt_key: &str) -> (String, Log) {
     let (evaluator, receipt_key) = (evaluator.to_owned(), receipt_key.to_owned());
@@ -103,6 +113,11 @@ fn control_plane(evaluator: &str, receipt_key: &str) -> (String, Log) {
             serde_json::json!({"id": "job_1", "state": "queued", "grant": grant(),
                 "evaluator_url": evaluator, "evaluator_receipt_key": receipt_key})
             .to_string(),
+        ),
+        // The client asks for an upload grant before each upload.
+        "/v1/jobs/job_1/upload-grants" => (
+            201,
+            serde_json::json!({"grant": upload_grant(), "header": ""}).to_string(),
         ),
         _ => (404, r#"{"code": "ENC2603", "message": "no"}"#.into()),
     })
@@ -309,6 +324,10 @@ fn control_plane_placed(
             }
             (200, v.to_string())
         }
+        "/v1/jobs/job_1/upload-grants" => (
+            201,
+            serde_json::json!({"grant": upload_grant(), "header": ""}).to_string(),
+        ),
         _ => (404, r#"{"code": "ENC2603", "message": "no"}"#.into()),
     })
 }

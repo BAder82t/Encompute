@@ -124,6 +124,22 @@ impl Envelope {
         out
     }
 
+    /// The header alone, without the checksum or the payload: to read what
+    /// an upload claims (its key ID) before the whole envelope is
+    /// processed. Nothing here is verified; a full [`Envelope::decode`] of
+    /// the same bytes decides.
+    pub fn peek_header(bytes: &[u8]) -> Result<Header> {
+        if bytes.len() < 4 + 2 + 4 + 32 || &bytes[..4] != MAGIC {
+            return Err(bad("not an Encompute envelope"));
+        }
+        let hlen = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
+        if hlen > MAX_HEADER || 10 + hlen > bytes.len() - 32 {
+            return Err(bad("envelope header length is invalid"));
+        }
+        serde_json::from_slice(&bytes[10..10 + hlen])
+            .map_err(|e| bad(format!("envelope header: {e}")))
+    }
+
     /// Parse and verify structure and checksum. Does not check bindings;
     /// use [`Envelope::check`].
     pub fn decode(bytes: &[u8]) -> Result<Self> {

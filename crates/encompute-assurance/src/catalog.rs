@@ -730,7 +730,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-evaluator/tests/exact_selection.rs::integer_bitwise_logic_is_not_selected_for_bgv"),
         (EndToEnd, "test:crates/encompute-runtime/tests/openfhe_bgv.rs::arithmetic_programs_run_on_bgv_without_proofs"),
     ]),
-    inv!("INV-171", "exact-optimization", "The evaluation-key cache is bounded in serialized key bytes (a single entry larger than the bound is admitted alone) and never runs a ciphertext under another client's keys: sessions use only keys registered with them, a ciphertext runs only under the key its envelope is bound to, and evicted keys are reported missing. Registering evaluation keys under key ID K makes the evaluator use exactly the key material whose SHA-256 is K; an upload, accepted or refused, never inserts or changes keys used for another key ID, and a key tag already loaded is shared only by byte-identical key material (ENC-SF-2026-035).", [
+    inv!("INV-171", "exact-optimization", "The evaluation-key cache is bounded in serialized key bytes (a single entry larger than the bound is admitted alone) and never runs a ciphertext under another client's keys: sessions use only keys registered with them, a ciphertext runs only under the key its envelope is bound to, and evicted keys are reported missing. Registering evaluation keys under key ID K makes the evaluator use exactly the key material whose SHA-256 is K; an upload, accepted or refused, never inserts or changes keys used for another key ID. Loaded keys live in OpenFHE's process-wide maps under a tag of their own, the key tag and the SHA-256 of the key material, and a ciphertext is mapped to that tag only inside the context that loaded those keys (and mapped back to the client's tag on the way out): a co-tenant that knows a victim's key tag, and uploads keys relabelled with it first, neither blocks the victim's upload nor changes the victim's result (ENC-SF-2026-035, the squatting residual).", [
         (Positive, "test:crates/encompute-runtime/tests/keycache.rs::bounded_shared_and_isolated"),
         (Negative, "test:crates/encompute-runtime/tests/sessions.rs::round_trip_and_rejections"),
         (Adversarial, "test:crates/encompute-evaluator/src/keycache.rs::bounded_lru_and_shared_loads"),
@@ -979,10 +979,15 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::every_grant_can_be_withdrawn_through_the_api"),
         (EndToEnd, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_disables_and_cancellations"),
     ]),
-    inv!("INV-198", "dp", "The control plane charges a reservation only if its declared sensitivity is at least what its own noise and mechanism imply for the ledger's privacy unit; an under-declared reservation is refused (ENC-SF-2026-048).", [
-        (Positive, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+    inv!("INV-198", "dp", "The control plane charges a reservation only if its declared sensitivity is at least what its own noise and mechanism imply for the ledger's privacy unit; an under-declared reservation is refused (ENC-SF-2026-048). It computes the cost (rho, then epsilon at the ledger's delta) from the declared sensitivity and noise variance with its own accountant, never from a declared epsilon, and refuses a mechanism that is inconsistent with the ledger: a named privacy level with other noise, no noise, a cost below the floor, and Poisson sampling claimed for an organization-level ledger (an organization is never sampled, so no amplification applies). Golden vectors of derived reservations (sensitivity, noise variance, rho, epsilon) are pinned to an independent reference. What it does not derive: the noise multiplier, clip norm and sampling rate of a release it did not plan are the spender's declarations (the multiplier only sets the floor on the sensitivity, and the charge never falls below the minimum reservation cost); a governed job's reservation is derived from its program instead (INV-241).", [
+        (Positive, "test:crates/encompute-control/tests/reservation_derivation.rs::golden_vectors_of_derived_reservations"),
+        (Positive, "test:crates/encompute-control/tests/reservation_derivation.rs::a_sampled_release_of_an_inner_unit_charges_the_clip_norm_once"),
         (Negative, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+        (Negative, "test:crates/encompute-control/tests/reservation_derivation.rs::tampered_declarations_are_refused"),
         (Adversarial, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+        (Adversarial, "test:crates/encompute-control/tests/state.rs::an_organization_level_reservation_cannot_claim_sampling"),
+        (Adversarial, "test:crates/encompute-control/tests/reservation_derivation.rs::the_declared_noise_multiplier_is_the_unverified_input"),
+        (EndToEnd, "test:crates/encompute-control/tests/state.rs::an_organization_level_reservation_cannot_claim_sampling"),
     ]),
     inv!("INV-199", "keybroker", "Every field of key broker state that gates release is authenticated under a key derived from the KEK: an edited state file does not open, an unauthenticated one opens only after its owner's explicit upgrade, every legitimate save advances the generation, and a production store that cannot authenticate state backs no broker (ENC-SF-2026-043).", [
         (Positive, "test:crates/encompute-keybroker/tests/state_integrity.rs::owner_changes_are_reauthenticated_and_generations_advance"),
@@ -1001,7 +1006,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:crates/encompute-openfhe-client/tests/binfhe.rs::foreign_bootstrapping_keys_are_refused_before_any_gate"),
         (Adversarial, "test:crates/encompute-openfhe-client/tests/binfhe.rs::foreign_bootstrapping_keys_are_refused_before_any_gate"),
     ]),
-    inv!("INV-202", "evaluator", "With a control plane, the evaluator discloses a loaded program, or whether a key is registered for it, only to a holder of a valid grant for that program (ENC-SF-2026-064).", [
+    inv!("INV-202", "evaluator", "With a control plane, the evaluator discloses a loaded program, or whether a key is registered for it, only to a holder of a valid upload grant for exactly that program or those keys (ENC-SF-2026-064; INV-248).", [
         (Positive, "test:crates/encompute-evaluator/tests/uploads.rs::with_a_control_plane_programs_and_keys_are_not_advertised"),
         (Negative, "test:crates/encompute-evaluator/tests/uploads.rs::with_a_control_plane_programs_and_keys_are_not_advertised"),
         (Adversarial, "test:crates/encompute-evaluator/tests/uploads.rs::with_a_control_plane_programs_and_keys_are_not_advertised"),
@@ -1822,5 +1827,16 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-keybroker/tests/lifecycle.rs::lifecycle_retiring_old_root_versions_closes_the_backups_copy_of_the_kek"),
         (EndToEnd, "test:crates/encompute-keybroker/tests/crypto_shred.rs::a_control_plane_revocation_message_shreds"),
         (EndToEnd, "test:crates/encompute-cli/tests/keys_lifecycle.rs::revoking_through_the_cli_replaces_the_kek"),
+    ]),
+    inv!("INV-248", "evaluator", "With a control plane, a program or evaluation-key upload needs an upload grant, and a grant admits exactly one upload. The control plane issues it only to the principal that submitted the job (never to another member of the organization, whatever their role, and only while the job is queued with an unexpired job grant), signed over the organization, project, job, client, evaluator, program ID, key ID (the SHA-256 of the key material, which holds the key tag), a random grant ID and an expiry no later than the job grant's. The evaluator verifies it against the pinned control-plane key, for itself, for that kind of upload and that exact program or key ID, before anything is compiled or loaded, and spends it atomically: of any number of concurrent uploads with one grant exactly one succeeds, and the others are refused with ENC2608; an upload that fails (an unparsable program, keys that do not match their ID) spends nothing, so a retry after a failure works. A job grant opens no upload and is refused with a message naming the upload grant; reads (the program listing, the key lookup) need a grant for exactly what they ask about and do not spend it. Spent grants are kept in memory, one node: a restart forgets them, so the evaluator accepts no grant issued before it started, and a spent grant never becomes valid again while it is unexpired (ENC-SF-2026-064, the unbound and reusable grants).", [
+        (Positive, "test:crates/encompute-verification/src/service.rs::upload_grants_bind_object_evaluator_nonce_and_expiry"),
+        (Positive, "test:crates/encompute-evaluator/tests/uploads.rs::uploads_need_a_grant_with_a_control_plane"),
+        (Negative, "test:crates/encompute-evaluator/tests/uploads.rs::an_upload_grant_admits_exactly_one_upload"),
+        (Negative, "test:crates/encompute-evaluator/tests/uploads.rs::a_job_grant_no_longer_opens_an_upload"),
+        (Negative, "test:crates/encompute-control/tests/upload_grants.rs::only_the_initiator_of_a_queued_job_gets_upload_grants"),
+        (Adversarial, "test:crates/encompute-evaluator/tests/uploads.rs::concurrent_uploads_with_one_grant_succeed_once"),
+        (Adversarial, "test:crates/encompute-evaluator/tests/uploads.rs::an_upload_grant_binds_the_keys_it_names"),
+        (Adversarial, "test:crates/encompute-evaluator/tests/uploads.rs::a_restarted_evaluator_accepts_no_earlier_grant"),
+        (EndToEnd, "test:crates/encompute-control/tests/upload_grants.rs::a_control_plane_upload_grant_is_spent_by_one_upload"),
     ]),
 ];

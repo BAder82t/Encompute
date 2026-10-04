@@ -571,14 +571,23 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
             if let Some(k) = &eval_keys {
                 client.attach_evaluation_keys(k)?;
             }
-            let run = Remote::new(&url).with_grant(&grant).run_scheduled(
-                &client,
-                m.program(),
-                eval_keys.as_deref(),
-                &inputs,
-                receipt_key,
-                trusted.as_ref(),
-            )?;
+            // Programs and keys go up with upload grants the control plane
+            // issues to this job's initiator, one per upload.
+            let uploads = std::sync::Arc::new(JobUploads {
+                client: ControlClient::from_env(None)?,
+                job: id.clone(),
+            });
+            let run = Remote::new(&url)
+                .with_grant(&grant)
+                .with_upload_grants(uploads)
+                .run_scheduled(
+                    &client,
+                    m.program(),
+                    eval_keys.as_deref(),
+                    &inputs,
+                    receipt_key,
+                    trusted.as_ref(),
+                )?;
             eprintln!(
                 "Evaluator receipt       verified ({})",
                 if trusted.is_some() {
@@ -605,6 +614,28 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Where `jobs run` gets the upload grants of its job: the control plane
+/// issues each to the principal that submitted the job.
+struct JobUploads {
+    client: ControlClient,
+    job: String,
+}
+
+impl encompute_runtime::UploadGrantSource for JobUploads {
+    fn upload_grant(
+        &self,
+        kind: encompute_verification::UploadKind,
+        key_id: Option<&str>,
+    ) -> Result<encompute_verification::UploadGrant> {
+        let v = self.client.post(
+            &format!("/v1/jobs/{}/upload-grants", self.job),
+            json!({"kind": kind.as_str(), "key_id": key_id}),
+        )?;
+        serde_json::from_value(v["grant"].clone())
+            .map_err(|e| Error::new(Code::Remote, format!("upload grant: {e}")))
+    }
 }
 
 /// The client-side placement check of `jobs run --placement`: `path` holds

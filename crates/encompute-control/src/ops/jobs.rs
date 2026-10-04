@@ -33,7 +33,10 @@ use encompute_verification::governance::{
     is_hex32, release_within, GovernanceBinding, GovernanceInput, GrantGovernance, ReleaseClass,
     GOVERNANCE_BINDING_VERSION,
 };
-use encompute_verification::service::{now, sha256_hex, verify_signed, JOB_GRANT, JOB_GRANT_V2};
+use encompute_verification::service::{
+    now, sha256_hex, verify_signed, UploadGrant, UploadKind, JOB_GRANT, JOB_GRANT_V2, UPLOAD_GRANT,
+    UPLOAD_GRANT_TTL_SECS, UPLOAD_GRANT_VERSION,
+};
 use encompute_verification::{
     verify_receipt, EvaluatorIdentity, ExecutionSpec, ExpectedExecution, SignedExecutionReceipt,
 };
@@ -49,8 +52,8 @@ use crate::db::db_err;
 use crate::log::LogLine;
 use crate::model::{
     bad, check_name, new_id, CompleteJob, CreatePlan, EvaluatorStatus, JobGrant, JobState, JobView,
-    KeyRef, MessageEnvelope, RegisterEvaluator, Role, ServiceKind, SubmitJob, JOB_GRANT_TTL_SECS,
-    JOB_GRANT_VERSION, PLATFORM_ORG,
+    KeyRef, MessageEnvelope, RegisterEvaluator, RequestUploadGrant, Role, ServiceKind, SubmitJob,
+    JOB_GRANT_TTL_SECS, JOB_GRANT_VERSION, PLATFORM_ORG,
 };
 
 /// Evaluators silent for longer are unhealthy.
@@ -2334,6 +2337,102 @@ impl Control {
         })
         // (`tx_anchored` anchors the cancellation before it returns: a
         // restored database cannot bring the job back.)
+    }
+
+    /// The job's initiator asks for an upload grant: the control plane's
+    /// signed authorization to upload one program, or one set of evaluation
+    /// keys (named by key ID), once, to the job's scheduled evaluator. The
+    /// grant names the initiator (the principal authenticated here), the
+    /// job, the evaluator, the program, the keys, a random ID the evaluator
+    /// spends and an expiry that never outlives the job's own grant.
+    /// Nobody else gets one, whatever role they hold in the organization:
+    /// the job grant is visible to the whole submitting organization, so it
+    /// opens no upload.
+    pub fn issue_upload_grant(&self, ctx: &Ctx, id: &str, r: RequestUploadGrant) -> Result<Value> {
+        let key_id = match (r.kind, &r.key_id) {
+            (UploadKind::Keys, Some(k)) if is_hex32(k) => k.clone(),
+            (UploadKind::Keys, _) => {
+                return Err(bad("keys need a key_id: 32 bytes of lowercase hex"))
+            }
+            (UploadKind::Program, None) => String::new(),
+            (UploadKind::Program, Some(_)) => return Err(bad("a program upload names no key_id")),
+        };
+        self.tx_anchored(|t| {
+            let j = job_row(t, id, false)?.ok_or_else(|| not_found("job", id))?;
+            job_visible(t, ctx, &j)?;
+            job_project(t, ctx, &j)?;
+            if !ctx.principal.member_of(&j.organization) {
+                return Err(not_found("job", id));
+            }
+            if j.initiated_by != ctx.actor() {
+                return Err(forbidden(
+                    "only the principal that submitted the job asks for its upload grants",
+                ));
+            }
+            if j.state != JobState::Queued {
+                return Err(conflict(format!(
+                    "job {id} is {}: upload grants are issued for a scheduled (queued) job",
+                    j.state.as_str()
+                )));
+            }
+            let grant = j
+                .grant
+                .as_ref()
+                .ok_or_else(|| conflict("the job has no grant"))?;
+            // Only for a grant this control plane signed for this job.
+            let pk = self.signer.public_key_hex();
+            if grant.issuer_public_key != pk
+                || verify_signed(&pk, JOB_GRANT, &grant.unsigned(), &grant.signature).is_err()
+                || grant.job_id != id
+                || j.evaluator.as_deref() != Some(grant.evaluator.as_str())
+            {
+                return Err(conflict(
+                    "the job's grant is not one this control plane issued for it",
+                ));
+            }
+            let at = now();
+            if at >= grant.expires_at {
+                return Err(conflict("the job's grant expired"));
+            }
+            if let Some(g) = &grant.governance {
+                if at >= g.not_after {
+                    return Err(Error::new(
+                        Code::GovernanceAuthorizationExpired,
+                        "the job's governed window has ended",
+                    ));
+                }
+            }
+            let mut nonce = [0u8; 16];
+            getrandom::getrandom(&mut nonce).expect("operating-system randomness");
+            let mut g = UploadGrant {
+                version: UPLOAD_GRANT_VERSION,
+                grant_id: encompute_verification::hex(&nonce),
+                kind: r.kind,
+                organization: j.organization.clone(),
+                project: j.project.clone(),
+                job_id: j.id.clone(),
+                client: ctx.actor().to_owned(),
+                evaluator: grant.evaluator.clone(),
+                program_id: j.program_id.clone(),
+                key_id: key_id.clone(),
+                issued_at: at,
+                expires_at: (at + UPLOAD_GRANT_TTL_SECS).min(grant.expires_at),
+                issuer: self.service_id.clone(),
+                issuer_public_key: pk,
+                signature: String::new(),
+            };
+            g.signature = self.signer.sign(UPLOAD_GRANT, &g.unsigned())?;
+            audit::append(
+                t,
+                ctx.draft("job.upload_granted", "job", id, Outcome::Succeeded)
+                    .org(&j.organization)
+                    .project(&j.project)
+                    .r#ref("grant", g.grant_id.clone())
+                    .r#ref("kind", r.kind.as_str().to_owned())
+                    .r#ref("evaluator", g.evaluator.clone()),
+            )?;
+            Ok(json!({"grant": g, "header": g.to_header()}))
+        })
     }
 
     /// An owner approves a job that uses its asset (assets whose policy

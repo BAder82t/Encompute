@@ -306,6 +306,36 @@ governance branch). Each has a test that fails against the code before.
   recomputing the database's log), recovery of 107,600 events 1,011 s ->
   160 s (`load_100k_events_heavy`). INV-226, INV-251.
 
+Two residuals of the rc.3 round are fixed on the governance branch. They
+ship with the release that merges it.
+
+- **Evaluator upload grants were reusable and not bound to a client**
+  (ENC-SF-2026-064, residual; `cb6a764`). A program or key upload took the
+  job's grant, which names no client or key, is visible to the whole
+  submitting organization, and was never spent. An upload now needs an
+  upload grant that the control plane issues only to the principal that
+  submitted the job, signed over the evaluator, the program ID, the key ID
+  and a random grant ID; the evaluator spends it atomically (one upload per
+  grant, a replay is ENC2608) and a job grant opens no upload. Spent grants
+  are kept in memory, one node: a restart forgets them, so the evaluator
+  accepts no grant issued before it started (limit: it assumes the control
+  plane's clock is not ahead of the evaluator's by more than the time
+  between a grant's use and the restart). Tests:
+  `crates/encompute-evaluator/tests/uploads.rs::an_upload_grant_admits_exactly_one_upload`,
+  `concurrent_uploads_with_one_grant_succeed_once`,
+  `an_upload_grant_binds_the_keys_it_names`,
+  `a_restarted_evaluator_accepts_no_earlier_grant`;
+  `crates/encompute-control/tests/upload_grants.rs`; INV-248, INV-202
+  (extended).
+- **A co-tenant could block a victim's key upload** (ENC-SF-2026-035,
+  residual; `77d010f`). A client that knew the victim's key tag could
+  upload its own keys under it first, and the victim's upload was then
+  refused (409) until the entry was evicted. The shim now keeps each
+  uploaded set under the key tag and the SHA-256 of its key material, so
+  the two never meet. Test:
+  `crates/encompute-openfhe-client/tests/key_tags.rs::another_clients_keys_under_the_victims_tag_are_never_used`;
+  INV-171 (extended).
+
 ### Open (accepted / needs design)
 
 Known issues from the release-candidate rounds that are not fixed yet.
@@ -372,12 +402,6 @@ stated.
   fixed). A lost compare-and-set now reloads and re-applies, but running
   several replicas against one anchor is not supported. The anchor's
   growth and rewrite cost are closed (see below).
-- **Evaluator upload grants are reusable until they expire**
-  (ENC-SF-2026-064, partly fixed), and are not bound to a client.
-- **A co-tenant can block a victim's key upload** (ENC-SF-2026-035,
-  residual). A client that knows the victim's key tag can upload its own
-  keys under it first; the victim's upload is then refused (409) until
-  the entry is evicted. The victim's result is never wrong.
 - **The plan validator's exact-equality check still uses the planner's
   `derive`** (ENC-SF-2026-077, partly fixed). The validator's independent
   floor covers the core requirements only.
