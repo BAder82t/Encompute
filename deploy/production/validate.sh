@@ -181,7 +181,10 @@ else
     for f in "$root" "$crt" "$key"; do
       [ -n "$f" ] && d exec "$CONTROL" test -r "$f" 2>/dev/null || missing="$missing ${f:-(unset)}"
     done
-    if [ "$mode" != verify-full ]; then
+    optout="$(d inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTROL" | grep -E '^ENCOMPUTE_ALLOW_(PLAINTEXT_DATABASE|UNVERIFIED_DATABASE_TLS)=true$' | tr '\n' ' ')"
+    if [ -n "$optout" ]; then
+      fail PG-07 "the control plane sets a database downgrade opt-out ($optout): production policy is sslmode=verify-full with no opt-out"
+    elif [ "$mode" != verify-full ]; then
       fail PG-07 "the control plane's database URL has sslmode=${mode:-(none)}, not verify-full: the server is not verified (chain and name)"
     elif [ -n "$missing" ]; then
       fail PG-07 "sslmode=verify-full, but sslrootcert, sslcert and sslkey must all name readable files in the control plane container; missing:$missing"

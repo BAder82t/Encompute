@@ -220,12 +220,13 @@ fn test_admin_url() -> Option<String> {
 }
 
 /// `encompute-control migrate` in production mode with `url` as the
-/// connection string: (success, stdout, stderr).
-fn migrate(url: &str, allow_plaintext: bool) -> (bool, String, String) {
+/// connection string and `extra` environment: (success, stdout, stderr).
+fn migrate_env(url: &str, extra: &[(&str, &str)]) -> (bool, String, String) {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "enc-prod-{}-{}",
         std::process::id(),
-        url.len() + usize::from(allow_plaintext)
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let url_file = dir.join("db-url");
@@ -239,8 +240,8 @@ fn migrate(url: &str, allow_plaintext: bool) -> (bool, String, String) {
         .env("ENCOMPUTE_SIGNING_KEY_FILE", dir.join("unused-key"))
         .env("ENCOMPUTE_ANCHOR_DIR", &dir)
         .arg("migrate");
-    if allow_plaintext {
-        c.env("ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE", "true");
+    for (k, v) in extra {
+        c.env(k, v);
     }
     let o = c.output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -249,6 +250,88 @@ fn migrate(url: &str, allow_plaintext: bool) -> (bool, String, String) {
         String::from_utf8_lossy(&o.stdout).into_owned(),
         String::from_utf8_lossy(&o.stderr).into_owned(),
     )
+}
+
+fn migrate(url: &str, allow_plaintext: bool) -> (bool, String, String) {
+    if allow_plaintext {
+        migrate_env(url, &[("ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE", "true")])
+    } else {
+        migrate_env(url, &[])
+    }
+}
+
+const PLAINTEXT_OPT_OUT: (&str, &str) = ("ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE", "true");
+const UNVERIFIED_OPT_OUT: (&str, &str) = ("ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS", "true");
+
+#[test]
+fn production_requires_verify_full_and_each_downgrade_has_its_own_opt_out() {
+    let Some(pg) = tls_pg() else { return };
+    let cc = format!(
+        "sslcert={} sslkey={}",
+        pg.file("pg-client.crt"),
+        pg.file("pg-client.key")
+    );
+    let root = pg.file("internal-ca.crt");
+    let ca = pg.conn(
+        "postgres",
+        &format!("sslmode=verify-ca sslrootcert={root} {cc}"),
+    );
+    let req = pg.conn("postgres", &format!("sslmode=require {cc}"));
+    let prefer = pg.conn("postgres", &format!("sslmode=prefer {cc}"));
+    let disable = pg.conn("postgres", "sslmode=disable");
+
+    // verify-full: starts with no opt-out and no warning.
+    let (ok, out, err) = migrate_env(&pg.good(""), &[]);
+    assert!(ok && out.contains("schema version"), "{out} {err}");
+    assert!(!err.contains("allowed"), "{err}");
+
+    // verify-ca and require: refused, naming the variable and the weakness.
+    for url in [&ca, &req] {
+        let (ok, _, err) = migrate_env(url, &[]);
+        assert!(
+            !ok && err.contains("ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS=true"),
+            "{err}"
+        );
+        assert!(err.contains("sslmode=verify-full"), "{err}");
+        // The plaintext opt-out does not admit them.
+        let (ok, _, err) = migrate_env(url, &[PLAINTEXT_OPT_OUT]);
+        assert!(
+            !ok && err.contains("ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS=true"),
+            "{err}"
+        );
+        // Their own opt-out does, and warns.
+        let (ok, out, err) = migrate_env(url, &[UNVERIFIED_OPT_OUT]);
+        assert!(ok && out.contains("schema version"), "{out} {err}");
+        assert!(err.contains("database_tls_unverified_allowed"), "{err}");
+    }
+    let (_, _, err) = migrate_env(&ca, &[]);
+    assert!(err.contains("host name"), "{err}");
+
+    // prefer and disable can send plaintext: they need the plaintext opt-out,
+    // and the unverified opt-out does not admit them.
+    for url in [&prefer, &disable] {
+        let (ok, _, err) = migrate_env(url, &[]);
+        assert!(
+            !ok && err.contains("ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true"),
+            "{err}"
+        );
+        let (ok, _, err) = migrate_env(url, &[UNVERIFIED_OPT_OUT]);
+        assert!(
+            !ok && err.contains("ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true"),
+            "{err}"
+        );
+    }
+    let (ok, _, err) = migrate_env(&prefer, &[PLAINTEXT_OPT_OUT]);
+    assert!(ok && err.contains("database_plaintext_allowed"), "{err}");
+
+    // Strict parsing of both opt-outs.
+    for name in [
+        "ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE",
+        "ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS",
+    ] {
+        let (ok, _, err) = migrate_env(&req, &[(name, "yes")]);
+        assert!(!ok && err.contains(name), "{err}");
+    }
 }
 
 #[test]
@@ -294,9 +377,9 @@ fn production_mode_refuses_a_plaintext_database_unless_opted_out() {
     let (ok, stdout, stderr) = migrate(&plain, true);
     assert!(ok && stdout.contains("schema version"), "{stdout} {stderr}");
     assert!(stderr.contains("database_plaintext_allowed"), "{stderr}");
-    // TLS enforced, but this server has none: refused by the client, with
-    // no opt-out needed to get that far.
-    let (ok, _, stderr) = migrate(&format!("{plain}?sslmode=require"), false);
+    // TLS enforced by the client, but this server has none: refused by the
+    // client once the downgrade is acknowledged.
+    let (ok, _, stderr) = migrate_env(&format!("{plain}?sslmode=require"), &[UNVERIFIED_OPT_OUT]);
     assert!(!ok && stderr.contains("does not support TLS"), "{stderr}");
 
     let _ = c.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"));

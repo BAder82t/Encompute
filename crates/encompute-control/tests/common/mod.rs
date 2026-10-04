@@ -91,6 +91,7 @@ pub fn recovery_config(env0: &Env0) -> encompute_control::config::Config {
         service_id: "control-plane".into(),
         database_url: zeroize::Zeroizing::new(env0.url.clone()),
         allow_plaintext_database: false,
+        allow_unverified_database_tls: false,
         signing_key_file: None,
         oidc: vec![],
         dev_token_secret: None,

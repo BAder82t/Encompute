@@ -16,6 +16,7 @@
 #   a network with a route out             TOP-03
 #   control plane's database URL: sslmode=disable, require or verify-ca
 #   (not verify-full), each in turn                          PG-07
+#   verify-full with ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true set          PG-07
 #   key broker: plain http to the provider; https without a CA   BAO-07
 # Then the stand-ins are configured as the topology requires (sslmode=verify-full
 # with a CA and a client certificate; https with a CA) and PG-07 and BAO-07 must PASS.
@@ -85,6 +86,13 @@ for mode in require verify-ca; do
   grep -qE "^FAIL  PG-07 .*sslmode=$mode" "$W/v-$mode.out" || variants="$variants PG-07(sslmode=$mode)"
   grep -E '^FAIL  PG-07 ' "$W/v-$mode.out"
 done
+# verify-full with a downgrade opt-out set is still a failure.
+db_url verify-full; export NEG_ALLOW_PLAINTEXT=true
+DOCKER_TIMEOUT=120 dc up -d --force-recreate control >/dev/null 2>&1; sleep 2
+validate "$W/v-optout.out"
+grep -qE '^FAIL  PG-07 .*opt-out' "$W/v-optout.out" || variants="$variants PG-07(opt-out)"
+grep -E '^FAIL  PG-07 ' "$W/v-optout.out"
+unset NEG_ALLOW_PLAINTEXT
 export NEG_KB_BAO_ADDR="https://openbao:8200" NEG_KB_BAO_CACERT=""
 DOCKER_TIMEOUT=120 dc up -d --force-recreate keybroker >/dev/null 2>&1; sleep 2
 validate "$W/v-nocacert.out"

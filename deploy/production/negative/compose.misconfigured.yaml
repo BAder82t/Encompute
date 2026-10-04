@@ -43,6 +43,7 @@ services:
     environment:
       ENCOMPUTE_SIGNING_KEY: ${NEG_SIGNING_KEY:?set by run.sh}
       DATABASE_PASSWORD: ${NEG_DB_PASSWORD:?set by run.sh}
+      ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE: ${NEG_ALLOW_PLAINTEXT:-false}
     # The database URL and the files it may name, as the real control plane
     # has them mounted.
     secrets: [db-url, internal-ca.crt, pg-client.crt, pg-client.key]
