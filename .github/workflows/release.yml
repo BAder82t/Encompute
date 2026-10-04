@@ -359,6 +359,9 @@ jobs:
           python -m pip install -q "pip-audit==2.10.0"
           sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null
       - run: ./scripts/install-openfhe.sh
+      # Cold databases throughout (the release check sets that), and the test
+      # runner proven to fail on a missing service or an empty suite.
+      - run: ./scripts/test-full-selftest.sh
       - name: scripts/release-check.sh
         run: ./scripts/release-check.sh --repro
       - if: always()
