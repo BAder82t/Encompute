@@ -778,9 +778,19 @@ encompute-control compact-governance-mirror --archive-dir /mnt/archive/governanc
 encompute-control verify-governance-archive --archive-dir /mnt/archive/governance
 ```
 
-Safety window: a segment is sealed only if it is not the newest, ends at
-least `--keep-events` events (default 10,000) before the anchored size, and
-its last event is at least `--min-age-days` old (default 30). Only
+Retention: the mirror keeps the newest 10,000 events **or** anything
+younger than 30 days. A segment is sealed (and so eligible for pruning)
+only if it is older than **both**: it is not the newest, it ends at least
+`--keep-events` events (default 10,000) before the anchored size, and its
+last event is at least `--min-age-days` old (default 30). Both are
+configurable; setting either to 0 removes that half of the window. The
+effective values and the compaction time are recorded in the archive's
+manifest (`policy`) for the audit trail, and are informational only: the
+seal commits to the manifest without them, verifying an archive and
+recovery never read them, and changing the retention of a later compaction
+changes nothing about how history sealed earlier verifies. Compaction is
+always run by an operator: there is no scheduler and nothing triggers one
+automatically. Only
 anchored and mirrored events are ever sealed, and the state is verified
 (`verify-state`'s checks) before anything is written. The witnessed
 checkpoints and the evidence they bind are in the database, which a
@@ -825,6 +835,20 @@ the mirror, and `export-governance-log` from a newer database still can).
 Do not compact against another archive directory than the one the
 previous compaction wrote: it is refused.
 
+OpenBao. On OpenBao/Vault KV version 2 the delete destroys the key's
+metadata, which removes every version of the segment and its entry in the
+listing (a soft delete would leave the key listed). It is tested against a
+real OpenBao 2.1.0 server in development mode (in-memory storage): the
+compaction, the delete, a restart, and a recovery from the archive pass,
+deleting again is harmless, a segment that is not the archived one is left
+in place and reported, and an error from OpenBao in the middle of the
+pruning (a token that may not delete one segment) leaves a mirror that
+still verifies and a rerun finishes it. Not exercised: raft storage, a
+Vault server, or an outage of the storage backend in the middle of a
+delete, so plan the first compaction on a copy and keep the archive. The
+token that compacts needs delete on the mirror's metadata path
+(`<mount>/metadata/<path>-glog/*`) as well as what the control plane uses.
+
 Versions. A compaction writes a version-3 anchor; a deployment that never
 compacts keeps a version-2 anchor, which the previous release still reads.
 A release that does not know seals refuses a version-3 anchor (state anchor
@@ -834,9 +858,10 @@ the first compaction.
 Recovery's import is batched: 1,000 events per statement, every event still
 recomputed in memory (leaf, partition position, chain hash), in one
 transaction, so a crash or a refusal anywhere leaves the database as it
-was and the next run starts over (measured: 107,600 events in
-160 seconds, against 1,011 seconds one event at a time, on the same
-loaded machine).
+was and the next run starts over (approximately 6x on the 120k-event
+fixture in this environment, not a guaranteed benchmark: replaying
+107,600 events took about 1,011 seconds one event at a time and about 160
+seconds batched, on a heavily loaded machine).
 
 It **freezes** every rolled-back ledger: the ledger is treated as exhausted,
 so budget the database forgot is never spent again. Ledgers the governance log

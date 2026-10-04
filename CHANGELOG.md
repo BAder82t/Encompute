@@ -14,8 +14,18 @@ Work toward confidential cross-agency computation
   a dry run, a retention window, a commit point at the anchor's
   compare-and-set and crash-safe pruning. The database's log is not
   compacted. Recovery's import writes 1,000 events per statement in one
-  transaction (107,600 events: 160 s, was 1,011 s on the same
-  loaded machine). INV-251.
+  transaction (approximately 6x on the 120k-event fixture in this
+  environment, not a guaranteed benchmark: replaying 107,600 events took
+  about 1,011 s before and about 160 s after, on a heavily loaded
+  machine). A compaction is always run by the operator: nothing
+  schedules or triggers one. The archive's manifest records the retention
+  policy used and the compaction's time for the audit trail; it is not
+  part of what the seal commits to, and verifying an archive or recovering
+  never reads it (manifests written without it verify unchanged). Deleting
+  the sealed segments from OpenBao KV destroys the key's metadata (no
+  version or listing left) and finishes a soft-deleted segment; it is
+  tested against a real OpenBao development server, not raft storage.
+  INV-251.
 - **Evaluator uploads need a one-time upload grant bound to the client.**
   With a control plane, a program or key upload took the job's grant,
   which names no client or key, is visible to the whole submitting

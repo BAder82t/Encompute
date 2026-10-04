@@ -303,8 +303,10 @@ governance branch). Each has a test that fails against the code before.
   25 segments and 26.5 MB -> 2.7 MB (23.8 MB archived), the database's log
   tables unchanged at 126.4 MB, the mirror check 1.00 s -> 0.09 s, the
   start 15.7 s -> 11.2 s (a loaded machine: the start is dominated by
-  recomputing the database's log), recovery of 107,600 events 1,011 s ->
-  160 s (`load_100k_events_heavy`). INV-226, INV-251.
+  recomputing the database's log), recovery of 107,600 events about 1,011 s ->
+  about 160 s, approximately 6x on the 120k-event fixture in this
+  environment and not a guaranteed benchmark, on a heavily loaded machine
+  (`load_100k_events_heavy`). INV-226, INV-251.
 
 Two residuals of the rc.3 round are fixed on the governance branch. They
 ship with the release that merges it.

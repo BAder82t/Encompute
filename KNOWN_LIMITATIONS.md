@@ -189,9 +189,16 @@ Related: [support matrix](docs/support-matrix.md),
   An old backup that ends inside the sealed prefix needs the archive to
   recover (`recover --archive-dir`); without it, recovery refuses and says
   so. A compaction is an anchor version bump: no downgrade after the first
-  one. Recovery from an older backup imports the missing events in
-  batches: 160 seconds for 107,600 events, against 1,011 seconds one at a
-  time on the same loaded machine (732 on a quieter one). A spend
+  one. It is run by an operator only: nothing schedules or triggers one.
+  Deleting the sealed segments from OpenBao KV was exercised against a real
+  OpenBao 2.1.0 development server (in-memory storage); production's raft
+  storage uses the same KV API but its durability and `max_entry_size`
+  behaviour under a prune are not exercised, and a Vault server was not
+  tried. Recovery from an older backup imports the missing events in
+  batches: approximately 6x on the 120k-event fixture in this
+  environment, not a guaranteed benchmark (replaying 107,600 events took
+  about 1,011 seconds one at a time and about 160 seconds batched, on a
+  heavily loaded machine; 732 seconds one at a time on a quieter one). A spend
   adds one append and one checkpoint to its latency (concurrent spends
   share a checkpoint), and still re-loads and re-verifies the whole ledger
   to checkpoint it (besides verifying it inside the spend), so its cost
