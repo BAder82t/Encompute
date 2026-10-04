@@ -3,7 +3,7 @@
   "extends": "test-manifest.json",
   "comment": "The governance branch's full run: main's manifest (extends) with every minimum raised to what this tree measured, the suites it adds, and the runs that are not cargo test (the assurance report, the governance attack suite, the backup drill, the public-sector examples; read by marker and count lines). A minimum can only go up here, and a lower number anywhere is a test removed: reviewed. Run it with scripts/test-governance-full.sh.",
   "runs": [
-    {"id": "control-plane", "min_tests": 574, "min_db_backed": 388, "allowed_skips": [{"match": "spend_latency", "reason": "a latency benchmark run by hand: cargo test --release -p encompute-control --test spend_latency -- --ignored --nocapture"}]},
+    {"id": "control-plane", "min_tests": 581, "min_db_backed": 395, "allowed_skips": [{"match": "spend_latency", "reason": "a latency benchmark run by hand: cargo test --release -p encompute-control --test spend_latency -- --ignored --nocapture"}, {"match": "load_100k_events_heavy", "reason": "the governance log load test above 100,000 events (minutes) run by hand: cargo test --release -p encompute-control --test governance_scale -- --ignored --nocapture load_100k_events_heavy"}]},
     {"id": "cli", "min_tests": 61},
     {"id": "workspace-rest", "min_tests": 600},
     {"id": "assurance", "command": ["bash", "-c", "cargo build -q --release -p encompute-assurance --bins --examples && target/release/assurance-report"], "parser": "lines", "needs": ["openfhe"], "min_tests": 18},
