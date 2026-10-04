@@ -1411,3 +1411,58 @@ fn unpinned_broker_in_asset_brokers_refused() {
     assert!(e.message.contains("hospital-b-broker"), "{}", e.message);
     assert!(e.message.contains("grant-signing key"), "{}", e.message);
 }
+
+/// A spec's broker binding cannot be edited without notice. Swapping two
+/// brokers' grant-signing keys leaves a spec that validates, but it is
+/// another spec: its ID, which the workers' attested identity and every
+/// key's release policy bind, changes, so evidence for the original is
+/// refused at the brokers and the workers pin the original keys. Swapping
+/// the brokers' owners, or renaming which broker holds a key, no longer
+/// validates (a key is at its owner's broker).
+#[test]
+fn editing_the_broker_binding_cannot_swap_brokers_unnoticed() {
+    let three = || {
+        bound(
+            spec(),
+            &[
+                ("hospital-a-broker", '6', "hospital-a"),
+                ("hospital-b-broker", '8', "hospital-b"),
+            ],
+        )
+    };
+    let original = three();
+    original.validate().unwrap();
+    // The grant-signing keys swapped between the two hospitals' brokers.
+    let mut swapped = three();
+    swapped
+        .key_brokers
+        .insert("hospital-a-broker".into(), h('8'));
+    swapped
+        .key_brokers
+        .insert("hospital-b-broker".into(), h('6'));
+    swapped.validate().unwrap();
+    assert_ne!(swapped.id().unwrap(), original.id().unwrap());
+    // The owners swapped: hospital A's keys are no longer at its broker.
+    let mut owners = three();
+    owners
+        .broker_organizations
+        .insert("hospital-a-broker".into(), "hospital-b".into());
+    owners
+        .broker_organizations
+        .insert("hospital-b-broker".into(), "hospital-a".into());
+    assert_eq!(owners.validate().unwrap_err().code, Code::TrainingSpec);
+    // Every key of hospital A moved to hospital B's broker, and back.
+    let mut moved = three();
+    for (key, broker) in moved.asset_brokers.iter_mut() {
+        if key.ends_with("-a") || key.ends_with(".hospital-a") {
+            *broker = "hospital-b-broker".into();
+        }
+    }
+    assert_eq!(moved.validate().unwrap_err().code, Code::TrainingSpec);
+    // A binding with the broker map dropped is the single-broker spec again:
+    // two brokers without a binding are refused.
+    let mut dropped = three();
+    dropped.asset_brokers.clear();
+    dropped.broker_organizations.clear();
+    assert_eq!(dropped.validate().unwrap_err().code, Code::TrainingSpec);
+}
