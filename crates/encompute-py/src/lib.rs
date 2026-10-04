@@ -156,7 +156,8 @@ impl Model {
     /// JSON: outputs, the verified receipt, and the commitments the control
     /// plane checks.
     #[pyo3(signature = (url, inputs, grant_json, receipt_key, keys_dir=None,
-                        trusted_evaluators=None, allow_unpinned_evaluator=false))]
+                        trusted_evaluators=None, allow_unpinned_evaluator=false,
+                        upload_grant=None))]
     #[allow(clippy::too_many_arguments)]
     fn run_remote_json(
         &self,
@@ -167,6 +168,7 @@ impl Model {
         keys_dir: Option<&str>,
         trusted_evaluators: Option<Vec<String>>,
         allow_unpinned_evaluator: bool,
+        upload_grant: Option<Py<PyAny>>,
     ) -> PyResult<String> {
         use encompute_verification::{output_commitment, request_commitment, JobGrant};
         let trusted = encompute_runtime::Remote::trusted_evaluators(
@@ -208,8 +210,11 @@ impl Model {
             }
             None => (m.new_client(Mode::Encrypted).map_err(err)?, None),
         };
-        let run = encompute_runtime::Remote::new(url)
-            .with_grant(&grant)
+        let mut remote = encompute_runtime::Remote::new(url).with_grant(&grant);
+        if let Some(callback) = upload_grant {
+            remote = remote.with_upload_grants(std::sync::Arc::new(PythonUploads(callback)));
+        }
+        let run = remote
             .run_scheduled(
                 &client,
                 m.program(),
@@ -228,6 +233,32 @@ impl Model {
             "key_id": client.key_id(),
         })
         .to_string())
+    }
+}
+
+/// Upload grants from a Python callable `(kind, key_id) -> str` (the grant's
+/// JSON), which asks the control plane as the job's initiator.
+struct PythonUploads(Py<PyAny>);
+
+impl encompute_runtime::UploadGrantSource for PythonUploads {
+    fn upload_grant(
+        &self,
+        kind: encompute_verification::UploadKind,
+        key_id: Option<&str>,
+    ) -> encompute_ir::Result<encompute_verification::UploadGrant> {
+        let refused = |e: String| {
+            encompute_ir::Error::new(
+                encompute_ir::Code::Remote,
+                format!("upload grant from the control plane: {e}"),
+            )
+        };
+        let json: String = Python::attach(|py| {
+            self.0
+                .call1(py, (kind.as_str(), key_id))
+                .and_then(|v| v.extract(py))
+        })
+        .map_err(|e| refused(e.to_string()))?;
+        serde_json::from_str(&json).map_err(|e| refused(e.to_string()))
     }
 }
 

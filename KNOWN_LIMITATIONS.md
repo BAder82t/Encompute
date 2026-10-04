@@ -263,12 +263,14 @@ Related: [support matrix](docs/support-matrix.md),
   generation and MAC (`--expect-generation`, `--expect-state-mac`).
   Revocation does not crypto-shred: an old state file plus the unchanged
   KEK still yields the revoked keys. Keep broker backups access-controlled.
-- **Evaluator upload grants are reusable** until they expire, and are not
-  bound to a client.
-- **A co-tenant can block a victim's evaluation-key upload.** A client that
-  knows another client's key tag (it is in every ciphertext) can upload
-  keys under it first; the victim's upload is then refused until that
-  entry is evicted. The victim never gets a wrong result.
+- **Spent upload grants are remembered in memory, one node.** An upload
+  grant admits one upload; the evaluator keeps the spent ones until they
+  expire and, after a restart, refuses every grant issued before it
+  started (the grants not yet used are asked for again). That holds if the
+  control plane's clock is not ahead of the evaluator's by more than the
+  time between a grant's use and the restart. Several evaluator replicas
+  behind one address would each keep their own memory: one grant could be
+  spent once on each.
 - **Secrets have environment-variable fallbacks.** `*_FILE` is preferred,
   but production mode also accepts the plain variable (for example
   `ENCOMPUTE_DATABASE_URL`, `BAO_TOKEN`).

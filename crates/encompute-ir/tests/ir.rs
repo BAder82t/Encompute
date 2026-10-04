@@ -329,6 +329,30 @@ fn the_governance_codes_are_the_2701_block() {
     assert_eq!(Code::GovernanceBundleLimit.as_str(), "ENC2730");
 }
 
+/// The service block from ENC2601: contiguous, with the evaluator upload
+/// grant's replay code (ENC2608) in it and documented in docs/errors.md.
+#[test]
+fn the_service_codes_are_the_2601_block() {
+    let block: Vec<&str> = Code::ALL
+        .iter()
+        .map(|c| c.as_str())
+        .filter(|s| s.starts_with("ENC26"))
+        .collect();
+    let expected: Vec<String> = (2601..=2608).map(|n| format!("ENC{n}")).collect();
+    assert_eq!(block, expected);
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/errors.md"),
+    )
+    .unwrap();
+    for c in expected {
+        assert!(
+            doc.contains(&format!("| {c} |")),
+            "docs/errors.md lacks {c}"
+        );
+    }
+    assert_eq!(Code::UploadGrantReplayed.as_str(), "ENC2608");
+}
+
 fn with_forms(forms: &str) -> String {
     format!(
         "encompute 0.1\nprogram eligible precision 0.001 purpose \"eligibility\"\n\

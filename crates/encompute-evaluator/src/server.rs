@@ -2,11 +2,11 @@
 //!
 //! | Method | Path | Body → Response |
 //! |---|---|---|
-//! | GET  | /v1/info | → protocol, versions, loaded programs (with a control plane: only the program a grant names) |
-//! | POST | /v1/programs | `.eir` text → `{program_id}` (job grant with a control plane) |
-//! | GET  | /v1/programs/{p}/keys/{k} | → 200 if registered, else 404 (job grant with a control plane) |
-//! | POST | /v1/programs/{p}/keys | evaluation-keys envelope → `{key_id}` (job grant with a control plane) |
-//! | POST | /v1/programs/{p}/jobs | inputs envelope → `{job_id, timings, receipt}` |
+//! | GET  | /v1/info | → protocol, versions, loaded programs (with a control plane: only the program an upload grant names) |
+//! | POST | /v1/programs | `.eir` text → `{program_id}` (upload grant with a control plane) |
+//! | GET  | /v1/programs/{p}/keys/{k} | → 200 if registered, else 404 (upload grant with a control plane) |
+//! | POST | /v1/programs/{p}/keys | evaluation-keys envelope → `{key_id}` (upload grant with a control plane) |
+//! | POST | /v1/programs/{p}/jobs | inputs envelope → `{job_id, timings, receipt}` (job grant with a control plane) |
 //! | GET  | /v1/jobs/{j}/result | → outputs envelope |
 //! | GET  | /v1/jobs/{j}/receipt | → signed execution receipt (canonical JSON) |
 //! | GET  | /v1/jobs/{j}/proof | → execution proof (`ENCP`), for programs requiring one |
@@ -16,12 +16,17 @@
 //! binding the execution spec, key, and the exact request and response
 //! bytes. A receipt is a signed claim, not a proof of correct execution.
 //!
-//! With a control plane ([`Evaluator::with_control`]), program and key
-//! uploads carry the job's grant (`Encompute-Job-Grant`), as jobs do, and
-//! the grant must name the uploaded program before it is compiled; the key
-//! lookup needs one too, and `/v1/info` lists only the program a presented
-//! grant names. Without one (local development) they need none. Job IDs are 128-bit
-//! random: a result is fetched by its unguessable ID.
+//! With a control plane ([`Evaluator::with_control`]), a job carries the job
+//! grant (`Encompute-Job-Grant`), and a program or key upload carries an
+//! upload grant (`Encompute-Upload-Grant`): the control plane's signed
+//! authorization for one client to upload one program, or one set of keys
+//! (by key ID), to this evaluator. The grant must name the uploaded object
+//! before anything is compiled or loaded, and one grant admits exactly one
+//! upload (a replay is refused with ENC2608); the key lookup needs one too,
+//! and `/v1/info` lists only the program a presented grant names. A job
+//! grant opens no upload. Without a control plane (local development)
+//! uploads need no grant. Job IDs are 128-bit random: a result is fetched
+//! by its unguessable ID.
 //!
 //! Upload limits (bytes, environment, read by [`Limits::from_env`]):
 //! `ENCOMPUTE_MAX_PROGRAM_BYTES` (default 64 MiB), `ENCOMPUTE_MAX_KEY_BYTES`
@@ -40,8 +45,9 @@ use encompute_ir::{Code, Error, Result};
 use serde_json::json;
 
 use encompute_attestation::AttestationRecord;
-use encompute_verification::{http, EvaluatorSigner, WorkloadAttestationRef};
+use encompute_verification::{http, EvaluatorSigner, UploadKind, WorkloadAttestationRef};
 
+use crate::control::Grants;
 use crate::engine::{Engine, Local};
 use crate::session::{execution_proof, issue_receipt, BackendKind, Backends};
 
@@ -149,6 +155,8 @@ fn error_reply(e: &Error) -> Reply {
         Code::Forbidden => 403,
         Code::NotFound => 404,
         Code::Conflict => 409,
+        // A spent upload grant.
+        Code::UploadGrantReplayed => 409,
         Code::Scheduling => 503,
         _ => 500,
     };
@@ -234,19 +242,19 @@ impl Evaluator {
     }
 
     /// With a control plane, `/v1/info` lists only the program a valid
-    /// grant for this evaluator names (other tenants' programs are not
-    /// advertised); without one (local development), every program.
-    fn info(&self, grant: Option<&str>) -> serde_json::Value {
+    /// upload grant for this evaluator names (other tenants' programs are
+    /// not advertised); without one (local development), every program.
+    fn info(&self, grants: &Grants) -> serde_json::Value {
         let programs: Vec<_> = match &self.control {
             None => self.engine.programs(),
-            Some(c) => match c.authorize_upload(grant, None) {
-                Ok(g) => self
+            Some(c) => match c.listed_program(grants) {
+                Some(program_id) => self
                     .engine
                     .programs()
                     .into_iter()
-                    .filter(|p| p.program_id == g.program_id)
+                    .filter(|p| p.program_id == program_id)
                     .collect(),
-                Err(_) => vec![],
+                None => vec![],
             },
         };
         let b = self.engine.backend();
@@ -350,10 +358,10 @@ impl Evaluator {
         out
     }
 
-    fn route(&self, method: &Method, path: &str, body: &[u8], grant: Option<&str>) -> Reply {
+    fn route(&self, method: &Method, path: &str, body: &[u8], grants: &Grants) -> Reply {
         let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
         let r = match (method, parts.as_slice()) {
-            (Method::Get, ["v1", "info"]) => Ok(ok_json(self.info(grant))),
+            (Method::Get, ["v1", "info"]) => Ok(ok_json(self.info(grants))),
             (Method::Get, ["metrics"]) => Ok(Reply {
                 status: 200,
                 body: self.metrics().into_bytes(),
@@ -367,12 +375,12 @@ impl Evaluator {
                 }),
                 None => return not_found("attestation"),
             },
-            (Method::Post, ["v1", "programs"]) => self.add_uploaded_program(body, grant),
+            (Method::Post, ["v1", "programs"]) => self.add_uploaded_program(body, grants),
             // With a control plane, whether a key is registered is told
-            // only to a holder of a grant for the program.
+            // only to a holder of an upload grant for exactly these keys.
             (Method::Get, ["v1", "programs", pid, "keys", kid]) => {
                 match self
-                    .authorize_upload(grant, Some(pid))
+                    .authorize_lookup(grants, pid, kid)
                     .and_then(|_| self.engine.has_key(pid, kid))
                 {
                     Ok(true) => Ok(ok_json(json!({ "key_id": kid }))),
@@ -381,10 +389,9 @@ impl Evaluator {
                 }
             }
             (Method::Post, ["v1", "programs", pid, "keys"]) => self
-                .authorize_upload(grant, Some(pid))
-                .and_then(|_| self.engine.register_keys(pid, body))
+                .upload_keys(pid, body, grants)
                 .map(|k| ok_json(json!({ "key_id": k }))),
-            (Method::Post, ["v1", "programs", pid, "jobs"]) => self.job(pid, body, grant),
+            (Method::Post, ["v1", "programs", pid, "jobs"]) => self.job(pid, body, grants.job),
             (Method::Get, ["v1", "jobs", jid, what @ ("result" | "receipt" | "proof")]) => {
                 return match self
                     .results
@@ -413,29 +420,60 @@ impl Evaluator {
         r.unwrap_or_else(|e| error_reply(&e))
     }
 
-    /// With a control plane, an upload needs a grant for this evaluator.
-    fn authorize_upload(&self, grant: Option<&str>, program_id: Option<&str>) -> Result<()> {
+    /// With a control plane, a key lookup needs an upload grant for these
+    /// keys (it spends nothing).
+    fn authorize_lookup(&self, grants: &Grants, pid: &str, kid: &str) -> Result<()> {
         match &self.control {
-            Some(c) => c.authorize_upload(grant, program_id).map(|_| ()),
+            Some(c) => c
+                .authorize_upload(grants, UploadKind::Keys, Some(pid), Some(kid))
+                .map(|_| ()),
             None => Ok(()),
         }
     }
 
-    fn add_uploaded_program(&self, body: &[u8], grant: Option<&str>) -> Result<Reply> {
-        // With a control plane, the grant must name this program before
-        // anything is compiled or loaded: a refused upload changes nothing.
-        // The program ID is the hash of the parsed program's canonical text,
-        // so it is known before compiling.
-        self.authorize_upload(grant, None)?;
+    /// Registers evaluation keys. With a control plane the upload grant
+    /// must name these keys' ID (read from the envelope's header, checked
+    /// against the key material when it is registered) and is spent by the
+    /// upload; a refused upload leaves it unspent.
+    fn upload_keys(&self, pid: &str, body: &[u8], grants: &Grants) -> Result<String> {
+        let Some(c) = &self.control else {
+            return self.engine.register_keys(pid, body);
+        };
+        // Refuse a bad grant before reading the envelope at all.
+        c.authorize_upload(grants, UploadKind::Keys, Some(pid), None)?;
+        let key_id = encompute_protocol::Envelope::peek_header(body)?
+            .key_id
+            .ok_or_else(|| Error::new(Code::WrongKey, "the keys carry no key ID"))?;
+        let permit = c.begin_upload(grants, UploadKind::Keys, pid, Some(&key_id))?;
+        let registered = self.engine.register_keys(pid, body)?;
+        // The upload registers the key ID it claims (the material's hash).
+        if registered != key_id {
+            return Err(Error::new(
+                Code::WrongKey,
+                "the keys registered under another key ID than the one granted",
+            ));
+        }
+        permit.commit();
+        Ok(registered)
+    }
+
+    fn add_uploaded_program(&self, body: &[u8], grants: &Grants) -> Result<Reply> {
+        // With a control plane, the upload grant must name this program
+        // before anything is compiled or loaded: a refused upload changes
+        // nothing. The program ID is the hash of the parsed program's
+        // canonical text, so it is known before compiling.
+        if let Some(c) = &self.control {
+            c.authorize_upload(grants, UploadKind::Program, None, None)?;
+        }
         let text = std::str::from_utf8(body)
             .map_err(|_| Error::new(Code::Parse, "program must be UTF-8 .eir text"))?;
-        let expected = match &self.control {
+        let (expected, permit) = match &self.control {
             Some(c) => {
                 let pid = crate::session::program_id(&encompute_ir::parse(text)?);
-                c.authorize_upload(grant, Some(&pid))?;
-                Some(pid)
+                let permit = c.begin_upload(grants, UploadKind::Program, &pid, None)?;
+                (Some(pid), Some(permit))
             }
-            None => None,
+            None => (None, None),
         };
         let i = self.engine.add_program(text)?;
         if expected.is_some_and(|pid| pid != i.program_id) {
@@ -443,6 +481,9 @@ impl Evaluator {
                 Code::WrongProgram,
                 "the program compiled to another ID than the one granted",
             ));
+        }
+        if let Some(p) = permit {
+            p.commit();
         }
         Ok(ok_json(json!({ "program_id": i.program_id })))
     }
@@ -543,8 +584,11 @@ impl Evaluator {
             "POST" => Method::Post,
             _ => Method::Other,
         };
-        let grant = req
+        let job_grant = req
             .header(encompute_verification::service::H_JOB_GRANT)
+            .map(str::to_owned);
+        let upload_grant = req
+            .header(encompute_verification::service::H_UPLOAD_GRANT)
             .map(str::to_owned);
         let limit = self.limit_for(&path);
         let body = req.body;
@@ -554,7 +598,15 @@ impl Evaluator {
                 format!("request body above the {limit}-byte limit"),
             ))
         } else {
-            self.route(&method, &path, &body, grant.as_deref())
+            self.route(
+                &method,
+                &path,
+                &body,
+                &Grants {
+                    job: job_grant.as_deref(),
+                    upload: upload_grant.as_deref(),
+                },
+            )
         };
         let (status, len) = (reply.status, reply.body.len());
         let ctype = if reply.json {

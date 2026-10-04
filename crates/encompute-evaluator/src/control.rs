@@ -6,6 +6,10 @@
 //! - sends heartbeats (ready, or draining when told to drain);
 //! - runs a job only with a job grant signed by the **pinned** control-plane
 //!   key, naming this evaluator and the job's program, unexpired and unused;
+//! - takes a program or evaluation keys only with an **upload grant**, signed
+//!   by the same key, naming this evaluator, the client the control plane
+//!   authenticated, the program or key ID, a nonce and an expiry; one grant
+//!   admits one upload (see [`ControlLink::begin_upload`]);
 //! - asks the control plane to start each job just before running it, so a
 //!   job revoked or cancelled after scheduling never starts;
 //! - reports each receipt as a signed message, retried until delivered.
@@ -18,7 +22,7 @@
 //! scheduling only), `ENCOMPUTE_EXACT_WORKERS` and
 //! `ENCOMPUTE_BENCHMARK_PROFILE`.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -26,8 +30,29 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use encompute_ir::{Code, Error, Result};
-use encompute_verification::service::{now, seal, signed_call, JobGrant, Scope};
+use encompute_verification::service::{
+    now, seal, signed_call, JobGrant, Scope, UploadGrant, UploadKind,
+};
 use encompute_verification::ServiceSigner;
+
+/// The headers a request may carry a grant in.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Grants<'a> {
+    /// `Encompute-Job-Grant`: runs a job; no longer opens an upload.
+    pub job: Option<&'a str>,
+    /// `Encompute-Upload-Grant`.
+    pub upload: Option<&'a str>,
+}
+
+/// Where an upload grant stands on this evaluator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spend {
+    /// An upload with it is running: a second one is refused now, and the
+    /// grant is free again if the first fails.
+    Running,
+    /// An upload with it succeeded: spent until it expires.
+    Spent,
+}
 
 pub struct ControlLink {
     url: String,
@@ -36,6 +61,13 @@ pub struct ControlLink {
     me: ServiceSigner,
     agent: ureq::Agent,
     used: Mutex<HashSet<String>>,
+    /// Upload grants by ID, with their expiry: one upload each. Kept in
+    /// memory (this evaluator is one node); see [`ControlLink::begin_upload`]
+    /// for what a restart does.
+    uploads: Mutex<HashMap<String, (u64, Spend)>>,
+    /// When this process started (seconds): it accepts only upload grants
+    /// issued after it.
+    started_at: u64,
     outbox: Mutex<VecDeque<(String, Value)>>,
     draining: AtomicBool,
 }
@@ -75,6 +107,8 @@ impl ControlLink {
                 .timeout(Duration::from_secs(30))
                 .build(),
             used: Mutex::new(HashSet::new()),
+            uploads: Mutex::new(HashMap::new()),
+            started_at: now(),
             outbox: Mutex::new(VecDeque::new()),
             draining: AtomicBool::new(false),
         }
@@ -159,29 +193,129 @@ impl ControlLink {
         self.draining.load(Ordering::SeqCst)
     }
 
-    /// Checks the grant a program or key upload carries: signed by the
-    /// pinned control plane, for this evaluator and `program_id` (when
-    /// known before compiling), unexpired. Unlike a job it neither spends
-    /// the grant nor starts anything.
-    pub fn authorize_upload(
-        &self,
-        grant_header: Option<&str>,
-        program_id: Option<&str>,
-    ) -> Result<JobGrant> {
-        let h = grant_header.ok_or_else(|| {
-            Error::new(
+    /// For tests of a restart: this process counts as started at `t`.
+    pub fn with_started_at(mut self, t: u64) -> Self {
+        self.started_at = t;
+        self
+    }
+
+    /// The upload grant a request carries, if it is one this evaluator
+    /// takes: a job grant opens no upload (it binds no client and no key,
+    /// and anyone who can read the job holds it).
+    fn upload_grant(&self, grants: &Grants) -> Result<UploadGrant> {
+        match (grants.upload, grants.job) {
+            (Some(h), _) => UploadGrant::from_header(h),
+            (None, Some(_)) => Err(Error::new(
                 Code::ServiceAuthentication,
-                "this evaluator accepts programs and keys only with a job grant from its control plane",
-            )
-        })?;
-        let g = JobGrant::from_header(h)?;
+                "a job grant no longer opens an upload: ask the control plane for an upload \
+                 grant (POST /v1/jobs/{id}/upload-grants) and send it in Encompute-Upload-Grant",
+            )),
+            (None, None) => Err(Error::new(
+                Code::ServiceAuthentication,
+                "this evaluator accepts programs and keys only with an upload grant from its control plane",
+            )),
+        }
+    }
+
+    /// Everything about an upload grant but whether it was spent: signed by
+    /// the pinned control plane, for this evaluator and this object,
+    /// unexpired, and issued after this process started.
+    fn check_upload(
+        &self,
+        g: &UploadGrant,
+        kind: UploadKind,
+        program_id: &str,
+        key_id: Option<&str>,
+    ) -> Result<()> {
         g.verify(
             &self.control_key,
             self.me.id(),
-            program_id.unwrap_or(&g.program_id),
+            kind,
+            program_id,
+            key_id,
             now(),
         )?;
+        // A restart forgets which grants were spent. Everything it does not
+        // remember was issued before it, so none of those is accepted: a
+        // spent grant stays spent while it could still be used. (`<=`: a
+        // grant of the second the process started in is refused too.)
+        if g.issued_at <= self.started_at {
+            return Err(Error::new(
+                Code::ServiceAuthentication,
+                "the upload grant was issued before this evaluator started: ask the control plane for a new one",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks the grant a program or key lookup carries (it does not spend
+    /// it): an upload grant of `kind` for this evaluator, naming
+    /// `program_id` and, for keys, `key_id` (any, when not yet known: the
+    /// grant's own). A read bound to the one object the grant names, so it
+    /// works after the upload spent the grant, until the grant expires.
+    pub fn authorize_upload(
+        &self,
+        grants: &Grants,
+        kind: UploadKind,
+        program_id: Option<&str>,
+        key_id: Option<&str>,
+    ) -> Result<UploadGrant> {
+        let g = self.upload_grant(grants)?;
+        let key = key_id.or((kind == UploadKind::Keys).then_some(g.key_id.as_str()));
+        self.check_upload(&g, kind, program_id.unwrap_or(&g.program_id), key)?;
         Ok(g)
+    }
+
+    /// The program an upload grant names, for `/v1/info` (other tenants'
+    /// programs are not advertised): `None` for anything that is not a
+    /// valid upload grant of this evaluator.
+    pub fn listed_program(&self, grants: &Grants) -> Option<String> {
+        let g = self.upload_grant(grants).ok()?;
+        let key = (g.kind == UploadKind::Keys).then_some(g.key_id.as_str());
+        self.check_upload(&g, g.kind, &g.program_id, key).ok()?;
+        Some(g.program_id)
+    }
+
+    /// Takes an upload grant for one upload: checks it like
+    /// [`ControlLink::authorize_upload`] and, in one step under one lock,
+    /// refuses it (ENC2608) if it is spent or an upload with it is running,
+    /// else marks it running. The upload then ends the grant's life with
+    /// [`UploadPermit::commit`] (spent until it expires); dropping the
+    /// permit without it (the upload failed) frees the grant, as a failed
+    /// upload changed nothing.
+    ///
+    /// Spent grants are kept in memory, one node: a restart forgets them,
+    /// and no upload grant issued before the process started is accepted
+    /// (`issued_at` must be after the start), so a spent grant is never
+    /// valid again while it could still be used, and the restart costs only
+    /// the grants not used yet. The one assumption is that the control plane's
+    /// clock is not ahead of this evaluator's by more than the time between
+    /// a grant's use and the restart.
+    pub fn begin_upload(
+        &self,
+        grants: &Grants,
+        kind: UploadKind,
+        program_id: &str,
+        key_id: Option<&str>,
+    ) -> Result<UploadPermit<'_>> {
+        let g = self.upload_grant(grants)?;
+        self.check_upload(&g, kind, program_id, key_id)?;
+        let t = now();
+        let mut m = self.uploads.lock().unwrap_or_else(|p| p.into_inner());
+        // An expired grant is refused by its expiry, so it need not be kept.
+        m.retain(|_, (expires, _)| *expires >= t);
+        if m.contains_key(&g.grant_id) {
+            return Err(Error::new(
+                Code::UploadGrantReplayed,
+                "this upload grant was already used, or an upload with it is running",
+            ));
+        }
+        m.insert(g.grant_id.clone(), (g.expires_at, Spend::Running));
+        Ok(UploadPermit {
+            link: self,
+            grant_id: g.grant_id,
+            committed: false,
+        })
     }
 
     /// Checks a job's grant and asks the control plane to start it. Fails
@@ -288,6 +422,37 @@ impl ControlLink {
             me.flush();
             std::thread::sleep(period);
         });
+    }
+}
+
+/// The right to one upload, taken with [`ControlLink::begin_upload`].
+#[must_use = "dropping a permit frees the grant: commit it when the upload succeeded"]
+pub struct UploadPermit<'a> {
+    link: &'a ControlLink,
+    grant_id: String,
+    committed: bool,
+}
+
+impl UploadPermit<'_> {
+    /// The upload succeeded: the grant is spent until it expires.
+    pub fn commit(mut self) {
+        let mut m = self.link.uploads.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((_, s)) = m.get_mut(&self.grant_id) {
+            *s = Spend::Spent;
+        }
+        self.committed = true;
+    }
+}
+
+impl Drop for UploadPermit<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.link
+                .uploads
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.grant_id);
+        }
     }
 }
 

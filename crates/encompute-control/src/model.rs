@@ -385,6 +385,20 @@ pub struct RequestReleaseTicket {
     pub asset_version_id: String,
 }
 
+/// The job's initiator asks for an upload grant for its scheduled job: one
+/// program, or one set of evaluation keys (by key ID), uploaded once to the
+/// job's evaluator.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestUploadGrant {
+    pub kind: encompute_verification::UploadKind,
+    /// Keys only: the key ID (hex SHA-256 of the key material, which holds
+    /// the key tag) the upload carries. Required for keys, refused for a
+    /// program.
+    #[serde(default)]
+    pub key_id: Option<String>,
+}
+
 /// A recipient records a governed job's released result as a derived
 /// asset it holds as custodian (a dataset version of its own).
 #[derive(Debug, Deserialize)]

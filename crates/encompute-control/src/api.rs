@@ -544,6 +544,9 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "jobs", id, "cancel"]) => ok(control.cancel_job(ctx, id)?),
         ("POST", ["v1", "jobs", id, "approve"]) => ok(control.approve_job(ctx, id)?),
         ("POST", ["v1", "jobs", id, "start"]) => ok(control.start_job(ctx, id)?),
+        ("POST", ["v1", "jobs", id, "upload-grants"]) => {
+            created(control.issue_upload_grant(ctx, id, parse(&r.body)?)?)
+        }
         ("POST", ["v1", "jobs", id, "release-ticket"]) => {
             created(control.issue_release_ticket(ctx, id, parse(&r.body)?)?)
         }
@@ -773,6 +776,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/jobs/{}/cancel"),
     ("POST", "/v1/jobs/{}/approve"),
     ("POST", "/v1/jobs/{}/start"),
+    ("POST", "/v1/jobs/{}/upload-grants"),
     ("POST", "/v1/jobs/{}/release-ticket"),
     ("POST", "/v1/jobs/{}/derived-assets"),
     ("POST", "/v1/jobs/{}/complete"),

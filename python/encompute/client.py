@@ -370,6 +370,14 @@ class Project:
                 # Enforced again natively, before anything is sent.
                 None if self._client.trusted_evaluators is None else sorted(self._client.trusted_evaluators),
                 self._client.allow_unpinned_evaluator,
+                # The evaluator takes a program and keys only with upload
+                # grants, one per upload, which the control plane issues to
+                # the principal that submitted the job.
+                lambda kind, key_id: json.dumps(
+                    self._client.post(
+                        f"/v1/jobs/{job.id}/upload-grants", {"kind": kind, "key_id": key_id}
+                    )["grant"]
+                ),
             )
         )
         self._client.post(
