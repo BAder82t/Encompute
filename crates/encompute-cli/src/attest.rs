@@ -571,7 +571,10 @@ pub enum BrokerCmd {
         #[command(flatten)]
         file: BrokerFile,
     },
-    /// Revoke a key version (default: the current one).
+    /// Revoke a key version (default: the current one). Also replaces the
+    /// KEK, so an older copy of the state file no longer yields the revoked
+    /// key under the KEK that is current afterwards (a copy of the old KEK
+    /// itself does: see `rotate-root --retire-old-versions`).
     Revoke {
         #[arg(long)]
         asset: String,
@@ -598,6 +601,12 @@ pub enum BrokerCmd {
         /// `encompute login` as the organization's security admin).
         #[arg(long)]
         report: bool,
+        /// Then retire every older root key version for good, so a wrapped
+        /// KEK from an older backup can never be opened again. Irreversible
+        /// and shared by every KEK wrapped under this root key: first
+        /// rotate-root for every other broker of the organization.
+        #[arg(long)]
+        retire_old_versions: bool,
     },
     /// Authenticate a broker state file written by an earlier Encompute
     /// (before states were authenticated under the KEK). Prints what the
@@ -997,9 +1006,23 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             file,
         } => {
             let mut b = open_broker(&file, None)?;
+            let kek = b.state().kek_id.clone();
             let v = b.revoke(&asset, version)?;
             b.save(&file.broker)?;
             println!("{asset}: key version {v} revoked");
+            if b.state().kek_id != kek {
+                println!(
+                    "KEK replaced ({} -> {}): an older state file no longer yields the revoked key \
+                     under the current KEK",
+                    kek.as_deref().unwrap_or("?"),
+                    b.state().kek_id.as_deref().unwrap_or("?")
+                );
+            } else {
+                println!(
+                    "NOT SHREDDED: this store has no KEK it can replace; an older state file \
+                     still holds the key"
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
         BrokerCmd::Rewrap { new_kek, file } => {
@@ -1013,7 +1036,11 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        BrokerCmd::RotateRoot { file, report } => {
+        BrokerCmd::RotateRoot {
+            file,
+            report,
+            retire_old_versions,
+        } => {
             let mut s = file.root()?.ok_or_else(|| {
                 Error::new(
                     Code::KeyRelease,
@@ -1032,6 +1059,13 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                     serde_json::to_value(&r).expect("serializable"),
                 )?;
                 println!("recorded in the control plane's audit trail");
+            }
+            if retire_old_versions {
+                let v = s.retire_older_root_versions()?;
+                println!(
+                    "root key versions older than {v} retired: a wrapped KEK from an older backup \
+                     can no longer be opened"
+                );
             }
             Ok(ExitCode::SUCCESS)
         }

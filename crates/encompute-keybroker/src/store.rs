@@ -11,7 +11,7 @@
 //!   vault store implements the same trait: the broker never needs the
 //!   KEK itself.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -108,6 +108,33 @@ pub trait SecretStore: Send {
         }
     }
 
+    /// Starts a rotation of this store's wrapping key (the crypto-shred of
+    /// a revocation): a store with a fresh key, made durable under a
+    /// pending name but not yet live, so a crash after the broker writes a
+    /// state wrapped under it still finds it ([`adopt_pending`]). `None`
+    /// when the store has no wrapping key it can replace (development
+    /// plaintext, or a key held in memory only): nothing is shredded.
+    ///
+    /// [`adopt_pending`]: SecretStore::adopt_pending
+    fn begin_rekey(&self) -> Result<Option<Box<dyn SecretStore>>> {
+        Ok(None)
+    }
+
+    /// Makes this store, from [`begin_rekey`](SecretStore::begin_rekey), the
+    /// live one, and destroys the wrapping key it replaced (and any other
+    /// pending one). Called only after the state wrapped under it is saved
+    /// and, with a generation mark, the mark advanced. Idempotent.
+    fn commit_rekey(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Switches to the pending wrapping key `kek_id` that a rotation left
+    /// behind (a state written under it was found), if there is one;
+    /// whether it did. The key is promoted only by `commit_rekey`.
+    fn adopt_pending(&mut self, _kek_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Authenticates the broker's state (release policies, mode,
     /// organization, key versions, revocations) under a key derived from
     /// this store's wrapping key: whoever can write the state file but does
@@ -159,12 +186,16 @@ impl SecretStore for DevelopmentFileStore {
 /// Keys wrapped under a 32-byte KEK from a separate file (mode 0600).
 pub struct LocalKekStore {
     kek: Zeroizing<[u8; 32]>,
+    /// The KEK file, when the key came from one: a rotation writes its
+    /// successor beside it.
+    path: Option<PathBuf>,
 }
 
 impl LocalKekStore {
     pub fn from_key(kek: [u8; 32]) -> Self {
         Self {
             kek: Zeroizing::new(kek),
+            path: None,
         }
     }
 
@@ -178,7 +209,7 @@ impl LocalKekStore {
                 .as_slice()
                 .try_into()
                 .map_err(|_| err(format!("{}: a KEK file is 32 bytes", path.display())))?;
-            return Ok(Self::from_key(k));
+            return Ok(Self::from_key(k).at(path));
         }
         let mut k = Zeroizing::new([0u8; 32]);
         getrandom::getrandom(k.as_mut()).map_err(|e| err(format!("no randomness: {e}")))?;
@@ -193,7 +224,12 @@ impl LocalKekStore {
         o.open(path)
             .and_then(|mut f| f.write_all(k.as_ref()))
             .map_err(io)?;
-        Ok(Self::from_key(*k))
+        Ok(Self::from_key(*k).at(path))
+    }
+
+    fn at(mut self, path: &Path) -> Self {
+        self.path = Some(path.to_owned());
+        self
     }
 
     /// A fingerprint of the KEK (not secret).
@@ -241,6 +277,89 @@ pub(crate) fn check_private(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The file a rotated wrapping key waits in, beside the live one, until
+/// the state saved under it is recorded: `NAME.next.KEKID`. One file per
+/// key ID, so a rotation never overwrites a pending key that a written
+/// state may still need.
+pub(crate) fn pending_path(live: &Path, kek_id: &str) -> PathBuf {
+    let mut name = live.file_name().unwrap_or_default().to_owned();
+    name.push(format!(".next.{kek_id}"));
+    live.with_file_name(name)
+}
+
+/// Writes `bytes` to a new private file (mode 0600), durably.
+pub(crate) fn write_private_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let io = |e: std::io::Error| err(format!("{}: {e}", path.display()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(path).map_err(io)?;
+    f.write_all(bytes).and_then(|_| f.sync_all()).map_err(io)?;
+    sync_dir(path);
+    Ok(())
+}
+
+/// Flushes the directory entry of `path` (best effort: not every
+/// filesystem supports it).
+pub(crate) fn sync_dir(path: &Path) {
+    if let Some(d) = path.parent() {
+        let d = if d.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            d
+        };
+        if let Ok(f) = std::fs::File::open(d) {
+            let _ = f.sync_all();
+        }
+    }
+}
+
+/// Whether a rotation left a pending key beside `live`.
+pub(crate) fn has_pending(live: &Path) -> bool {
+    let prefix = format!(
+        "{}.next.",
+        live.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let dir = live.parent().filter(|d| !d.as_os_str().is_empty());
+    std::fs::read_dir(dir.unwrap_or_else(|| Path::new(".")))
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        })
+        .unwrap_or(false)
+}
+
+/// Makes the pending key `kek_id` the live file `live` (an atomic rename,
+/// which destroys the key it replaces) and removes every other pending
+/// key. Returns whether a pending file was promoted; with none, the live
+/// file is already it.
+pub(crate) fn promote_pending(live: &Path, kek_id: &str) -> Result<bool> {
+    let pending = pending_path(live, kek_id);
+    let promoted = pending.exists();
+    if promoted {
+        std::fs::rename(&pending, live).map_err(|e| err(format!("{}: {e}", live.display())))?;
+        sync_dir(live);
+    }
+    let prefix = format!(
+        "{}.next.",
+        live.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let dir = live.parent().filter(|d| !d.as_os_str().is_empty());
+    if let Ok(rd) = std::fs::read_dir(dir.unwrap_or_else(|| Path::new("."))) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    Ok(promoted)
+}
+
 impl SecretStore for LocalKekStore {
     fn name(&self) -> &'static str {
         "local-kek"
@@ -264,6 +383,64 @@ impl SecretStore for LocalKekStore {
 
     fn state_mac(&self, state: &[u8]) -> Result<Option<[u8; 32]>> {
         Ok(Some(self.mac_state(state)))
+    }
+
+    fn begin_rekey(&self) -> Result<Option<Box<dyn SecretStore>>> {
+        let Some(live) = &self.path else {
+            return Ok(None);
+        };
+        let mut k = Zeroizing::new([0u8; 32]);
+        getrandom::getrandom(k.as_mut()).map_err(|e| err(format!("no randomness: {e}")))?;
+        let next = Self::from_key(*k).at(live);
+        write_private_new(&pending_path(live, &next.kek_id()), k.as_ref())?;
+        Ok(Some(Box::new(next)))
+    }
+
+    fn commit_rekey(&self) -> Result<()> {
+        let Some(live) = &self.path else {
+            return Ok(());
+        };
+        if !promote_pending(live, &self.kek_id())? {
+            // Nothing pending: the live file must already be this key,
+            // or the key that wrapped the state was never made durable.
+            let b = Zeroizing::new(
+                std::fs::read(live).map_err(|e| err(format!("{}: {e}", live.display())))?,
+            );
+            if b.as_slice() != self.kek.as_ref() {
+                return Err(err(format!(
+                    "{}: the rotated KEK is neither pending nor live",
+                    live.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn adopt_pending(&mut self, kek_id: &str) -> Result<bool> {
+        let Some(live) = &self.path else {
+            return Ok(false);
+        };
+        let pending = pending_path(live, kek_id);
+        if !pending.exists() {
+            return Ok(false);
+        }
+        check_private(&pending)?;
+        let b = Zeroizing::new(
+            std::fs::read(&pending).map_err(|e| err(format!("{}: {e}", pending.display())))?,
+        );
+        let k: [u8; 32] = b
+            .as_slice()
+            .try_into()
+            .map_err(|_| err(format!("{}: a KEK file is 32 bytes", pending.display())))?;
+        let adopted = Self::from_key(k).at(live);
+        if adopted.kek_id() != kek_id {
+            return Err(err(format!(
+                "{}: the pending KEK is not the one its name says",
+                pending.display()
+            )));
+        }
+        *self = adopted;
+        Ok(true)
     }
 }
 

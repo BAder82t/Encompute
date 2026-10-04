@@ -312,25 +312,38 @@ Known issues from the release-candidate rounds that are not fixed yet.
 Each needs a design decision, or is accepted for now with the mitigation
 stated.
 
-- **Several key brokers in one training job need a per-asset binding.**
-  A workload trusts each broker its spec names for every asset, so a second
-  broker could grant a key for the first one's assets. Specs are limited to
-  exactly one broker (`TrainingSpec::validate`, tested by
-  `crates/encompute-training/tests/training.rs::a_spec_binds_its_key_brokers`,
-  closing the gap in ENC-SF-2026-036); an asset-to-broker map is the
-  design for multi-owner custody.
-- **An older key broker state file resurrects revoked keys.**
-  `lifecycle_restoring_an_older_state_file_resurrects_a_revoked_key`
-  documents it. Since ENC-SF-2026-043 the state file is authenticated
-  under a key derived from the KEK, so an edited file does not open; but
-  an older copy that was genuinely authenticated still opens, and
-  restoring it by hand brings the revoked keys back. `restore.sh` keeps a
-  newer broker state. Detecting the rollback needs the state's
-  generation anchored outside the file (in the KMS or the control plane).
-- **Revocation does not crypto-shred.** A revocation rewrites the current
-  state file only; an old state file plus the unchanged KEK still yields
-  the revoked keys. A per-asset KEK, or KEK rotation on revoke, would fix
-  it.
+- **Closed on the governance branch (unreleased): per-asset key broker
+  binding.** A training spec may bind each key to its owner's broker
+  (`asset_brokers`, with `broker_organizations`); a workload accepts a
+  key's grant only from the broker bound to it, and a governed broker
+  refuses a key its governance binding gives to another broker (`c7ac996`,
+  `40284e9`, `crates/encompute-training/tests/training.rs::contribution_key_bound_to_another_parties_broker_refused`,
+  `crates/encompute-keybroker/tests/grant_pinning.rs::a_grant_for_an_asset_from_another_owners_broker_is_refused`,
+  `crates/encompute-keybroker/tests/sovereign.rs::governed_broker_refuses_asset_bound_to_another_broker`;
+  INV-235). A spec without the map still names exactly one broker, and its
+  ID is unchanged. The adversarial cases added later are in `8092c0f`.
+  Older readers refuse a spec that has the map (unknown field): no
+  migration is needed, and nothing reads it wrongly.
+- **Closed on the governance branch (unreleased): an older broker state
+  file no longer resurrects revoked keys under a generation mark.** The
+  state's generation and MAC are recorded in the organization's KMS with
+  compare-and-set before a change is acknowledged or a key granted, and a
+  state older than the mark, forked, or not chained to it is refused
+  (`472a4eb`, `crates/encompute-keybroker/tests/generation.rs::broker_state_rollback_refused_by_kms_generation`,
+  INV-236). Without a mark (development, or a non-governed broker) the
+  rollback of a state restored with its own KEK is still not detected: a
+  governed production broker refuses to run without one.
+- **Closed on the governance branch (unreleased): revocation crypto-shreds
+  the revoked key against an older state file.** A revocation also
+  replaces the KEK, in the same change as the revocation and the same
+  generation-mark advance (`0d4b013`,
+  `crates/encompute-keybroker/tests/crypto_shred.rs::revoking_shreds_the_old_state_for_the_current_kek`,
+  `crates/encompute-keybroker/tests/lifecycle.rs::lifecycle_restoring_an_older_state_file_cannot_release_a_revoked_key`;
+  INV-250). It does not cover a copy of the old KEK: a KEK file in a
+  backup, or an old wrapped KEK while its root key version is not retired
+  (`encompute keys rotate-root --retire-old-versions`), still opens an
+  older state file, and a store with no KEK it can replace (development
+  plaintext) shreds nothing. See [deployment.md](deployment.md#revoking-a-key-and-recovering-a-broker).
 - **An anchor restored from the same backup forgets later spend.** When
   the database and the anchor are restored together, privacy spend rolls
   back to the backup. Keep the anchor outside the backup set, in the

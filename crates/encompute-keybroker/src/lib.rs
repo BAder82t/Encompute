@@ -33,7 +33,7 @@ mod workload;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -448,6 +448,14 @@ pub struct KeyBroker {
     governance: Option<GovernanceConfig>,
     /// The state's generation high-water mark, if configured.
     mark: Option<AttachedMark>,
+    /// The store is a rotated one whose key is still pending (see
+    /// [`SecretStore::begin_rekey`]): the next save that records the state
+    /// wrapped under it makes it live ([`SecretStore::commit_rekey`]).
+    rekey_uncommitted: AtomicBool,
+    /// A revocation was applied and the wrapping key not yet rotated (the
+    /// rotation failed): the next revocation, or [`KeyBroker::rotate_kek`],
+    /// does it.
+    shred_owed: bool,
 }
 
 struct AttachedMark {
@@ -578,15 +586,34 @@ impl KeyBroker {
         store: Box<dyn SecretStore>,
     ) -> Result<Self> {
         refuse_marked(&state)?;
-        Self::open(state, verifier, store, StateAuth::Required)
+        Self::open(state, verifier, store, StateAuth::Required)?.settled()
+    }
+
+    /// Makes a rotated wrapping key live once the state that names it is
+    /// accepted (see [`SecretStore::adopt_pending`]): after the generation
+    /// mark's checks when there is a mark, so a state refused as a rollback
+    /// never promotes a key.
+    fn settled(self) -> Result<Self> {
+        if self.rekey_uncommitted.swap(false, Ordering::SeqCst) {
+            self.store.commit_rekey()?;
+        }
+        Ok(self)
     }
 
     fn open(
         mut state: BrokerState,
         verifier: Verifier,
-        store: Box<dyn SecretStore>,
+        mut store: Box<dyn SecretStore>,
         auth: StateAuth,
     ) -> Result<Self> {
+        // A revocation rotates the wrapping key: a crash after the state
+        // wrapped under the new key was written leaves that key pending.
+        let mut adopted = false;
+        if store.key_id() != state.kek_id {
+            if let Some(id) = state.kek_id.clone() {
+                adopted = store.adopt_pending(&id)?;
+            }
+        }
         if state.mode == BrokerMode::Production && store.security() != StoreSecurity::Production {
             return Err(err(
                 Code::KeyRelease,
@@ -643,6 +670,8 @@ impl KeyBroker {
             grant_signer,
             governance: None,
             mark: None,
+            rekey_uncommitted: AtomicBool::new(adopted),
+            shred_owed: false,
         })
     }
 
@@ -770,7 +799,7 @@ impl KeyBroker {
             cas: AtomicU64::new(cas),
             head: std::sync::Mutex::new(fingerprint),
         });
-        Ok(self)
+        self.settled()
     }
 
     /// Whether a generation mark guards this broker's state.
@@ -989,7 +1018,8 @@ impl KeyBroker {
     }
 
     /// Revokes every version of `asset_id`: idempotent, returns the
-    /// versions revoked now.
+    /// versions revoked now. Like [`revoke`](KeyBroker::revoke), it rotates
+    /// the wrapping key.
     pub fn revoke_all(&mut self, asset_id: &str) -> Result<Vec<u64>> {
         let versions: Vec<u64> = self
             .state
@@ -1002,17 +1032,41 @@ impl KeyBroker {
             .map(|(k, _)| *k)
             .collect();
         for v in &versions {
-            self.revoke(asset_id, Some(*v))?;
+            self.revoke_version(asset_id, Some(*v))?;
         }
+        if !versions.is_empty() {
+            self.shred_owed = true;
+        }
+        self.shred()?;
         Ok(versions)
     }
 
     /// Revokes a version (default: the current one). A revoked current key
-    /// is never released; rotate to release again. Restoring a state file
-    /// saved before the revocation undoes it, undetected unless a
-    /// generation mark guards the state (see
+    /// is never released; rotate to release again.
+    ///
+    /// Revocation also crypto-shreds: the wrapping key (KEK) is replaced by
+    /// a fresh one (a store that can: see [`SecretStore::begin_rekey`]), the
+    /// surviving keys are re-wrapped under it and the state is
+    /// authenticated under it, in the same change as the revocation. The
+    /// next [`save`](KeyBroker::save) writes the state, advances the
+    /// generation mark and only then makes the new KEK live, destroying the
+    /// old one: an older copy of the state file, with the KEK that is
+    /// current afterwards, no longer opens, and the revoked key cannot be
+    /// recovered from it. A copy of the old KEK itself (a backup) still
+    /// opens it; with a root-wrapped KEK, retiring the old root key
+    /// versions closes that ([`RootWrappedKekStore::retire_older_root_versions`]).
+    /// A store that cannot rotate its KEK shreds nothing, and restoring a
+    /// state file saved before the revocation undoes it, undetected unless
+    /// a generation mark guards the state (see
     /// [`load_with_mark`](KeyBroker::load_with_mark)).
     pub fn revoke(&mut self, asset_id: &str, version: Option<u64>) -> Result<u64> {
+        let v = self.revoke_version(asset_id, version)?;
+        self.shred_owed = true;
+        self.shred()?;
+        Ok(v)
+    }
+
+    fn revoke_version(&mut self, asset_id: &str, version: Option<u64>) -> Result<u64> {
         let broker_id = self.state.broker_id.clone();
         let s = self
             .state
@@ -1038,10 +1092,42 @@ impl KeyBroker {
         Ok(v)
     }
 
+    fn shred(&mut self) -> Result<()> {
+        if self.shred_owed && self.rotate_kek()?.is_some() {
+            self.shred_owed = false;
+        }
+        Ok(())
+    }
+
+    /// Replaces the wrapping key (KEK) with a fresh one and re-wraps every
+    /// surviving key and the state's MAC under it (in memory; the next
+    /// [`save`](KeyBroker::save) writes the state and then makes the new
+    /// KEK live). Returns the new KEK's ID, or `None` when the store has no
+    /// KEK it can replace (development plaintext, or a KEK held in memory
+    /// only). Revoked keys are already destroyed, so what an older state
+    /// file wrapped under the old KEK stays unreadable once that KEK is
+    /// gone.
+    pub fn rotate_kek(&mut self) -> Result<Option<String>> {
+        let Some(next) = self.store.begin_rekey()? else {
+            return Ok(None);
+        };
+        self.rewrap_keys(next)?;
+        self.rekey_uncommitted.store(true, Ordering::SeqCst);
+        self.shred_owed = false;
+        Ok(self.state.kek_id.clone())
+    }
+
     /// Re-wraps every key under `store` (KEK rotation, or a move to a KMS),
     /// which then replaces the current store. A production broker still
     /// needs a production store.
     pub fn rewrap(&mut self, store: Box<dyn SecretStore>) -> Result<()> {
+        self.rewrap_keys(store)?;
+        // The new store's key is its own, not a pending rotation's.
+        self.rekey_uncommitted.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn rewrap_keys(&mut self, store: Box<dyn SecretStore>) -> Result<()> {
         if self.state.mode == BrokerMode::Production
             && store.security() != StoreSecurity::Production
         {
@@ -1332,6 +1418,14 @@ impl KeyBroker {
             *m.head.lock().unwrap_or_else(|p| p.into_inner()) = next.state_mac;
             self.generation.store(state.generation, Ordering::SeqCst);
         }
+        // The state wrapped under a rotated KEK is written (and its mark
+        // advanced): only now does the new KEK replace the old one. A
+        // failure here leaves the state durable and the new KEK pending
+        // (opened by `adopt_pending`); the next save retries.
+        if self.rekey_uncommitted.load(Ordering::SeqCst) {
+            self.store.commit_rekey()?;
+            self.rekey_uncommitted.store(false, Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -1345,7 +1439,7 @@ impl KeyBroker {
     pub fn load(path: &Path, verifier: Verifier, store: Box<dyn SecretStore>) -> Result<Self> {
         let state = Self::read(path)?;
         refuse_marked(&state)?;
-        Self::open(state, verifier, store, StateAuth::Required)
+        Self::open(state, verifier, store, StateAuth::Required)?.settled()
     }
 
     /// Opens the state at `path` as [`load`](KeyBroker::load) does, then
@@ -1388,7 +1482,7 @@ impl KeyBroker {
     ) -> Result<Self> {
         let state = Self::read(path)?;
         refuse_marked(&state)?;
-        Self::open(state, verifier, store, StateAuth::Legacy)
+        Self::open(state, verifier, store, StateAuth::Legacy)?.settled()
     }
 
     fn read(path: &Path) -> Result<BrokerState> {

@@ -18,7 +18,7 @@ use encompute_keybroker::{
     BrokerMode, DevelopmentFileStore, GovernanceConfig, KeyBroker, LocalKekStore,
 };
 use encompute_trust::authz::{AuthorizationLimits, RevocationV2};
-use encompute_verification::governance::{ProgramRef, ReleaseClass};
+use encompute_verification::governance::{GovernanceBinding, ProgramRef, ReleaseClass};
 use encompute_verification::ticket::TicketKind;
 
 fn code<T>(r: encompute_ir::Result<T>) -> Code {
@@ -1351,8 +1351,18 @@ fn derived_world(
     install: bool,
     edit: impl FnOnce(&mut encompute_trust::authz::AuthorizationV2),
 ) -> (World, String) {
+    derived_world_with(binding(), pin, install, edit)
+}
+
+/// [`derived_world`] for an execution `binding`.
+fn derived_world_with(
+    binding: GovernanceBinding,
+    pin: bool,
+    install: bool,
+    edit: impl FnOnce(&mut encompute_trust::authz::AuthorizationV2),
+) -> (World, String) {
     let clock = Arc::new(AtomicU64::new(T0));
-    let spec = spec_for(&binding());
+    let spec = spec_for(&binding);
     let mut b = bare_broker(&clock, &spec)
         .with_governance(governance())
         .unwrap();
@@ -1361,7 +1371,7 @@ fn derived_world(
         broker: b,
         clock,
         evaluator: encompute_verification::EvaluatorSigner::from_seed(&[9; 32]),
-        binding: binding(),
+        binding,
         spec,
         authorization: signed(authorization()),
         placement: None,
@@ -1488,6 +1498,36 @@ fn custodian_broker_releases_with_all_lineage_authorizations() {
     let counters = &w.broker.state().counters;
     assert_eq!(counters[&w.authorization_id()].releases, 1);
     assert_eq!(counters[&lineage].releases, 1);
+}
+
+/// A job over sources at several brokers: the custodian's broker releases
+/// a derived result's key only if the execution's binding maps the result's
+/// version to this broker. A binding that gives it to another broker, or
+/// leaves it out, releases nothing here, whatever the authorizations and
+/// the ticket say (ENC2715), and the same binding releases at the broker it
+/// names.
+#[test]
+fn custodian_broker_refuses_a_derived_key_the_binding_gives_to_another_broker() {
+    let v = asset_version();
+    let with = |map: &[(&String, &str)]| {
+        let mut b = binding();
+        b.asset_brokers = map
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        derived_world_with(b, true, true, |_| {})
+    };
+    let (mut w, lineage) = with(&[(&v, "benefits-broker"), (&h('9'), BROKER)]);
+    let e = release_derived(&mut w, &lineage).unwrap_err();
+    assert_eq!(e.code, Code::GovernanceCustody, "{e}");
+    assert!(e.message.contains("benefits-broker"), "{e}");
+    // Left out of the map.
+    let (mut w, lineage) = with(&[(&h('9'), BROKER)]);
+    let e = release_derived(&mut w, &lineage).unwrap_err();
+    assert_eq!(e.code, Code::GovernanceCustody, "{e}");
+    // Mapped here (the lineage owner's source is at another broker): released.
+    let (mut w, lineage) = with(&[(&v, BROKER), (&h('9'), "benefits-broker")]);
+    release_derived(&mut w, &lineage).unwrap();
 }
 
 /// The lineage owner's limits hold at the custodian's broker: each release

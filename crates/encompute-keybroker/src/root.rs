@@ -34,7 +34,10 @@ use zeroize::Zeroizing;
 use encompute_ir::{Code, Error, Result};
 use encompute_verification::{hex, unhex};
 
-use crate::store::{KeyContext, LocalKekStore, SecretStore, StoreSecurity, StoredKey};
+use crate::store::{
+    has_pending, pending_path, promote_pending, write_private_new, KeyContext, LocalKekStore,
+    SecretStore, StoreSecurity, StoredKey,
+};
 use crate::KeyMaterial;
 
 fn err(msg: impl Into<String>) -> Error {
@@ -62,6 +65,16 @@ pub trait RootKeyProvider: Send + Sync {
     fn rewrap(&self, ciphertext: &str, aad: &[u8]) -> Result<(String, u64)>;
     /// Creates a new root key version; returns it.
     fn rotate(&self) -> Result<u64>;
+    /// Makes every root key version older than `version` unable to decrypt
+    /// anything, for good (a KEK wrapped under one, in an old backup, then
+    /// never opens): the last step of a crypto-shred. Irreversible, and
+    /// shared with every other secret wrapped under this root key.
+    fn retire_before(&self, _version: u64) -> Result<()> {
+        Err(err(format!(
+            "root key provider {} cannot retire old root key versions",
+            self.provider()
+        )))
+    }
 }
 
 /// The broker's KEK, wrapped under a root key. Not secret.
@@ -99,7 +112,7 @@ pub struct RootRotation {
 pub struct RootWrappedKekStore {
     kek: LocalKekStore,
     wrapped: WrappedKek,
-    provider: Box<dyn RootKeyProvider>,
+    provider: std::sync::Arc<dyn RootKeyProvider>,
     path: PathBuf,
 }
 
@@ -117,6 +130,7 @@ impl RootWrappedKekStore {
         if organization.is_empty() {
             return Err(err("a root-wrapped KEK needs an organization"));
         }
+        let provider: std::sync::Arc<dyn RootKeyProvider> = provider.into();
         let aad = kek_aad(organization);
         if !path.exists() {
             let mut k = Zeroizing::new([0u8; 32]);
@@ -205,6 +219,61 @@ impl RootWrappedKekStore {
             new_version,
         })
     }
+
+    /// Retires every root key version older than the one the live KEK is
+    /// wrapped under (see [`RootKeyProvider::retire_before`]), so that an
+    /// older wrapped KEK (a backup's, or one replaced by a revocation or a
+    /// root rotation) can never be opened again, and the asset keys under
+    /// it with it. Rotate the root key first (`rotate_root`) so the live KEK
+    /// is under a version newer than every copy to retire; every other KEK
+    /// wrapped under this root key must have been re-wrapped by then, or it
+    /// is lost.
+    pub fn retire_older_root_versions(&self) -> Result<u64> {
+        // A wrapped KEK a revocation left pending may still be needed by
+        // the state saved under it: start the broker (it adopts and
+        // promotes it) before retiring what could open it.
+        if has_pending(&self.path) {
+            return Err(err(format!(
+                "a rotated KEK is still pending beside {} (`.next.` files): start the broker once \
+                 so a state that names it takes effect; delete a file no saved state names; then \
+                 retire the old root key versions",
+                self.path.display()
+            )));
+        }
+        let v = self.wrapped.key_version;
+        self.provider.retire_before(v)?;
+        Ok(v)
+    }
+
+    fn read_wrapped(&self, path: &Path) -> Result<(WrappedKek, LocalKekStore)> {
+        let wrapped: WrappedKek = serde_json::from_slice(
+            &std::fs::read(path).map_err(|e| err(format!("{}: {e}", path.display())))?,
+        )
+        .map_err(|e| err(format!("{}: {e}", path.display())))?;
+        let w = &self.wrapped;
+        if wrapped.format != WRAPPED_KEK_FORMAT
+            || wrapped.organization != w.organization
+            || wrapped.provider != w.provider
+            || wrapped.key_ref != w.key_ref
+        {
+            return Err(err(format!(
+                "{}: this wrapped KEK is not of this organization, provider and root key",
+                path.display()
+            )));
+        }
+        let pt = self
+            .provider
+            .decrypt(&wrapped.ciphertext, &kek_aad(&wrapped.organization))?;
+        let k: [u8; 32] = pt
+            .as_slice()
+            .try_into()
+            .map_err(|_| err("the root key provider returned a KEK of the wrong length"))?;
+        let kek = LocalKekStore::from_key(k);
+        if kek.kek_id() != wrapped.kek_id {
+            return Err(err("the unwrapped KEK does not match its fingerprint"));
+        }
+        Ok((wrapped, kek))
+    }
 }
 
 fn write_new(path: &Path, w: &WrappedKek) -> Result<()> {
@@ -253,6 +322,65 @@ impl SecretStore for RootWrappedKekStore {
 
     fn state_mac(&self, state: &[u8]) -> Result<Option<[u8; 32]>> {
         Ok(Some(self.kek.mac_state(state)))
+    }
+
+    fn begin_rekey(&self) -> Result<Option<Box<dyn SecretStore>>> {
+        let mut k = Zeroizing::new([0u8; 32]);
+        getrandom::getrandom(k.as_mut()).map_err(|e| err(format!("no randomness: {e}")))?;
+        let kek = LocalKekStore::from_key(*k);
+        let (ciphertext, key_version) = self
+            .provider
+            .encrypt(k.as_ref(), &kek_aad(&self.wrapped.organization))?;
+        let wrapped = WrappedKek {
+            key_version,
+            kek_id: kek.kek_id(),
+            ciphertext,
+            ..self.wrapped.clone()
+        };
+        write_private_new(
+            &pending_path(&self.path, &wrapped.kek_id),
+            &serde_json::to_vec_pretty(&wrapped).expect("serializable"),
+        )?;
+        Ok(Some(Box::new(Self {
+            kek,
+            wrapped,
+            provider: self.provider.clone(),
+            path: self.path.clone(),
+        })))
+    }
+
+    fn commit_rekey(&self) -> Result<()> {
+        if !promote_pending(&self.path, &self.wrapped.kek_id)? {
+            let live: WrappedKek = serde_json::from_slice(
+                &std::fs::read(&self.path)
+                    .map_err(|e| err(format!("{}: {e}", self.path.display())))?,
+            )
+            .map_err(|e| err(format!("{}: {e}", self.path.display())))?;
+            if live.kek_id != self.wrapped.kek_id {
+                return Err(err(format!(
+                    "{}: the rotated KEK is neither pending nor live",
+                    self.path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn adopt_pending(&mut self, kek_id: &str) -> Result<bool> {
+        let pending = pending_path(&self.path, kek_id);
+        if !pending.exists() {
+            return Ok(false);
+        }
+        let (wrapped, kek) = self.read_wrapped(&pending)?;
+        if wrapped.kek_id != kek_id {
+            return Err(err(format!(
+                "{}: the pending KEK is not the one its name says",
+                pending.display()
+            )));
+        }
+        self.wrapped = wrapped;
+        self.kek = kek;
+        Ok(true)
     }
 }
 
@@ -534,6 +662,14 @@ impl RootKeyProvider for OpenBaoTransit {
         self.encrypt(&pt, aad)
     }
 
+    fn retire_before(&self, version: u64) -> Result<()> {
+        self.call(
+            &format!("keys/{}/config", self.key),
+            serde_json::json!({"min_decryption_version": version}),
+        )
+        .map(|_| ())
+    }
+
     fn rotate(&self) -> Result<u64> {
         self.call(&format!("keys/{}/rotate", self.key), serde_json::json!({}))?;
         let v = self.answer(
@@ -578,6 +714,27 @@ impl DevelopmentRootKey {
             &std::fs::read(&self.path).map_err(|e| err(format!("{}: {e}", self.path.display())))?,
         )
         .map_err(|e| err(format!("{}: {e}", self.path.display())))
+    }
+
+    fn save(&self, roots: &DevRoots) -> Result<()> {
+        let tmp = self.path.with_extension("tmp");
+        let _ = std::fs::remove_file(&tmp);
+        {
+            use std::io::Write;
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(0o600);
+            }
+            let mut f = o
+                .open(&tmp)
+                .map_err(|e| err(format!("{}: {e}", tmp.display())))?;
+            f.write_all(&serde_json::to_vec(roots).expect("serializable"))
+                .map_err(|e| err(format!("{}: {e}", tmp.display())))?;
+        }
+        std::fs::rename(&tmp, &self.path).map_err(|e| err(format!("{}: {e}", self.path.display())))
     }
 
     fn cipher(roots: &DevRoots, version: u64) -> Result<ChaCha20Poly1305> {
@@ -652,31 +809,19 @@ impl RootKeyProvider for DevelopmentRootKey {
         self.encrypt(&pt, aad)
     }
 
+    fn retire_before(&self, version: u64) -> Result<()> {
+        let mut roots = self.load()?;
+        roots.versions.retain(|v, _| *v >= version);
+        self.save(&roots)
+    }
+
     fn rotate(&self) -> Result<u64> {
         let mut roots = self.load()?;
         let next = roots.versions.keys().last().map_or(1, |v| v + 1);
         let mut k = Zeroizing::new([0u8; 32]);
         getrandom::getrandom(k.as_mut()).map_err(|e| err(format!("no randomness: {e}")))?;
         roots.versions.insert(next, hex(k.as_ref()));
-        let tmp = self.path.with_extension("tmp");
-        let _ = std::fs::remove_file(&tmp);
-        {
-            use std::io::Write;
-            let mut o = std::fs::OpenOptions::new();
-            o.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                o.mode(0o600);
-            }
-            let mut f = o
-                .open(&tmp)
-                .map_err(|e| err(format!("{}: {e}", tmp.display())))?;
-            f.write_all(&serde_json::to_vec(&roots).expect("serializable"))
-                .map_err(|e| err(format!("{}: {e}", tmp.display())))?;
-        }
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| err(format!("{}: {e}", self.path.display())))?;
+        self.save(&roots)?;
         Ok(next)
     }
 }

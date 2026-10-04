@@ -204,8 +204,10 @@ encrypted assets
   under a key derived from the KEK. A state file edited outside Encompute (a
   release policy, the mode, the organization or a key version) does not
   open; restore it from a backup instead. Without a generation mark, a
-  backup does restore keys revoked since it was taken (a rollback this
-  check does not detect), so keep backups access-controlled.
+  state file restored together with the KEK it was saved under (a backup
+  of both) does restore keys revoked since it was taken, a rollback this
+  check does not detect: keep backups access-controlled, and see
+  [Revoking a key and recovering a broker](#revoking-a-key-and-recovering-a-broker).
 - **Generation mark.** A governed broker (a governance key pinned) in
   production refuses to start without a generation mark in the
   organization's KMS; any other broker may use one. Every save writes the
@@ -271,11 +273,93 @@ encrypted assets
   (a signed message, delivered at least once) to destroy every version of
   its key. The broker is told only once the revocation is in the state
   anchor. Revocations for an asset go only to a key broker of the platform
-  or of the asset's organization.
+  or of the asset's organization. A revocation also replaces the broker's
+  KEK (below).
 - **Failures.** A provider that is unavailable, disabled, refuses the
   organization's context, or no longer decrypts a key version releases
   nothing. There is no fallback to local or plaintext keys. Production
   brokers refuse development stores.
+
+### Revoking a key and recovering a broker
+
+**What a revocation does to the broker's files.** Destroying a key in the
+current `broker.json` is not enough: an older copy of the file still holds
+the key, wrapped under the KEK. So a revocation, in the same change, also
+replaces the KEK. The broker generates a new one and re-wraps every
+surviving key and the state's authentication under it (`kek_id` in
+`broker.json` changes). It writes the new KEK beside the live one
+(`NAME.next.KEKID`, mode 0600; for a root-wrapped KEK, a wrapped KEK file)
+before it writes the state. Then, on the save, it writes the state,
+advances the generation mark with compare-and-set, and only then makes the
+new KEK live, destroying the old file. A key revoked this way cannot be
+recovered from an older state file with the KEK that is current
+afterwards. Applies to a broker that keeps its KEK in a file (`--kek`) or
+wrapped under a root key (`--wrapped-kek`); a development broker with
+plaintext keys, or an embedding that holds the KEK in memory, replaces
+nothing (`encompute keys revoke` prints `NOT SHREDDED`).
+
+**What it does not do.**
+
+- A copy of the *old* KEK still opens an older state file. With `--kek`,
+  that is any backup or snapshot of the KEK file: keep the KEK file out of
+  the backup set, or delete backups that predate a revocation. With a
+  root-wrapped KEK, the old wrapped KEK in a backup is not secret and opens
+  while the Transit key version that wraps it does. After revoking, run
+  `encompute keys rotate-root --retire-old-versions` (same flags as the
+  broker): it rotates the root key, re-wraps the live KEK under the new
+  version, and sets Transit's `min_decryption_version`, so the older
+  wrapped KEKs never open again. It is irreversible and applies to every KEK
+  wrapped under that root key, so run `rotate-root` first for every other
+  broker of the organization. The reference Compose files back up the broker
+  volume (state and wrapped KEK) together: after a revocation, retire the old
+  root versions, or treat the earlier `broker.tar` as still able to open
+  the revoked key.
+- Destroying a key does not recall plaintext a workload already received:
+  revocation is not retroactive.
+- A KMS that keeps old versions of a secret (KV-v2 for the generation mark)
+  holds no key material: the mark records a generation number and a state
+  MAC only.
+
+**If the broker stops during a revocation.** Start it again with the same
+flags. At each step the files are consistent:
+
+| It stopped | What is on disk | On the next start |
+| --- | --- | --- |
+| After the new KEK was written, before the state | the old state under the old (live) KEK; an unused `.next.` file | the state opens as it was; the control plane retries the revocation; the unused file is removed by the next revocation |
+| After the state was written, before the generation mark advanced | state one save ahead of the mark, naming the new KEK; the new KEK pending | the state opens only if it continues the mark's (ENC2713 otherwise); the broker adopts the pending KEK, advances the mark, then makes it live |
+| After the mark advanced, before the new KEK became live | the same, with the mark current | the broker adopts the pending KEK and makes it live |
+
+Never delete a `.next.` file while `kek_id` in `broker.json` names it: it
+is the only copy of the key that opens the state. A file no saved state
+names (check `kek_id`) is safe to delete.
+
+**Recovering.**
+
+- *ENC2713, the state is older than the mark.* An older copy was restored,
+  or the newest state was lost. Put back the newest state file (the file
+  the broker wrote last, with its KEK or wrapped KEK). Nothing older is
+  accepted, whatever KEK it comes with. There is no supported command to
+  lower or reset a mark; an owner who has lost every copy of the newest
+  state (and with it the revocations, used tickets and counters since the
+  last backup) re-protects the affected assets under new keys and
+  registers new versions.
+- *The mark was deleted.* A state saved under a mark does not open without
+  it (ENC2713). Undelete the latest KV-v2 version of
+  `encompute/brokers/BROKER_ID/generation`.
+- *The state is intact, the KEK is lost.* Nothing can be recovered: the
+  wrapped keys and the state's authentication need it. This is by design.
+  Re-protect the assets under new keys.
+- *Restoring a backup into a new volume.* `restore.sh` restores the broker
+  volume only when it is empty, so an existing newer state wins. Start the
+  broker with the mark: it refuses a state older than the mark, so a
+  restored backup comes up only if nothing was revoked or released since.
+  After a restore, check with the control plane that every revoked asset's
+  key is revoked (it re-sends `asset.revoked` until the broker
+  acknowledges).
+- *Revoking at a stopped broker.* `encompute keys revoke` (with the broker's
+  `--kek` or `--root-key` flags, and `--generation-mark` when the state is
+  guarded) does the same as a message: it replaces the KEK and saves. Do not
+  run it while the broker is serving the same files.
 
 ### Registering an organization's own key broker
 
