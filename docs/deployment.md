@@ -863,7 +863,34 @@ fixture in this environment, not a guaranteed benchmark: replaying
 107,600 events took about 1,011 seconds one event at a time and about 160
 seconds batched, on a heavily loaded machine).
 
-It **freezes** every rolled-back ledger: the ledger is treated as exhausted,
+**Restoring a database backup, step by step.** Since the state anchor holds
+the audit chain's head with every checkpoint of the governance log (a deny
+event's call returns only after it, and the background pass runs every two
+seconds), restoring ANY database backup older than the last anchored
+checkpoint is refused at start with `AUDIT STATE ROLLBACK` (or the
+governance log or privacy refusal above when those moved too) until you
+run `encompute-control recover`. In practice that is any backup older than
+a couple of seconds or than the last deny event. Before this, a restore
+within the old window of 100 audit events started silently with audit
+events missing. The procedure:
+
+1. Restore the database from the backup (the anchor is kept: it is newer).
+2. Start the control plane, or run `encompute-control verify-state`: it is
+   refused, naming what is behind (`AUDIT STATE ROLLBACK ... STARTUP REFUSED`).
+3. Run `encompute-control recover --operator NAME` (with `--archive-dir`
+   when the backup ends inside a compacted mirror's sealed prefix). It
+   records the rewind in the audit chain as an `audit.gap.recorded` event
+   (the anchored sequence and root are in it) and prints "audit chain:
+   events after N were lost; the gap is recorded", and does everything
+   below for the governance log and the ledgers.
+4. Start the control plane.
+
+The audit chain has **no mirror**: the audit events written after the
+backup are lost for good. `recover` records that they were lost; it cannot
+restore them. Keep database backups frequent if the audit trail matters,
+and export audit events (`GET /v1/audit`) to your own archive.
+
+Recovery also **freezes** every rolled-back ledger: the ledger is treated as exhausted,
 so budget the database forgot is never spent again. Ledgers the governance log
 records as frozen are frozen again. It re-applies every anchored revocation the
 database forgot: the asset is revoked again, jobs that had not started
@@ -1124,9 +1151,11 @@ refused.
 The events form a hash chain. Signed checkpoints anchor the chain, so an
 edited, deleted or reordered event before the last checkpoint is detected.
 Events after the last checkpoint are covered only by the unkeyed hash chain
-until the next checkpoint (every `ENCOMPUTE_AUDIT_CHECKPOINT_EVERY` events,
-default 100): someone who can write the database could rewrite that tail
-undetected. Auditors read their own organization's events
+until the next checkpoint of the governance log, which anchors the audit
+head with it (before the call returns for a security deny event, otherwise
+by the background pass every two seconds; an audit checkpoint every
+`ENCOMPUTE_AUDIT_CHECKPOINT_EVERY` events, default 100, also anchors it):
+someone who can write the database could rewrite that tail undetected. Auditors read their own organization's events
 (`GET /v1/audit`, `encompute audit list`).
 
 ## Configuration

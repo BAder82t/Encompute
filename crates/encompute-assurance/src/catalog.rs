@@ -675,6 +675,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/audit_tail.rs::a_deny_call_anchors_the_audit_events_before_it"),
         (Positive, "test:crates/encompute-control/tests/audit_tail.rs::ordinary_audit_events_wait_for_the_next_checkpoint_and_no_longer"),
         (Adversarial, "test:crates/encompute-control/tests/audit_tail.rs::a_failed_anchor_write_leaves_the_audit_tail_for_the_next_checkpoint"),
+        (EndToEnd, "test:crates/encompute-control/tests/audit_tail.rs::an_older_backup_is_refused_until_recovery_records_the_audit_gap"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
     inv!("INV-163", "deployment", "An evaluator executes only jobs compatible with its registered backend and parameter profile, only with an unexpired grant from the pinned control plane naming it and the job's program, and only after the control plane consents to the start.", [

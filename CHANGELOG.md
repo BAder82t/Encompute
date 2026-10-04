@@ -26,6 +26,19 @@ Work toward confidential cross-agency computation
   version or listing left) and finishes a soft-deleted segment; it is
   tested against a real OpenBao development server, not raft storage.
   INV-251.
+- **Restoring an older database backup is refused until `recover` runs
+  (operator-visible change).** The state anchor now holds the audit
+  chain's head with every checkpoint of the governance log (a deny call
+  returns only after it; the background pass runs every two seconds). After
+  this change, restoring ANY database backup older than the last anchored
+  checkpoint (in practice older than a couple of seconds or the last deny
+  event) refuses to start with `AUDIT STATE ROLLBACK` until
+  `encompute-control recover --operator NAME` is run, which records the
+  rewind in the audit chain (`audit.gap.recorded`). Before, a restore
+  within the old window of 100 audit events started silently with audit
+  events missing. Procedure: restore, start (refused), recover, start. The
+  audit chain has no mirror, so the audit events written after the backup
+  are lost: recover records that, it cannot restore them. docs/deployment.md.
 - **Evaluator uploads need a one-time upload grant bound to the client.**
   With a control plane, a program or key upload took the job's grant,
   which names no client or key, is visible to the whole submitting
