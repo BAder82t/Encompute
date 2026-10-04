@@ -3,7 +3,10 @@
 This guide covers the first supported deployment: the control plane with
 PostgreSQL, OpenFHE evaluators, key brokers backed by a customer-managed
 root key, and secure-aggregation coordinators, on Docker Compose
-([deploy/docker-compose](../deploy/docker-compose/)).
+([deploy/docker-compose](../deploy/docker-compose/)). For a deployment with
+TLS in front of every client, PostgreSQL that accepts only TLS, an external
+OpenBao and secrets as files, see the
+[reference production topology](production-deployment.md).
 
 ## Architecture
 

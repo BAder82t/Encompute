@@ -71,7 +71,8 @@ Related: [support matrix](docs/support-matrix.md),
   disk encryption, or keep the key directory in a key store.
 - **Local mode shares one process.** Without `--remote`, client and
   evaluator run in one process: anyone who compromises it sees both.
-- **The evaluator speaks plain HTTP.** Put a TLS proxy in front of it.
+- **The evaluator speaks plain HTTP.** Put a TLS proxy in front of it. The
+  [reference production topology](docs/production-deployment.md) does.
 - **No FHE key rotation and no threshold decryption.** One client holds
   each secret key.
 - **Client side channels are out of scope,** and so are timing side
@@ -131,11 +132,25 @@ Related: [support matrix](docs/support-matrix.md),
 - **The Compose OpenBao runs in development mode, in memory.** It stands
   in for a customer KMS in trials: its root keys disappear when it
   restarts, and its root token comes from `init.sh`. Point the key broker
-  at your own OpenBao or Vault (over HTTPS) for real keys.
+  at your own OpenBao or Vault (over HTTPS) for real keys. The
+  [reference production topology](docs/production-deployment.md) does, with
+  an external OpenBao in server mode.
 - **No built-in TLS.** No Encompute service terminates TLS, and the Compose
   deployment provides none. The control plane connects to PostgreSQL
   without TLS. Terminate TLS in front of every service and keep the
-  database on a private network.
+  database on a private network. The reference production topology does
+  this with configuration only: a reverse proxy in front of the services
+  (mutual TLS on its operations and key-broker listeners), PostgreSQL that
+  accepts only TLS, and a TLS client sidecar beside the control plane and
+  beside the key broker. The binaries themselves still have no TLS settings:
+  the control plane has no TLS client for PostgreSQL, and the key broker's
+  HTTPS client trusts only the built-in public web roots, so a vault behind
+  a private CA needs the sidecar.
+- **The reference production topology is one machine and one of each
+  service.** Its validation (`deploy/production/validate.sh`) checks
+  configuration, not security properties. It does not cover high
+  availability, Kubernetes, KMS adapters beyond OpenBao and Vault, volume
+  encryption, or a vault holding the state anchor behind a private CA.
 - **The newest audit events are only hash-chained.** Events after the last
   signed checkpoint (every 100 events by default) are covered by an
   unkeyed hash chain until the next checkpoint.
