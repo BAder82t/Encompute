@@ -304,7 +304,7 @@ governance branch). Each has a test that fails against the code before.
   tables unchanged at 126.4 MB, the mirror check 1.00 s -> 0.09 s, the
   start 15.7 s -> 11.2 s (a loaded machine: the start is dominated by
   recomputing the database's log), recovery of 107,600 events 1,011 s ->
-  160 s (`load_100k_events_heavy`). INV-226, INV-248.
+  160 s (`load_100k_events_heavy`). INV-226, INV-251.
 
 ### Open (accepted / needs design)
 

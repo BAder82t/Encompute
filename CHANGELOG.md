@@ -15,7 +15,7 @@ Work toward confidential cross-agency computation
   compare-and-set and crash-safe pruning. The database's log is not
   compacted. Recovery's import writes 1,000 events per statement in one
   transaction (107,600 events: 160 s, was 1,011 s on the same
-  loaded machine). INV-248.
+  loaded machine). INV-251.
 - **Assurance, attacks and examples (phase 9).** The attack suite
   `scripts/governance-attacks.sh` runs 27 attacks on the governance
   surface (forged or edited authorizations, expired or revoked ones, wrong

@@ -1158,7 +1158,7 @@ mod tests {
         assert_eq!(an.snapshot().glog_size, 0);
     }
 
-    /// INV-248: the anchor of a mirror that was compacted is version 3 and
+    /// INV-251: the anchor of a mirror that was compacted is version 3 and
     /// holds a seal; one that never was stays version 2, byte for byte what
     /// the previous release wrote and reads. The previous release refuses
     /// a sealed anchor twice over (its struct knows no seal, its version
