@@ -11,7 +11,7 @@ Thanks for your interest in Encompute.
 
 ## Development
 
-See the [README](README.md#build). Before sending changes:
+See [the build guide](docs/guide/build.md). Before sending changes:
 
 ```sh
 cargo fmt --all --check
@@ -29,7 +29,7 @@ cargo test --workspace --features encompute-runtime/openfhe,encompute-evaluator/
 
 Do not use `--all-features`: it enables the research features
 (`research-tfhe-rs`, `vfhe-research`) and test-only features. Test those
-separately, as the README's Build section shows. `scripts/release-check.sh`
+separately, as the build guide shows. `scripts/release-check.sh`
 runs every check from a clean checkout.
 
 A user-visible feature is done when it has an implementation, tests, docs

@@ -1,9 +1,9 @@
 # Support matrix
 
 This is the one authoritative list of what Encompute supports, for release
-0.3.0. The README's status table is a
-summary of this page. If they disagree, this page wins, and the README is a
-bug.
+0.3.0. The [status summary](guide/status-summary.md) is a
+short version of this page. If they disagree, this page wins, and the
+summary is a bug.
 
 ## Statuses
 
