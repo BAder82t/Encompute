@@ -10,6 +10,11 @@
 # Names and ports are overridable (defaults are the topology's own):
 #   COMPOSE_PROJECT_NAME (encompute-prod)   BAO_PROJECT (encompute-bao)   BAO_NETWORK (encompute-bao)
 #   BAO_PORT (8200, loopback)   EDGE_API_PORT/EDGE_EVALUATOR_PORT/EDGE_OPS_PORT/EDGE_KEYBROKER_PORT (8443-8446)
+# The control plane and the key broker speak TLS themselves, which the published
+# v0.3.0 images do not: name images that do (ENCOMPUTE_CONTROL_IMAGE and
+# ENCOMPUTE_SERVICES_IMAGE), or set LAB_BUILD_IMAGES=1 to build them from this
+# checkout (Dockerfile.control and Dockerfile.services: heavy, tens of minutes
+# cold) and use them by image ID.
 # Needs docker compose, openssl, curl, python3 with `cryptography`.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -36,6 +41,18 @@ if [ "${1:-}" = down ]; then
   exit 0
 fi
 
+if [ "${LAB_BUILD_IMAGES:-0}" = 1 ]; then
+  step "images from this checkout"
+  ( cd "$ROOT" && DOCKER_TIMEOUT=14400 d build -q -f Dockerfile.control -t encompute-control:lab . \
+    && DOCKER_TIMEOUT=14400 d build -q -f Dockerfile.services -t encompute-services:lab . )
+  # By image ID: content-addressed, so the validator's pin check holds.
+  ENCOMPUTE_CONTROL_IMAGE="$(d image inspect -f '{{.Id}}' encompute-control:lab)"
+  ENCOMPUTE_SERVICES_IMAGE="$(d image inspect -f '{{.Id}}' encompute-services:lab)"
+  export ENCOMPUTE_CONTROL_IMAGE ENCOMPUTE_SERVICES_IMAGE
+fi
+: "${ENCOMPUTE_CONTROL_IMAGE:?set ENCOMPUTE_CONTROL_IMAGE and ENCOMPUTE_SERVICES_IMAGE to images with native TLS (or LAB_BUILD_IMAGES=1); see docs/production-deployment.md}"
+: "${ENCOMPUTE_SERVICES_IMAGE:?set ENCOMPUTE_SERVICES_IMAGE (see ENCOMPUTE_CONTROL_IMAGE)}"
+export ENCOMPUTE_CONTROL_IMAGE ENCOMPUTE_SERVICES_IMAGE
 ISS="${ENCOMPUTE_OIDC_ISSUER:-https://idp.lab.test.invalid}"
 export BAO_ADDR="https://localhost:$BAO_PORT" BAO_CACERT="$PWD/secrets/bao-ca.crt"
 EDGE="https://localhost:$EDGE_API_PORT"
@@ -63,11 +80,11 @@ BAO_KEY_SHARES=1 BAO_KEY_THRESHOLD=1 ./bootstrap-openbao.sh
 ./bao-token.sh login
 
 step "secrets"
-ENCOMPUTE_OIDC_ISSUER="$ISS" BAO_UPSTREAM=openbao:8200 BAO_SERVER_NAME=openbao ./init-secrets.sh
+ENCOMPUTE_OIDC_ISSUER="$ISS" BAO_UPSTREAM=openbao:8200 ./init-secrets.sh
 set -a; . ./.env; set +a
 
 step "database, control plane, edge"
-DOCKER_TIMEOUT=300 dc up -d --build postgres pg-tunnel control bao-tunnel edge
+DOCKER_TIMEOUT=300 dc up -d postgres control edge
 wait_for "the edge serves the API over TLS" "curl -fs --cacert '$CA' $EDGE/ready" 120
 dc exec -T control encompute-control bootstrap --issuer "$ISS" --subject platform-admin
 
@@ -75,13 +92,13 @@ step "platform services: register the evaluator and the key broker"
 reg() { api platform-admin POST /v1/organizations/platform/service-accounts \
   "{\"id\":\"$1\",\"kind\":\"$2\",\"public_key\":\"$3\",\"url\":\"$4\"}" >/dev/null; }
 reg evaluator-1 evaluator "$ENCOMPUTE_EVALUATOR_PUBLIC_KEY" "$ENCOMPUTE_EVALUATOR_URL"
-reg "keybroker-$KEYBROKER_ORG" keybroker "$ENCOMPUTE_KEYBROKER_PUBLIC_KEY" "http://bao-tunnel:8760"
+reg "keybroker-$KEYBROKER_ORG" keybroker "$ENCOMPUTE_KEYBROKER_PUBLIC_KEY" "http://keybroker:8760"
 
 step "key broker state: protect one asset (wraps the broker's KEK in OpenBao)"
 POL="$(mktemp)"
 trap 'rm -f "$POL"' EXIT
 d run --rm -v "$ROOT/deploy/confidential-space/demo.eir:/m.eir:ro" --entrypoint encompute \
-  "${ENCOMPUTE_SERVICES_IMAGE:-ghcr.io/bader82t/encompute-services@sha256:b76d8993cc375291e6627e093eed4abc32a5f9dc9ddbbf8c1a7a710b06a36f33}" \
+  "$ENCOMPUTE_SERVICES_IMAGE" \
   attest policy /m.eir --image "sha256:$(printf 'a%.0s' $(seq 64))" --tee intel_tdx > "$POL"
 chmod 644 "$POL"
 ./protect-asset.sh lab-asset "$POL" >/dev/null

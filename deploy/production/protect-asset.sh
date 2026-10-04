@@ -6,8 +6,9 @@
 #
 # POLICY.json comes from `encompute attest policy MODEL --image sha256:...
 # --tee intel_tdx`. The key broker must have its token file (bao-token.sh)
-# and the bao-tunnel must be up; the broker itself may be stopped, and must
-# be (re)started afterwards: it refuses to start without its state.
+# and the root-key provider must be reachable on the `bao` network; the broker
+# itself may be stopped, and must be (re)started afterwards: it refuses to
+# start without its state.
 set -euo pipefail
 cd "$(dirname "$0")"
 ASSET="${1:?usage: protect-asset.sh ASSET POLICY.json}"
@@ -15,7 +16,6 @@ POLICY="$(cd "$(dirname "${2:?usage: protect-asset.sh ASSET POLICY.json}")" && p
 ORG="${KEYBROKER_ORG:-modelco}"
 PROJECT="${COMPOSE_PROJECT_NAME:-encompute-prod}"
 dc() { docker compose -p "$PROJECT" "$@"; }
-dc up -d bao-tunnel >/dev/null
 dc run --rm -T --no-deps -v "$POLICY:/tmp/policy.json:ro" keybroker \
   keys protect --asset "$ASSET" --policy /tmp/policy.json \
   --broker-id "keybroker-$ORG" --root-key "openbao:transit/$ORG" --organization "$ORG" \

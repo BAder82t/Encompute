@@ -38,5 +38,5 @@ untar() { docker run --rm -v "${PROJECT}_$1:/v" -v "$DIR:/b:ro" "$ALPINE" sh -c 
 untar anchor '[ -z "$(ls -A /v)" ] && tar -C /v -xf /b/anchor.tar && echo "anchor restored" || echo "anchor kept (existing anchor is authoritative)"'
 untar broker '[ -z "$(ls -A /v)" ] && tar -C /v -xf /b/broker.tar && echo "broker restored" || echo "broker kept (existing broker state is authoritative)"'
 untar evaluator 'tar -C /v -xf /b/evaluator.tar'
-dc up -d pg-tunnel control edge
+dc up -d control edge
 echo "restored from $DIR; the control plane verifies the database against the anchor at start"

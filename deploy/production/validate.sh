@@ -72,7 +72,7 @@ psql_sock() { # run SQL in the postgres container over the local socket
   d exec -i "$PG" psql -U encompute -d encompute -tAq -c "$1" 2>&1
 }
 
-PG="$(cid postgres)"; CONTROL="$(cid control)"; TUN="$(cid pg-tunnel)"
+PG="$(cid postgres)"; CONTROL="$(cid control)"; KEYBROKER="$(cid keybroker)"
 ALL="$(cids_all)"
 
 # -----------------------------------------------------------------------------
@@ -83,9 +83,10 @@ else
   bad=""
   for c in $ALL; do
     img="$(d inspect -f '{{.Config.Image}}' "$c")"
-    case "$img" in *@sha256:*|encompute-tunnel:*) ;; *) bad="$bad $(d inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$c")=$img" ;; esac
+    # By digest, or by image ID (a bare sha256:<64 hex>): both are content-addressed.
+    case "$img" in *@sha256:*|sha256:????????????????????????????????????????????????????????????????) ;; *) bad="$bad $(d inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$c")=$img" ;; esac
   done
-  [ -z "$bad" ] && pass TOP-01 "every image is pinned by digest (the tunnel is built from a digest-pinned Dockerfile)" \
+  [ -z "$bad" ] && pass TOP-01 "every image is pinned by digest (or is a content-addressed image ID)" \
     || fail TOP-01 "images not pinned by digest:$bad"
   pub=""
   for c in $ALL; do
@@ -168,19 +169,31 @@ else
     if [ "$w" = 0 ] && [ "${#pw}" -ge 24 ]; then pass PG-06 "the database password is not a default and is ${#pw} characters"
     else fail PG-06 "the database password is a default or shorter than 24 characters"; fi
   else fail PG-06 "cannot read $SECRETS_DIR/db-password"; fi
-  url=""; [ -r "$SECRETS_DIR/db-url" ] && url="$(cat "$SECRETS_DIR/db-url")"
-  host="$(printf '%s' "$url" | sed -n 's|^[a-z]*://[^@]*@\([^:/?]*\).*|\1|p')"
-  case "$host" in
-    127.0.0.1|localhost)
-      cfg=""; [ -n "$TUN" ] && cfg="$(d exec "$TUN" cat /etc/stunnel/pg.conf 2>/dev/null)"
-      if printf '%s' "$cfg" | grep -qiE '^verifyChain *= *yes' && printf '%s' "$cfg" | grep -qiE '^checkHost *= *[a-z]' \
-         && printf '%s' "$cfg" | grep -qiE '^CAfile *=' && ! printf '%s' "$cfg" | grep -qiE '^(verify *= *0|verifyPeer *= *no)'; then
-        pass PG-07 "the control plane reaches PostgreSQL through a TLS client that verifies the server's chain and name (the verify-full equivalent)"
-      else fail PG-07 "the connection string points at loopback but no TLS client that verifies chain AND name is in front of it" "$cfg"; fi ;;
-    "") fail PG-07 "cannot read the database URL ($SECRETS_DIR/db-url)" ;;
-    *) if printf '%s' "$url" | grep -q 'sslmode=verify-full'; then pass PG-07 "the connection string requires sslmode=verify-full"
-       else fail PG-07 "the connection string reaches $host without sslmode=verify-full"; fi ;;
-  esac
+  # The control plane's own TLS client, as it is configured in the running
+  # container: read the mounted URL (not the host's copy) and the files it names.
+  url=""; [ -n "$CONTROL" ] && url="$(d exec "$CONTROL" cat /run/secrets/db-url 2>/dev/null)"
+  if [ -z "$url" ]; then fail PG-07 "cannot read the database URL in the control plane container (/run/secrets/db-url)"
+  else
+    q="${url#*\?}"; [ "$q" = "$url" ] && q=""
+    param() { printf '%s' "$q" | tr '&' '\n' | sed -n "s/^$1=//p" | head -n 1; }
+    mode="$(param sslmode)"; root="$(param sslrootcert)"; crt="$(param sslcert)"; key="$(param sslkey)"
+    missing=""
+    for f in "$root" "$crt" "$key"; do
+      [ -n "$f" ] && d exec "$CONTROL" test -r "$f" 2>/dev/null || missing="$missing ${f:-(unset)}"
+    done
+    if [ "$mode" != verify-full ]; then
+      fail PG-07 "the control plane's database URL has sslmode=${mode:-(none)}, not verify-full: the server is not verified (chain and name)"
+    elif [ -n "$missing" ]; then
+      fail PG-07 "sslmode=verify-full, but sslrootcert, sslcert and sslkey must all name readable files in the control plane container; missing:$missing"
+    else
+      pass PG-07 "the control plane's database URL requires sslmode=verify-full (chain and name against $root) and presents the client certificate $crt"
+    fi
+  fi
+  # And what it actually does: its live connections are TLS and carry a client certificate.
+  out="$(psql_sock "select count(*) filter (where s.ssl is not true or s.client_dn is null), count(*) from pg_stat_activity a join pg_stat_ssl s using (pid) where a.client_addr is not null and a.backend_type = 'client backend'")"
+  if [ "$out" = "0|0" ]; then fail PG-08 "no network connection to inspect (is the control plane connected?)"
+  elif [ "${out%%|*}" = 0 ]; then pass PG-08 "every network connection to the database is TLS and presented a client certificate (${out#*|} inspected)"
+  else fail PG-08 "$out (without TLS or a client certificate | total) network connections to the database"; fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -237,6 +250,29 @@ print("ok" if not bad else "; ".join(bad))' 2>/dev/null)"
   else fail BAO-06 "the key broker's token: $verdict"; fi
 else fail BAO-06 "cannot check the key broker's token (no $SECRETS_DIR/bao-token or no provider answer)"; fi
 
+# The key broker's own TLS client, as configured in the running container.
+if [ -z "$KEYBROKER" ]; then fail BAO-07 "no keybroker container in project '$PROJECT'"
+else
+  e="$(d inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$KEYBROKER")"
+  kaddr="$(printf '%s\n' "$e" | sed -n 's/^BAO_ADDR=//p' | head -n 1)"
+  kca="$(printf '%s\n' "$e" | sed -n 's/^BAO_CACERT=//p' | head -n 1)"
+  kcert="$(printf '%s\n' "$e" | sed -n 's/^BAO_CLIENT_CERT=//p' | head -n 1)"
+  kkey="$(printf '%s\n' "$e" | sed -n 's/^BAO_CLIENT_KEY=//p' | head -n 1)"
+  case "$kaddr" in
+    https://*) : ;;
+    *) fail BAO-07 "the key broker's BAO_ADDR is not https (${kaddr:-unset})"; kaddr="" ;;
+  esac
+  if [ -n "$kaddr" ]; then
+    if [ -z "$kca" ] || ! d exec "$KEYBROKER" test -r "$kca" 2>/dev/null; then
+      fail BAO-07 "the key broker has no readable BAO_CACERT (${kca:-unset}): it would trust only the public web roots for a private provider"
+    elif [ -n "$kcert$kkey" ] && { [ -z "$kcert" ] || [ -z "$kkey" ] || ! d exec "$KEYBROKER" test -r "$kcert" 2>/dev/null || ! d exec "$KEYBROKER" test -r "$kkey" 2>/dev/null; }; then
+      fail BAO-07 "BAO_CLIENT_CERT and BAO_CLIENT_KEY must both name readable files (cert ${kcert:-unset}, key ${kkey:-unset})"
+    else
+      pass BAO-07 "the key broker verifies the provider ($kaddr) natively against $kca${kcert:+ and presents the client certificate $kcert}"
+    fi
+  fi
+fi
+
 # -----------------------------------------------------------------------------
 section "Secrets: files, never environment"
 envbad=""; valbad=""
@@ -244,7 +280,7 @@ envbad=""; valbad=""
 for c in $ALL; do d inspect -f '{{json .Config.Env}} {{json .Config.Cmd}} {{json .Config.Entrypoint}}' "$c" >> "$WORK/inspect.json"; done
 for c in $ALL; do
   svc="$(d inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$c")"
-  names="$(d inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" | sed 's/=.*//' | grep -iE 'PASSWORD|PASSWD|SECRET|TOKEN|PRIVATE|_KEY' | grep -viE 'PUBLIC|_FILE$' || true)"
+  names="$(d inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" | sed 's/=.*//' | grep -iE 'PASSWORD|PASSWD|SECRET|TOKEN|PRIVATE|_KEY' | grep -viE 'PUBLIC|_FILE$|^(BAO|VAULT)_CLIENT_KEY$' || true)"
   [ -z "$names" ] || envbad="$envbad $svc:$(echo $names | tr ' ' ',')"
 done
 [ -z "$envbad" ] && pass SEC-01 "no secret-named environment variable (every secret is a *_FILE path)" || fail SEC-01 "secret-named environment variables:$envbad"

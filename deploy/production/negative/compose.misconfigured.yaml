@@ -5,6 +5,11 @@
 #   edge       the operations and key-broker listeners do NOT require a client certificate
 #   control    a stand-in with secrets as environment literals and no health check
 #   network    not internal; images not pinned
+#   keybroker  a stand-in whose root-key provider address and CA come from run.sh
+#              (planted: plain http; https without a CA)
+#   control's database URL also comes from run.sh (planted: sslmode=disable,
+#   require, verify-ca), and run.sh finally configures the stand-ins correctly
+#   to show the validator can pass the same two checks.
 # Never run it anywhere that matters.
 name: encompute-negative
 
@@ -38,6 +43,17 @@ services:
     environment:
       ENCOMPUTE_SIGNING_KEY: ${NEG_SIGNING_KEY:?set by run.sh}
       DATABASE_PASSWORD: ${NEG_DB_PASSWORD:?set by run.sh}
+    # The database URL and the files it may name, as the real control plane
+    # has them mounted.
+    secrets: [db-url, internal-ca.crt, pg-client.crt, pg-client.key]
+
+  keybroker:
+    image: alpine:3.20
+    command: ["sleep", "3600"]
+    environment:
+      BAO_ADDR: ${NEG_KB_BAO_ADDR:?set by run.sh}
+      BAO_CACERT: ${NEG_KB_BAO_CACERT:-}
+    secrets: [bao-ca.crt]
 
   edge:
     image: caddy:2-alpine@sha256:881bbc60f9986d5ab8e7cfd6cf7e4ef3c9c0439fef2429d035d065577882f028
@@ -57,3 +73,8 @@ secrets:
   db-password: {file: "${NEG_SECRETS}/db-password"}
   edge.crt: {file: "${NEG_SECRETS}/edge.crt"}
   edge.key: {file: "${NEG_SECRETS}/edge.key"}
+  db-url: {file: "${NEG_SECRETS}/db-url"}
+  internal-ca.crt: {file: "${NEG_SECRETS}/internal-ca.crt"}
+  pg-client.crt: {file: "${NEG_SECRETS}/pg-client.crt"}
+  pg-client.key: {file: "${NEG_SECRETS}/pg-client.key"}
+  bao-ca.crt: {file: "${NEG_SECRETS}/bao-ca.crt"}
