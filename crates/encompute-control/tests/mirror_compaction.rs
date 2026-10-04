@@ -400,6 +400,133 @@ fn old_and_new_backups_after_a_compaction() {
     env0.started();
 }
 
+// --- the recorded retention policy -----------------------------------------------------
+
+/// The manifest files of an archive directory.
+fn manifests(archive: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(archive)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("manifest-"))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Rewrites the `policy` of a manifest file (or removes it: the format
+/// from before it was recorded).
+fn set_policy(manifest: &Path, policy: Option<serde_json::Value>) {
+    let mut m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+    match policy {
+        Some(p) => m["policy"] = p,
+        None => {
+            m.as_object_mut().unwrap().remove("policy");
+        }
+    }
+    std::fs::write(manifest, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+}
+
+/// A compaction records the retention it ran with and when, in the
+/// manifest, and that record is informational: verifying the archive and
+/// recovery give the same result whatever it says (or when it is absent, as
+/// in a manifest written before it was recorded), and a later compaction
+/// with another retention leaves what an earlier one sealed as it was.
+#[test]
+fn the_recorded_retention_is_audit_information_and_never_read() {
+    let Some((env0, backups)) = log_with_backups(&[1_000], 4_500) else {
+        return;
+    };
+    let old = &backups[0];
+    let source = dump_log(&env0.url);
+    let archive = tmp_dir("archive");
+    let before = encompute_verification::service::now();
+    let (env0, r) = compacted(env0, &archive);
+    let after = encompute_verification::service::now();
+    assert_eq!(r.sealed_after, 4_000, "{r:?}");
+
+    // Recorded: the effective keep_events and min_age_secs, and the time.
+    let files = manifests(&archive);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let m: serde_json::Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    assert_eq!(m["policy"]["keep_events"], 100, "{m}");
+    assert_eq!(m["policy"]["min_age_secs"], 0, "{m}");
+    let at = m["policy"]["compacted_at"].as_u64().unwrap();
+    assert!(
+        (before..=after).contains(&at),
+        "{at} not in {before}..={after}"
+    );
+
+    // Verification and recovery do not depend on it: the same outcome with
+    // the recorded values, with others, with absurd ones and with none.
+    let url = env0.url.clone();
+    let mut recovered = vec![];
+    let policies = [
+        Some(m["policy"].clone()),
+        Some(json!({"keep_events": 0, "min_age_secs": 0, "compacted_at": 0})),
+        Some(
+            json!({"keep_events": 999_999_999, "min_age_secs": 31_536_000_000u64,
+                    "compacted_at": u64::MAX / 2}),
+        ),
+        None,
+    ];
+    for p in policies {
+        set_policy(&files[0], p.clone());
+        assert_eq!(
+            verify_the_archive(&env0, &archive).unwrap(),
+            r.archived_segments,
+            "{p:?}"
+        );
+        restore_database(old, &url);
+        refused_start(&env0, "GOVERNANCE LOG STATE ROLLBACK");
+        let notes = recover_with_archive(&env0, Some(&archive)).unwrap();
+        assert!(
+            notes.iter().any(|n| n.contains("from the mirror")),
+            "{notes:?}"
+        );
+        recovered.push(dump_log(&url));
+        env0.started();
+    }
+    for (i, rows) in recovered.iter().enumerate() {
+        assert_same_rows("a recovery whatever the recorded policy", &source, rows);
+        assert_same_rows("the same rows each time", &recovered[0], &recovered[i]);
+    }
+    // What the seal does commit to is still checked, policy or not.
+    let sealed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    let mut forged = sealed.clone();
+    forged["segments"][0]["sha256"] = json!("00".repeat(32));
+    std::fs::write(&files[0], serde_json::to_vec_pretty(&forged).unwrap()).unwrap();
+    assert!(verify_the_archive(&env0, &archive).is_err());
+    std::fs::write(&files[0], serde_json::to_vec_pretty(&sealed).unwrap()).unwrap();
+    verify_the_archive(&env0, &archive).unwrap();
+
+    // A later compaction under another retention extends the archive: the
+    // earlier manifest stays byte for byte, and records its own policy.
+    let first = std::fs::read(&files[0]).unwrap();
+    let t = env0.started();
+    append_and_checkpoint(&t, 4_500, 2_000);
+    let mut o = opts(&archive);
+    o.keep_events = 50;
+    o.min_age_secs = 7;
+    let r2 = t.control.compact_mirror(&o).unwrap();
+    assert!(r2.sealed_after > r.sealed_after, "{r2:?}");
+    let env0 = stop(t);
+    let files2 = manifests(&archive);
+    assert_eq!(files2.len(), 2, "{files2:?}");
+    assert_eq!(std::fs::read(&files[0]).unwrap(), first);
+    let m2: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&files2[1]).unwrap()).unwrap();
+    assert_eq!(m2["policy"]["keep_events"], 50, "{m2}");
+    assert_eq!(m2["policy"]["min_age_secs"], 7, "{m2}");
+    verify_the_archive(&env0, &archive).unwrap();
+    env0.started();
+}
+
 // --- truncation and replay -----------------------------------------------------------
 
 /// What an attacker with the anchor store's files can do to a compacted

@@ -52,7 +52,7 @@ use encompute_ir::{Code, Error, Result};
 use encompute_verification::service::sha256_hex;
 
 use crate::anchor::{AnchorStore, Seal, StoredAnchor};
-use crate::archive::{Archive, ArchivedSegment, Manifest, MANIFEST_VERSION};
+use crate::archive::{Archive, ArchivedSegment, CompactionPolicy, Manifest, MANIFEST_VERSION};
 use crate::control::Control;
 use crate::govlog;
 use crate::log::LogLine;
@@ -315,6 +315,12 @@ impl Control {
                 size: sealed_size,
                 head: sealed_head.clone(),
                 segments: manifest_segments,
+                // Informational: the seal does not commit to it.
+                policy: Some(CompactionPolicy {
+                    keep_events: o.keep_events,
+                    min_age_secs: o.min_age_secs,
+                    compacted_at: now,
+                }),
             };
             let new_seal = manifest.seal()?;
             archive.put_manifest(&manifest)?;

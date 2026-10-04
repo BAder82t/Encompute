@@ -54,6 +54,22 @@ pub struct ArchivedSegment {
     pub sha256: String,
 }
 
+/// The retention policy a compaction ran with, recorded for the audit
+/// trail. It is informational: it is **not** part of the manifest's digest
+/// (so the seal does not commit to it), and neither verifying an archive nor
+/// recovery reads it. Changing the retention of a later compaction never
+/// changes how history sealed earlier verifies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionPolicy {
+    /// A segment within this many events of the anchored size was kept.
+    pub keep_events: i64,
+    /// A segment whose last event was younger than this (seconds) was kept.
+    pub min_age_secs: u64,
+    /// When the compaction committed (seconds since the epoch).
+    pub compacted_at: u64,
+}
+
 /// What the archive holds: the segments of events `1..=size`, in order,
 /// and the chain head after the last.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,13 +79,35 @@ pub struct Manifest {
     pub size: i64,
     pub head: String,
     pub segments: Vec<ArchivedSegment>,
+    /// How the compaction that wrote this manifest was configured. Absent
+    /// from manifests written before it was recorded, which parse and
+    /// digest exactly as before. Not covered by the digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<CompactionPolicy>,
+}
+
+/// The part of a manifest the seal commits to.
+#[derive(Serialize)]
+struct Committed<'a> {
+    v: u32,
+    size: i64,
+    head: &'a str,
+    segments: &'a [ArchivedSegment],
 }
 
 impl Manifest {
-    /// SHA-256 of the canonical JSON: what the anchor's seal holds.
+    /// SHA-256 of the canonical JSON of everything but the recorded policy:
+    /// what the anchor's seal holds. It is the digest of the format before
+    /// the policy was recorded, byte for byte.
     pub fn digest(&self) -> Result<String> {
+        let c = Committed {
+            v: self.v,
+            size: self.size,
+            head: &self.head,
+            segments: &self.segments,
+        };
         Ok(sha256_hex(
-            &encompute_verification::canonical::canonical_json(self)?,
+            &encompute_verification::canonical::canonical_json(&c)?,
         ))
     }
 
@@ -241,8 +279,23 @@ impl Archive {
     /// its digest.
     pub fn put_manifest(&self, m: &Manifest) -> Result<String> {
         m.check_shape()?;
+        let path = self.manifest_path(m.size);
+        // A manifest of the same sealed content already there (an earlier
+        // run that crashed before its commit) stays as it is, with the
+        // policy it recorded: the policy is not part of what is sealed.
+        if path.exists() {
+            let old: Manifest = serde_json::from_slice(&read_bounded_manifest(&path)?)
+                .map_err(|e| file_err(&path, e))?;
+            if old.digest()? == m.digest()? {
+                return m.digest();
+            }
+            return Err(archive_err(format!(
+                "governance archive {} exists with other content: refusing to replace it",
+                path.display()
+            )));
+        }
         let bytes = serde_json::to_vec_pretty(m).map_err(|e| archive_err(e.to_string()))?;
-        put(&self.manifest_path(m.size), &bytes)?;
+        put(&path, &bytes)?;
         m.digest()
     }
 
@@ -360,6 +413,7 @@ mod tests {
             size: 5,
             head: "ab".repeat(32),
             segments: vec![s1, s2],
+            policy: None,
         };
         a.put_manifest(&m).unwrap();
         let seal = m.seal().unwrap();
@@ -374,6 +428,27 @@ mod tests {
         let (a, m, _) = built(&dir);
         a.put_segment(1, 1, 3, "one\ntwo\nthree\n").unwrap();
         a.put_manifest(&m).unwrap();
+        // The same sealed content with another recorded policy keeps the
+        // file; other sealed content is refused.
+        let mut again = m.clone();
+        again.policy = Some(CompactionPolicy {
+            keep_events: 1,
+            min_age_secs: 1,
+            compacted_at: 1,
+        });
+        a.put_manifest(&again).unwrap();
+        assert_eq!(
+            Archive::open(&dir, false)
+                .unwrap()
+                .load(&m.seal().unwrap(), false)
+                .unwrap()
+                .manifest
+                .policy,
+            None
+        );
+        let mut other = m.clone();
+        other.head = "cd".repeat(32);
+        assert!(a.put_manifest(&other).is_err());
         let e = a.put_segment(1, 1, 3, "other\n").unwrap_err();
         assert!(e.message.contains("refusing to replace"), "{e}");
         assert_eq!(
@@ -455,5 +530,65 @@ mod tests {
         let mut v = m;
         v.v = 9;
         assert!(a.put_manifest(&v).is_err());
+    }
+
+    /// The recorded retention policy is informational: a manifest with any
+    /// policy, or none (the format before it was recorded), has the same
+    /// digest, so one seal verifies all of them, and the policy is read back
+    /// as written.
+    #[test]
+    fn the_recorded_policy_is_not_part_of_what_the_seal_commits_to() {
+        let dir = tmp("policy");
+        let (a, m, seal) = built(&dir);
+        // The digest of the format without the field, spelled out.
+        let legacy = sha256_hex(
+            &encompute_verification::canonical::canonical_json(&serde_json::json!({
+                "v": m.v, "size": m.size, "head": m.head, "segments": m.segments,
+            }))
+            .unwrap(),
+        );
+        assert_eq!(m.digest().unwrap(), legacy);
+        assert_eq!(seal.manifest, legacy);
+        for (keep, age, at) in [(10_000, 30 * 86_400, 1u64), (0, 0, 2), (7, 9, u64::MAX / 2)] {
+            let mut with = m.clone();
+            with.policy = Some(CompactionPolicy {
+                keep_events: keep,
+                min_age_secs: age,
+                compacted_at: at,
+            });
+            assert_eq!(with.digest().unwrap(), legacy);
+            assert_eq!(with.seal().unwrap(), seal);
+            // Rewrite the manifest file with this policy: the sealed
+            // archive still loads and every segment still verifies.
+            std::fs::write(
+                dir.join(format!("manifest-{:012}.json", m.size)),
+                serde_json::to_vec_pretty(&with).unwrap(),
+            )
+            .unwrap();
+            let v = a.load(&seal, true).unwrap();
+            assert_eq!(v.manifest.policy, with.policy);
+            assert_eq!(v.read(1).unwrap(), "one\ntwo\nthree\n");
+        }
+        // A manifest as the earlier format wrote it (no policy key).
+        std::fs::write(
+            dir.join(format!("manifest-{:012}.json", m.size)),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "v": m.v, "size": m.size, "head": m.head, "segments": m.segments,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(a.load(&seal, true).unwrap().manifest.policy, None);
+        // What the seal does commit to is still checked: a changed segment
+        // list is refused whatever policy it carries.
+        let mut tampered = m.clone();
+        tampered.segments[0].sha256 = "00".repeat(32);
+        tampered.policy = m.policy.clone();
+        std::fs::write(
+            dir.join(format!("manifest-{:012}.json", m.size)),
+            serde_json::to_vec_pretty(&tampered).unwrap(),
+        )
+        .unwrap();
+        assert!(a.load(&seal, false).is_err());
     }
 }
