@@ -48,6 +48,16 @@ deny = [
     { name = "tfhe-cuda-backend", reason = "part of TFHE-rs (research-only)" },
     { name = "concrete-csprng", reason = "part of Zama's stack (research-only)" },
     { name = "concrete-fft", reason = "part of Zama's stack (research-only)" },
+    # The TLS boundary: every TLS client is rustls with the `ring` provider.
+    # OpenSSL and aws-lc would need their own license and build review (the
+    # OpenSSL entries in security/exceptions.toml are image packages, not
+    # crates). scripts/test-deny-tls-bans.sh proves these bans fire.
+    { name = "openssl", reason = "TLS is rustls with ring; OpenSSL is not in the production graph" },
+    { name = "openssl-sys", reason = "TLS is rustls with ring; OpenSSL is not in the production graph" },
+    { name = "native-tls", reason = "TLS is rustls with ring; native-tls pulls in the platform TLS library" },
+    { name = "aws-lc-rs", reason = "TLS is rustls with ring; aws-lc is not part of the reviewed build" },
+    { name = "aws-lc-sys", reason = "TLS is rustls with ring; aws-lc is not part of the reviewed build" },
+    { name = "aws-lc-fips-sys", reason = "TLS is rustls with ring; aws-lc is not part of the reviewed build" },
 ]
 
 [licenses]

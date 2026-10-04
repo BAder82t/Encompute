@@ -162,6 +162,8 @@ jobs:
         with:
           tool: cargo-deny,cargo-audit
       - run: cargo deny check advisories bans licenses sources
+      # The OpenSSL / aws-lc / native-tls bans must actually fire.
+      - run: ./scripts/test-deny-tls-bans.sh
       - run: scripts/release/check-pins.sh
       - name: third-party notices cover the production crates
         run: cargo fetch --locked && python3 scripts/third_party_notices.py --check
