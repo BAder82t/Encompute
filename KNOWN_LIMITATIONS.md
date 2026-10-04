@@ -173,23 +173,33 @@ Related: [support matrix](docs/support-matrix.md),
   are not compared with the registry; only the IDs are. Checking that a
   registered asset ID names a real asset also tells a submitter who
   already knows an ID that it exists.
-- **The governance log and its mirror grow without bound.** The state
-  anchor is constant in size, but every security-negative transition and
-  every privacy spend is an event of the governance log (about 300 bytes),
-  kept in the database and mirrored into the anchor store; nothing is
-  pruned below the anchored head. 10 million spends are about 3 GB of
-  mirror, and the start check, which recomputes the whole log, grows with
-  it (measured in release mode on a shared, loaded machine: 4.3 seconds
-  for 120,100 events). Recovery from an older backup replays the missing
-  events from the mirror one at a time: 732 seconds for 107,600 events
-  (about 7 ms each), not optimized. A spend adds one append and
-  one checkpoint to its latency (concurrent spends share a checkpoint),
-  and still re-loads and re-verifies the whole ledger to checkpoint it
-  (besides verifying it inside the spend), so its cost grows with the
-  ledger's age. Size the anchor store for the mirror (the vault's entry
-  limit applies to each segment, which is at most 256 KiB, not to the
-  mirror as a whole). Compacting the mirror and snapshotting the log's
-  frontier for startup are not built.
+- **The governance log grows without bound; its mirror can be
+  compacted.** The state anchor is constant in size, but every
+  security-negative transition and every privacy spend is an event of the
+  governance log (about 300 bytes), kept in the database. **The database's
+  log is never compacted** (nothing is pruned there: the start check, the
+  negative sets, proofs and evidence read all of it), so the database
+  grows with it, and so does the start check, which recomputes the whole
+  log (measured in release mode on a loaded machine: 4.3 seconds for
+  120,100 events; 10 million spends are about 3 GB). The mirror in the
+  anchor store can be compacted into an archive you keep
+  (`compact-governance-mirror`, docs/deployment.md): the anchor store then
+  holds the tail, and the anchor grows by a seal of a few hundred bytes
+  once, not with the log. Without compaction the mirror grows as before.
+  An old backup that ends inside the sealed prefix needs the archive to
+  recover (`recover --archive-dir`); without it, recovery refuses and says
+  so. A compaction is an anchor version bump: no downgrade after the first
+  one. Recovery from an older backup imports the missing events in
+  batches: 160 seconds for 107,600 events, against 1,011 seconds one at a
+  time on the same loaded machine (732 on a quieter one). A spend
+  adds one append and one checkpoint to its latency (concurrent spends
+  share a checkpoint), and still re-loads and re-verifies the whole ledger
+  to checkpoint it (besides verifying it inside the spend), so its cost
+  grows with the ledger's age. Not built: pruning or summarizing the
+  database's log (it needs signed snapshots of every negative set, of
+  each partition's tree and of every reader's view, and the start check
+  would then trust the snapshot instead of recomputing the history), and a
+  snapshot of the log's frontier for startup.
 - **An anchor restored from the same backup forgets later spend.** When
   the database and the anchor are restored together, privacy spend rolls
   back to the backup. Keep the anchor outside the backup set, in the

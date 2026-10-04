@@ -89,6 +89,8 @@ fn append_and_checkpoint(t: &T, from: usize, n: usize) {
 /// importer.
 fn import_reference(env0: &Env0, a: &StateAnchor, url: &str) -> u64 {
     let db = Db::connect(url).unwrap();
+    // A cold database is not migrated yet (a template clone is).
+    db.migrate().unwrap();
     let store = DirAnchor::new(env0.anchor_dir.clone()).unwrap();
     db.tx(|t| {
         let mut imp = ReferenceImporter::new(t)?;
@@ -107,6 +109,8 @@ fn import_reference(env0: &Env0, a: &StateAnchor, url: &str) -> u64 {
 /// The same with the batched importer.
 fn import_batched(env0: &Env0, a: &StateAnchor, url: &str) -> u64 {
     let db = Db::connect(url).unwrap();
+    // A cold database is not migrated yet (a template clone is).
+    db.migrate().unwrap();
     let store = DirAnchor::new(env0.anchor_dir.clone()).unwrap();
     db.tx(|t| {
         let mut imp = Importer::new(t)?;

@@ -6,6 +6,16 @@ Work toward confidential cross-agency computation
 ([docs/public-sector.md](docs/public-sector.md)). None of it is part of
 0.3.
 
+- **Governance log mirror: compaction and batched recovery.** The mirror
+  in the anchor store can be compacted into an archive the state anchor's
+  seal commits to (`encompute-control compact-governance-mirror`,
+  `verify-governance-archive`, `recover --archive-dir`; anchor version 3,
+  written by the first compaction only, a few hundred bytes, constant), with
+  a dry run, a retention window, a commit point at the anchor's
+  compare-and-set and crash-safe pruning. The database's log is not
+  compacted. Recovery's import writes 1,000 events per statement in one
+  transaction (107,600 events: 160 s, was 1,011 s on the same
+  loaded machine). INV-248.
 - **Assurance, attacks and examples (phase 9).** The attack suite
   `scripts/governance-attacks.sh` runs 27 attacks on the governance
   surface (forged or edited authorizations, expired or revoked ones, wrong
