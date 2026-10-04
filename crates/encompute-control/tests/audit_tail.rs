@@ -200,3 +200,69 @@ fn a_failed_anchor_write_leaves_the_audit_tail_for_the_next_checkpoint() {
     assert_eq!(a.audit_seq, audit_head(&t.env0.url).0);
     assert!(a.audit_seq >= head);
 }
+
+/// What an operator does after restoring a database backup older than the
+/// last anchored checkpoint: the start is refused naming AUDIT (the
+/// governance log did not move, so nothing else is behind), `recover`
+/// records the rewind in the audit chain (the lost events are not
+/// restored: the audit chain has no mirror), and the start then succeeds
+/// over a chain that includes the gap event.
+#[test]
+fn an_older_backup_is_refused_until_recovery_records_the_audit_gap() {
+    let Some(w) = world() else { return };
+    w.t.control.checkpoint_log().unwrap();
+    let url = w.t.env0.url.clone();
+    let (backup_head, _) = audit_head(&url);
+    let backup = format!("{}_auditbk", db_name(&url));
+    backup_database(&url, &backup);
+    // Events after the backup, anchored by the next checkpoint.
+    for i in 0..3 {
+        w.t.ok(
+            &w.b_dev,
+            "POST",
+            "/v1/projects",
+            Some(json!({"organization": "modelco", "name": format!("after-backup-{i}")})),
+        );
+    }
+    w.t.control.checkpoint_log().unwrap();
+    let (anchored, _) = audit_head(&url);
+    assert!(anchored >= backup_head + 3);
+    assert_eq!(w.t.control.anchor.snapshot().audit_seq, anchored);
+    let env0 = w.t.env0;
+    drop(w.t.control);
+
+    restore_database(&backup, &url);
+    let e = env0.start().err().expect("an older backup started");
+    assert!(e.message.contains("AUDIT STATE ROLLBACK"), "{e}");
+    assert!(e.message.contains("STARTUP REFUSED"), "{e}");
+    let gaps = |url: &str| -> i64 {
+        let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+        c.query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'audit.gap.recorded'",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+    };
+    assert_eq!(gaps(&url), 0);
+
+    let notes = run_recovery(&env0);
+    assert!(
+        notes.iter().any(|n| n.contains(&format!(
+            "audit chain: events after {backup_head} were lost"
+        ))),
+        "{notes:?}"
+    );
+    // The gap is an event of the audit chain; the lost events are not back
+    // (the chain is the backup's plus the gap event).
+    assert_eq!(gaps(&url), 1);
+    assert_eq!(
+        audit_head(&url).0,
+        backup_head + 1,
+        "the chain is the backup's plus the gap event: the events after the backup are not restored"
+    );
+    // The service starts, and the anchor now covers the recovered chain.
+    let t = env0.started();
+    t.control.checkpoint_log().unwrap();
+    assert_eq!(t.control.anchor.snapshot().audit_seq, audit_head(&url).0);
+}
