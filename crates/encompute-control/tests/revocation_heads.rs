@@ -432,6 +432,42 @@ fn head_from_a_non_member_refused() {
     assert_eq!(rh.stored(), 0);
 }
 
+/// Two reads of a draft agree on everything except `at`, the server's
+/// read time in whole seconds (it changes with the clock, not the log).
+fn same_draft(a: &Value, b: &Value) -> bool {
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        v.as_object_mut()
+            .expect("a draft is an object")
+            .remove("at");
+        v
+    };
+    strip(a) == strip(b)
+}
+
+/// Two reads of one draft that straddle a second boundary differ in `at`
+/// alone: a whole-value comparison (what the auditor test did) fails on
+/// them, the draft comparison does not, and a real difference is still
+/// seen. Deterministic: it forces the straddle the clock only produces
+/// under load.
+#[test]
+fn reads_of_a_draft_that_straddle_a_second_boundary_agree() {
+    let first = json!({"project": "p", "organization": "tax", "seq": 1, "root": "ab", "at": 1_000});
+    let second =
+        json!({"project": "p", "organization": "tax", "seq": 1, "root": "ab", "at": 1_001});
+    assert_ne!(first, second, "the old comparison fails on a straddle");
+    assert!(same_draft(&first, &second));
+    let mut other = second.clone();
+    other["root"] = json!("cd");
+    assert!(!same_draft(&first, &other), "a changed root is still seen");
+    other = second;
+    other["seq"] = json!(2);
+    assert!(
+        !same_draft(&first, &other),
+        "a changed number is still seen"
+    );
+}
+
 /// Auditors read the draft and write nothing: not from a member
 /// organization's auditor role, not from an appointed auditor organization.
 #[test]
@@ -441,7 +477,14 @@ fn auditor_post_refused() {
     let (aud_admin, aud_auditor) = auditor_org(g);
     let d = rh.draft(&g.tax_sec1, TAX);
     for who in [&g.tax_auditor, &aud_auditor] {
-        assert_eq!(rh.draft(who, TAX), d, "an auditor reads the draft");
+        let (lo, r, hi) = (now(), rh.draft(who, TAX), now());
+        // The draft carries the server's read time, in whole seconds: it
+        // differs between two reads whenever a second boundary falls
+        // between them. Each read's time is bracketed by the clock around
+        // that read, and everything else must equal the first draft.
+        let at = r["at"].as_u64().unwrap();
+        assert!((lo..=hi).contains(&at), "{at} outside {lo}..={hi}");
+        assert!(same_draft(&r, &d), "an auditor reads the draft: {r} vs {d}");
     }
     // The auditor organization's admin is not an auditor and not tax's
     // security admin: it reads nothing here.
