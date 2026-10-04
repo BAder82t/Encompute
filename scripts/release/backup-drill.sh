@@ -718,9 +718,16 @@ OUT="$(ENCOMPUTE_TOKEN="$(tok b-dev)" "$E" jobs run "$W/score.encompute" --proje
 check "a new job runs after the restore (CKKS result correct, trust SATISFIED)" \
   eq "$(close "$OUT" 0.01 0.04 0.09 0.81) $(grep -c 'Trust report *SATISFIED' "$W/job2.err")" "True 1"
 
-step "7b. database loss only: the surviving anchor is kept and the same backup restores"
+step "7b. database loss only: the surviving anchor is kept and a backup as new as it restores"
+# The anchor now covers the audit events the job after the restore wrote (it
+# anchors the audit chain's head with every checkpoint of the governance log),
+# so b1 is older than it: a fresh backup of the running deployment, anchor
+# first, is as new as the surviving anchor. (b1 over this anchor is refused:
+# step 8.)
+backup "$BACKUPS/b1b"
+snapshot "$W/pre-b1b"
 stop "$KB_PID" "$EVAL_PID" "$CTL_PID"
-restore "$BACKUPS/b1" > "$W/restore2.txt"
+restore "$BACKUPS/b1b" > "$W/restore2.txt"
 check "database-only restore keeps the existing anchor and broker state" eq \
   "$(grep -c 'anchor kept' "$W/restore2.txt") $(grep -c 'broker kept' "$W/restore2.txt")" "1 1"
 ctl verify-state >"$W/verify2.txt" 2>&1 || true
@@ -730,7 +737,7 @@ start_evaluator || die "the evaluator did not re-register"
 start_keybroker || die "the key broker did not restart"
 check "privacy state equals the backup after the database-only restore" eq \
   "$(ok a-owner GET "/v1/privacy/$DS1" | canon)|$(ok a-owner GET "/v1/privacy/$DS2" | canon)" \
-  "$(canon < "$W/pre/privacy-$DS1.json")|$(canon < "$W/pre/privacy-$DS2.json")"
+  "$(canon < "$W/pre-b1b/privacy-$DS1.json")|$(canon < "$W/pre-b1b/privacy-$DS2.json")"
 
 step "8. an OLDER backup over a NEWER anchor is refused; recovery freezes"
 PRE_DS1_SPENT="$(jget 'v["spent"]["epsilon"]' < "$W/pre/privacy-$DS1.json")"
