@@ -813,13 +813,20 @@ impl AnchorStore for OpenBaoKvAnchor {
     }
 
     fn mirror_delete(&self, n: u64, allow: &Allow<'_>) -> Result<()> {
-        let Some((current, _)) = self.mirror_entry(n)? else {
-            return Ok(());
-        };
-        allow(Some(&current))?;
-        // The metadata endpoint removes the entry and every version of it.
-        // (No compare-and-set exists for a delete: only a compaction
-        // deletes, below the seal, where no writer replaces.)
+        // An entry that cannot be read (never written, or soft-deleted by
+        // an operator: KV version 2 keeps the key and its metadata listed)
+        // has no content for `allow` to judge and nothing to lose, but its
+        // metadata still has to go for the segment to be gone from the live
+        // path and from the listing: so the delete below runs for it too,
+        // which also makes a rerun idempotent.
+        if let Some((current, _)) = self.mirror_entry(n)? {
+            allow(Some(&current))?;
+        }
+        // The metadata endpoint removes the entry and every version of it
+        // (a destroy, not a soft delete, which would leave the key listed
+        // and its versions undeletable). No compare-and-set exists for a
+        // delete: only a compaction deletes, below the seal, where no
+        // writer replaces.
         let url = format!(
             "{}/v1/{}/metadata/{}-glog/{n:012}",
             self.addr, self.mount, self.path
