@@ -474,17 +474,6 @@ impl Control {
                 ),
             )
         })?;
-        if a.audit_seq > seq
-            || audit::hash_at(&mut *c, a.audit_seq)?.as_deref() != Some(a.audit_root.as_str())
-        {
-            return Err(rollback(
-                "AUDIT",
-                format!(
-                    "the anchor recorded audit event {} but the database's chain ends at {seq} or differs",
-                    a.audit_seq
-                ),
-            ));
-        }
         // Each ledger's floor is its latest checkpoint event in the log
         // (which the checks above showed extends the anchored head).
         let frozen = govlog::negative_set(&mut *c, govlog::NegSet::FrozenLedgers)?;
@@ -530,6 +519,21 @@ impl Control {
             .next()
         {
             return Err(rollback(loss.state(), loss.message()));
+        }
+        // The audit chain last: a restore reaches the governed state and the
+        // audit chain together (every deny checkpoint anchors both), and the
+        // refusal that names what the log says was undone is the more useful
+        // one.
+        if a.audit_seq > seq
+            || audit::hash_at(&mut *c, a.audit_seq)?.as_deref() != Some(a.audit_root.as_str())
+        {
+            return Err(rollback(
+                "AUDIT",
+                format!(
+                    "the anchor recorded audit event {} but the database's chain ends at {seq} or differs",
+                    a.audit_seq
+                ),
+            ));
         }
         Ok(())
     }
@@ -1308,21 +1312,81 @@ impl Control {
 
     /// One checkpoint of the log. With `covered`, the event that needs
     /// anchoring: nothing is done when the anchor already holds it.
+    ///
+    /// The audit chain's head is anchored in the same compare-and-set
+    /// (one signed anchor, one commit point), so a checkpoint that makes a
+    /// deny event durable also covers every audit event committed before
+    /// it (the deny's own audit event, written in its transaction,
+    /// included). The audit chain has no mirror: the anchor detects a
+    /// truncated or rewritten chain, it cannot restore one.
     fn checkpoint_log_once(&self, covered: Option<i64>) -> Result<()> {
         self.anchor
             .try_update(&self.signer, |a| {
                 if covered.is_some_and(|g| g <= a.glog_size) {
                     return Ok(false);
                 }
-                let (size, head) = self
-                    .db
-                    .tx(|t| {
+                let audit_due = self.audit_head_differs(a);
+                let (size, head, audit) = self.db.tx(|t| {
+                    let (size, head) =
                         govlog::checkpoint_extending(t, &self.signer, a.glog_size, &a.glog_head)
-                    })
-                    .map_err(|e| self.log_rollback(a, e))?;
-                self.advance_log(a, size, head)
+                            .map_err(|e| self.log_rollback(a, e))?;
+                    let audit = if audit_due {
+                        Some(
+                            audit::checkpoint_extending(
+                                t,
+                                &self.signer,
+                                a.audit_seq,
+                                &a.audit_root,
+                            )
+                            .map_err(|e| self.audit_rollback(a, e))?,
+                        )
+                    } else {
+                        None
+                    };
+                    Ok((size, head, audit))
+                })?;
+                let mut moved = false;
+                if let Some(cp) = audit {
+                    if cp.seq > a.audit_seq {
+                        a.audit_seq = cp.seq;
+                        a.audit_root = cp.root;
+                        moved = true;
+                    }
+                }
+                Ok(self.advance_log(a, size, head)? || moved)
             })
             .map(|_| ())
+    }
+
+    /// Whether the audit head is not the anchored event (a read, no lock):
+    /// ahead of it, or behind or different, which the checkpoint then
+    /// refuses.
+    fn audit_head_differs(&self, a: &crate::anchor::StateAnchor) -> bool {
+        let head = self.db.conn().and_then(|mut c| {
+            c.query_one("SELECT seq, hash FROM audit_head WHERE id", &[])
+                .map_err(db_err)
+        });
+        match head {
+            Ok(r) => r.get::<_, i64>(0) != a.audit_seq || r.get::<_, String>(1) != a.audit_root,
+            Err(_) => true,
+        }
+    }
+
+    /// An audit chain that does not extend the anchored root is a rollback
+    /// found while the service runs; any other error passes.
+    fn audit_rollback(&self, a: &crate::anchor::StateAnchor, e: Error) -> Error {
+        if e.code == Code::TrustEvidence {
+            self.rollback_alarm("audit", "chain");
+            runtime_rollback(
+                "AUDIT",
+                format!(
+                    "the chain does not extend anchored audit event {}: {}",
+                    a.audit_seq, e.message
+                ),
+            )
+        } else {
+            e
+        }
     }
 
     /// Whether the transition that put `id` in `set` is anchored: the
@@ -1352,20 +1416,7 @@ impl Control {
             let cp = self
                 .db
                 .tx(|t| audit::checkpoint_extending(t, &self.signer, a.audit_seq, &a.audit_root))
-                .map_err(|e| {
-                    if e.code == Code::TrustEvidence {
-                        self.rollback_alarm("audit", "chain");
-                        runtime_rollback(
-                            "AUDIT",
-                            format!(
-                                "the chain does not extend anchored audit event {}: {}",
-                                a.audit_seq, e.message
-                            ),
-                        )
-                    } else {
-                        e
-                    }
-                })?;
+                .map_err(|e| self.audit_rollback(a, e))?;
             let newer = cp.seq > a.audit_seq;
             if newer {
                 a.audit_seq = cp.seq;

@@ -664,7 +664,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-keybroker/tests/root_keys.rs::openbao_wraps_unwraps_rotates_rewraps_and_revokes"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
-    inv!("INV-162", "deployment", "Audit records identify every security-sensitive state transition in a tamper-evident, anchored chain, without containing protected payloads (keys, data, weights, gradients, input values). An audit checkpoint is signed and anchored only if the chain extends the anchored root; a job failed at start for a revoked asset, and an evaluator's receipt key at registration, are audited (ENC-SF-2026-038, ENC-SF-2026-053, ENC-SF-2026-054).", [
+    inv!("INV-162", "deployment", "Audit records identify every security-sensitive state transition in a tamper-evident, anchored chain, without containing protected payloads (keys, data, weights, gradients, input values). An audit checkpoint is signed and anchored only if the chain extends the anchored root; a job failed at start for a revoked asset, and an evaluator's receipt key at registration, are audited (ENC-SF-2026-038, ENC-SF-2026-053, ENC-SF-2026-054). The state anchor holds the audit chain's head beside the governance log's, in one signed record with one commit point: every checkpoint of the log, forced and synchronous for each security deny event and run by the background pass every two seconds, anchors the audit head with it, so a deny call does not return before every audit event committed before it, its own included, is anchored and truncating them is refused at the next start (AUDIT STATE ROLLBACK), and an ordinary audit event (one that grants or merely records) waits for the next checkpoint at most: the audit events after the last checkpoint are the one part a truncation does not betray, and the audit chain has no mirror (the anchor detects a truncated chain, it never restores one).", [
         (Positive, "test:crates/encompute-control/tests/jobs.rs::lifecycle_receipt_trust_and_duplicate_messages"),
         (Positive, "test:crates/encompute-control/tests/keys.rs::key_releases_and_rotations_are_audited"),
         (Positive, "test:crates/encompute-control/tests/jobs.rs::a_job_failed_at_start_for_a_revoked_asset_is_audited"),
@@ -672,6 +672,9 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:crates/encompute-control/tests/state.rs::audit_chain_is_tamper_evident_and_anchored"),
         (Adversarial, "test:crates/encompute-control/tests/state.rs::truncated_audit_and_tampered_or_missing_anchor_are_refused"),
         (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::online_audit_rollback_is_never_reanchored"),
+        (Adversarial, "test:crates/encompute-control/tests/audit_tail.rs::a_deny_call_anchors_the_audit_events_before_it"),
+        (Positive, "test:crates/encompute-control/tests/audit_tail.rs::ordinary_audit_events_wait_for_the_next_checkpoint_and_no_longer"),
+        (Adversarial, "test:crates/encompute-control/tests/audit_tail.rs::a_failed_anchor_write_leaves_the_audit_tail_for_the_next_checkpoint"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
     inv!("INV-163", "deployment", "An evaluator executes only jobs compatible with its registered backend and parameter profile, only with an unexpired grant from the pinned control plane naming it and the job's program, and only after the control plane consents to the start.", [
