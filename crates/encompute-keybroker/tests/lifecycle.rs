@@ -663,15 +663,14 @@ fn lifecycle_restore_metadata_from_backup() {
     std::fs::remove_dir_all(&backup).unwrap();
 }
 
-/// FINDING (rollback): revocation destroys the key in the broker's state
-/// file only. The KEK and the root key are unchanged, so restoring an OLDER
-/// state file (taken before the revocation) with the current wrapped KEK
-/// brings the revoked key back, and the broker releases it again.
-///
-/// This test documents the current behaviour. When revocation is made
-/// rollback-proof, flip the final assertion to expect `Code::KeyRelease`.
+/// A revocation crypto-shreds: it destroys the key in the broker's state
+/// file and replaces the KEK, so restoring an OLDER state file (taken before
+/// the revocation) with the current wrapped KEK no longer opens, and the
+/// revoked key is not released. (Before the shred, this very restore
+/// released the revoked key.) A copy of the old wrapped KEK is dealt with
+/// by retiring the old root key versions: see the next test.
 #[test]
-fn lifecycle_restoring_an_older_state_file_resurrects_a_revoked_key() {
+fn lifecycle_restoring_an_older_state_file_cannot_release_a_revoked_key() {
     let Some(bao) = bao() else { return };
     let key = bao.new_key("lc-rollback");
     let dir = tmp("rollback");
@@ -682,11 +681,17 @@ fn lifecycle_restoring_an_older_state_file_resurrects_a_revoked_key() {
         .save(&state)
         .unwrap();
     std::fs::copy(&state, &old).unwrap();
+    let kek_before = read_json(&kek)["kek_id"].clone();
 
     let mut b = reopen(&state, Box::new(bao.open(&kek, &key).unwrap())).unwrap();
     b.revoke_all("patients").unwrap();
     b.save(&state).unwrap();
     assert_eq!(form(&state, "patients", 1), "destroyed");
+    assert_ne!(
+        read_json(&kek)["kek_id"],
+        kek_before,
+        "the KEK was replaced"
+    );
     let mut b = reopen(&state, Box::new(bao.open(&kek, &key).unwrap())).unwrap();
     assert_eq!(release(&mut b, "patients").err().unwrap(), Code::KeyRelease);
 
@@ -698,20 +703,61 @@ fn lifecycle_restoring_an_older_state_file_resurrects_a_revoked_key() {
     // Restore the pre-revocation state file.
     std::fs::copy(&old, &state).unwrap();
     assert_eq!(form(&state, "patients", 1), "wrapped");
-    let mut b = reopen(&state, Box::new(bao.open(&kek, &key).unwrap())).unwrap();
     assert_eq!(
-        release(&mut b, "patients"),
-        Ok(KEY.to_vec()),
-        "FINDING: a rolled-back state file releases a revoked key; \
-         if this now fails, the rollback was fixed: expect Code::KeyRelease"
+        reopen(&state, Box::new(bao.open(&kek, &key).unwrap()))
+            .err()
+            .unwrap(),
+        Code::KeyRelease,
+        "a rolled-back state file does not open under the KEK that replaced its own"
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// The operational mitigation available today: after revoking, re-wrap the
-/// surviving keys under a NEW KEK, rotate the root key and retire the old
-/// root versions. The pre-revocation backup (state + wrapped KEK) then no
-/// longer opens.
+/// The wrapped KEK a backup holds is not secret and opens while the root
+/// key version that wraps it does: until then, the backup's old state file
+/// and its wrapped KEK still yield the revoked key. Rotating the root key
+/// and retiring the old versions (`retire_older_root_versions`, after every
+/// other KEK under the key was re-wrapped) destroys that for good, in the
+/// KMS.
+#[test]
+fn lifecycle_retiring_old_root_versions_closes_the_backups_copy_of_the_kek() {
+    let Some(bao) = bao() else { return };
+    let key = bao.new_key("lc-retire");
+    let dir = tmp("retire");
+    let (kek, state) = (dir.join("kek.wrapped.json"), dir.join("broker.json"));
+    let (old_kek, old_state) = (dir.join("old.kek.json"), dir.join("old.broker.json"));
+    dev_broker(Box::new(bao.open(&kek, &key).unwrap()))
+        .save(&state)
+        .unwrap();
+    std::fs::copy(&kek, &old_kek).unwrap();
+    std::fs::copy(&state, &old_state).unwrap();
+    let mut b = reopen(&state, Box::new(bao.open(&kek, &key).unwrap())).unwrap();
+    b.revoke_all("patients").unwrap();
+    b.save(&state).unwrap();
+    let new_state = dir.join("new.broker.json");
+    std::fs::copy(&state, &new_state).unwrap();
+
+    // The backup (old state and its own wrapped KEK) still opens: the
+    // residual until the old root versions are retired.
+    std::fs::copy(&old_state, &state).unwrap();
+    let mut b = reopen(&state, Box::new(bao.open(&old_kek, &key).unwrap())).unwrap();
+    assert_eq!(release(&mut b, "patients").unwrap(), KEY);
+
+    let mut s = bao.open(&kek, &key).unwrap();
+    let r = s.rotate_root().unwrap();
+    assert_eq!(s.retire_older_root_versions().unwrap(), r.new_version);
+    assert_eq!(code(bao.open(&old_kek, &key)), Code::KeyRelease);
+    // The live broker still opens.
+    std::fs::copy(&new_state, &state).unwrap();
+    let mut b = reopen(&state, Box::new(bao.open(&kek, &key).unwrap())).unwrap();
+    assert_eq!(release(&mut b, "patients").err().unwrap(), Code::KeyRelease);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The manual route to the same end, to a KEK in another file (a revocation
+/// now replaces the KEK itself): after revoking, re-wrap the surviving keys
+/// under a NEW KEK, rotate the root key and retire the old root versions.
+/// The pre-revocation backup (state + wrapped KEK) then no longer opens.
 #[test]
 fn lifecycle_revocation_survives_rollback_after_kek_rotation_and_root_retirement() {
     let Some(bao) = bao() else { return };

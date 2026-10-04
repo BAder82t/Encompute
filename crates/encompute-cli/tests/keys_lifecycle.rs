@@ -514,6 +514,64 @@ fn openbao_keys_lifecycle_through_the_cli() {
     ok(&strs(&run(&["keys", "challenge"], "modelco")), &env);
 }
 
+/// A revocation through the CLI crypto-shreds: it replaces the KEK, says so,
+/// and an older copy of the state file no longer opens under the KEK that is
+/// current afterwards.
+#[test]
+fn revoking_through_the_cli_replaces_the_kek() {
+    let d = Dir::new("shred");
+    setup(&d);
+    let (kek, b) = (d.p("k.kek"), d.p("b.json"));
+    let a = protect(&d, "prod-policy.json", &["--kek", &kek]);
+    ok(&strs(&a), &[]);
+    let kek_id = |path: &str| -> String {
+        let s: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        s["kek_id"].as_str().unwrap().to_owned()
+    };
+    let (old_state, old_id) = (std::fs::read(&b).unwrap(), kek_id(&b));
+    ok(
+        &[
+            "keys", "rotate", "--asset", "weights", "--broker", &b, "--kek", &kek,
+        ],
+        &[],
+    );
+    let out = ok(
+        &[
+            "keys",
+            "revoke",
+            "--asset",
+            "weights",
+            "--version",
+            "1",
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+        ],
+        &[],
+    );
+    assert!(out.contains("key version 1 revoked"), "{out}");
+    assert!(out.contains("KEK replaced"), "{out}");
+    assert_ne!(kek_id(&b), old_id);
+    // No KEK left pending beside the live one.
+    let pending: Vec<_> = std::fs::read_dir(&d.0)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".next."))
+        .collect();
+    assert!(pending.is_empty(), "{pending:?}");
+    // The new state opens; the old one (from before the revocation) does
+    // not, under the current KEK.
+    ok(&["keys", "challenge", "--broker", &b, "--kek", &kek], &[]);
+    std::fs::write(&b, old_state).unwrap();
+    let e = refused(
+        &["keys", "challenge", "--broker", &b, "--kek", &kek],
+        &[],
+        "ENC2004",
+    );
+    assert!(e.contains("open it with that store"), "{e}");
+}
+
 /// Review finding KB-2 (ENC-SF-2026-043): a broker state file without its authentication tag
 /// (one written before 0.3.0-rc.4, or with the tag stripped) is refused, and
 /// opens again only after its owner has checked and confirmed it.
