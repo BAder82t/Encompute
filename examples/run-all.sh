@@ -17,9 +17,9 @@ MODE="${1:-quick}"
 # Path entries run an example by its directory (the public-sector ones).
 PS_B="public-sector/public-health-statistics"
 PS_C="public-sector/fraud-signal"
-QUICK="01 02 04 06 08 09 10 11 13 14 15 $PS_B $PS_C"
+QUICK="00 01 02 04 06 08 09 10 11 13 14 15 $PS_B $PS_C"
 STANDARD="$QUICK 03 07 12 16 17 18 20"
-CRYPTO="01 03 05 19 20"
+CRYPTO="00 01 03 05 19 20"
 case "$MODE" in
   quick) LIST="$QUICK" ;;
   standard) LIST="$STANDARD" ;;
