@@ -1,0 +1,59 @@
+# A DELIBERATELY MISCONFIGURED topology, for negative tests only
+# (run.sh). It breaks the reference topology's requirements on purpose:
+#   postgres   TLS off, the default pg_hba (plaintext connections accepted)
+#   openbao    dev mode (in memory, http, a literal root token in the environment)
+#   edge       the operations and key-broker listeners do NOT require a client certificate
+#   control    a stand-in with secrets as environment literals and no health check
+#   network    not internal; images not pinned
+# Never run it anywhere that matters.
+name: encompute-negative
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    environment:
+      POSTGRES_USER: encompute
+      POSTGRES_DB: encompute
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
+    secrets: [db-password]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -U encompute"]
+      interval: 3s
+      retries: 20
+
+  openbao:
+    image: openbao/openbao:2.1.0@sha256:7de07aa6df3937d44c96c2d65c188b2d4a70546f2a764ad4510301305af6a223
+    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: not-a-real-token-dev-only
+    ports: ["127.0.0.1:${NEG_BAO_PORT:-58221}:8200"]
+    healthcheck:
+      test: ["CMD-SHELL", "BAO_ADDR=http://127.0.0.1:8200 bao status >/dev/null 2>&1"]
+      interval: 3s
+      retries: 20
+
+  control:
+    image: alpine:3.20
+    command: ["sleep", "3600"]
+    environment:
+      ENCOMPUTE_SIGNING_KEY: ${NEG_SIGNING_KEY:?set by run.sh}
+      DATABASE_PASSWORD: ${NEG_DB_PASSWORD:?set by run.sh}
+
+  edge:
+    image: caddy:2-alpine@sha256:881bbc60f9986d5ab8e7cfd6cf7e4ef3c9c0439fef2429d035d065577882f028
+    secrets: [edge.crt, edge.key]
+    volumes: ["./Caddyfile.misconfigured:/etc/caddy/Caddyfile:ro"]
+    ports:
+      - "127.0.0.1:${NEG_API_PORT:-8480}:8443"
+      - "127.0.0.1:${NEG_EVALUATOR_PORT:-8481}:8444"
+      - "127.0.0.1:${NEG_OPS_PORT:-8482}:8445"
+      - "127.0.0.1:${NEG_KEYBROKER_PORT:-8483}:8446"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8443/live"]
+      interval: 3s
+      retries: 20
+
+secrets:
+  db-password: {file: "${NEG_SECRETS}/db-password"}
+  edge.crt: {file: "${NEG_SECRETS}/edge.crt"}
+  edge.key: {file: "${NEG_SECRETS}/edge.key"}

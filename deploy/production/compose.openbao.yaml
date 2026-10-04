@@ -1,0 +1,40 @@
+# A reference OpenBao for trying the topology on a laptop. In production
+# this is YOUR OpenBao or Vault, outside this stack: the Encompute stack
+# reaches it through the bao-tunnel and only needs BAO_UPSTREAM (host:port),
+# BAO_SERVER_NAME and the CA that signed its certificate. This file shows the
+# shape to match: server mode with a TLS listener and integrated (raft)
+# storage, sealed until initialised and unsealed (bootstrap-openbao.sh).
+# It is NOT dev mode: nothing is in memory, nothing is unsealed on start.
+name: ${BAO_PROJECT:-encompute-bao}
+
+services:
+  openbao:
+    image: openbao/openbao:2.1.0@sha256:7de07aa6df3937d44c96c2d65c188b2d4a70546f2a764ad4510301305af6a223
+    command: ["server", "-config=/etc/openbao/openbao.hcl"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    volumes:
+      - ./config/openbao.hcl:/etc/openbao/openbao.hcl:ro
+      - baodata:/openbao/file
+    secrets: [bao-server.crt, bao-server.key]
+    networks: [bao]
+    ports: ["127.0.0.1:${BAO_PORT:-8200}:8200"]
+    # Healthy only when initialised AND unsealed: a sealed vault is alive
+    # but not ready.
+    healthcheck:
+      test: ["CMD-SHELL", "BAO_ADDR=https://127.0.0.1:8200 BAO_SKIP_VERIFY=true bao status >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 4s
+      retries: 6
+      start_period: 5s
+
+secrets:
+  bao-server.crt: {file: ./secrets/bao-server.crt}
+  bao-server.key: {file: ./secrets/bao-server.key}
+
+networks:
+  bao:
+    name: ${BAO_NETWORK:-encompute-bao}
+
+volumes:
+  baodata:

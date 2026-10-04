@@ -1,0 +1,252 @@
+# Encompute: the reference production topology. One control plane, PostgreSQL
+# with TLS required, an OpenFHE evaluator and a key broker, behind one edge
+# that terminates TLS (mutual TLS on the operations and key-broker
+# listeners). The root-key provider (OpenBao or Vault) is EXTERNAL: see
+# compose.openbao.yaml for the shape, and docs/production-deployment.md.
+#
+#   ./init-secrets.sh        secrets/ (random) and .env (public keys, ports)
+#   docker compose up -d
+#
+# Every secret is a file under ./secrets, mounted at /run/secrets: no
+# secret is an environment value. Images are pinned by digest. Only the
+# edge publishes ports; the backend network is internal (no route out).
+name: encompute-prod
+
+x-service: &service
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  # --- PostgreSQL, TLS required -------------------------------------------------
+  postgres:
+    <<: *service
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    # PostgreSQL insists its key is owned by it and not readable by others;
+    # a mounted secret is neither. The wrapper copies the certificate files
+    # into a tmpfs it owns (never into the data volume), then starts the
+    # image's normal entrypoint.
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        install -m 0600 -o postgres -g postgres /run/secrets/pg-server.key /run/pgtls/server.key &&
+        install -m 0644 -o postgres -g postgres /run/secrets/pg-server.crt /run/pgtls/server.crt &&
+        install -m 0644 -o postgres -g postgres /run/secrets/internal-ca.crt /run/pgtls/ca.crt &&
+        exec docker-entrypoint.sh postgres
+        -c listen_addresses=*
+        -c ssl=on
+        -c ssl_cert_file=/run/pgtls/server.crt
+        -c ssl_key_file=/run/pgtls/server.key
+        -c ssl_ca_file=/run/pgtls/ca.crt
+        -c ssl_min_protocol_version=TLSv1.2
+        -c password_encryption=scram-sha-256
+        -c hba_file=/etc/encompute/pg_hba.conf
+    environment:
+      POSTGRES_USER: encompute
+      POSTGRES_DB: encompute
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
+    secrets: [db-password, pg-server.crt, pg-server.key, internal-ca.crt]
+    tmpfs: ["/run/pgtls:mode=0700,uid=70,gid=70"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./config/pg_hba.conf:/etc/encompute/pg_hba.conf:ro
+    networks: [backend]
+    # Ready when the final server answers over TCP AND the database exists
+    # (the image's temporary start-up server listens on the socket only).
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U encompute -d encompute && psql -U encompute -d encompute -tAc 'select 1' | grep -q 1"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 10s
+
+  # The control plane's TLS client for PostgreSQL. The control plane has no
+  # TLS client of its own: it shares this container's network namespace and
+  # reaches the database on loopback; this sidecar verifies the database's
+  # certificate (chain and name) and presents a client certificate.
+  pg-tunnel:
+    <<: *service
+    image: encompute-tunnel:stunnel
+    build: ./tunnel
+    command: ["/etc/stunnel/pg.conf"]
+    volumes: ["./config/stunnel-pg.conf:/etc/stunnel/pg.conf:ro"]
+    secrets: [internal-ca.crt, pg-client.crt, pg-client.key]
+    depends_on:
+      postgres: {condition: service_healthy}
+    # backend: the database. egress: the control plane (sharing this
+    # namespace) fetches its identity provider's keys and, if configured, the
+    # vault anchor. With ENCOMPUTE_OIDC_JWKS_FILE and the anchor on its volume
+    # you can drop egress and the control plane has no route out.
+    networks: [backend, egress]
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5432"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- Control plane ------------------------------------------------------------
+  control:
+    <<: *service
+    image: ${ENCOMPUTE_CONTROL_IMAGE:-ghcr.io/bader82t/encompute-control@sha256:84eff60eb85dae115f9cefd8b4b559b4fab1fd5cb0784047e3da29ec0c1a428f}
+    network_mode: service:pg-tunnel
+    depends_on:
+      pg-tunnel: {condition: service_healthy}
+    environment:
+      ENCOMPUTE_ENV: production
+      ENCOMPUTE_LISTEN: 0.0.0.0:8770
+      ENCOMPUTE_DATABASE_URL_FILE: /run/secrets/db-url
+      ENCOMPUTE_SIGNING_KEY_FILE: /run/secrets/control-key
+      ENCOMPUTE_OIDC_ISSUER: ${ENCOMPUTE_OIDC_ISSUER:?set in .env (init-secrets.sh)}
+      ENCOMPUTE_OIDC_AUDIENCE: ${ENCOMPUTE_OIDC_AUDIENCE:-encompute}
+      ENCOMPUTE_OIDC_JWKS_URL: ${ENCOMPUTE_OIDC_JWKS_URL:-}
+      ENCOMPUTE_OIDC_JWKS_FILE: ${ENCOMPUTE_OIDC_JWKS_FILE:-}
+      # The state anchor is on its own volume: restoring an older database
+      # backup cannot rewind it. Back it up separately.
+      ENCOMPUTE_ANCHOR_DIR: /var/lib/encompute/anchor
+      ENCOMPUTE_METRICS_TOKEN_FILE: /run/secrets/metrics-token
+    secrets: [db-url, control-key, metrics-token]
+    volumes:
+      - anchor:/var/lib/encompute/anchor
+      - ./oidc:/etc/encompute/oidc:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:8770/ready >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # --- Evaluator ----------------------------------------------------------------
+  evaluator:
+    <<: *service
+    image: ${ENCOMPUTE_EVALUATOR_IMAGE:-ghcr.io/bader82t/encompute-evaluator@sha256:2f27867700b2a86bba2d671be35a443b86aac008c2b726a83970fb3bf3c517ec}
+    depends_on:
+      control: {condition: service_healthy}
+    environment:
+      ENCOMPUTE_CONTROL_URL: http://pg-tunnel:8770
+      ENCOMPUTE_CONTROL_PUBLIC_KEY: ${ENCOMPUTE_CONTROL_PUBLIC_KEY:?run init-secrets.sh}
+      ENCOMPUTE_SERVICE_ID: evaluator-1
+      ENCOMPUTE_SERVICE_KEY_FILE: /run/secrets/evaluator-key
+      # Where clients reach this evaluator: the edge's evaluator listener.
+      ENCOMPUTE_ADVERTISE_URL: ${ENCOMPUTE_EVALUATOR_URL:-https://localhost:8444}
+      ENCOMPUTE_CAPACITY: "2"
+    command: ["--workers", "2", "--identity", "/var/lib/encompute/receipt.key"]
+    secrets: [evaluator-key]
+    volumes: [evaluator:/var/lib/encompute]
+    networks: [backend]
+    # The image has no curl: a bash TCP probe of GET /v1/info (bash, not sh:
+    # /dev/tcp is a bash feature).
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8750 && printf 'GET /v1/info HTTP/1.0\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 5s
+
+  # --- Key broker and its route to the external root-key provider -------------
+  # The key broker's HTTPS client trusts only the built-in public web roots,
+  # so it reaches the provider through this TLS client on loopback, which
+  # verifies the provider's certificate against YOUR CA (bao-ca.crt).
+  bao-tunnel:
+    <<: *service
+    image: encompute-tunnel:stunnel
+    build: ./tunnel
+    command: ["/etc/stunnel/bao.conf.template"]
+    environment:
+      BAO_UPSTREAM: ${BAO_UPSTREAM:?run init-secrets.sh}
+      BAO_SERVER_NAME: ${BAO_SERVER_NAME:?run init-secrets.sh}
+    volumes: ["./config/stunnel-bao.conf.template:/etc/stunnel/bao.conf.template:ro"]
+    secrets: [bao-ca.crt]
+    # backend: the edge reaches the broker here. bao: the route to the
+    # provider (an ordinary Docker network that can reach it; with a provider
+    # on another host, any network with a route to it).
+    networks: [backend, bao]
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8200"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  keybroker:
+    <<: *service
+    image: ${ENCOMPUTE_SERVICES_IMAGE:-ghcr.io/bader82t/encompute-services@sha256:b76d8993cc375291e6627e093eed4abc32a5f9dc9ddbbf8c1a7a710b06a36f33}
+    network_mode: service:bao-tunnel
+    depends_on:
+      bao-tunnel: {condition: service_healthy}
+      control: {condition: service_healthy}
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+      BAO_TOKEN_FILE: /run/secrets/bao-token
+      ENCOMPUTE_CONTROL_PUBLIC_KEY: ${ENCOMPUTE_CONTROL_PUBLIC_KEY:?run init-secrets.sh}
+      ENCOMPUTE_SERVICE_ID: keybroker-${KEYBROKER_ORG:-modelco}
+    secrets: [bao-token]
+    volumes: [broker:/var/lib/encompute]
+    command: ["keys", "serve", "--listen", "0.0.0.0:8760", "--jwks", "google",
+              "--broker", "/var/lib/encompute/broker.json",
+              "--root-key", "openbao:transit/${KEYBROKER_ORG:-modelco}",
+              "--organization", "${KEYBROKER_ORG:-modelco}",
+              "--wrapped-kek", "/var/lib/encompute/kek.wrapped.json"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:8760/live >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # --- Edge ---------------------------------------------------------------------
+  edge:
+    <<: *service
+    image: caddy:2-alpine@sha256:881bbc60f9986d5ab8e7cfd6cf7e4ef3c9c0439fef2429d035d065577882f028
+    # Only the control plane is awaited: the edge answers 502 for a service
+    # that is not up yet, and the first start needs the edge (the API) to
+    # register the evaluator and key broker before they can start.
+    depends_on:
+      control: {condition: service_healthy}
+    secrets: [edge.crt, edge.key, client-ca.crt]
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks: [backend, edge]
+    ports:
+      - "${EDGE_BIND:-127.0.0.1}:${EDGE_API_PORT:-8443}:8443"
+      - "${EDGE_BIND:-127.0.0.1}:${EDGE_EVALUATOR_PORT:-8444}:8444"
+      - "${EDGE_BIND:-127.0.0.1}:${EDGE_OPS_PORT:-8445}:8445"
+      - "${EDGE_BIND:-127.0.0.1}:${EDGE_KEYBROKER_PORT:-8446}:8446"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8443/live"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+      start_period: 3s
+
+secrets:
+  db-password: {file: ./secrets/db-password}
+  db-url: {file: ./secrets/db-url}
+  control-key: {file: ./secrets/control.key}
+  evaluator-key: {file: ./secrets/evaluator.key}
+  metrics-token: {file: ./secrets/metrics-token}
+  bao-token: {file: ./secrets/bao-token}
+  edge.crt: {file: ./secrets/edge.crt}
+  edge.key: {file: ./secrets/edge.key}
+  client-ca.crt: {file: ./secrets/client-ca.crt}
+  internal-ca.crt: {file: ./secrets/internal-ca.crt}
+  bao-ca.crt: {file: ./secrets/bao-ca.crt}
+  pg-server.crt: {file: ./secrets/pg-server.crt}
+  pg-server.key: {file: ./secrets/pg-server.key}
+  pg-client.crt: {file: ./secrets/pg-client.crt}
+  pg-client.key: {file: ./secrets/pg-client.key}
+
+networks:
+  # No route out: the database, control plane, evaluator and key broker
+  # cannot reach the Internet or the host.
+  backend:
+    internal: true
+  edge: {}
+  egress: {}
+  # The route to the external root-key provider.
+  bao:
+    name: ${BAO_NETWORK:-encompute-bao}
+    external: true
+
+volumes:
+  pgdata:
+  anchor:
+  evaluator:
+  broker:
