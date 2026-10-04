@@ -407,13 +407,14 @@ fn a_missing_ledger_with_a_checkpoint_is_refused_at_start() {
 #[test]
 fn scratch_directories_are_never_reused() {
     let probe = tmp_dir("sc");
+    // encompute-control-sc_{pid}_{counter}_{time} (the harness's unique names).
     let n: u64 = probe
         .file_name()
         .unwrap()
         .to_str()
         .unwrap()
-        .split('-')
-        .nth(4)
+        .split('_')
+        .nth(2)
         .unwrap()
         .parse()
         .unwrap();
@@ -428,9 +429,15 @@ fn scratch_directories_are_never_reused() {
             stale.push(d);
         }
     }
+    let mut seen = std::collections::HashSet::new();
     for _ in 0..39 {
         let d = tmp_dir("sc");
         assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "{}", d.display());
+        assert!(
+            seen.insert(d.clone()),
+            "{} was handed out twice",
+            d.display()
+        );
     }
     for d in stale {
         let _ = std::fs::remove_dir_all(d);
