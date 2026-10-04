@@ -501,7 +501,7 @@ fn an_openbao_error_in_the_middle_of_a_prune_is_finished_by_a_rerun() {
     // sealed segment's events (a well-formed segment that is not the
     // archived one): the rerun does not delete it and says so. The other is
     // not even a segment (the reader ignores such a file below the seal, so
-    // the compaction never sees it): it stays too.
+    // the compaction cannot prune it): it stays too, and is reported.
     let (swapped, garbage) = (before[3], before[4]);
     let other = store.mirror_read(before[5]).unwrap();
     store.mirror_replace(swapped, &other, &|_| Ok(())).unwrap();
@@ -522,6 +522,22 @@ fn an_openbao_error_in_the_middle_of_a_prune_is_finished_by_a_rerun() {
             .any(|n| n.contains(&format!("mirror segment {swapped} is not the archived one"))),
         "{:?}",
         r.notes
+    );
+    // The one that is not a segment is reported, naming its key, by the
+    // compaction; verify-governance-archive fails on it (a non-zero exit
+    // for the command), never deleting it.
+    let key = seg(garbage);
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains(&key) && n.contains("cannot be parsed") && n.contains(&path)),
+        "{:?}",
+        r.notes
+    );
+    let e = verify_archive(&store, &public_key(&env0), &archive).unwrap_err();
+    assert!(
+        e.message.contains(&key) && e.message.contains("cannot be parsed"),
+        "{e}"
     );
     // Both are still in OpenBao with the bytes they had; the other sealed
     // segments are gone.

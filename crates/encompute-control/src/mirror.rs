@@ -96,6 +96,31 @@ fn parse(n: u64, lines: &str) -> Result<Vec<Exported>> {
     Ok(out)
 }
 
+/// The segments at or below `max_n` (the sealed range: the highest number
+/// the archive holds) that the mirror's reader cannot parse, each named
+/// with the store and its number (the KV key's last component). The reader
+/// ignores such a segment below the seal, so nothing else would ever say it
+/// is there; it is reported, never deleted (its bytes cannot be compared
+/// with the archive's).
+pub fn unparseable_sealed(store: &dyn AnchorStore, max_n: u64) -> Result<Vec<String>> {
+    let mut nums = store.mirror_list()?;
+    nums.sort_unstable();
+    let mut out = vec![];
+    for n in nums.into_iter().filter(|n| *n <= max_n) {
+        let bad = match store.mirror_read(n) {
+            Ok(text) => parse(n, &text).err().map(|e| e.message),
+            Err(e) => Some(e.message),
+        };
+        if let Some(why) = bad {
+            out.push(format!(
+                "mirror segment {n:012} ({}) is in the sealed range but cannot be parsed ({why}): left in place, never deleted; check it against the archive and remove it by hand",
+                store.describe()
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// The newest segment the writer extends: its number, its first and last
 /// event positions, the last one's chain hash (`None` for a segment to
 /// rewrite from its first position) and whether it is full.

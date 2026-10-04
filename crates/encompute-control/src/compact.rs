@@ -386,6 +386,13 @@ impl Control {
             }
         }
         report.pruned_segments = pruned_ok;
+        // A segment of the sealed range the reader cannot parse is never
+        // seen above (it is ignored below the seal): say it is there.
+        if let Some(max_n) = manifest.segments.iter().map(|s| s.n).max() {
+            report
+                .notes
+                .extend(crate::mirror::unparseable_sealed(store, max_n)?);
+        }
         // The mirror as it is now still verifies against the anchor.
         let a2 = self.anchor.snapshot();
         let after = scan(store, a2.seal.as_ref(), a2.glog_size, &a2.glog_head, None)?;
@@ -439,6 +446,17 @@ pub fn verify_archive(
     })?;
     let v = Archive::open(dir, false)?.load(&seal, true)?;
     scan(&v, None, seal.size, &seal.head, None)?;
+    // The archive is sound; a sealed-range segment the mirror holds and
+    // cannot parse is not (nothing else reports it): a failure naming it.
+    if let Some(max_n) = v.manifest.segments.iter().map(|s| s.n).max() {
+        let bad = crate::mirror::unparseable_sealed(store, max_n)?;
+        if !bad.is_empty() {
+            return Err(compact_err(format!(
+                "the archive verifies, but {}",
+                bad.join("; ")
+            )));
+        }
+    }
     Ok(ArchiveReport {
         sealed: seal.size,
         segments: v.manifest.segments.len(),
