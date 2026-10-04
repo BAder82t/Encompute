@@ -278,6 +278,33 @@ governance branch). Each has a test that fails against the code before.
   Ordinary audit events still wait for the next checkpoint (two seconds at
   most), and the audit chain has no mirror: a truncated chain is detected,
   not restored (KNOWN_LIMITATIONS.md). INV-162, INV-226 (`030b5cb`).
+- **The governance log's mirror grew without bound, and recovery from it
+  was slow** (ENC-SF-2026-083, the open part). Closed: the mirror can be
+  compacted into an archive the state anchor's seal commits to
+  (`compact-governance-mirror`; anchor version 3, constant size), and
+  recovery's import is batched. Not closed, stated plainly: the
+  **database's** log and its start check still grow (a compaction of the
+  mirror does not touch them, on purpose: they are what detects a
+  rollback). Tests that fail against the code before (naive variants built
+  from these sources fail them): `crates/encompute-control/tests/mirror_compaction.rs`
+  (`compaction_seals_archives_prunes_and_the_service_restarts` fails if the
+  seal is not committed before pruning, `a_crash_before_the_commit_point_changes_nothing`
+  fails if pruning comes before the commit point, `a_tampered_archive_is_refused`
+  fails without the manifest digest and segment hash checks,
+  `a_truncated_or_replayed_tail_is_refused` fails without the gap check or
+  if a rebuild starts at event 1, `the_writer_starts_over_after_the_seal`
+  fails if a wiped mirror is rewritten from event 1,
+  `deny_state_survives_compaction_and_recovery` fails if a compaction also
+  deletes database events) and
+  `crates/encompute-control/tests/mirror_import.rs` (a non-atomic or
+  incomplete batched import fails the equivalence and kill tests).
+  Measured on the 120,100-event fixture: the anchor 417 -> 592 bytes
+  (the seal; constant however many events it covers), the mirror 241 ->
+  25 segments and 26.5 MB -> 2.7 MB (23.8 MB archived), the database's log
+  tables unchanged at 126.4 MB, the mirror check 1.00 s -> 0.09 s, the
+  start 15.7 s -> 11.2 s (a loaded machine: the start is dominated by
+  recomputing the database's log), recovery of 107,600 events 1,011 s ->
+  160 s (`load_100k_events_heavy`). INV-226, INV-248.
 
 ### Open (accepted / needs design)
 

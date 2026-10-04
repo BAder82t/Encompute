@@ -619,9 +619,8 @@ ENC2204), so a caller cannot grow the log faster than that for free. A
 real deployment spends far less: a training run reserves and commits once
 per round, so a hundred rounds a day across ten datasets are about 2,000
 events a day, under 1 MB of mirror a day. Measured here: one event and
-about 350 bytes of mirror per spend. The mirror is never pruned below the anchored head. Segments may be
-compacted (rewritten as fewer, larger segments starting at event 1) only
-when the result still chains to the anchored head. Keep the anchor store
+about 350 bytes of mirror per spend. The mirror is never pruned below the anchored head except by a
+compaction (below), which archives what it prunes. Keep the anchor store
 backed up with the anchor.
 
 Recovery reads what to re-apply from the governance log, so the log must
@@ -667,13 +666,93 @@ is named by its number in write order and the events it holds
   event, which reading then starts from).
 - **Size.** The mirror grows with the log: roughly 400 bytes per event
   and one segment per checkpoint (each security-negative transition
-  checkpoints at once). It is never pruned below the anchored head.
-  Segments may be compacted into one that starts at the first event, but
-  only when the result still chains to the anchored head (recovery's
-  rebuild does exactly that). On OpenBao each segment is one KV entry;
-  reading the mirror at start reads every segment.
+  checkpoints at once). It is pruned only by a compaction (below), and
+  only into an archive. On OpenBao each segment is one KV entry; reading
+  the mirror at start reads every segment it holds.
 - Back it up with the anchor (`backup.sh` captures the anchor volume, the
   mirror included; `restore.sh` restores both only into an empty volume).
+
+### Compacting the governance log mirror
+
+The mirror in the anchor store grows with the log. A compaction moves its
+oldest segments to an **archive** you keep (a directory: a mounted volume
+or an object-store mount) and prunes them from the anchor store, so the
+anchor store holds the tail. The **database's log is not compacted**: it
+keeps every event, tree node, checkpoint and witness, the start check
+recomputes all of it as before, and nothing that detects a rollback, a
+truncation or an undone revocation changes. Only the mirror, the copy
+recovery imports from after a restore, shrinks. What a compaction does
+not do: shrink the database, or shorten the start check (4.3 seconds for
+120,100 events on a quiet machine; see KNOWN_LIMITATIONS.md).
+
+```sh
+# What would be sealed (writes and deletes nothing, not even the directory):
+encompute-control compact-governance-mirror --archive-dir /mnt/archive/governance --dry-run
+# Do it (the control plane may keep running; run it from one place at a time):
+encompute-control compact-governance-mirror --archive-dir /mnt/archive/governance
+# Check an archive against the state anchor (no database needed):
+encompute-control verify-governance-archive --archive-dir /mnt/archive/governance
+```
+
+Safety window: a segment is sealed only if it is not the newest, ends at
+least `--keep-events` events (default 10,000) before the anchored size, and
+its last event is at least `--min-age-days` old (default 30). Only
+anchored and mirrored events are ever sealed, and the state is verified
+(`verify-state`'s checks) before anything is written. The witnessed
+checkpoints and the evidence they bind are in the database, which a
+compaction does not touch, so they do not gate it.
+
+Order and crash semantics. The sealed segments are verified (they chain
+from the previous seal, or the empty log, to the database's own hash at
+the seal) and copied, byte for byte, to `<archive>/segments/`, with
+`<archive>/manifest-<size>.json` listing each with its SHA-256; the
+archive is read back against the manifest. Then the state anchor is
+replaced with a **seal** (the sealed size, the chain head there, the
+manifest's digest): the anchor's compare-and-set is the commit point, and
+the anchor becomes version 3, a few hundred bytes larger and constant. Only
+then are the sealed segments deleted from the anchor store, oldest first,
+each only if its bytes are the archived ones. A crash before the commit
+point changes nothing (the archive holds files nothing refers to; running
+the compaction again writes the same bytes). A crash after it leaves the
+seal and some sealed segments still in the mirror: reading takes events up
+to the seal as the archive's and ignores them, and the next compaction
+deletes them. At no point is an event neither in the mirror nor in an
+archive the anchor commits to.
+
+Reading and recovery. The start, the checkpoints and recovery's rebuild
+of a damaged mirror read from the sealed head: a truncated, gapped, edited
+or forked tail, or an old sealed segment replayed after the tail, is
+refused (GOVERNANCE LOG STATE ROLLBACK), as before. A restored backup is
+refused as behind the anchor, as before. `recover` completes one that
+reaches the seal from the tail alone. One that ends **inside the sealed
+prefix** needs the archive:
+
+```sh
+encompute-control recover --operator NAME --archive-dir /mnt/archive/governance
+```
+
+The archive is checked against the seal (the manifest's digest, every
+segment's SHA-256, the whole chain from the empty log to the anchored
+head); a tampered, missing, swapped or substituted archive is refused and
+recovery changes nothing. Without `--archive-dir` it says what is missing.
+Keep the archive with the anchor's backups; **losing it costs
+availability, never safety** (an old backup then cannot be brought back from
+the mirror, and `export-governance-log` from a newer database still can).
+Do not compact against another archive directory than the one the
+previous compaction wrote: it is refused.
+
+Versions. A compaction writes a version-3 anchor; a deployment that never
+compacts keeps a version-2 anchor, which the previous release still reads.
+A release that does not know seals refuses a version-3 anchor (state anchor
+version 3 is not supported by this release): there is no downgrade after
+the first compaction.
+
+Recovery's import is batched: 1,000 events per statement, every event still
+recomputed in memory (leaf, partition position, chain hash), in one
+transaction, so a crash or a refusal anywhere leaves the database as it
+was and the next run starts over (measured: 107,600 events in
+160 seconds, against 1,011 seconds one event at a time, on the same
+loaded machine).
 
 It **freezes** every rolled-back ledger: the ledger is treated as exhausted,
 so budget the database forgot is never spent again. Ledgers the governance log

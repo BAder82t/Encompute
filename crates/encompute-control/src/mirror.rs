@@ -40,17 +40,24 @@
 //! One control plane per anchor store: the compare-and-set of the anchor
 //! and of each new segment make a second writer fail closed rather than
 //! corrupt the mirror, but only one is supported (a replaced segment is a
-//! plain atomic replace). The mirror is never pruned below the anchored
-//! head; segments may be compacted (rewritten as a new run starting at
-//! event 1) only when the result still chains to it.
+//! plain atomic replace).
+//!
+//! The mirror is never pruned below the anchored head except by a
+//! compaction (`crate::compact`): the sealed prefix, events `1..=size`, is
+//! copied to an archive and the anchor's seal commits to it; the mirror
+//! then holds the tail, from event `size + 1`, which reading verifies from
+//! the sealed head instead of from the empty log. Everything above holds
+//! for the tail: the anchored head is the authority, a truncated, gapped,
+//! forked or edited tail is refused, and a segment that covers the seal
+//! (an old copy of a pruned one, say) only begins the tail again.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use encompute_ir::{Code, Error, Result};
-use encompute_trust::govlog::{chain_hash, hash_hex, Hash, CHAIN_GENESIS};
+use encompute_trust::govlog::{chain_hash, hash_hex, parse_hash, Hash, CHAIN_GENESIS};
 
-use crate::anchor::AnchorStore;
+use crate::anchor::{AnchorStore, Seal};
 use crate::control::Control;
 use crate::govlog::{self, Exported};
 use crate::log::LogLine;
@@ -122,37 +129,120 @@ impl TailCache {
 /// What a scan calls with each verified event.
 pub type Each<'a> = dyn FnMut(&Exported) -> Result<()> + 'a;
 
+/// Where a scan reads segments from: the anchor store's mirror, or an
+/// archive (checked as it is read), or both ([`Layered`]).
+pub trait Segments {
+    /// The segment numbers, in any order.
+    fn list(&self) -> Result<Vec<u64>>;
+    /// A segment's lines.
+    fn read(&self, n: u64) -> Result<String>;
+}
+
+impl<T: AnchorStore + ?Sized> Segments for T {
+    fn list(&self) -> Result<Vec<u64>> {
+        self.mirror_list()
+    }
+
+    fn read(&self, n: u64) -> Result<String> {
+        self.mirror_read(n)
+    }
+}
+
+/// The archive's segments and, for the numbers it does not hold, the
+/// mirror's: every event of the log from the first (recovery, when a
+/// restored database ends inside the sealed prefix).
+pub struct Layered<'a> {
+    pub mirror: &'a dyn AnchorStore,
+    pub archive: &'a crate::archive::Verified,
+}
+
+impl Segments for Layered<'_> {
+    fn list(&self) -> Result<Vec<u64>> {
+        let mut nums = self.mirror.mirror_list()?;
+        nums.extend(Segments::list(self.archive)?);
+        nums.sort_unstable();
+        nums.dedup();
+        Ok(nums)
+    }
+
+    fn read(&self, n: u64) -> Result<String> {
+        if Segments::list(self.archive)?.contains(&n) {
+            Segments::read(self.archive, n)
+        } else {
+            self.mirror.mirror_read(n)
+        }
+    }
+}
+
+/// A segment a scan parsed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentInfo {
+    pub n: u64,
+    pub first: i64,
+    pub last: i64,
+    pub bytes: usize,
+    /// When the segment's last event happened (`at`, seconds).
+    pub last_at: u64,
+}
+
 /// What a scan found.
 #[derive(Debug)]
 pub struct Scanned {
     /// The last event position seen, anchored or not.
     pub end: i64,
+    /// Every segment that parsed, in number order.
+    pub segments: Vec<SegmentInfo>,
+    /// The numbers of the segments of the run that reached the anchored
+    /// size (a run begins at a segment that covers the base: event 1, or
+    /// the seal's).
+    pub run: Vec<u64>,
 }
 
 /// Streams the mirror once, segment by segment: the first `size` events
-/// must chain, recomputed, to `head`. `each` sees every verified event (in
+/// must chain, recomputed, to `head`, from the empty log or, with `base`
+/// (the anchor's seal), from the sealed head: the events up to it are the
+/// archive's and are not read. `each` sees every verified event (in
 /// order) as it is checked. Nothing is held beyond one segment.
-pub fn scan(
-    store: &dyn AnchorStore,
+pub fn scan<S: Segments + ?Sized>(
+    store: &S,
+    base: Option<&Seal>,
     size: i64,
     head: &str,
     mut each: Option<&mut Each<'_>>,
 ) -> Result<Scanned> {
-    let mut nums = store.mirror_list()?;
+    let mut nums = store.list()?;
     nums.sort_unstable();
     let genesis = hash_hex(&CHAIN_GENESIS);
-    let mut prev: Hash = CHAIN_GENESIS;
-    let mut last = 0i64;
+    let (base_size, base_head) = match base {
+        Some(b) => (b.size, b.head.clone()),
+        None => (0, genesis.clone()),
+    };
+    let base_hash: Hash =
+        parse_hash("sealed head", &base_head).map_err(|e| mirror_err(e.message))?;
+    // A base that is not the anchored head at the anchored size cannot be
+    // reached by any events.
+    let base_mismatch = || -> Option<String> {
+        (size == base_size && base_head != head).then(|| {
+            if base.is_some() {
+                "the anchor's seal holds a head that is not the anchored head".into()
+            } else {
+                "the anchored head of an empty log is not the empty head".into()
+            }
+        })
+    };
+    let mut prev: Hash = base_hash;
+    let mut last = base_size;
     let mut pseqs: HashMap<String, u64> = HashMap::new();
-    let mut pending: Option<String> = None;
-    let mut reached = size == 0;
+    let mut pending: Option<String> = base_mismatch();
+    let mut reached = size == base_size;
     let mut end = 0i64;
-    if size == 0 && head != genesis {
-        pending = Some("the anchored head of an empty log is not the empty head".into());
-    }
+    let mut segments = vec![];
+    let mut run: Vec<u64> = vec![];
     for n in nums {
         let bad = |m: String| format!("governance log mirror segment {n}: {m}");
-        let events = match store.mirror_read(n).and_then(|l| parse(n, &l)) {
+        let text = store.read(n);
+        let bytes = text.as_ref().map_or(0, |t| t.len());
+        let events = match text.and_then(|l| parse(n, &l)) {
             Ok(e) => e,
             Err(e) => {
                 // Damage past the anchored size is an orphan; below it,
@@ -164,12 +254,21 @@ pub fn scan(
             }
         };
         let first = events[0].gseq;
-        if first == 1 {
-            prev = CHAIN_GENESIS;
-            last = 0;
+        segments.push(SegmentInfo {
+            n,
+            first,
+            last: events[events.len() - 1].gseq,
+            bytes,
+            last_at: events[events.len() - 1].event.at,
+        });
+        let starts_run = first <= base_size + 1;
+        if starts_run {
+            prev = base_hash;
+            last = base_size;
             pseqs.clear();
-            pending = None;
-            reached = size == 0;
+            pending = base_mismatch();
+            reached = size == base_size;
+            run.clear();
         } else if reached && first > size {
             end = end.max(events[events.len() - 1].gseq);
             continue;
@@ -179,13 +278,28 @@ pub fn scan(
             )));
             continue;
         }
+        if first <= size {
+            run.push(n);
+        }
         for x in &events {
+            if starts_run && x.gseq <= base_size {
+                continue; // covered by the seal: the archive's, not read
+            }
             if x.gseq > size {
                 end = end.max(x.gseq);
                 continue;
             }
             let b = |m: &str| mirror_err(format!("governance log mirror, event {}: {m}", x.gseq));
-            let p = pseqs.entry(x.event.partition.clone()).or_insert(0);
+            // From a seal, a partition's position at the seal is not
+            // known here (the database's own log checks it at import and
+            // at every start): its first event in the tail sets it.
+            let p = pseqs
+                .entry(x.event.partition.clone())
+                .or_insert(if base.is_some() {
+                    x.event.pseq.saturating_sub(1)
+                } else {
+                    0
+                });
             if x.event.pseq != *p + 1 {
                 pending.get_or_insert(b("its partition's positions are not contiguous").message);
                 break;
@@ -220,13 +334,13 @@ pub fn scan(
             "the governance log mirror ends at event {last}, before the anchored {size} (truncated)"
         )));
     }
-    Ok(Scanned { end })
+    Ok(Scanned { end, segments, run })
 }
 
 impl Control {
     /// Where the writer extends the mirror: from the database's own
     /// events, never from what the mirror says it holds.
-    fn find_open(&self, c: &mut postgres::Client, anchored: i64) -> Result<Open> {
+    fn find_open(&self, c: &mut postgres::Client, anchored: i64, base: i64) -> Result<Open> {
         let store = self.anchor.store();
         let mut nums = store.mirror_list()?;
         nums.sort_unstable_by(|a, b| b.cmp(a));
@@ -279,11 +393,14 @@ impl Control {
             // before it): never extend it from its own start; keep
             // looking for the last valid segment before it, or start over.
         }
+        // Starting over: from the seal's tail when the mirror was
+        // compacted (the sealed events are the archive's), else from the
+        // first event.
         let next = nums.first().map_or(1, |m| m + 1);
         Ok(Open {
             n: next,
-            from: 1,
-            to: 0,
+            from: base + 1,
+            to: base,
             hash: None,
             full: false,
             replace: false,
@@ -447,7 +564,10 @@ impl Control {
 
     /// Mirrors the database's events up to `size` before the anchor moves
     /// there from `anchored`.
-    pub(crate) fn mirror_through(&self, anchored: i64, size: i64) -> Result<()> {
+    ///
+    /// `base` is the size the anchor's seal holds (0 if the mirror was
+    /// never compacted): a mirror that has to start over starts after it.
+    pub(crate) fn mirror_through(&self, anchored: i64, size: i64, base: i64) -> Result<()> {
         let anchored = anchored.max(self.stored_glog_size());
         let mut c = self.db.conn()?;
         let cached = match self.mirror.get() {
@@ -457,7 +577,7 @@ impl Control {
         let res = (|| {
             let o = match cached {
                 Some(o) => o,
-                None => self.find_open(&mut c, anchored)?,
+                None => self.find_open(&mut c, anchored, base)?,
             };
             if o.hash.is_some() && o.to >= size {
                 return Ok(());
@@ -472,8 +592,8 @@ impl Control {
 
     /// The startup check: the mirror chains to the anchored head. Logs an
     /// orphaned suffix.
-    pub(crate) fn check_mirror(&self, size: i64, head: &str) -> Result<()> {
-        let s = scan(self.anchor.store(), size, head, None)?;
+    pub(crate) fn check_mirror(&self, size: i64, head: &str, seal: Option<&Seal>) -> Result<()> {
+        let s = scan(self.anchor.store(), seal, size, head, None)?;
         if s.end > size {
             LogLine::new(&self.service_id, "governance_mirror_orphan")
                 .field("mirror_end", s.end)
@@ -487,30 +607,91 @@ impl Control {
     /// Imports the anchored events the database lacks from the mirror,
     /// streaming, exactly up to the anchored head (never an orphaned
     /// suffix). Returns how many were added.
-    pub(crate) fn import_from_mirror(&self, size: i64, head: &str) -> Result<u64> {
-        // First pass: the mirror chains to the anchored head, before
-        // anything is written.
-        scan(self.anchor.store(), size, head, None)?;
-        self.db.tx(|t| {
+    ///
+    /// After a compaction the mirror holds the tail only: a database that
+    /// ends at or after the sealed size is completed from it. One that
+    /// ends inside the sealed prefix needs `archive` (the directory the
+    /// compaction wrote to), checked against the anchor's seal: then the
+    /// whole log is read from its first event, archive and mirror together,
+    /// and verified end to end.
+    ///
+    /// All of it is one transaction (see [`govlog::Importer`]): a failure
+    /// or a crash anywhere leaves the database as it was.
+    pub(crate) fn import_from_mirror(
+        &self,
+        a: &crate::anchor::StateAnchor,
+        archive: Option<&std::path::Path>,
+    ) -> Result<u64> {
+        let (size, head) = (a.glog_size, a.glog_head.as_str());
+        let store = self.anchor.store();
+        let mut from_archive = None;
+        if let Some(seal) = &a.seal {
+            let have = {
+                let mut c = self.db.conn()?;
+                let (n, _) = c
+                    .query_one("SELECT gseq, hash FROM governance_head WHERE id", &[])
+                    .map(|r| (r.get::<_, i64>(0), r.get::<_, String>(1)))
+                    .map_err(crate::db::db_err)?;
+                n
+            };
+            if have < seal.size {
+                let Some(dir) = archive else {
+                    return Err(mirror_err(format!(
+                        "the database's log ends at event {have}, inside the sealed prefix (events 1..={} were compacted out of the mirror into an archive): run recovery with the archive (`recover --archive-dir DIR`, see docs/deployment.md)",
+                        seal.size
+                    )));
+                };
+                from_archive = Some(crate::archive::Archive::open(dir, false)?.load(seal, false)?);
+            }
+        }
+        let run = |t: &mut postgres::Transaction<'_>| -> Result<u64> {
             let mut imp = govlog::Importer::new(t)?;
-            scan(
-                self.anchor.store(),
+            let each = &mut |x: &Exported| imp.push(t, x);
+            match &from_archive {
+                // The whole log, from its first event.
+                Some(v) => scan(
+                    &Layered {
+                        mirror: store,
+                        archive: v,
+                    },
+                    None,
+                    size,
+                    head,
+                    Some(each),
+                )?,
+                None => scan(store, a.seal.as_ref(), size, head, Some(each))?,
+            };
+            imp.finish(t)
+        };
+        // First pass: the log chains to the anchored head, before
+        // anything is written.
+        match &from_archive {
+            Some(v) => scan(
+                &Layered {
+                    mirror: store,
+                    archive: v,
+                },
+                None,
                 size,
                 head,
-                Some(&mut |x: &Exported| imp.push(t, x)),
-            )?;
-            Ok(imp.added)
-        })
+                None,
+            )?,
+            None => scan(store, a.seal.as_ref(), size, head, None)?,
+        };
+        self.db.tx(run)
     }
 
     /// Rebuilds the whole mirror from the database's log up to `size`
     /// (recovery, after the database's log was checked against the
     /// anchor), as a new run starting at event 1 after every segment there
     /// is, damaged or not.
-    pub(crate) fn rebuild_mirror(&self, size: i64) -> Result<()> {
+    pub(crate) fn rebuild_mirror(&self, size: i64, seal: Option<&Seal>) -> Result<()> {
         if size == 0 {
             return Ok(());
         }
+        // After a compaction the rebuilt run is the tail: the sealed
+        // events are the archive's and are not written back.
+        let base = seal.map_or(0, |s| s.size);
         let next = self
             .anchor
             .store()
@@ -521,8 +702,8 @@ impl Control {
         let mut c = self.db.conn()?;
         let o = Open {
             n: next,
-            from: 1,
-            to: 0,
+            from: base + 1,
+            to: base,
             hash: None,
             full: false,
             replace: false,
@@ -532,5 +713,240 @@ impl Control {
             self.mirror.set(None);
         }
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encompute_trust::govlog::{GovEvent, GOVLOG_VERSION};
+    use std::collections::BTreeMap;
+
+    /// Segments in memory: (number, lines).
+    struct Mem(Vec<(u64, String)>);
+
+    impl Segments for Mem {
+        fn list(&self) -> Result<Vec<u64>> {
+            Ok(self.0.iter().map(|(n, _)| *n).collect())
+        }
+
+        fn read(&self, n: u64) -> Result<String> {
+            self.0
+                .iter()
+                .find(|(m, _)| *m == n)
+                .map(|(_, l)| l.clone())
+                .ok_or_else(|| mirror_err("no such segment"))
+        }
+    }
+
+    /// A well-formed chain of `n` events over three partitions.
+    fn chain(n: usize) -> Vec<Exported> {
+        let mut out = vec![];
+        let mut prev = CHAIN_GENESIS;
+        let mut pseqs: HashMap<String, u64> = HashMap::new();
+        for g in 1..=n {
+            let partition = ["platform", "o:org-a", "o:org-b"][g % 3].to_owned();
+            let p = pseqs.entry(partition.clone()).or_insert(0);
+            *p += 1;
+            let event = GovEvent {
+                v: GOVLOG_VERSION,
+                partition,
+                pseq: *p,
+                kind: "role.removed".into(),
+                subject: format!("rol_{g}"),
+                org: None,
+                at: 1_000 + g as u64,
+                refs: BTreeMap::new(),
+            };
+            prev = chain_hash(&prev, g as u64, &event.leaf_hash().unwrap());
+            out.push(Exported {
+                gseq: g as i64,
+                hash: hash_hex(&prev),
+                event,
+                anchor: None,
+            });
+        }
+        out
+    }
+
+    /// Segments of `per` events each, numbered from `first_n`.
+    fn segments(events: &[Exported], per: usize, first_n: u64) -> Vec<(u64, String)> {
+        events
+            .chunks(per)
+            .enumerate()
+            .map(|(i, c)| (first_n + i as u64, crate::govlog::to_lines(c).unwrap()))
+            .collect()
+    }
+
+    fn seal_at(events: &[Exported], size: usize) -> Seal {
+        Seal {
+            size: size as i64,
+            head: events[size - 1].hash.clone(),
+            manifest: "0".repeat(64),
+        }
+    }
+
+    fn scan_all(m: &Mem, seal: Option<&Seal>, events: &[Exported]) -> Result<Scanned> {
+        scan(
+            m,
+            seal,
+            events.len() as i64,
+            &events.last().unwrap().hash,
+            None,
+        )
+    }
+
+    fn refused(r: Result<Scanned>, what: &str) {
+        let e = r.expect_err(what);
+        assert_eq!(e.code, Code::TrustEvidence, "{e}");
+    }
+
+    /// The whole mirror and the tail after a seal both reach the anchored
+    /// head, and the sealed run reads only what follows the seal.
+    #[test]
+    fn a_tail_chains_from_the_seal() {
+        let ev = chain(50);
+        let all = Mem(segments(&ev, 10, 1));
+        let s = scan_all(&all, None, &ev).unwrap();
+        assert_eq!((s.end, s.run.len()), (50, 5));
+        let seal = seal_at(&ev, 30);
+        // After a compaction: segments 4 and 5 only.
+        let tail = Mem(all.0[3..].to_vec());
+        let mut seen = vec![];
+        let s = scan(
+            &tail,
+            Some(&seal),
+            50,
+            &ev[49].hash,
+            Some(&mut |x: &Exported| {
+                seen.push(x.gseq);
+                Ok(())
+            }),
+        )
+        .unwrap();
+        assert_eq!(seen, (31..=50).collect::<Vec<_>>());
+        assert_eq!(s.run, vec![4, 5]);
+        // The segments before the seal are ignored when they are still
+        // there (a crash after the commit): the events up to it are not
+        // read.
+        let s = scan_all(&all, Some(&seal), &ev).unwrap();
+        assert_eq!(s.end, 50);
+        // Without the seal, the tail alone is a gap.
+        refused(scan_all(&tail, None, &ev), "a tail with no seal");
+        // The seal at the anchored size: nothing follows, the head is the
+        // seal's.
+        let seal50 = seal_at(&ev, 50);
+        let none = Mem(vec![]);
+        scan(&none, Some(&seal50), 50, &ev[49].hash, None).unwrap();
+        refused(
+            scan(&none, Some(&seal50), 50, &ev[48].hash, None),
+            "a seal that is not the anchored head",
+        );
+    }
+
+    /// Truncation, gaps, edits, forks and replays of a tail are refused.
+    #[test]
+    fn a_damaged_tail_is_refused() {
+        let ev = chain(50);
+        let seal = seal_at(&ev, 30);
+        let all = segments(&ev, 10, 1);
+        let tail = |v: Vec<(u64, String)>| Mem(v);
+        // Truncated: the newest segment gone, or an event of it.
+        refused(
+            scan_all(&tail(all[3..4].to_vec()), Some(&seal), &ev),
+            "newest gone",
+        );
+        let mut cut = all[4].1.lines().collect::<Vec<_>>();
+        cut.pop();
+        refused(
+            scan_all(
+                &tail(vec![all[3].clone(), (5, format!("{}\n", cut.join("\n")))]),
+                Some(&seal),
+                &ev,
+            ),
+            "last event dropped",
+        );
+        // A gap: the first tail segment gone.
+        refused(
+            scan_all(&tail(all[4..].to_vec()), Some(&seal), &ev),
+            "first tail segment gone",
+        );
+        // An edited event.
+        let edited = all[3].1.replacen("rol_35", "rol_99", 1);
+        refused(
+            scan_all(&tail(vec![(4, edited), all[4].clone()]), Some(&seal), &ev),
+            "edited",
+        );
+        // A seal that is not this history's head: nothing chains from it.
+        let mut forked = seal.clone();
+        forked.head = ev[28].hash.clone();
+        refused(
+            scan_all(&tail(all[3..].to_vec()), Some(&forked), &ev),
+            "another sealed head",
+        );
+        // A sealed segment replayed after the tail, or a tail segment
+        // replayed: the run begins again and does not reach the head.
+        let mut replay = all[3..].to_vec();
+        replay.push((9, all[1].1.clone()));
+        refused(
+            scan_all(&tail(replay), Some(&seal), &ev),
+            "an old segment replayed",
+        );
+        let mut replay = all[3..].to_vec();
+        replay.push((9, all[3].1.clone()));
+        refused(
+            scan_all(&tail(replay), Some(&seal), &ev),
+            "a tail segment replayed",
+        );
+        // A partition's positions out of order inside the tail.
+        let mut swapped = ev.clone();
+        swapped.swap(34, 37);
+        for (i, x) in swapped.iter_mut().enumerate() {
+            x.gseq = i as i64 + 1;
+        }
+        refused(
+            scan(
+                &tail(segments(&swapped[30..], 10, 4)),
+                Some(&seal),
+                50,
+                &ev[49].hash,
+                None,
+            ),
+            "reordered events",
+        );
+    }
+
+    /// A segment that straddles the seal (an old copy kept under its
+    /// number) begins the tail at the seal; segments of other runs are
+    /// ignored; a rebuilt run after the seal supersedes a damaged one.
+    #[test]
+    fn leftovers_straddles_and_rebuilt_runs() {
+        let ev = chain(50);
+        let seal = seal_at(&ev, 25);
+        // Segments of 10: 21..30 straddles the seal at 25.
+        let all = segments(&ev, 10, 1);
+        let s = scan_all(&Mem(all[2..].to_vec()), Some(&seal), &ev).unwrap();
+        assert_eq!(s.run, vec![3, 4, 5]);
+        // A damaged tail segment, then a rebuilt run from the seal on
+        // under higher numbers: the later run is the mirror.
+        let mut m = all[3..4].to_vec();
+        m[0].1 = "garbage\n".into();
+        m.extend(segments(&ev[25..], 10, 20));
+        let s = scan_all(&Mem(m), Some(&seal), &ev).unwrap();
+        assert_eq!(s.run, vec![20, 21, 22]);
+        // Segments the mirror holds past the anchored size are an
+        // orphan suffix: never part of the run.
+        let orphans = chain(60);
+        let m = Mem(segments(&orphans, 10, 1));
+        let s = scan(
+            &m,
+            Some(&seal_at(&orphans, 25)),
+            50,
+            &orphans[49].hash,
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.end, 60);
+        assert_eq!(s.run, vec![3, 4, 5]);
     }
 }

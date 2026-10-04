@@ -159,7 +159,7 @@ impl Control {
         })?;
         let (migrated, size, head) = migrated;
         // The mirror first, then the anchor (the commit point).
-        self.mirror_through(0, size)?;
+        self.mirror_through(0, size, 0)?;
         self.anchor.try_update(&self.signer, |a| {
             a.glog_size = size;
             a.glog_head = head.clone();

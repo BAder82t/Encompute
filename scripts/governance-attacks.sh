@@ -48,6 +48,9 @@ export after a source was revoked|ENC2706|encompute-control|governed_jobs|export
 grant replayed across projects|refused|encompute-control|governed_jobs|cross_project_grant_replay_refused
 skipped or replayed log sequence number|ENC2717|encompute-control|revocation_heads|skipped_or_replayed_seq_refused
 rolled-back database against the anchor|ENC2202|encompute-control|governance_rollback|restores_resurrecting_governed_state_are_refused_and_recovered
+truncated, gapped or replayed compacted mirror|ENC2202|encompute-control|mirror_compaction|a_truncated_or_replayed_tail_is_refused
+tampered, swapped or substituted mirror archive|refused|encompute-control|mirror_compaction|a_tampered_archive_is_refused
+old backup behind a compacted mirror|ENC2202|encompute-control|mirror_compaction|old_and_new_backups_after_a_compaction
 forged release ticket at the broker|ENC2712|encompute-keybroker|sovereign|forged_ticket_refused
 replayed release ticket at the broker|ENC2712|encompute-keybroker|sovereign|replayed_ticket_refused
 ticket for another organization at the broker|ENC2712|encompute-keybroker|sovereign|ticket_for_other_org_refused

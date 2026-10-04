@@ -247,6 +247,13 @@ impl encompute_control::anchor::AnchorStore for FlakyAnchor {
     ) -> encompute_ir::Result<()> {
         self.inner.mirror_replace(n, lines, allow)
     }
+    fn mirror_delete(
+        &self,
+        n: u64,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_delete(n, allow)
+    }
 }
 
 /// A directory anchor store that kills the process (as a crash would)
@@ -291,6 +298,13 @@ impl encompute_control::anchor::AnchorStore for KillAnchor {
     ) -> encompute_ir::Result<()> {
         self.inner.mirror_replace(n, lines, allow)
     }
+    fn mirror_delete(
+        &self,
+        n: u64,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_delete(n, allow)
+    }
 }
 
 impl Env0 {
@@ -316,6 +330,99 @@ impl Env0 {
             }))
             .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
         (t, fail)
+    }
+}
+
+/// Everything an import writes, as text, in a fixed order (the rows'
+/// `recorded_at` is the time of the transaction: not part of the log).
+pub fn dump_log(url: &str) -> Vec<String> {
+    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    let mut out = vec![];
+    for r in c
+        .query(
+            "SELECT gseq, partition, pseq, kind, subject_id, org_id, body::text, leaf_hash,
+                    prev_hash, hash FROM governance_events ORDER BY gseq",
+            &[],
+        )
+        .unwrap()
+    {
+        out.push(format!(
+            "event {} {} {} {} {} {:?} {} {} {} {}",
+            r.get::<_, i64>(0),
+            r.get::<_, String>(1),
+            r.get::<_, i64>(2),
+            r.get::<_, String>(3),
+            r.get::<_, String>(4),
+            r.get::<_, Option<String>>(5),
+            r.get::<_, String>(6),
+            r.get::<_, String>(7),
+            r.get::<_, String>(8),
+            r.get::<_, String>(9),
+        ));
+    }
+    for r in c
+        .query(
+            "SELECT partition, level, idx, hash FROM governance_tree_nodes ORDER BY 1, 2, 3",
+            &[],
+        )
+        .unwrap()
+    {
+        out.push(format!(
+            "node {} {} {} {}",
+            r.get::<_, String>(0),
+            r.get::<_, i32>(1),
+            r.get::<_, i64>(2),
+            r.get::<_, String>(3)
+        ));
+    }
+    let h = c
+        .query_one("SELECT gseq, hash FROM governance_head WHERE id", &[])
+        .unwrap();
+    out.push(format!(
+        "head {} {}",
+        h.get::<_, i64>(0),
+        h.get::<_, String>(1)
+    ));
+    for r in c
+        .query(
+            "SELECT gseq, digest, anchor FROM governance_anchor_genesis ORDER BY gseq",
+            &[],
+        )
+        .unwrap()
+    {
+        out.push(format!("genesis {}", r.get::<_, i64>(0)));
+    }
+    // Each partition's root at its full size, recomputed from the nodes.
+    let parts: Vec<String> = c
+        .query(
+            "SELECT DISTINCT partition FROM governance_events ORDER BY 1",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    for p in parts {
+        let n = encompute_control::govlog::partition_size(&mut c, &p).unwrap();
+        let root = encompute_control::govlog::partition_root(&mut c, &p, n).unwrap();
+        out.push(format!(
+            "root {p} {n} {}",
+            encompute_trust::govlog::hash_hex(&root)
+        ));
+    }
+    out
+}
+
+pub fn assert_same_rows(what: &str, a: &[String], b: &[String]) {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "{what}: {} rows against {}",
+        a.len(),
+        b.len()
+    );
+    for (x, y) in a.iter().zip(b) {
+        assert_eq!(x, y, "{what}");
     }
 }
 
