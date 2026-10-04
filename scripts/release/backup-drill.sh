@@ -739,6 +739,45 @@ check "privacy state equals the backup after the database-only restore" eq \
   "$(ok a-owner GET "/v1/privacy/$DS1" | canon)|$(ok a-owner GET "/v1/privacy/$DS2" | canon)" \
   "$(canon < "$W/pre-b1b/privacy-$DS1.json")|$(canon < "$W/pre-b1b/privacy-$DS2.json")"
 
+step "7c. the LATEST backup (b1) is older than the surviving anchor: refused naming AUDIT until recover records the gap"
+# The disaster an operator really has: the database is lost, the newest
+# backup predates the last anchored checkpoint. Nothing the governance log
+# records moved since b1, so the refusal is the audit chain's.
+stop "$KB_PID" "$EVAL_PID" "$CTL_PID"
+restore "$BACKUPS/b1" > "$W/restore7c.txt"
+check "restoring b1 keeps the newer anchor" contains "$W/restore7c.txt" "anchor kept"
+check "b1 holds no audit gap event yet" \
+  eq "$(sql_in "SELECT count(*) FROM audit_events WHERE action = 'audit.gap.recorded'")" 0
+B1_AUDIT_HEAD="$(sql_in "SELECT seq FROM audit_head WHERE id")"
+if start_control; then
+  fail_check "the control plane refuses to start on b1 over the newer anchor"
+  stop "$CTL_PID"
+else
+  wait "$CTL_PID" 2>/dev/null && rc=0 || rc=$?
+  check "the control plane refuses to start on b1 (exit $rc, not ready)" \
+    test "$rc" -ne 0 -a "$(curl -fs "$CTL_URL/ready" >/dev/null 2>&1 && echo up || echo down)" = down
+  check "the refusal names AUDIT STATE ROLLBACK and STARTUP REFUSED" \
+    eq "$(grep -c 'AUDIT STATE ROLLBACK.*STARTUP REFUSED' "$CTL_LOG")" 1
+fi
+ctl verify-state >"$W/verify7c.txt" 2>&1 && fail_check "verify-state refuses b1 over the newer anchor" \
+  || check "verify-state refuses b1 (AUDIT STATE ROLLBACK)" \
+    eq "$(grep -c "AUDIT STATE ROLLBACK" "$W/verify7c.txt")" 1
+ctl recover --operator drill-operator >"$W/recover7c.txt" 2>&1 || true
+check "recover says the audit events after b1 were lost and the gap is recorded" \
+  eq "$(grep -c "audit chain: events after $B1_AUDIT_HEAD were lost; the gap is recorded" "$W/recover7c.txt") $(grep -c RECOVERED "$W/recover7c.txt")" "1 1"
+check "the gap is an event of the audit chain (audit.gap.recorded, by drill-operator)" \
+  eq "$(sql_in "SELECT count(*) FROM audit_events WHERE action = 'audit.gap.recorded' AND actor = 'drill-operator'")" 1
+check "the chain is b1's plus the gap event: the lost events are not restored" \
+  eq "$(sql_in "SELECT seq FROM audit_head WHERE id")" "$((B1_AUDIT_HEAD + 1))"
+ctl verify-state >"$W/verify7c2.txt" 2>&1 || true
+check "verify-state after recovery: STATE VERIFIED" contains "$W/verify7c2.txt" "STATE VERIFIED"
+start_control || die "the control plane did not start after the audit recovery: $(tail -n 3 "$CTL_LOG")"
+start_evaluator || die "the evaluator did not re-register"
+start_keybroker || die "the key broker did not restart"
+pass "control plane starts after recovering the audit gap"
+check "nothing governed moved since b1: no ledger was frozen, $DS1 and $DS2 are not frozen" \
+  eq "$(sql_in "SELECT count(*) FROM audit_events WHERE action = 'privacy.ledger.frozen'") $(ok a-owner GET "/v1/privacy/$DS1" | jget 'v["frozen"]') $(ok a-owner GET "/v1/privacy/$DS2" | jget 'v["frozen"]')" "0 None None"
+
 step "8. an OLDER backup over a NEWER anchor is refused; recovery freezes"
 PRE_DS1_SPENT="$(jget 'v["spent"]["epsilon"]' < "$W/pre/privacy-$DS1.json")"
 ok a-owner POST "/v1/privacy/$DS1/events" "$(reserve_body r4-after-backup)" >/dev/null
