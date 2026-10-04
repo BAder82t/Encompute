@@ -8,14 +8,28 @@
 //! misspelt value refuses to start rather than meaning development.
 //! `ENCOMPUTE_ENV=production` fails closed: it refuses development tokens,
 //! a development state anchor, missing signing keys, default database
-//! credentials, and plain-HTTP identity providers, and serves `/metrics`
-//! only to a scraper presenting the metrics token (unless told otherwise).
+//! credentials, a plaintext database connection (see below), and plain-HTTP
+//! identity providers, and serves `/metrics` only to a scraper presenting
+//! the metrics token (unless told otherwise).
+//!
+//! The database connection is encrypted by the connection string itself
+//! (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`: see `pgtls`). Production
+//! mode refuses `disable`, `prefer` and an absent `sslmode`, which can send
+//! credentials and data in plaintext, unless
+//! `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true` is set: an explicit opt-out for
+//! a database reached over a channel that is encrypted some other way (a
+//! sidecar tunnel, a unix socket is exempt already); it logs a warning at
+//! every start. `require` encrypts without authenticating the server and is
+//! accepted with a warning; `verify-ca` and `verify-full` are the settings
+//! that defeat an active attacker.
 
 use std::path::PathBuf;
 
 use zeroize::Zeroizing;
 
 use encompute_ir::{Code, Error, Result};
+
+use crate::log::LogLine;
 
 fn insecure(msg: impl Into<String>) -> Error {
     Error::new(Code::InsecureConfiguration, msg)
@@ -103,6 +117,9 @@ pub struct Config {
     /// This service's ID (the recipient name in signed requests).
     pub service_id: String,
     pub database_url: Zeroizing<String>,
+    /// `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true`: production mode may use a
+    /// database connection that is not TLS-enforced.
+    pub allow_plaintext_database: bool,
     /// The control plane's signing key seed (job grants, audit
     /// checkpoints, anchors, messages).
     pub signing_key_file: Option<PathBuf>,
@@ -154,7 +171,8 @@ const DEFAULT_PASSWORDS: [&str; 8] = [
 /// reads it (`postgres://user:password@host/db`, a `?password=` query
 /// parameter, percent-encoding, or `key=value` with quoting).
 fn db_password(url: &str) -> Result<Option<String>> {
-    let c: postgres::Config = url
+    let (rest, _) = crate::pgtls::split(url)?;
+    let c: postgres::Config = rest
         .parse()
         .map_err(|_| insecure("ENCOMPUTE_DATABASE_URL is not a valid connection string"))?;
     Ok(c.get_password()
@@ -224,6 +242,17 @@ impl Config {
             service_id: std::env::var("ENCOMPUTE_SERVICE_ID")
                 .unwrap_or_else(|_| "control-plane".into()),
             database_url,
+            allow_plaintext_database: match std::env::var("ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE")
+                .as_deref()
+            {
+                Ok("true") => true,
+                Ok("false") | Err(_) => false,
+                Ok(other) => {
+                    return Err(insecure(format!(
+                        "ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE={other}: use true or false"
+                    )))
+                }
+            },
             signing_key_file: std::env::var("ENCOMPUTE_SIGNING_KEY_FILE")
                 .ok()
                 .map(Into::into),
@@ -306,7 +335,51 @@ impl Config {
                 return Err(insecure(format!("anchor store {addr} must use https")));
             }
         }
-        Ok(())
+        self.check_database_transport()
+    }
+
+    /// Production: the database connection must enforce TLS, unless the
+    /// operator opted out by name (and is told at every start).
+    fn check_database_transport(&self) -> Result<()> {
+        let (rest, tls) = crate::pgtls::split(&self.database_url)?;
+        let cfg: postgres::Config = rest
+            .parse()
+            .map_err(|_| insecure("ENCOMPUTE_DATABASE_URL is not a valid connection string"))?;
+        // A unix socket never leaves the host.
+        let local = !cfg.get_hosts().is_empty()
+            && cfg
+                .get_hosts()
+                .iter()
+                .all(|h| matches!(h, postgres::config::Host::Unix(_)));
+        if tls.enforces_tls() || local {
+            if tls.enforces_tls() && !tls.verifies_server() {
+                LogLine::new(&self.service_id, "database_server_not_verified")
+                    .field(
+                        "warning",
+                        "sslmode=require encrypts the database connection but does not check \
+                         the server's identity: use verify-full with sslrootcert",
+                    )
+                    .emit();
+            }
+            return Ok(());
+        }
+        if self.allow_plaintext_database {
+            LogLine::new(&self.service_id, "database_plaintext_allowed")
+                .field(
+                    "warning",
+                    "ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true: the database connection is not \
+                     TLS-enforced; credentials and data can cross the network unencrypted \
+                     unless another channel protects them",
+                )
+                .emit();
+            return Ok(());
+        }
+        Err(insecure(
+            "production mode refuses a plaintext database connection: set sslmode=verify-full \
+             (with sslrootcert, and sslcert/sslkey if the server wants a client certificate) \
+             in ENCOMPUTE_DATABASE_URL, or opt out explicitly with \
+             ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true",
+        ))
     }
 }
 
@@ -320,8 +393,9 @@ mod tests {
             listen: "0.0.0.0:8770".into(),
             service_id: "control-plane".into(),
             database_url: Zeroizing::new(
-                "postgres://encompute:Xk3!long-random@db/encompute".into(),
+                "postgres://encompute:Xk3!long-random@db/encompute?sslmode=verify-full&sslrootcert=/ca.pem".into(),
             ),
+            allow_plaintext_database: false,
             signing_key_file: Some("/run/secrets/control-key".into()),
             oidc: vec![OidcIssuer {
                 issuer: "https://login.example".into(),
@@ -337,10 +411,57 @@ mod tests {
     }
 
     #[test]
+    fn production_refuses_a_plaintext_database_unless_opted_out() {
+        let with = |url: &str, allow: bool| {
+            let mut c = prod();
+            c.database_url = Zeroizing::new(url.into());
+            c.allow_plaintext_database = allow;
+            c.validate()
+        };
+        let base = "postgres://encompute:Xk3!long-random@db/encompute";
+        for q in [
+            "",
+            "?sslmode=disable",
+            "?sslmode=prefer",
+            "?sslmode=verify-full",
+            "?sslmode=bogus",
+        ] {
+            let e = with(&format!("{base}{q}"), false).unwrap_err();
+            assert_eq!(e.code, Code::InsecureConfiguration, "{q}");
+        }
+        assert!(with("host=db user=e password=Xk3!long-random", false).is_err());
+        // The opt-out, by name.
+        assert!(with(base, true).is_ok());
+        assert!(with(&format!("{base}?sslmode=prefer"), true).is_ok());
+        // Enforced TLS needs no opt-out; so does a unix socket.
+        for q in [
+            "?sslmode=require",
+            "?sslmode=verify-ca&sslrootcert=/ca.pem",
+            "?sslmode=verify-full&sslrootcert=system",
+        ] {
+            assert!(with(&format!("{base}{q}"), false).is_ok(), "{q}");
+        }
+        assert!(with(
+            "host=/var/run/postgresql user=e password=Xk3!long-random",
+            false
+        )
+        .is_ok());
+        // A development configuration is never refused for it.
+        let mut c = prod();
+        c.env = Env::Development;
+        c.database_url = Zeroizing::new(base.into());
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
     fn production_refuses_insecure_fallbacks() {
         prod().validate().unwrap();
         let refused = |f: fn(&mut Config)| {
             let mut c = prod();
+            // These cases are about something other than the transport: the
+            // opt-out keeps their (plaintext) connection strings from being
+            // refused for that reason instead.
+            c.allow_plaintext_database = true;
             f(&mut c);
             assert_eq!(c.validate().unwrap_err().code, Code::InsecureConfiguration);
         };

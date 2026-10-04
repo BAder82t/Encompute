@@ -25,6 +25,7 @@ mod receipt;
 mod reference;
 pub mod service;
 mod spec;
+pub mod tls;
 pub mod transcript;
 mod verify;
 

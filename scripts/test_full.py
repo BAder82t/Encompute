@@ -25,12 +25,13 @@ DEFAULT_MANIFEST = ROOT / "scripts" / "test-manifest.json"
 LABELS = {
     "postgres": "PostgreSQL",
     "openbao": "OpenBao",
+    "tls-postgres": "TLS PostgreSQL",
     "openfhe": "OpenFHE",
     "migrations": "Migrations",
     "tfhe": "TFHE-rs research",
     "gcp": "Google Cloud",
 }
-ORDER = ["postgres", "openbao", "openfhe", "migrations", "tfhe", "gcp"]
+ORDER = ["postgres", "openbao", "tls-postgres", "openfhe", "migrations", "tfhe", "gcp"]
 
 
 # --- Dependencies ----------------------------------------------------------------
@@ -91,6 +92,23 @@ def check_openbao(env):
     return True, "%s answers; the token is valid" % addr
 
 
+def check_tls_postgres(env):
+    """The TLS-enabled test server (scripts/tls-test-db.sh up) and its PKI."""
+    addr, pw, pki = (env.get("ENCOMPUTE_TEST_TLS_DATABASE"), env.get("ENCOMPUTE_TEST_TLS_DATABASE_PASSWORD"),
+                     env.get("ENCOMPUTE_TEST_TLS_PKI"))
+    if not (addr and pw and pki):
+        return False, ("ENCOMPUTE_TEST_TLS_DATABASE, ENCOMPUTE_TEST_TLS_DATABASE_PASSWORD and "
+                       "ENCOMPUTE_TEST_TLS_PKI must be set (scripts/tls-test-db.sh up; eval \"$(scripts/tls-test-db.sh env)\")")
+    missing = [f for f in ("internal-ca.crt", "edge-ca.crt", "pg-client.crt", "pg-client.key", "ops-client.crt",
+                           "ops-client.key") if not (Path(pki) / f).is_file()]
+    if missing:
+        return False, "%s lacks %s" % (pki, ", ".join(missing))
+    ok, why = tcp_reachable("tcp://" + addr, 5432)
+    if not ok:
+        return False, why
+    return True, "%s answers; PKI in %s" % (addr, pki)
+
+
 def check_openfhe(env):
     root = Path(env.get("OPENFHE_ROOT") or ROOT / ".deps" / "openfhe")
     need = [root / "include/openfhe/pke/openfhe.h", root / "lib/libOPENFHEpke_static.a"]
@@ -127,6 +145,8 @@ def precheck(deps, env):
             out[d] = check_postgres(env)
         elif d == "openbao":
             out[d] = check_openbao(env)
+        elif d == "tls-postgres":
+            out[d] = check_tls_postgres(env)
         elif d == "openfhe":
             out[d] = check_openfhe(env)
         elif d == "migrations":

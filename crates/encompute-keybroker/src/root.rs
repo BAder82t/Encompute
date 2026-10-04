@@ -311,11 +311,30 @@ impl OpenBaoTransit {
             // Redirects are never followed: ureq would carry X-Vault-Token
             // to whatever origin a redirect names (it strips only
             // Authorization and Cookie). A 3xx is an error (see `answer`).
-            agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(10))
-                .redirects(0)
-                .build(),
+            agent: Self::agent(None),
         })
+    }
+
+    fn agent(tls: Option<std::sync::Arc<rustls::ClientConfig>>) -> ureq::Agent {
+        let b = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(10))
+            .redirects(0);
+        match tls {
+            Some(c) => b.tls_config(c).build(),
+            None => b.build(),
+        }
+    }
+
+    /// Trusts the CA bundle and presents the client certificate that
+    /// `BAO_CACERT`, `BAO_CLIENT_CERT` and `BAO_CLIENT_KEY` (or the `VAULT_`
+    /// names) name; with none of them set the client is unchanged (public
+    /// web roots, no client certificate). A bundle that cannot be read or
+    /// holds no certificate is an error, never a fall back to other roots.
+    pub fn with_tls_from_env(mut self) -> Result<Self> {
+        if let Some(c) = encompute_verification::tls::provider_config_from_env()? {
+            self.agent = Self::agent(Some(c));
+        }
+        Ok(self)
     }
 
     /// From `BAO_ADDR`/`VAULT_ADDR`, and the token from `BAO_TOKEN_FILE`
@@ -338,7 +357,7 @@ impl OpenBaoTransit {
                 err("set BAO_TOKEN_FILE (or BAO_TOKEN) for the root key provider")
             })?),
         };
-        Self::new(&addr, mount, key, token)
+        Self::new(&addr, mount, key, token)?.with_tls_from_env()
     }
 
     /// A reply's JSON body: only a 2xx answer counts. With redirects off,

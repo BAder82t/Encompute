@@ -2,15 +2,16 @@
 //! embedded in the binary and applied in order under an advisory lock; an
 //! applied migration whose text changed is refused rather than re-run.
 
-use postgres::{NoTls, Transaction};
+use postgres::Transaction;
 use r2d2_postgres::PostgresConnectionManager;
 use sha2::{Digest, Sha256};
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 use encompute_ir::{Code, Error, Result};
 use encompute_verification::hex;
 
-pub type Pool = r2d2::Pool<PostgresConnectionManager<NoTls>>;
-pub type Conn = r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
+pub type Pool = r2d2::Pool<PostgresConnectionManager<MakeRustlsConnect>>;
+pub type Conn = r2d2::PooledConnection<PostgresConnectionManager<MakeRustlsConnect>>;
 
 /// Every migration, in order. Never edit one that has shipped: add another.
 pub const MIGRATIONS: &[(i32, &str, &str)] = &[
@@ -46,7 +47,27 @@ pub fn db_err<E: std::fmt::Display + 'static>(e: E) -> Error {
             );
         }
     }
+    if let Some(pe) = any.downcast_ref::<postgres::Error>() {
+        return Error::new(Code::Remote, format!("database: {}", with_causes(pe)));
+    }
     Error::new(Code::Remote, format!("database: {e}"))
+}
+
+/// An error with its causes (`a: b: c`): the driver's message for a failed
+/// TLS handshake is only "error performing TLS handshake"; the reason (an
+/// unknown issuer, an expired certificate, a name mismatch) is its source.
+fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(c) = cur {
+        let msg = c.to_string();
+        if !out.contains(&msg) {
+            out.push_str(": ");
+            out.push_str(&msg);
+        }
+        cur = c.source();
+    }
+    out
 }
 
 /// Deadlocks and serialization failures: the transaction rolled back and
@@ -63,15 +84,33 @@ pub struct Db {
 
 impl Db {
     pub fn connect(url: &str) -> Result<Self> {
-        let config: postgres::Config = url.parse().map_err(db_err)?;
-        let manager = PostgresConnectionManager::new(config, NoTls);
+        let (rest, tls) = crate::pgtls::split(url)?;
+        let mut config: postgres::Config = rest.parse().map_err(db_err)?;
+        // The driver refuses plaintext whenever sslmode asks for TLS: a
+        // server without TLS fails here instead of being used unencrypted.
+        config.ssl_mode(tls.driver_mode());
+        let connector = tls.connector()?;
+        let probe = connector.clone();
+        let probe_config = config.clone();
+        let manager = PostgresConnectionManager::new(config, connector);
         let pool = r2d2::Pool::builder()
             .max_size(16)
             // Open connections on demand (r2d2 otherwise opens all of them).
             .min_idle(Some(1))
             .connection_timeout(std::time::Duration::from_secs(10))
-            .build(manager)
-            .map_err(db_err)?;
+            .build(manager);
+        let pool = match pool {
+            Ok(p) => p,
+            Err(e) => {
+                // The pool only says it timed out. One direct attempt
+                // brings back the driver's own reason (a certificate that
+                // is not trusted, a server without TLS, a wrong password).
+                return Err(match probe_config.connect(probe) {
+                    Err(cause) => db_err(cause),
+                    Ok(_) => db_err(e),
+                });
+            }
+        };
         Ok(Self { pool })
     }
 

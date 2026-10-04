@@ -277,6 +277,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The database-TLS tests need a TLS PostgreSQL that requires a client
+      # certificate (a throwaway PKI; nothing is committed).
+      - name: TLS PostgreSQL for the database-TLS tests
+        run: |
+          scripts/tls-test-db.sh up "$RUNNER_TEMP/tls-pg"
+          scripts/tls-test-db.sh env "$RUNNER_TEMP/tls-pg" | sed 's/^export //' >> "$GITHUB_ENV"
       - run: cargo clippy -p encompute-control -p encompute-keybroker -p encompute-verification --all-targets -- -D warnings
       # The runner must itself fail when a service is down or a suite is empty.
       - run: ./scripts/test-full-selftest.sh
