@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+- **Native TLS clients.** The control plane's PostgreSQL connection honours
+  `sslmode` (`disable`, `prefer`, `require`, `verify-ca`, `verify-full`),
+  `sslrootcert`, `sslcert` and `sslkey` in `ENCOMPUTE_DATABASE_URL`
+  (rustls; no OpenSSL). No `sslmode` stays plaintext, as before. In production
+  mode the control plane now refuses a plaintext database connection (no
+  `sslmode`, `disable`, `prefer`) unless `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true`
+  is set, which logs a warning at every start: an existing production
+  deployment without TLS to its database must set `sslmode` or the opt-out
+  before upgrading. The key broker's OpenBao/Vault client takes a private CA
+  (`BAO_CACERT`, or `VAULT_CACERT`) and a client certificate
+  (`BAO_CLIENT_CERT` with `BAO_CLIENT_KEY`); an unreadable or empty CA file is
+  an error. Database errors now carry their cause (an unknown issuer, an
+  expired certificate, a name mismatch).
+- **Reference production topology:** the `pg-tunnel` and `bao-tunnel` stunnel
+  sidecars are gone; the control plane verifies PostgreSQL (`verify-full`, a
+  client certificate) and the key broker verifies the vault itself. The
+  control plane and services images are now required variables
+  (`ENCOMPUTE_CONTROL_IMAGE`, `ENCOMPUTE_SERVICES_IMAGE`): the published v0.3.0
+  images predate native TLS. `validate.sh` reads the real client settings
+  (PG-07, PG-08, BAO-07). Not covered: the CLI and SDK, the identity provider
+  key fetch and the state-anchor client still trust only the public roots.
+- **Tests:** `scripts/tls-test-db.sh` starts a TLS PostgreSQL that requires a
+  client certificate; `scripts/test-full.sh` checks for it (`tls-postgres`).
+
 ## 0.3.0 — 2026-10-02
 
 The first stable 0.3 release. Its content is that of 0.3.0-rc.4 (see that

@@ -1,8 +1,9 @@
 # Reference production topology
 
 This page describes one blessed topology for running Encompute with TLS in
-front of every client, PostgreSQL that accepts only TLS, an external
-OpenBao or Vault, and secrets as files. It is built from the existing
+front of every client, PostgreSQL that accepts only TLS and that the control
+plane verifies itself, an external OpenBao or Vault that the key broker
+verifies itself, and secrets as files. It is built from the existing
 services with configuration and scripts only
 ([deploy/production](../deploy/production/)). There is one topology on
 purpose: it is the one that is validated, and the one a review should start
@@ -27,17 +28,10 @@ of this topology has been done.
            │ backend network (internal: no route out)        │
    ┌───────▼────────┐   ┌────────▼───────┐   ┌────────────────▼───────────────┐
    │ control plane  │   │   evaluator    │   │ key broker                      │
-   │ (shares the    │   │   (OpenFHE)    │   │ (shares the namespace of        │
-   │ namespace of   │   └────────────────┘   │  bao-tunnel)                    │
-   │ pg-tunnel)     │                        └───────────────┬─────────────────┘
-   └───────┬────────┘                                        │ loopback http
-           │ loopback, no TLS                       ┌────────▼────────┐
-   ┌───────▼────────┐                               │ bao-tunnel      │
-   │ pg-tunnel      │                               │ (stunnel)       │
-   │ (stunnel): TLS │                               └────────┬────────┘
-   │ + client cert, │                                        │ TLS, chain and name
-   │ verifies name  │                                        │ verified
-   └───────┬────────┘                                        │
+   │ TLS client:    │   │   (OpenFHE)    │   │ TLS client: verifies the vault  │
+   │ verify-full +  │   └────────────────┘   │ against BAO_CACERT              │
+   │ client cert    │                        └───────────────┬─────────────────┘
+   └───────┬────────┘                                        │ TLS, chain and name
            │ TLS 1.2+, client certificate required   ┌───────▼─────────────────┐
    ┌───────▼────────┐                                │ OpenBao / Vault         │
    │ PostgreSQL 16  │                                │ EXTERNAL: TLS listener, │
@@ -50,47 +44,57 @@ of this topology has been done.
 
 Only the edge publishes ports. The `backend` network is a Docker internal
 network: the database, evaluator and key broker have no route out. The
-control plane and the tunnels sit on one more network each (`egress`, `bao`)
-because the control plane fetches its identity provider's keys and the key
-broker must reach the vault.
+control plane and the key broker sit on one more network each (`egress`,
+`bao`) because the control plane fetches its identity provider's keys and the
+key broker must reach the vault.
 
-### Why two tunnels
+### Native TLS in the control plane and the key broker
 
-The control plane connects to PostgreSQL without TLS, and the key broker's
-HTTPS client trusts only the built-in public web roots, so it cannot verify a
-private CA. Neither binary has TLS settings you can configure (see
-[known limitations](../KNOWN_LIMITATIONS.md)). The topology therefore puts a TLS
-client sidecar in the same network namespace as each of them, the pattern the
-Compose deployment already uses for its key broker:
+Earlier versions of this topology put a stunnel sidecar in front of each of
+them, because the control plane's PostgreSQL client had no TLS and the key
+broker's HTTPS client trusted only the built-in public web roots. Both
+binaries now speak TLS themselves (rustls with the `ring` provider; no
+OpenSSL), and the sidecars and their image are gone:
 
-- `pg-tunnel` (stunnel, protocol `pgsql`): the control plane connects to
-  `127.0.0.1:5432` inside the shared namespace, with `sslmode=disable` in its
-  connection string, which never leaves that namespace. The sidecar speaks
-  TLS to PostgreSQL, verifies the certificate chain and the name (`verifyChain`
-  and `checkHost`, the equivalent of `sslmode=verify-full`) and presents a
-  client certificate. PostgreSQL's `pg_hba.conf` accepts only `hostssl` with
-  `clientcert=verify-full`, so a connection without TLS or without the
-  certificate is refused by the server, not just discouraged by the client.
-- `bao-tunnel` (stunnel): the key broker uses `BAO_ADDR=http://127.0.0.1:8200`.
-  The broker accepts plain HTTP only on loopback. The sidecar verifies the
-  vault's certificate against your CA and name.
+- **Control plane to PostgreSQL.** `ENCOMPUTE_DATABASE_URL` (the `db-url`
+  secret) carries libpq's parameters: `sslmode=verify-full` checks the
+  certificate chain against `sslrootcert` and the host name (`postgres`), and
+  `sslcert` and `sslkey` present a client certificate. `require` encrypts but
+  does not verify the server (with `sslrootcert` it verifies the chain, as
+  libpq does), `verify-ca` verifies the chain but not the name; `disable`,
+  `prefer` and no `sslmode` stay plaintext-capable. Production mode refuses
+  those unless `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true` is set, which logs a
+  warning at every start; this topology does not set it. PostgreSQL's
+  `pg_hba.conf` accepts only `hostssl` with `clientcert=verify-full`, so a
+  connection without TLS or without the certificate is refused by the server
+  as well as by the client.
+- **Key broker to the vault.** `BAO_ADDR` is `https://` and `BAO_CACERT`
+  (or `VAULT_CACERT`) names the CA bundle that signed the vault's certificate.
+  The bundle replaces the public roots for this connection; a file that cannot
+  be read, or holds no certificate, stops the broker instead of falling back.
+  For a vault that requires client certificates, `BAO_CLIENT_CERT` and
+  `BAO_CLIENT_KEY` (or the `VAULT_` pair) present one. Without any of these
+  the client behaves as before.
 
-The honest consequence: the control plane's connection string says
-`sslmode=disable`, and the guarantee comes from the sidecar and the server's
-`pg_hba.conf`. Native TLS in the binaries would remove both sidecars; it is not
-done (see [What is not covered](#what-is-not-covered)).
+The native TLS clients are in images built from this source and in the first
+release that contains them. The published v0.3.0 images predate them: with
+those images the control plane cannot parse `sslmode=verify-full` and the
+broker cannot trust your CA. `compose.yaml` therefore has no default image for
+the control plane and the services: `ENCOMPUTE_CONTROL_IMAGE` and
+`ENCOMPUTE_SERVICES_IMAGE` are required, and Compose stops with a message when
+they are unset. When the release that contains native TLS is published, put its
+digests here (and in your `.env`); until then build the images from the
+checkout (`lab-up.sh` with `LAB_BUILD_IMAGES=1` does).
 
 ## What each component protects, and what it trusts
 
 | Component | Protects | Trusts |
 |---|---|---|
 | Edge (Caddy) | Confidentiality and integrity of client and operator traffic in transit; keeps the operations and key-broker listeners to holders of a client certificate; keeps `/metrics` off the public listeners. | The server certificate you give it, and the client CA. It forwards to the backend over the internal network without TLS: the backend network is the trust boundary. |
-| Control plane | Tenancy, policy, plans, jobs, trust evidence, the audit trail. Authenticates every request itself (OIDC tokens, signed service requests). | The identity provider's keys; PostgreSQL, through the tunnel; its anchor volume. |
+| Control plane | Tenancy, policy, plans, jobs, trust evidence, the audit trail. Authenticates every request itself (OIDC tokens, signed service requests). | The identity provider's keys; PostgreSQL, verified itself against the internal CA (`verify-full`, client certificate); its anchor volume. |
 | PostgreSQL | The database's contents in transit (TLS 1.2+, client certificate, SCRAM). | Its own volume and host. It is not encrypted at rest by this topology: use volume encryption. |
-| pg-tunnel | The control plane's database connection. | The internal CA you give it. |
 | Evaluator | Computes on ciphertexts only; holds no client secret key. | The control plane's pinned public key. |
-| Key broker | Releases asset keys to attested workloads under their owners' policies. | The vault (through bao-tunnel), and the attestation provider's keys. |
-| bao-tunnel | The key broker's connection to the vault. | The vault CA you give it. |
+| Key broker | Releases asset keys to attested workloads under their owners' policies. | The vault, verified itself against the CA you give it (`BAO_CACERT`), and the attestation provider's keys. |
 | OpenBao / Vault (external) | The organization's root key (not exportable): the broker's KEK is wrapped under it. | Its operators and its seal. |
 | `./secrets` | Signing keys, database password, TLS keys, tokens, as files. | The host's file permissions: the directory is 0700, as in the Compose deployment. |
 
@@ -114,16 +118,19 @@ the certificate and vault steps with its own.
    [The external OpenBao or Vault](#the-external-openbao-or-vault)). Run
    `bootstrap-openbao.sh` against it, then `bao-token.sh login`.
 3. **Secrets.** `ENCOMPUTE_OIDC_ISSUER=... BAO_UPSTREAM=host:port
-   BAO_SERVER_NAME=name ./init-secrets.sh` writes the random secrets (database
-   password, signing keys, metrics token) and `.env` (public keys, ports).
+   ENCOMPUTE_CONTROL_IMAGE=... ENCOMPUTE_SERVICES_IMAGE=... ./init-secrets.sh`
+   writes the random secrets (database password, signing keys, metrics token,
+   and the database URL with `sslmode=verify-full`) and `.env` (public keys,
+   ports, image names). The host of `BAO_UPSTREAM` must be a name in the
+   vault's certificate.
 4. **Database, control plane and edge.** `docker compose up -d postgres
-   pg-tunnel control bao-tunnel edge`, then
+   control edge`, then
    `docker compose exec control encompute-control bootstrap --issuer ISSUER
    --subject YOU`.
 5. **Register the platform services** through the edge (`POST
    /v1/organizations/platform/service-accounts` for the evaluator and for the
    key broker, with the public keys in `.env`; the broker's URL is
-   `http://bao-tunnel:8760`). The evaluator cannot register with the control
+   `http://keybroker:8760`). The evaluator cannot register with the control
    plane until its service account exists.
 6. **Protect the first asset** with `protect-asset.sh ASSET POLICY.json`. The key
    broker refuses to start without its state; this creates it and wraps its KEK
@@ -131,14 +138,13 @@ the certificate and vault steps with its own.
 7. **The rest.** `docker compose up -d`.
 8. **Validate.** `./validate.sh` (below).
 
-Images are pinned by digest in `compose.yaml`. The Encompute images default to
-the digests published with the v0.3.0 release (verify them as
-[verify-release.md](verify-release.md) describes) and are overridable with
-`ENCOMPUTE_CONTROL_IMAGE`, `ENCOMPUTE_EVALUATOR_IMAGE` and
-`ENCOMPUTE_SERVICES_IMAGE`. The release images are `linux/amd64`. The tunnel
-image is built from `deploy/production/tunnel/Dockerfile` (a digest-pinned
-Alpine base; the stunnel package is the one Alpine 3.20 ships and is not pinned
-by version).
+Images are pinned by digest. The evaluator image defaults to the digest
+published with the v0.3.0 release (verify it as
+[verify-release.md](verify-release.md) describes; override it with
+`ENCOMPUTE_EVALUATOR_IMAGE`). The control plane and services images have no
+default, as explained above; name them by digest (or, in a laboratory, by
+image ID: the validator accepts both as pinned). The release images are
+`linux/amd64`.
 
 ## The external OpenBao or Vault
 
@@ -186,14 +192,14 @@ every container's environment and command line.
 
 | Secret | Used by |
 |---|---|
-| `db-password`, `db-url` | PostgreSQL; the control plane (`db-url` points at the tunnel) |
+| `db-password`, `db-url` | PostgreSQL; the control plane (`db-url` names the database, `sslmode=verify-full` and the files below) |
 | `control.key`, `evaluator.key` | service signing keys |
 | `metrics-token` | the control plane's `/metrics` |
 | `bao-token` | the key broker (periodic AppRole token) |
 | `edge.{crt,key}`, `client-ca.crt` | the edge |
 | `pg-server.{crt,key}`, `internal-ca.crt` | PostgreSQL |
-| `pg-client.{crt,key}`, `internal-ca.crt` | pg-tunnel |
-| `bao-ca.crt` | bao-tunnel |
+| `pg-client.{crt,key}`, `internal-ca.crt` | the control plane's database connection (`sslcert`, `sslkey`, `sslrootcert`) |
+| `bao-ca.crt` | the key broker (`BAO_CACERT`) |
 
 PostgreSQL insists its key is owned by it and not readable by others; a
 mounted secret is neither, so the PostgreSQL container copies the key into a
@@ -204,7 +210,6 @@ tmpfs it owns at start (never into the data volume).
 | Service | Check | Meaning |
 |---|---|---|
 | postgres | `pg_isready` over TCP and a query over the socket | the final server is up and the database exists |
-| pg-tunnel, bao-tunnel | the loopback port is open | the TLS client is listening |
 | control | `GET /ready` | the database answers |
 | evaluator | `GET /v1/info` | the evaluator serves |
 | keybroker | `GET /live` | the broker started, and could open its state |
@@ -256,10 +261,10 @@ any fails.
 
 | ID | Requirement |
 |---|---|
-| TOP-01..03 | images pinned by digest; only the edge publishes ports; the backend network is internal |
+| TOP-01..03 | images pinned by digest (or content-addressed image ID); only the edge publishes ports; the backend network is internal |
 | EDGE-01..07 | TLS on the API listener; plaintext does not reach the service; TLS 1.2+ on all four listeners; the operations and key-broker listeners refuse no certificate, and the operations listener an untrusted one; `/metrics` is off the public listener and token-protected |
-| PG-01..07 | `ssl=on`, TLS 1.2+, SCRAM; `pg_hba` has no plaintext accepting rule and no trust over the network; a plaintext connection and a TLS connection without a client certificate are refused; every network connection is TLS; the password is not a default; the control plane's connection is verified (chain and name) |
-| BAO-01..06 | https verified against your CA; plaintext refused; initialised and unsealed; not in-memory storage; no dev-mode container; the broker's token is periodic, renewable, and holds only its policy |
+| PG-01..08 | `ssl=on`, TLS 1.2+, SCRAM; `pg_hba` has no plaintext accepting rule and no trust over the network; a plaintext connection and a TLS connection without a client certificate are refused; every network connection is TLS; the password is not a default; the control plane's own database URL, read in its container, says `sslmode=verify-full` and names a readable CA, client certificate and key (PG-07); its live connections are TLS and carry a client certificate (PG-08) |
+| BAO-01..07 | https verified against your CA; plaintext refused; initialised and unsealed; not in-memory storage; no dev-mode container; the broker's token is periodic, renewable, and holds only its policy; the key broker's own settings, read in its container: an `https` `BAO_ADDR`, a readable `BAO_CACERT`, and a readable pair if `BAO_CLIENT_CERT` is set (BAO-07) |
 | SEC-01..06 | no secret-named environment variable; no secret value in any environment or command line; secrets mounted as files; the control plane in production mode with `*_FILE` secrets; `secrets/` is 0700; no secret tracked in git |
 | HLTH-01..03 | every service has a health check; all report healthy; the endpoints answer 200 through the edge |
 | BAK-01..02 | a backup verifies; the drill passes (both optional) |
@@ -267,7 +272,11 @@ any fails.
 `negative/run.sh` starts a deliberately misconfigured topology (plaintext
 PostgreSQL, dev-mode OpenBao over http, no client certificate required,
 secrets in the environment, no health check) and asserts that the validator
-exits non-zero and fails each of the matching checks.
+exits non-zero and fails each of the matching checks. It also plants the
+control plane's database URL as `sslmode=disable`, `require` and `verify-ca`
+in turn (PG-07 must fail each), a key broker with a plain `http` provider and
+one with `https` but no CA (BAO-07), and finally configures the stand-ins as
+the topology requires and asserts that PG-07 and BAO-07 pass.
 
 ### What the validation does not show
 
@@ -292,8 +301,8 @@ PASS means no listed misconfiguration was found.
 - Wrap the AppRole secret-id and bind it to the key broker's address; renew
   the token on a timer and alert on failure.
 - Put the anchor in your vault (`ENCOMPUTE_ANCHOR_BAO_*`, https) rather than on a
-  volume that could be restored with the database, once the vault's CA is one
-  the control plane trusts (see not covered).
+  volume that could be restored with the database, once the control plane's
+  anchor client can trust your vault's CA (it cannot yet: see not covered).
 - Encrypt the volumes and the backups at rest; restrict access to backups (a
   restored older key broker state brings back revoked keys).
 - Alert on `encompute_state_rollback_total`, `encompute_anchor_bytes` and the
@@ -309,12 +318,14 @@ PASS means no listed misconfiguration was found.
 - **High availability.** One of each service, one database. No replicated
   control plane, no database failover, no vault cluster beyond what you run
   yourself. A restart is a restore from backup when state is lost.
-- **Native TLS in the Encompute binaries.** TLS is provided by the edge and the
-  two stunnel sidecars. The control plane has no TLS client for PostgreSQL and
-  the key broker's HTTPS client trusts only built-in public roots, so a
-  vault, an identity provider or an anchor vault behind a private CA works only
-  through a sidecar like `bao-tunnel`. Evaluators and the control plane speak
-  plain HTTP on the backend network.
+- **Native TLS everywhere.** Native TLS covers the control plane's database
+  connection and the key broker's connection to the vault. Not done: the
+  control plane's state-anchor client for an OpenBao/Vault KV store, its
+  identity provider key fetch, and the evaluator's client of the control
+  plane trust only the built-in public roots (or speak plain HTTP on the
+  backend network); the CLI and SDK also trust only the public roots and
+  present no client certificate, so a private-CA edge needs a publicly trusted
+  certificate for the API and evaluator listeners.
 - **Mutual TLS for everything.** Mutual TLS is required on the operations and
   key-broker listeners only. The API and evaluator listeners authenticate
   with OIDC tokens and signed requests, because the CLI and SDK present no client
