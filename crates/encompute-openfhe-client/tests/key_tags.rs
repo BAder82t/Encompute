@@ -160,21 +160,14 @@ fn another_clients_keys_under_the_victims_tag_are_never_used() {
         Outcome::Result(out) => assert_eq!(decrypt(&out).unwrap(), A * B),
         other => panic!("baseline: {other:?}"),
     }
-    // Accepted first: the victim's upload is refused (it used to be
-    // accepted and the product came out wrong, e.g. 63556 for 5535).
-    match evaluator_process(&dir, "poisoned") {
-        Outcome::Refused(msg) => {
-            assert!(msg.contains("WrongKey"), "{msg}");
-            assert!(msg.contains("different key material"), "{msg}");
-        }
-        Outcome::Result(out) => panic!(
-            "the victim's job ran under the attacker's keys: {:?}",
-            decrypt(&out)
-        ),
-    }
-    // Refused uploads and mislabelled keys plant nothing: the victim's own
-    // keys load and the result is correct.
-    for scenario in ["poisoned_refused", "mislabelled"] {
+    // The attacker's relabelled keys were accepted first. They used to
+    // make the victim's upload refused (a denial of service: the tag
+    // squatted) and, before that, the product came out wrong (63556 for
+    // 5535). The evaluator keeps each upload under its own tag, made of
+    // the key tag and the SHA-256 of the key material, so the attacker's
+    // keys are not in the victim's way: the victim's upload is accepted
+    // and the result is correct.
+    for scenario in ["poisoned", "poisoned_refused", "mislabelled"] {
         match evaluator_process(&dir, scenario) {
             Outcome::Result(out) => assert_eq!(decrypt(&out).unwrap(), A * B, "{scenario}"),
             other => panic!("{scenario}: {other:?}"),

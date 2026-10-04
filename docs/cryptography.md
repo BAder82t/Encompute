@@ -361,10 +361,14 @@ Integrity against an active attacker comes from other layers:
   process-wide maps. Every key must carry the key tag it is sent under and
   consist of polynomials over the context's key-switching modulus (Q·P)
   in evaluation form;
-  only then are the keys inserted. OpenFHE looks keys up by tag alone, so
-  the shim binds each loaded tag to the SHA-256 of the key material it
-  came from, and refuses an upload that names a loaded tag with other
-  bytes. A tag is shared only by byte-identical key material (INV-171).
+  only then are the keys inserted. OpenFHE looks keys up by tag alone, in
+  maps where the first keys under a tag stay, so the shim inserts the keys
+  under a tag of their own, the key tag and the SHA-256 of the key
+  material. A ciphertext is mapped to that tag only inside the context
+  that loaded the keys (and back to the client's tag when it is stored),
+  so another client's keys under the same client-visible tag sit beside
+  these, never in front of them, and neither blocks nor replaces the
+  other (INV-171).
 - BinFHE bootstrapping and switching keys are checked against the vetted
   context before any gate runs (section 2.2).
 - INV-007 tests that Encompute's own parsers never panic on arbitrary
