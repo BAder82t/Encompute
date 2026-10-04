@@ -13,10 +13,16 @@
 #
 # Needs: release binaries with OpenFHE (encompute, encompute-evaluator,
 # encompute-control), python3 with `cryptography` (TOOL_PYTHON), the SDK's
-# Python (SDK_PYTHON), a PostgreSQL admin URL
-# (ENCOMPUTE_E2E_DATABASE_URL, allowed to create roles and databases) and an
-# OpenBao/Vault dev server (BAO_ADDR, BAO_TOKEN; Transit and KV enabled or
-# enable-able). pg_dump/psql are run through $PG_DUMP/$PSQL (default: local).
+# Python (SDK_PYTHON), a TLS-enabled PostgreSQL (scripts/tls-test-db.sh up;
+# eval "$(scripts/tls-test-db.sh env)": production mode requires
+# sslmode=verify-full, so the control plane runs against it with a CA and a
+# client certificate) and an OpenBao/Vault dev server (BAO_ADDR, BAO_TOKEN;
+# Transit and KV enabled or enable-able). pg_dump/psql are run through
+# $PG_DUMP/$PSQL (default: local; they take libpq URLs). In a test
+# environment only, with a plaintext PostgreSQL admin URL
+# (ENCOMPUTE_E2E_DATABASE_URL, allowed to create roles and databases) and
+# ENCOMPUTE_E2E_ALLOW_PLAINTEXT_DATABASE=true, the control plane gets the
+# named opt-out ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true instead (insecure).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$ROOT/target/release}"
@@ -25,7 +31,12 @@ PYTHON="${TOOL_PYTHON:-python3}"   # helpers (needs `cryptography`)
 # The CLI compiles Python functions with $SDK_PYTHON (the Encompute SDK).
 export PYTHON_SDK="${SDK_PYTHON:-python3}"
 PG_DUMP="${PG_DUMP:-pg_dump}"; PSQL="${PSQL:-psql}"
-: "${ENCOMPUTE_E2E_DATABASE_URL:?set ENCOMPUTE_E2E_DATABASE_URL (PostgreSQL admin URL)}"
+# shellcheck source=lib-prod-db.sh
+. "$ROOT/scripts/lib-prod-db.sh"
+DB_MODE="$(prod_db_mode ENCOMPUTE_E2E)" || exit 1
+if [ "$DB_MODE" = plaintext ]; then
+  : "${ENCOMPUTE_E2E_DATABASE_URL:?set ENCOMPUTE_E2E_DATABASE_URL (PostgreSQL admin URL)}"
+fi
 : "${BAO_ADDR:?set BAO_ADDR (OpenBao/Vault)}"; : "${BAO_TOKEN:?set BAO_TOKEN}"
 W="$(mktemp -d)"
 PIDS=()
@@ -53,10 +64,22 @@ CANARY_KEY="$("$PYTHON" -c 'print("c4" * 32)')"  # the model's asset key
 step "infrastructure: a database role with a real password, a root key, an OIDC provider"
 TAG="e2e_$(rand | cut -c1-8)"
 DBPASS="$(rand)"
-"$PSQL" "$ENCOMPUTE_E2E_DATABASE_URL" -q -c "CREATE ROLE $TAG LOGIN PASSWORD '$DBPASS'" -c "CREATE DATABASE $TAG OWNER $TAG"
-ADMIN_BASE="${ENCOMPUTE_E2E_DATABASE_URL%/*}"
-HOSTPART="${ADMIN_BASE#*@}"
-DB_URL="postgres://$TAG:$DBPASS@$HOSTPART/$TAG"
+if [ "$DB_MODE" = tls ]; then
+  # The server's client-certificate rule ties the role to the certificate (CN
+  # encompute): use that role, and a database of our own. sslmode=verify-full.
+  TLS_PW="$ENCOMPUTE_TEST_TLS_DATABASE_PASSWORD"
+  "$PSQL" "$(tls_db_url encompute "$TLS_PW" encompute)" -q -c "CREATE DATABASE $TAG"
+  DB_URL="$(tls_db_url encompute "$TLS_PW" "$TAG")"
+  ENCOMPUTE_E2E_DATABASE_URL="$(tls_db_url encompute "$TLS_PW" encompute)"
+  DB_OPT_OUT=()
+else
+  "$PSQL" "$ENCOMPUTE_E2E_DATABASE_URL" -q -c "CREATE ROLE $TAG LOGIN PASSWORD '$DBPASS'" -c "CREATE DATABASE $TAG OWNER $TAG"
+  ADMIN_BASE="${ENCOMPUTE_E2E_DATABASE_URL%/*}"
+  HOSTPART="${ADMIN_BASE#*@}"
+  DB_URL="postgres://$TAG:$DBPASS@$HOSTPART/$TAG"
+  # TEST ENVIRONMENT ONLY: a plaintext database, with the named opt-out.
+  DB_OPT_OUT=(ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true)
+fi
 bao() { curl -fs -H "X-Vault-Token: $BAO_TOKEN" "$@"; }
 bao -X POST -d '{"type":"transit"}' "$BAO_ADDR/v1/sys/mounts/transit" >/dev/null 2>&1 || true
 bao -X POST "$BAO_ADDR/v1/transit/keys/$TAG-modelco" >/dev/null
@@ -77,7 +100,7 @@ CTL_PORT="$(free_port)"; EVAL_PORT="$(free_port)"; KB_PORT="$(free_port)"
 CTL_URL="http://127.0.0.1:$CTL_PORT"
 control_env() {
   # exec: in the background, the PID is the control plane's own.
-  exec env ENCOMPUTE_ENV=production \
+  exec env ENCOMPUTE_ENV=production ${DB_OPT_OUT[@]+"${DB_OPT_OUT[@]}"} \
     ENCOMPUTE_LISTEN="127.0.0.1:$CTL_PORT" \
     ENCOMPUTE_DATABASE_URL_FILE="$W/secrets/db-url" \
     ENCOMPUTE_SIGNING_KEY_FILE="$W/secrets/control.key" \

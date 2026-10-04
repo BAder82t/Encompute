@@ -28,6 +28,8 @@ up)
   mkdir -p "$DIR"
   "$ROOT/deploy/production/gen-test-certs.sh" "$DIR" >/dev/null
   cp "$ROOT/deploy/production/config/pg_hba.conf" "$DIR/pg_hba.conf"
+  # libpq clients (psql, pg_dump) refuse a client key readable by others.
+  chmod 600 "$DIR/pg-client.key" "$DIR/ops-client.key"
   dk rm -f "$NAME" >/dev/null 2>&1 || true
   dk run -d --name "$NAME" -p "127.0.0.1:$PORT:5432" \
     -e POSTGRES_USER=encompute -e POSTGRES_DB=encompute -e POSTGRES_PASSWORD=encompute-tls-test \

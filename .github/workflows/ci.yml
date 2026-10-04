@@ -344,9 +344,15 @@ jobs:
           . .venv/bin/activate
           pip install maturin numpy cryptography
           maturin develop --release --features openfhe
+      # Production mode requires sslmode=verify-full: the golden path runs
+      # against a TLS PostgreSQL that requires a client certificate (a
+      # throwaway PKI; nothing is committed).
+      - name: TLS PostgreSQL for production mode
+        run: |
+          scripts/tls-test-db.sh up "$RUNNER_TEMP/tls-pg"
+          scripts/tls-test-db.sh env "$RUNNER_TEMP/tls-pg" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: golden path, restart, backup and restore, revocation, canaries
         env:
-          ENCOMPUTE_E2E_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
           BAO_ADDR: http://127.0.0.1:8200
           BAO_TOKEN: ci-root
           SDK_PYTHON: .venv/bin/python
