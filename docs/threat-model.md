@@ -440,9 +440,14 @@ rollback.
   too, recovery refuses until the missing events are put back (a newer
   backup of the log's tables, or an export checked against the anchored
   head): the forgotten transitions are never silently dropped.
-- Editing audit events after the last anchored checkpoint (one every 100
-  events by default, `ENCOMPUTE_AUDIT_CHECKPOINT_EVERY`). The chain hash is
-  unkeyed.
+- Editing audit events after the last anchored checkpoint. A checkpoint of
+  the governance log anchors the audit head with it: before the call
+  returns for a security deny event, and every two seconds in the
+  background (an audit checkpoint every 100 events,
+  `ENCOMPUTE_AUDIT_CHECKPOINT_EVERY`, also anchors it). Events of the
+  window between are covered only by the unkeyed chain hash, and there is
+  no mirror of the audit chain: the anchor detects a truncation, it does
+  not restore.
 - Reading the database traffic: the control plane's PostgreSQL driver is
   configured without TLS (`crates/encompute-control/src/db.rs`). Run the
   database on a trusted network.
