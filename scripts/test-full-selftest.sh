@@ -170,6 +170,88 @@ out="$(scripts/test-full.sh --release --mode template 2>&1)"; code=$?
 if [ $code -ne 0 ] && echo "$out" | tail -n 1 | grep -qx "FULL TEST FAILED"; then echo "PASS  --release refuses template databases"
 else echo "FAIL  --release with template (exit $code)"; fails=$((fails + 1)); fi
 
+# A command that is not `cargo test` (parser "lines"): its suite declares a marker
+# line that must appear and a pattern whose matches are the passing checks.
+lines_manifest() {  # lines_manifest MIN [SUITE_EXTRA]
+  cat > "$W/m.json" <<JSON
+{"manifest_version": 1,
+ "runs": [{"id": "l", "command": ["bash", "-c", "cat $W/out.txt"], "parser": "lines", "min_tests": $1}],
+ "suites": [{"name": "l/report", "run": "l", "required": true, "min_tests": $1,
+             "marker": "^All checks satisfied", "count": "^ok ", "fail": "^FAILED ", "skip": "^SKIPPED " ${2:-}}]}
+JSON
+}
+{ printf 'ok   one\nok   two\nok   three\n'; echo "All checks satisfied."; } > "$W/out.txt"
+lines_manifest 3
+expect "a lines-parsed suite with its marker and count passes" 0 "PASS +l/report +3 tests"
+{ printf 'ok   one\nok   two\nok   three\n'; } > "$W/out.txt"
+lines_manifest 3
+expect "a lines-parsed suite without its marker line fails" 1 "FAIL +l/report" "marker line was not found"
+{ printf 'ok   one\nok   two\n'; echo "All checks satisfied."; } > "$W/out.txt"
+lines_manifest 3
+expect "a lines-parsed suite below its count fails" 1 "FAIL +l/report" "2 tests, minimum 3"
+{ echo "All checks satisfied."; } > "$W/out.txt"
+lines_manifest 3
+expect "a lines-parsed suite with no checks fails" 1 "FAIL +l/report" "zero tests"
+{ printf 'ok   one\nok   two\nok   three\nFAILED four\n'; echo "All checks satisfied."; } > "$W/out.txt"
+lines_manifest 3
+expect "a lines-parsed failing check fails" 1 "FAIL +l/report" "1 failed"
+{ printf 'ok   one\nok   two\nok   three\nSKIPPED four\n'; echo "All checks satisfied."; } > "$W/out.txt"
+lines_manifest 3
+expect "a lines-parsed skipped check fails" 1 "FAIL +l/report" "unexpected skip: SKIPPED four"
+lines_manifest 3 ', "allowed_skips": [{"match": "SKIPPED four", "reason": "needs a live service"}]'
+expect "a lines-parsed skip on the allow-list passes" 0 "PASS +l/report" "1 allowed skip"
+{ printf 'ok   one\nok   two\nok   three\n'; echo "All checks satisfied."; echo "(and then it died)"; } > "$W/body.txt"
+printf 'cat %s/body.txt; exit 1\n' "$W" > "$W/cmd.sh"
+cat > "$W/m.json" <<JSON
+{"manifest_version": 1,
+ "runs": [{"id": "l", "command": ["bash", "$W/cmd.sh"], "parser": "lines", "min_tests": 3}],
+ "suites": [{"name": "l/report", "run": "l", "required": true, "min_tests": 3, "marker": "^All checks", "count": "^ok "}]}
+JSON
+expect "a lines-parsed command that exits non-zero fails whatever it printed" 1 "exited 1"
+cat > "$W/m.json" <<JSON
+{"manifest_version": 1,
+ "runs": [{"id": "l", "command": ["true"], "parser": "lines"}],
+ "suites": [{"name": "l/report", "run": "l", "required": true, "min_tests": 1}]}
+JSON
+out="$(scripts/test-full.sh --manifest "$W/m.json" --json "$W/s.json" 2>&1)"; code=$?
+if [ $code -ne 0 ] && echo "$out" | grep -q "MANIFEST INVALID" && echo "$out" | grep -q "needs a marker pattern"; then
+  echo "PASS  a lines suite must declare its marker and count"
+else echo "FAIL  lines suite lint (exit $code)"; fails=$((fails + 1)); fi
+
+# A manifest that extends another: it raises a minimum and adds a run, and can
+# never lower a minimum or leave the base's runs out.
+{ section a 5; section b 3; } > "$W/out.txt"
+manifest "$W/base.json" "" "$(suite s/a a 5), $(suite s/b b 3)" 8
+cat > "$W/m.json" <<JSON
+{"manifest_version": 1, "extends": "base.json",
+ "runs": [{"id": "r", "min_tests": 8}],
+ "suites": [{"name": "s/a", "min_tests": 5}, {"name": "s/c", "run": "r", "target": "?/c", "required": true, "min_tests": 1}]}
+JSON
+{ section a 5; section b 3; section c 1; } > "$W/out.txt"
+expect "an extending manifest merges the base's runs and suites" 0 "PASS +s/a" "PASS +s/b" "PASS +s/c"
+{ section a 5; section b 3; } > "$W/out.txt"
+expect "an extending manifest's added suite must run" 1 "FAIL +s/c" "did not run"
+{ section a 5; section b 3; section c 1; } > "$W/out.txt"
+cat > "$W/m.json" <<JSON
+{"manifest_version": 1, "extends": "base.json",
+ "suites": [{"name": "s/a", "min_tests": 6}]}
+JSON
+expect "an extending manifest can raise a suite's minimum" 1 "FAIL +s/a" "5 tests, minimum 6"
+cat > "$W/m.json" <<JSON
+{"manifest_version": 1, "extends": "base.json",
+ "suites": [{"name": "s/a", "min_tests": 4}]}
+JSON
+out="$(scripts/test-full.sh --manifest "$W/m.json" --json "$W/s.json" 2>&1)"; code=$?
+if [ $code -ne 0 ] && echo "$out" | grep -q "MANIFEST INVALID" && echo "$out" | grep -q "lowers min_tests from 5 to 4"; then
+  echo "PASS  an extending manifest cannot lower a minimum"
+else echo "FAIL  lowering a minimum (exit $code)"; echo "$out" | sed 's/^/    | /'; fails=$((fails + 1)); fi
+cat > "$W/m.json" <<JSON
+{"manifest_version": 1, "extends": "m.json"}
+JSON
+out="$(scripts/test-full.sh --manifest "$W/m.json" --json "$W/s.json" 2>&1)"; code=$?
+if [ $code -ne 0 ] && echo "$out" | grep -q "extends loops back"; then echo "PASS  a manifest cannot extend itself"
+else echo "FAIL  extends loop (exit $code)"; fails=$((fails + 1)); fi
+
 echo
 if [ $fails -eq 0 ]; then echo "SELFTEST PASSED"; else echo "SELFTEST FAILED: $fails case(s)"; fi
 exit $((fails > 0))

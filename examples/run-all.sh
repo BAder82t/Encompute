@@ -27,6 +27,9 @@ case "$MODE" in
   full) LIST="$STANDARD 05 19" ;;
   *) echo "usage: $0 quick|standard|crypto|full" >&2; exit 2 ;;
 esac
+# EXAMPLES_ONLY="01 public-sector/fraud-signal" runs just those (the full-run
+# manifest's public-sector row), whatever the mode lists.
+[ -z "${EXAMPLES_ONLY:-}" ] || LIST="$EXAMPLES_ONLY"
 export EXAMPLES_MODE="$MODE"
 
 pass=0; fail=0; skipped=0
