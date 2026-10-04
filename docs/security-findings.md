@@ -250,6 +250,38 @@ confirmed on 2026-09-29.
 | ENC-SF-2026-093 | Removing a role (`memberships/remove`) was not anchored: a database restore gave the principal the role back (rc.4) | Medium | encompute-control (`anchor.rs`, `control.rs`, `ops/tenancy.rs`, migration 0004) | fixed | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `caaf754` | `crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_removed_role_removed`, `crates/encompute-control/tests/anchor_rollback.rs::approvals_from_before_version_4_get_stable_ids` | INV-178 (extended) | api.md, deployment.md, threat-model.md, KNOWN_LIMITATIONS.md |
 | ENC-SF-2026-094 | Source-asset lists were trusted for jobs whose program binds no registered asset (the ENC-SF-2026-089 residual): an omitted or extra asset became the job's lineage, revocation scope and trust report | Medium | encompute-control (`ops/jobs.rs`) | fixed | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `1a3d68d` | `crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_assets_its_program_binds_even_its_own`, `crates/encompute-control/tests/collaboration.rs::the_derived_sources_drive_revocation_and_the_trust_report` | INV-194 (extended) | api.md, KNOWN_LIMITATIONS.md, CHANGELOG.md |
 
+### Closed on the governance branch (unreleased)
+
+Two residuals of the rc.3 round are fixed on the governance branch. They
+ship with the release that merges it.
+
+- **Evaluator upload grants were reusable and not bound to a client**
+  (ENC-SF-2026-064, residual; `cb6a764`). A program or key upload took the
+  job's grant, which names no client or key, is visible to the whole
+  submitting organization, and was never spent. An upload now needs an
+  upload grant that the control plane issues only to the principal that
+  submitted the job, signed over the evaluator, the program ID, the key ID
+  and a random grant ID; the evaluator spends it atomically (one upload per
+  grant, a replay is ENC2608) and a job grant opens no upload. Spent grants
+  are kept in memory, one node: a restart forgets them, so the evaluator
+  accepts no grant issued before it started (limit: it assumes the control
+  plane's clock is not ahead of the evaluator's by more than the time
+  between a grant's use and the restart). Tests:
+  `crates/encompute-evaluator/tests/uploads.rs::an_upload_grant_admits_exactly_one_upload`,
+  `concurrent_uploads_with_one_grant_succeed_once`,
+  `an_upload_grant_binds_the_keys_it_names`,
+  `a_restarted_evaluator_accepts_no_earlier_grant`;
+  `crates/encompute-control/tests/upload_grants.rs`; INV-248, INV-202
+  (extended).
+- **A co-tenant could block a victim's key upload** (ENC-SF-2026-035,
+  residual; `77d010f`). A client that knew the victim's key tag could
+  upload its own keys under it first, and the victim's upload was then
+  refused (409) until the entry was evicted. The shim now keeps each
+  uploaded set under the key tag and the SHA-256 of its key material, so
+  the two never meet. Test:
+  `crates/encompute-openfhe-client/tests/key_tags.rs::another_clients_keys_under_the_victims_tag_are_never_used`;
+  INV-171 (extended).
+
 ### Open (accepted / needs design)
 
 Known issues from the release-candidate rounds that are not fixed yet.
@@ -318,12 +350,6 @@ stated.
   all the anchored-state tables. Both fail closed. A hash-chained
   governance event log replaces these sets, and both costs, before general
   availability.
-- **Evaluator upload grants are reusable until they expire**
-  (ENC-SF-2026-064, partly fixed), and are not bound to a client.
-- **A co-tenant can block a victim's key upload** (ENC-SF-2026-035,
-  residual). A client that knows the victim's key tag can upload its own
-  keys under it first; the victim's upload is then refused (409) until
-  the entry is evicted. The victim's result is never wrong.
 - **The plan validator's exact-equality check still uses the planner's
   `derive`** (ENC-SF-2026-077, partly fixed). The validator's independent
   floor covers the core requirements only.
