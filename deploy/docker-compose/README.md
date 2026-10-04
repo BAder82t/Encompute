@@ -10,6 +10,10 @@ It runs in production mode: OIDC identities only, secrets from files, no
 development fallbacks. See [docs/deployment.md](../../docs/deployment.md) for
 the architecture and [docs/api.md](../../docs/api.md) for the API.
 
+For TLS, an external OpenBao and a validation script, use the
+[reference production topology](../production/README.md) instead of this trial
+deployment.
+
 ## Start
 
 ```sh
