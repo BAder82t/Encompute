@@ -225,6 +225,13 @@ check "Fine-tuning E2E" pytest_ python/tests/test_finetune.py \
 check "Examples" env EXAMPLES_REQUIRE="15 16 17 18" examples/run-all.sh standard
 
 # --- Enterprise ------------------------------------------------------------------
+# The database-TLS tests need a TLS PostgreSQL that requires a client
+# certificate: start the throwaway one (scripts/tls-test-db.sh) unless given.
+if [ "$SERVICES" = 1 ] && [ -z "${ENCOMPUTE_TEST_TLS_DATABASE:-}" ]; then
+  TLS_PKI="$(mktemp -d)"
+  trap 'scripts/tls-test-db.sh down "$TLS_PKI" >/dev/null 2>&1; rm -rf "$LOG" "$TLS_PKI"' EXIT
+  if scripts/tls-test-db.sh up "$TLS_PKI" >/dev/null; then eval "$(scripts/tls-test-db.sh env "$TLS_PKI")"; fi
+fi
 if [ "$SERVICES" = 1 ]; then
   check "control plane" scripts/test-full.sh --release --runs control-plane,cli --json target/test-full/control-plane.json
   check "tenant isolation" scripts/test-full.sh --release --runs isolation --json target/test-full/isolation.json

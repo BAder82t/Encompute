@@ -1,7 +1,8 @@
 # A reference OpenBao for trying the topology on a laptop. In production
-# this is YOUR OpenBao or Vault, outside this stack: the Encompute stack
-# reaches it through the bao-tunnel and only needs BAO_UPSTREAM (host:port),
-# BAO_SERVER_NAME and the CA that signed its certificate. This file shows the
+# this is YOUR OpenBao or Vault, outside this stack: the key broker reaches
+# it directly over TLS and only needs BAO_UPSTREAM (host:port, the host being
+# a name in its certificate) and the CA that signed that certificate
+# (BAO_CACERT). This file shows the
 # shape to match: server mode with a TLS listener and integrated (raft)
 # storage, sealed until initialised and unsealed (bootstrap-openbao.sh).
 # It is NOT dev mode: nothing is in memory, nothing is unsealed on start.

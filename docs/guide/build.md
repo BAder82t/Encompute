@@ -38,6 +38,11 @@ scripts/enterprise-e2e.sh              # the commercial golden path in productio
 deploy/docker-compose/smoke.sh         # the same through the Compose deployment
 ```
 
+The database-TLS tests also need a TLS-enabled PostgreSQL that requires a
+client certificate: `scripts/tls-test-db.sh up` starts one on port 55445 (a
+throwaway PKI; `eval "$(scripts/tls-test-db.sh env)"` sets what the tests
+read, `down` removes it).
+
 Without those variables the service-backed tests skip and still "pass". A
 plain `cargo test` is for development: `ENCOMPUTE_REQUIRE_SERVICES=1` turns a
 skip into a failure, and `scripts/test-full.sh` goes further. It checks

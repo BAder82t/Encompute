@@ -135,22 +135,36 @@ Related: [support matrix](docs/support-matrix.md),
   at your own OpenBao or Vault (over HTTPS) for real keys. The
   [reference production topology](docs/production-deployment.md) does, with
   an external OpenBao in server mode.
-- **No built-in TLS.** No Encompute service terminates TLS, and the Compose
-  deployment provides none. The control plane connects to PostgreSQL
-  without TLS. Terminate TLS in front of every service and keep the
-  database on a private network. The reference production topology does
-  this with configuration only: a reverse proxy in front of the services
-  (mutual TLS on its operations and key-broker listeners), PostgreSQL that
-  accepts only TLS, and a TLS client sidecar beside the control plane and
-  beside the key broker. The binaries themselves still have no TLS settings:
-  the control plane has no TLS client for PostgreSQL, and the key broker's
-  HTTPS client trusts only the built-in public web roots, so a vault behind
-  a private CA needs the sidecar.
+- **No built-in TLS server.** No Encompute service terminates TLS, and the
+  Compose deployment provides none. Terminate TLS in front of every service
+  and keep the database on a private network. The reference production
+  topology does this with configuration only: a reverse proxy in front of
+  the services (mutual TLS on its operations and key-broker listeners) and
+  PostgreSQL that accepts only TLS.
+- **Native TLS clients cover two connections, not every one.** The control
+  plane's PostgreSQL connection honours `sslmode` (up to `verify-full`),
+  `sslrootcert`, `sslcert` and `sslkey` in its connection string, and the
+  key broker's connection to OpenBao or Vault takes a private CA
+  (`BAO_CACERT`) and a client certificate (`BAO_CLIENT_CERT`,
+  `BAO_CLIENT_KEY`). Production mode requires `sslmode=verify-full` for
+  the database; weaker settings need the named opt-outs
+  `ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS` (verify-ca, require) or
+  `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE` (insecure). Development mode and a
+  connection string without `sslmode` still connect in plaintext. Every other HTTPS client
+  trusts only the built-in public web roots and presents no client
+  certificate: the CLI and the Python SDK, the control plane's identity
+  provider key fetch and its OpenBao/Vault state-anchor client, and the
+  attestation provider fetches. The evaluator's client of the control plane
+  speaks plain HTTP on the backend network. The OpenBao client-certificate path
+  is tested against a stand-in server only, not a real OpenBao. The Postgres
+  TLS client has been exercised against PostgreSQL 16 only. No external
+  review of this work has been done.
 - **The reference production topology is one machine and one of each
   service.** Its validation (`deploy/production/validate.sh`) checks
   configuration, not security properties. It does not cover high
   availability, Kubernetes, KMS adapters beyond OpenBao and Vault, volume
-  encryption, or a vault holding the state anchor behind a private CA.
+  encryption, or a vault holding the state anchor behind a private CA (the
+  anchor client does not take `BAO_CACERT` yet).
 - **The newest audit events are only hash-chained.** Events after the last
   signed checkpoint (every 100 events by default) are covered by an
   unkeyed hash chain until the next checkpoint.

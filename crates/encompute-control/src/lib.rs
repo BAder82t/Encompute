@@ -22,6 +22,7 @@ pub mod log;
 pub mod metrics;
 pub mod model;
 mod ops;
+pub mod pgtls;
 pub mod transport;
 
 pub use control::{Control, Ctx};

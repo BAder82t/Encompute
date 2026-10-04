@@ -274,7 +274,7 @@ production_drill() {
   eq "$(capi "owner-$RUN" POST "/v1/privacy/$DATASET/events" "$(reserve_body "drill-after-$RUN")")" 200 || fail_check "spend after the backup"
 
   step "production: full disaster (every container and volume removed), restore.sh"
-  dc rm -sfv edge control evaluator keybroker bao-tunnel pg-tunnel postgres >/dev/null 2>&1 || true
+  dc rm -sfv edge control evaluator keybroker postgres >/dev/null 2>&1 || true
   docker volume rm "${P}_pgdata" "${P}_anchor" "${P}_broker" "${P}_evaluator" >/dev/null 2>&1 || true
   check "volumes are gone before the restore" bash -c "! docker volume ls -q | grep -q '^${P}_\(pgdata\|anchor\|broker\|evaluator\)\$'"
   (cd "$D" && ./restore.sh "$W/b1") >"$W/restore1.log" 2>&1 || { tail -n 15 "$W/restore1.log"; fail_check "restore.sh"; }
@@ -290,9 +290,9 @@ production_drill() {
   local healthy=0
   for _ in $(seq 120); do
     healthy="$(dc ps --format '{{.Health}}' 2>/dev/null | grep -c '^healthy$')"
-    [ "$healthy" = 7 ] && break; sleep 1
+    [ "$healthy" = 5 ] && break; sleep 1
   done
-  check "all 7 services are healthy again, the key broker having opened its wrapped KEK through OpenBao" eq "$healthy" 7
+  check "all 5 services are healthy again, the key broker having opened its wrapped KEK through OpenBao" eq "$healthy" 5
 
   step "production: an older backup over a newer anchor is refused; recover freezes"
   eq "$(capi "owner-$RUN" POST "/v1/privacy/$DATASET/events" "$(reserve_body "drill-newer-$RUN")")" 200 || fail_check "spend before the old restore"
@@ -318,9 +318,9 @@ production_drill() {
   dc up -d >/dev/null 2>&1 || true
   for _ in $(seq 120); do
     healthy="$(dc ps --format '{{.Health}}' 2>/dev/null | grep -c '^healthy$')"
-    [ "$healthy" = 7 ] && break; sleep 1
+    [ "$healthy" = 5 ] && break; sleep 1
   done
-  check "all 7 services are healthy after recovery" eq "$healthy" 7
+  check "all 5 services are healthy after recovery" eq "$healthy" 5
   summary
 }
 

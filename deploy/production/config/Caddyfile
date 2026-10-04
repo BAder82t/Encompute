@@ -40,7 +40,7 @@ https://:8443 {
 	import headers
 	@metrics path /metrics /metrics/*
 	respond @metrics 404
-	reverse_proxy pg-tunnel:8770
+	reverse_proxy control:8770
 }
 
 # Clients that submit encrypted jobs: the evaluator, server-side TLS.
@@ -59,13 +59,13 @@ https://:8445 {
 	import mutual_tls
 	import headers
 	handle_path /control/* {
-		reverse_proxy pg-tunnel:8770
+		reverse_proxy control:8770
 	}
 	handle_path /evaluator/* {
 		reverse_proxy evaluator:8750
 	}
 	handle_path /keybroker/* {
-		reverse_proxy bao-tunnel:8760
+		reverse_proxy keybroker:8760
 	}
 	respond 404
 }
@@ -76,5 +76,5 @@ https://:8445 {
 https://:8446 {
 	import mutual_tls
 	import headers
-	reverse_proxy bao-tunnel:8760
+	reverse_proxy keybroker:8760
 }
