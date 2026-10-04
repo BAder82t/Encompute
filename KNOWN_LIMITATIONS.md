@@ -146,15 +146,19 @@ Related: [support matrix](docs/support-matrix.md),
   `sslrootcert`, `sslcert` and `sslkey` in its connection string, and the
   key broker's connection to OpenBao or Vault takes a private CA
   (`BAO_CACERT`) and a client certificate (`BAO_CLIENT_CERT`,
-  `BAO_CLIENT_KEY`). Without `sslmode` the database connection is still
-  plaintext, as before; production mode refuses that unless
-  `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true`. Every other HTTPS client
+  `BAO_CLIENT_KEY`). Production mode requires `sslmode=verify-full` for
+  the database; weaker settings need the named opt-outs
+  `ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS` (verify-ca, require) or
+  `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE` (insecure). Development mode and a
+  connection string without `sslmode` still connect in plaintext. Every other HTTPS client
   trusts only the built-in public web roots and presents no client
   certificate: the CLI and the Python SDK, the control plane's identity
   provider key fetch and its OpenBao/Vault state-anchor client, and the
   attestation provider fetches. The evaluator's client of the control plane
-  speaks plain HTTP on the backend network. The Postgres TLS client has been
-  exercised against PostgreSQL 16 only.
+  speaks plain HTTP on the backend network. The OpenBao client-certificate path
+  is tested against a stand-in server only, not a real OpenBao. The Postgres
+  TLS client has been exercised against PostgreSQL 16 only. No external
+  review of this work has been done.
 - **The reference production topology is one machine and one of each
   service.** Its validation (`deploy/production/validate.sh`) checks
   configuration, not security properties. It does not cover high

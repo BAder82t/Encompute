@@ -62,9 +62,9 @@ OpenSSL), and the sidecars and their image are gone:
   `sslcert` and `sslkey` present a client certificate. `require` encrypts but
   does not verify the server (with `sslrootcert` it verifies the chain, as
   libpq does), `verify-ca` verifies the chain but not the name; `disable`,
-  `prefer` and no `sslmode` stay plaintext-capable. Production mode refuses
-  those unless `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true` is set, which logs a
-  warning at every start; this topology does not set it. PostgreSQL's
+  `prefer` and no `sslmode` can send plaintext. Production mode requires
+  `verify-full` and refuses the rest unless a named opt-out is set (matrix
+  below); this topology sets neither. PostgreSQL's
   `pg_hba.conf` accepts only `hostssl` with `clientcert=verify-full`, so a
   connection without TLS or without the certificate is refused by the server
   as well as by the client.
@@ -75,6 +75,16 @@ OpenSSL), and the sidecars and their image are gone:
   For a vault that requires client certificates, `BAO_CLIENT_CERT` and
   `BAO_CLIENT_KEY` (or the `VAULT_` pair) present one. Without any of these
   the client behaves as before.
+
+| `sslmode` in the database URL | Production mode |
+|---|---|
+| `verify-full` (with `sslrootcert`) | starts; the only baseline |
+| `verify-ca`, `require` | refused unless `ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS=true` (a downgrade; warns at every start) |
+| `prefer`, `disable`, absent | refused unless `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true` (insecure; for migration or emergencies; warns at every start) |
+
+The two opt-outs are independent: neither admits the other's modes. A unix-socket
+host is exempt. Development mode is not restricted. Both opt-outs take `true` or
+`false` and refuse to start on anything else.
 
 The native TLS clients are in images built from this source and in the first
 release that contains them. The published v0.3.0 images predate them: with
@@ -263,7 +273,7 @@ any fails.
 |---|---|
 | TOP-01..03 | images pinned by digest (or content-addressed image ID); only the edge publishes ports; the backend network is internal |
 | EDGE-01..07 | TLS on the API listener; plaintext does not reach the service; TLS 1.2+ on all four listeners; the operations and key-broker listeners refuse no certificate, and the operations listener an untrusted one; `/metrics` is off the public listener and token-protected |
-| PG-01..08 | `ssl=on`, TLS 1.2+, SCRAM; `pg_hba` has no plaintext accepting rule and no trust over the network; a plaintext connection and a TLS connection without a client certificate are refused; every network connection is TLS; the password is not a default; the control plane's own database URL, read in its container, says `sslmode=verify-full` and names a readable CA, client certificate and key (PG-07); its live connections are TLS and carry a client certificate (PG-08) |
+| PG-01..08 | `ssl=on`, TLS 1.2+, SCRAM; `pg_hba` has no plaintext accepting rule and no trust over the network; a plaintext connection and a TLS connection without a client certificate are refused; every network connection is TLS; the password is not a default; the control plane's own database URL, read in its container, says `sslmode=verify-full`, names a readable CA, client certificate and key, and no downgrade opt-out is set (PG-07); its live connections are TLS and carry a client certificate (PG-08) |
 | BAO-01..07 | https verified against your CA; plaintext refused; initialised and unsealed; not in-memory storage; no dev-mode container; the broker's token is periodic, renewable, and holds only its policy; the key broker's own settings, read in its container: an `https` `BAO_ADDR`, a readable `BAO_CACERT`, and a readable pair if `BAO_CLIENT_CERT` is set (BAO-07) |
 | SEC-01..06 | no secret-named environment variable; no secret value in any environment or command line; secrets mounted as files; the control plane in production mode with `*_FILE` secrets; `secrets/` is 0700; no secret tracked in git |
 | HLTH-01..03 | every service has a health check; all report healthy; the endpoints answer 200 through the edge |
@@ -274,7 +284,7 @@ PostgreSQL, dev-mode OpenBao over http, no client certificate required,
 secrets in the environment, no health check) and asserts that the validator
 exits non-zero and fails each of the matching checks. It also plants the
 control plane's database URL as `sslmode=disable`, `require` and `verify-ca`
-in turn (PG-07 must fail each), a key broker with a plain `http` provider and
+in turn, and `verify-full` with a downgrade opt-out set (PG-07 must fail each), a key broker with a plain `http` provider and
 one with `https` but no CA (BAO-07), and finally configures the stand-ins as
 the topology requires and asserts that PG-07 and BAO-07 pass.
 

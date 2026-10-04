@@ -79,12 +79,23 @@ the connection string says so: `sslmode=require`, `verify-ca` or
 `verify-full`, with `sslrootcert` (a PEM file, or `system`), and `sslcert` and
 `sslkey` for a server that wants a client certificate. Without `sslmode` it
 connects in plaintext, as it always has: keep that database on a private
-network that only the control plane can reach. In production mode
-(`ENCOMPUTE_ENV=production`) the control plane refuses a plaintext database
-connection (no `sslmode`, `disable` or `prefer`) unless
-`ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true`, an explicit opt-out that logs a
-warning at every start; `require` encrypts but does not verify the server, so
-use `verify-full`. The key broker's client of OpenBao or Vault trusts the CA
+network that only the control plane can reach. **Breaking change for production:** in production mode
+(`ENCOMPUTE_ENV=production`) the control plane requires `sslmode=verify-full`
+(with `sslrootcert`; chain and host name). Weaker settings are downgrades with
+named opt-outs, each logging a warning at every start and refusing any other
+value than `true`/`false`:
+
+| `sslmode` | Production mode |
+|---|---|
+| `verify-full` | starts |
+| `verify-ca` (chain only, not the host name), `require` (encrypts, server not verified) | refused unless `ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS=true` |
+| `prefer`, `disable`, absent (plaintext possible) | refused unless `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true`: insecure, for migration or emergencies |
+
+Neither opt-out admits the other's modes, and a unix-socket host is exempt.
+To find out what an existing deployment runs, read the `sslmode` in its
+`ENCOMPUTE_DATABASE_URL` (or the file named by `ENCOMPUTE_DATABASE_URL_FILE`;
+none means plaintext), or on the database `select ssl, client_dn from
+pg_stat_ssl where pid <> pg_backend_pid()`. The key broker's client of OpenBao or Vault trusts the CA
 bundle named by `BAO_CACERT` (or `VAULT_CACERT`) instead of the public roots,
 and presents `BAO_CLIENT_CERT` with `BAO_CLIENT_KEY` when both are set.
 
@@ -403,7 +414,8 @@ are read from files only.
 | `ENCOMPUTE_SERVICE_ID` | the control plane's service ID (default `control-plane`) |
 | `ENCOMPUTE_WORKERS` | HTTP worker threads (default 8) |
 | `ENCOMPUTE_DATABASE_URL_FILE` | PostgreSQL URL (a secret); `sslmode`, `sslrootcert`, `sslcert`, `sslkey` in it select TLS (see above) |
-| `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE` | `true` lets production mode use a database connection that is not TLS-enforced (logs a warning at every start); `true` or `false`, anything else refuses to start |
+| `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE` | `true` lets production mode use `prefer`, `disable` or no `sslmode`: INSECURE, for migration or emergencies (warns at every start); `true` or `false`, anything else refuses to start |
+| `ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS` | `true` lets production mode use `sslmode=verify-ca` or `require`, a downgrade from `verify-full` (warns at every start); independent of the plaintext opt-out; `true` or `false` only |
 | `ENCOMPUTE_SIGNING_KEY_FILE` | the control plane's Ed25519 seed (a secret) |
 | `ENCOMPUTE_OIDC_ISSUER`, `ENCOMPUTE_OIDC_AUDIENCE` | the identity provider |
 | `ENCOMPUTE_OIDC_JWKS_URL` / `_FILE` | its key set (default: `{issuer}/.well-known/jwks.json`) |

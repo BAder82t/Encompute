@@ -2,27 +2,49 @@
 
 ## Unreleased
 
+### BREAKING (production mode): the database connection must be `sslmode=verify-full`
+
+With `ENCOMPUTE_ENV=production` the control plane now refuses to start unless
+`ENCOMPUTE_DATABASE_URL` (or the file named by `ENCOMPUTE_DATABASE_URL_FILE`)
+says `sslmode=verify-full` with `sslrootcert` (a PEM file, or `system`), and
+`sslcert` and `sslkey` if the server wants a client certificate. Before, it
+always connected in plaintext and had no TLS settings.
+
+| `sslmode` | Production mode |
+|---|---|
+| `verify-full` | starts |
+| `verify-ca`, `require` | refused unless `ENCOMPUTE_ALLOW_UNVERIFIED_DATABASE_TLS=true` (a downgrade: no host-name check, or no server check) |
+| `prefer`, `disable`, absent | refused unless `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true` (insecure; for migration or emergencies) |
+
+The opt-outs are independent, take `true` or `false` only, and log a warning
+at every start. A unix-socket host is exempt; development mode is unchanged.
+
+**What existing deployments must do before upgrading:** find the mode you run
+(the `sslmode` in the connection string; none means plaintext, as every
+0.3.0 deployment is), then either enable TLS on PostgreSQL and set
+`sslmode=verify-full&sslrootcert=...` (preferred), or set
+`ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true` as a stopgap if the database is
+reached over a channel you encrypt another way (a tunnel). The error message
+names the variable to set.
+
+### Other changes
+
 - **Native TLS clients.** The control plane's PostgreSQL connection honours
-  `sslmode` (`disable`, `prefer`, `require`, `verify-ca`, `verify-full`),
-  `sslrootcert`, `sslcert` and `sslkey` in `ENCOMPUTE_DATABASE_URL`
-  (rustls; no OpenSSL). No `sslmode` stays plaintext, as before. In production
-  mode the control plane now refuses a plaintext database connection (no
-  `sslmode`, `disable`, `prefer`) unless `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true`
-  is set, which logs a warning at every start: an existing production
-  deployment without TLS to its database must set `sslmode` or the opt-out
-  before upgrading. The key broker's OpenBao/Vault client takes a private CA
-  (`BAO_CACERT`, or `VAULT_CACERT`) and a client certificate
-  (`BAO_CLIENT_CERT` with `BAO_CLIENT_KEY`); an unreadable or empty CA file is
-  an error. Database errors now carry their cause (an unknown issuer, an
-  expired certificate, a name mismatch).
+  `sslmode`, `sslrootcert`, `sslcert` and `sslkey` (rustls; no OpenSSL). The
+  key broker's OpenBao/Vault client takes a private CA (`BAO_CACERT`, or
+  `VAULT_CACERT`) and a client certificate (`BAO_CLIENT_CERT` with
+  `BAO_CLIENT_KEY`); an unreadable or empty CA file is an error. Database
+  errors now carry their cause (unknown issuer, expired certificate, name
+  mismatch).
 - **Reference production topology:** the `pg-tunnel` and `bao-tunnel` stunnel
   sidecars are gone; the control plane verifies PostgreSQL (`verify-full`, a
   client certificate) and the key broker verifies the vault itself. The
   control plane and services images are now required variables
   (`ENCOMPUTE_CONTROL_IMAGE`, `ENCOMPUTE_SERVICES_IMAGE`): the published v0.3.0
   images predate native TLS. `validate.sh` reads the real client settings
-  (PG-07, PG-08, BAO-07). Not covered: the CLI and SDK, the identity provider
-  key fetch and the state-anchor client still trust only the public roots.
+  (PG-07, PG-08, BAO-07). Still open: the CLI and SDK, the identity provider
+  key fetch, the state-anchor client and the attestation fetches trust only
+  the public roots; the evaluator talks plain HTTP to the control plane.
 - **Tests:** `scripts/tls-test-db.sh` starts a TLS PostgreSQL that requires a
   client certificate; `scripts/test-full.sh` checks for it (`tls-postgres`).
 
