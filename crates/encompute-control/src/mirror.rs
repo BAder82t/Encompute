@@ -499,7 +499,7 @@ impl Control {
                 head,
                 Some(&mut |x: &Exported| imp.push(t, x)),
             )?;
-            Ok(imp.added)
+            imp.finish(t)
         })
     }
 

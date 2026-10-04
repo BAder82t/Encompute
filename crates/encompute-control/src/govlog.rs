@@ -1111,19 +1111,22 @@ pub fn import(t: &mut impl GenericClient, lines: &str) -> Result<u64> {
             .map_err(|e| log_err(format!("governance log export, line {}: {e}", n + 1)))?;
         imp.push(t, &x)?;
     }
-    Ok(imp.added)
+    imp.finish(t)
 }
 
-/// Appends exported events one at a time (what [`import`] does per line),
-/// so a caller can stream them from a store without holding them all.
-pub struct Importer {
+/// The importer as it was before batching: one event, three round trips.
+/// Kept as the reference [`Importer`] is proven equivalent to (the
+/// equivalence test imports one mirror with both and compares the
+/// databases); nothing in the control plane calls it.
+#[doc(hidden)]
+pub struct ReferenceImporter {
     head: i64,
     prev: String,
     first: bool,
     pub added: u64,
 }
 
-impl Importer {
+impl ReferenceImporter {
     /// Verifies the database's own log and locks its head.
     pub fn new(t: &mut impl GenericClient) -> Result<Self> {
         let (head, prev) = verify_chain(t)?;
@@ -1185,6 +1188,252 @@ impl Importer {
         self.prev = r.hash;
         self.added += 1;
         Ok(())
+    }
+}
+
+/// How many events [`Importer`] writes per statement.
+pub const IMPORT_BATCH: usize = 1000;
+
+/// What the importer knows about a partition it has seen: its size and the
+/// complete subtrees on its right edge (all a new leaf can need), read
+/// from the database once and then kept up to date in memory.
+struct PartState {
+    size: u64,
+    edge: HashMap<(u32, u64), Hash>,
+}
+
+/// Events checked and waiting for their statement.
+#[derive(Default)]
+struct Pending {
+    gseq: Vec<i64>,
+    partition: Vec<String>,
+    pseq: Vec<i64>,
+    kind: Vec<String>,
+    subject: Vec<String>,
+    org: Vec<Option<String>>,
+    body: Vec<serde_json::Value>,
+    leaf: Vec<String>,
+    prev: Vec<String>,
+    hash: Vec<String>,
+    node_partition: Vec<String>,
+    node_level: Vec<i32>,
+    node_idx: Vec<i64>,
+    node_hash: Vec<String>,
+    genesis: Vec<(i64, String, String)>,
+}
+
+/// Appends exported events, streaming (what [`import`] does per line, so a
+/// caller can take them from a store without holding them all). Every
+/// event is checked in memory exactly as [`ReferenceImporter`] checks it
+/// (leaf, partition position, chain hash, the migration genesis's digest,
+/// the continuation of the database's own log), and written
+/// [`IMPORT_BATCH`] at a time: one multi-row statement for the events, one
+/// for the tree nodes they complete, and the head moved one event at a
+/// time (the schema's trigger allows no other step) in one round trip. All
+/// of it is in the caller's transaction, so the import is as atomic as it
+/// was: a crash or an error anywhere leaves the database as it was, and
+/// the next run starts from the same head. [`Self::finish`] writes the
+/// last batch and must be called.
+pub struct Importer {
+    head: i64,
+    prev: String,
+    first: bool,
+    parts: HashMap<String, PartState>,
+    pending: Pending,
+    pub added: u64,
+}
+
+/// The left siblings a leaf completes, taken out of the edge as they are
+/// merged into their parent (each is needed once).
+struct TakeSiblings<'a>(&'a mut HashMap<(u32, u64), Hash>);
+
+impl Nodes for TakeSiblings<'_> {
+    fn node(&mut self, level: u32, index: u64) -> Result<Hash> {
+        self.0.remove(&(level, index)).ok_or_else(|| {
+            log_err(format!(
+                "the governance log's tree node {level}/{index} is missing"
+            ))
+        })
+    }
+}
+
+impl Importer {
+    /// Verifies the database's own log and locks its head.
+    pub fn new(t: &mut impl GenericClient) -> Result<Self> {
+        let (head, prev) = verify_chain(t)?;
+        lock_head(t)?;
+        Ok(Self {
+            head,
+            prev,
+            first: true,
+            parts: HashMap::new(),
+            pending: Pending::default(),
+            added: 0,
+        })
+    }
+
+    /// The partition's size and right edge as the database holds them.
+    fn read_partition(t: &mut impl GenericClient, partition: &str) -> Result<PartState> {
+        let size = partition_size(t, partition)?;
+        let rows = t
+            .query(
+                "SELECT x.level, x.hash FROM governance_tree_nodes x
+                  WHERE x.partition = $1
+                    AND (x.level, x.idx) IN (SELECT l, ($2::bigint >> l) - 1 FROM generate_series(0, 62) AS l
+                                              WHERE (($2::bigint >> l) & 1) = 1)",
+                &[&partition, &(size as i64)],
+            )
+            .map_err(db_err)?;
+        let mut edge = HashMap::new();
+        for r in rows {
+            let (l, h): (i32, String) = (r.get(0), r.get(1));
+            edge.insert((l as u32, (size >> l) - 1), parse_hash("tree node", &h)?);
+        }
+        Ok(PartState { size, edge })
+    }
+
+    /// Checks `x` and queues it if the database lacks it; every field is
+    /// recomputed (leaf, partition position, chain hash). An event the
+    /// database holds must be the same (checked at its head).
+    pub fn push(&mut self, t: &mut impl GenericClient, x: &Exported) -> Result<()> {
+        let bad = |m: &str| log_err(format!("governance log export, event {}: {m}", x.gseq));
+        if self.first && x.gseq > self.head + 1 {
+            return Err(bad(&format!(
+                "the export starts after the database's last event ({}): events are missing",
+                self.head
+            )));
+        }
+        self.first = false;
+        if x.gseq <= self.head {
+            if x.gseq == self.head && x.hash != self.prev {
+                return Err(bad(
+                    "differs from the database's event there (another history)",
+                ));
+            }
+            return Ok(());
+        }
+        if x.gseq != self.head + 1 {
+            return Err(bad("out of order or missing events before it"));
+        }
+        let partition = x.event.partition.clone();
+        if !self.parts.contains_key(&partition) {
+            let st = Self::read_partition(t, &partition)?;
+            self.parts.insert(partition.clone(), st);
+        }
+        let part = self.parts.get_mut(&partition).expect("just inserted");
+        if x.event.pseq != part.size + 1 {
+            return Err(bad("its partition's positions are not contiguous"));
+        }
+        let genesis = x.event.kind == extra_kind::ANCHOR_GENESIS;
+        let leaf = x.event.leaf_hash()?;
+        let hash = chain_hash(
+            &parse_hash("governance log head", &self.prev)?,
+            x.gseq as u64,
+            &leaf,
+        );
+        let (leaf_hex, hash_hex_) = (hash_hex(&leaf), hash_hex(&hash));
+        let nodes = completed_nodes(
+            x.event.leaf_index(),
+            leaf,
+            &mut TakeSiblings(&mut part.edge),
+        )?;
+        if hash_hex_ != x.hash {
+            return Err(bad("its hash does not match its contents and position"));
+        }
+        if let (true, Some(a)) = (genesis, &x.anchor) {
+            let digest = x.event.refs.get("digest").cloned().unwrap_or_default();
+            if encompute_verification::service::sha256_hex(a.as_bytes()) != digest {
+                return Err(bad(
+                    "the version-1 anchor does not match the genesis digest",
+                ));
+            }
+            self.pending.genesis.push((x.gseq, digest, a.clone()));
+        }
+        // The edge now holds what the new leaf completed.
+        for (l, i, h) in &nodes {
+            part.edge.insert((*l, *i), *h);
+            self.pending.node_partition.push(partition.clone());
+            self.pending.node_level.push(*l as i32);
+            self.pending.node_idx.push(*i as i64);
+            self.pending.node_hash.push(hash_hex(h));
+        }
+        part.size = x.event.pseq;
+        let p = &mut self.pending;
+        p.gseq.push(x.gseq);
+        p.partition.push(partition);
+        p.pseq.push(x.event.pseq as i64);
+        p.kind.push(x.event.kind.clone());
+        p.subject.push(x.event.subject.clone());
+        p.org.push(x.event.org.clone());
+        p.body.push(serde_json::to_value(&x.event).map_err(db_err)?);
+        p.leaf.push(leaf_hex);
+        p.prev
+            .push(std::mem::replace(&mut self.prev, hash_hex_.clone()));
+        p.hash.push(hash_hex_);
+        self.head = x.gseq;
+        self.added += 1;
+        if self.pending.gseq.len() >= IMPORT_BATCH {
+            self.flush(t)?;
+        }
+        Ok(())
+    }
+
+    /// Writes what is queued: the events, their tree nodes, the migration
+    /// genesis rows, and the head, moved through each of them.
+    fn flush(&mut self, t: &mut impl GenericClient) -> Result<()> {
+        let p = std::mem::take(&mut self.pending);
+        if p.gseq.is_empty() {
+            return Ok(());
+        }
+        t.execute(
+            "INSERT INTO governance_events (gseq, partition, pseq, kind, subject_id, org_id, body,
+                 leaf_hash, prev_hash, hash)
+             SELECT * FROM unnest($1::int8[], $2::text[], $3::int8[], $4::text[], $5::text[],
+                                  $6::text[], $7::jsonb[], $8::text[], $9::text[], $10::text[])",
+            &[
+                &p.gseq,
+                &p.partition,
+                &p.pseq,
+                &p.kind,
+                &p.subject,
+                &p.org,
+                &p.body,
+                &p.leaf,
+                &p.prev,
+                &p.hash,
+            ],
+        )
+        .map_err(db_err)?;
+        t.execute(
+            "INSERT INTO governance_tree_nodes (partition, level, idx, hash)
+             SELECT * FROM unnest($1::text[], $2::int4[], $3::int8[], $4::text[])",
+            &[&p.node_partition, &p.node_level, &p.node_idx, &p.node_hash],
+        )
+        .map_err(db_err)?;
+        for (gseq, digest, anchor) in &p.genesis {
+            t.execute(
+                "INSERT INTO governance_anchor_genesis (gseq, digest, anchor) VALUES ($1, $2, $3)",
+                &[gseq, digest, anchor],
+            )
+            .map_err(db_err)?;
+        }
+        // The head moves one event at a time (its trigger refuses any
+        // other step): one statement per event, one round trip. The
+        // values are hex digests and integers this process computed.
+        let mut sql = String::with_capacity(p.gseq.len() * 110);
+        for (g, h) in p.gseq.iter().zip(&p.hash) {
+            sql.push_str(&format!(
+                "UPDATE governance_head SET gseq = {g}, hash = '{h}' WHERE id;"
+            ));
+        }
+        t.batch_execute(&sql).map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Writes the last batch; returns how many events were added.
+    pub fn finish(mut self, t: &mut impl GenericClient) -> Result<u64> {
+        self.flush(t)?;
+        Ok(self.added)
     }
 }
 
