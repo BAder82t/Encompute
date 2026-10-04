@@ -306,7 +306,10 @@ fn plans_without_estimates_still_load_and_schedule() {
 
 #[test]
 fn migration_2_applies_to_a_version_1_database() {
-    let Some(url) = fresh_database() else { return };
+    // An old schema, never the template: migrations are what this tests.
+    let Some(url) = unmigrated_database() else {
+        return;
+    };
     let db = Db::connect(&url).unwrap();
     assert_eq!(db.migrate_to(1).unwrap(), 1);
     assert_eq!(db.schema_version().unwrap(), 1);

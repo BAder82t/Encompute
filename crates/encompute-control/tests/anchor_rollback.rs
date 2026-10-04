@@ -876,7 +876,8 @@ fn restore_and_recovery_keep_a_removed_role_removed() {
 #[test]
 fn approvals_from_before_version_4_get_stable_ids() {
     let ids = |seed: &str| -> Option<Vec<String>> {
-        let url = fresh_database()?;
+        // An old schema, never the template: the upgrade is what this tests.
+        let url = unmigrated_database()?;
         let db = encompute_control::db::Db::connect(&url).unwrap();
         assert_eq!(db.migrate_to(3).unwrap(), 3);
         db.conn()
@@ -927,7 +928,8 @@ fn approvals_from_before_version_4_get_stable_ids() {
 #[test]
 fn a_schema_2_backup_migrated_twice_gets_the_same_ids() {
     let ids = || -> Option<Vec<String>> {
-        let url = fresh_database()?;
+        // An old schema, never the template: the upgrade is what this tests.
+        let url = unmigrated_database()?;
         let db = encompute_control::db::Db::connect(&url).unwrap();
         assert_eq!(db.migrate_to(2).unwrap(), 2);
         db.conn()

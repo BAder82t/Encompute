@@ -157,13 +157,21 @@ release); `--list` prints each row's command.
 | DP | `cargo test -p encompute-privacy`, runtime `--test privacy`, `test_privacy.py`, example 09 | |
 | patient DP-SGD | `test_dpsgd.py`, example 16 | |
 | HF/PEFT | `test_huggingface.py`, example 17 | |
-| control plane | `cargo test -p encompute-control -p encompute-keybroker -p encompute-verification` | `ENCOMPUTE_TEST_DATABASE_URL`, `ENCOMPUTE_TEST_BAO_ADDR`, `ENCOMPUTE_TEST_BAO_TOKEN` |
-| tenant isolation | `cargo test -p encompute-control --test isolation` (every route unauthenticated, wrong role, other tenant; the cross-tenant attack suite) | same services |
+| control plane | `scripts/test-full.sh --release --runs control-plane,cli` (the control-plane, key-broker, verification and CLI suites on cold databases; fails on a missing service, a skipped or empty required suite, or a count below `scripts/test-manifest.json`) | `ENCOMPUTE_TEST_DATABASE_URL`, `ENCOMPUTE_TEST_BAO_ADDR`, `ENCOMPUTE_TEST_BAO_TOKEN` |
+| tenant isolation | `scripts/test-full.sh --release --runs isolation` (`cargo test -p encompute-control --test isolation`: every route unauthenticated, wrong role, other tenant; the cross-tenant attack suite) | same services |
 | backup/restore | `scripts/release/backup-drill.sh` when present; else `scripts/enterprise-e2e.sh` (backup, restore, an older backup refused); else `deploy/docker-compose/smoke.sh` (backup, destroy, restore) | OpenFHE and the services and `pg_dump`/`psql`; or docker and the `:dev` images |
 | assurance | `assurance-report` (every security invariant) | |
 | commercial dependency | `scripts/audit-commercial-build.sh` on the release binaries, a wheel (built, or `WHEEL=`) and `IMAGES` | |
 | SBOM | `scripts/release/sbom-all.sh`: one SBOM per artifact, checked | syft for images |
 | security scans | `scripts/release/scan.sh` (below) | cargo-deny, cargo-audit, pip-audit; trivy or grype for images |
+
+The release check sets `ENCOMPUTE_TEST_DB_MODE=cold` for every row, and
+`--release` refuses any other mode: development runs use sealed template
+databases cloned per test (fast), and a clone must never be the evidence that
+the migrations and the bootstrap work. Changing a minimum in
+`scripts/test-manifest.json` is a reviewed change; `scripts/test-full-selftest.sh`
+proves the runner fails on a dead PostgreSQL or OpenBao, an empty, skipped or
+short suite and a smaller total (CI runs it).
 
 Reported rows (a FAIL fails the check, a SKIP does not): fine-tuning E2E,
 examples, enterprise E2E, Compose deployment, build pins, reproducibility

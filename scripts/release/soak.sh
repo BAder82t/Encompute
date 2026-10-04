@@ -62,6 +62,8 @@ FD_GROWTH="${FD_GROWTH:-32}"
 BIN="${BIN:-$ROOT/target/release}"
 E="$BIN/encompute"; EVAL="$BIN/encompute-evaluator"; CTL="$BIN/encompute-control"
 PYTHON="${TOOL_PYTHON:-python3}"
+# The soak always starts from an empty database, migrated by the real binaries:
+# it never uses the test template databases (ENCOMPUTE_TEST_DB_MODE).
 ADMIN_URL="${SOAK_DATABASE_URL:-${ENCOMPUTE_TEST_DATABASE_URL:-}}"
 : "${ADMIN_URL:?set SOAK_DATABASE_URL or ENCOMPUTE_TEST_DATABASE_URL (PostgreSQL admin URL)}"
 BAO_ADDR="${BAO_ADDR:-${ENCOMPUTE_TEST_BAO_ADDR:-}}"

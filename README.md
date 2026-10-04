@@ -460,9 +460,28 @@ servers will do):
 ENCOMPUTE_TEST_DATABASE_URL=postgres://USER:PASS@127.0.0.1:5432/postgres \
 ENCOMPUTE_TEST_BAO_ADDR=http://127.0.0.1:8200 ENCOMPUTE_TEST_BAO_TOKEN=root \
   cargo test -p encompute-control -p encompute-keybroker
+scripts/test-full.sh                   # the full run: precheck, every suite, verified to have run
 scripts/enterprise-e2e.sh              # the commercial golden path in production mode
 deploy/docker-compose/smoke.sh         # the same through the Compose deployment
 ```
+
+Without those variables the service-backed tests skip and still "pass". A
+plain `cargo test` is for development: `ENCOMPUTE_REQUIRE_SERVICES=1` turns a
+skip into a failure, and `scripts/test-full.sh` goes further. It checks
+PostgreSQL, OpenBao, OpenFHE and the migrations first, runs the suites listed
+in `scripts/test-manifest.json`, and fails on a missing service, a skipped,
+empty or failed required suite, or a test count below the recorded minimums
+(it prints `FULL TEST PASSED` or `FULL TEST FAILED` and writes a JSON summary to
+`target/test-full/summary.json`). Release gates use it.
+
+Database-backed tests run in one of two modes (`ENCOMPUTE_TEST_DB_MODE`):
+
+- `template` (the default for `cargo test`): the migrations run once per
+  schema revision into a sealed template database, and each test gets its own
+  clone. Fast; for development and pull requests.
+- `cold`: each test creates an empty database and the control plane migrates
+  it itself. Slower; `scripts/test-full.sh` and the release check always use
+  it, so a clone can never hide a broken migration or bootstrap.
 
 TFHE-rs (research feature; never in commercial builds):
 
