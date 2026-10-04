@@ -4,7 +4,12 @@
 //! any exists and 0 once none does, so runbooks and CI can gate on it.
 //!
 //! Needs PostgreSQL (`ENCOMPUTE_TEST_DATABASE_URL`); skipped without it
-//! unless `ENCOMPUTE_REQUIRE_SERVICES=1`.
+//! unless `ENCOMPUTE_REQUIRE_SERVICES=1`. Its database is dropped when the
+//! test ends.
+
+// The shared test database harness (a template clone per test; see there).
+#[path = "../../encompute-control/tests/common/testdb.rs"]
+mod testdb;
 
 use std::process::Command;
 use std::sync::Arc;
@@ -19,32 +24,6 @@ use encompute_control::Control;
 use encompute_verification::ServiceSigner;
 
 const SECRET: &str = "cli-test-development-secret";
-
-fn database() -> Option<String> {
-    let admin = match std::env::var("ENCOMPUTE_TEST_DATABASE_URL") {
-        Ok(u) => u,
-        Err(_) if std::env::var("ENCOMPUTE_REQUIRE_SERVICES").is_ok() => {
-            panic!("ENCOMPUTE_REQUIRE_SERVICES is set but ENCOMPUTE_TEST_DATABASE_URL is not")
-        }
-        Err(_) => {
-            eprintln!("SKIPPED: set ENCOMPUTE_TEST_DATABASE_URL");
-            return None;
-        }
-    };
-    let name = format!(
-        "enc_cli_legacy_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros()
-            % 1_000_000
-    );
-    let mut c = postgres::Client::connect(&admin, postgres::NoTls).unwrap();
-    c.batch_execute(&format!("CREATE DATABASE {name}")).unwrap();
-    let (base, _) = admin.rsplit_once('/').unwrap();
-    Some(format!("{base}/{name}"))
-}
 
 struct Plane {
     url: String,
@@ -93,10 +72,8 @@ impl Plane {
 }
 
 fn start() -> Option<Plane> {
-    let db = database()?;
-    let dir = std::env::temp_dir().join(format!("encompute-cli-legacy-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let db = testdb::fresh_database()?;
+    let dir = testdb::tmp_dir("cli-legacy");
     let d = Db::connect(&db).unwrap();
     d.migrate().unwrap();
     let control = Control::with_parts(

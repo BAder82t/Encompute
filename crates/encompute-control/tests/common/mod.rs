@@ -1,13 +1,14 @@
 //! Shared test harness: a fresh PostgreSQL database per test (from
-//! `ENCOMPUTE_TEST_DATABASE_URL`, an account allowed to create databases),
-//! a temporary anchor directory, development tokens, and an in-memory
-//! transport. Without the variable the tests are skipped, unless
+//! `ENCOMPUTE_TEST_DATABASE_URL`, an account allowed to create databases;
+//! a template clone or a cold, migrated-by-the-test database, see
+//! `testdb.rs`), a temporary anchor directory, development tokens, and an
+//! in-memory transport. Without the variable the tests are skipped, unless
 //! `ENCOMPUTE_REQUIRE_SERVICES=1` (CI), where that is a failure.
 
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -26,105 +27,15 @@ use encompute_verification::ServiceSigner;
 
 pub const SECRET: &str = "test-development-secret";
 
-static N: AtomicU64 = AtomicU64::new(0);
-
-/// The databases the running test created (fresh ones and backups). Each
-/// test runs on its own thread, so this thread-local is dropped when the
-/// test ends, passing or panicking (unwinding drops the test's control
-/// planes first); dropping it drops the databases. Tests move the parts of
-/// their worlds around freely (`let env0 = t.env0`), so the cleanup cannot
-/// hang off one struct.
-struct TestDatabases {
-    admin: String,
-    names: Vec<String>,
-}
-
-impl Drop for TestDatabases {
-    fn drop(&mut self) {
-        if self.names.is_empty() {
-            return;
-        }
-        // Never panic here: a panicking thread-local destructor aborts.
-        let mut c = match postgres::Client::connect(&self.admin, postgres::NoTls) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("test databases {:?} not dropped: {e}", self.names);
-                return;
-            }
-        };
-        for name in self.names.iter().rev() {
-            // End the sessions first (a pool, a spawned server or a leaked
-            // client may still hold one); FORCE ends any that reconnect.
-            let _ = c.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-                  WHERE datname = $1 AND pid <> pg_backend_pid()",
-                &[name],
-            );
-            if let Err(e) = c.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-            {
-                eprintln!("test database {name} not dropped: {e}");
-            }
-        }
-    }
-}
-
-thread_local! {
-    static CREATED: std::cell::RefCell<Option<TestDatabases>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Drops database `name` when the current test ends.
-fn drop_at_test_end(admin: &str, name: &str) {
-    CREATED.with(|c| {
-        c.borrow_mut()
-            .get_or_insert_with(|| TestDatabases {
-                admin: admin.to_owned(),
-                names: vec![],
-            })
-            .names
-            .push(name.to_owned())
-    });
-}
-
-/// A database for one test, or `None` (skipped). It is dropped when the
-/// test ends.
-pub fn fresh_database() -> Option<String> {
-    let admin = match std::env::var("ENCOMPUTE_TEST_DATABASE_URL") {
-        Ok(u) => u,
-        Err(_) if std::env::var("ENCOMPUTE_REQUIRE_SERVICES").is_ok() => {
-            panic!("ENCOMPUTE_REQUIRE_SERVICES is set but ENCOMPUTE_TEST_DATABASE_URL is not")
-        }
-        Err(_) => {
-            eprintln!("SKIPPED: set ENCOMPUTE_TEST_DATABASE_URL (a PostgreSQL account that may create databases)");
-            return None;
-        }
-    };
-    let name = format!(
-        "enc_test_{}_{}_{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros()
-            % 1_000_000
-    );
-    let mut c = postgres::Client::connect(&admin, postgres::NoTls).expect("test database");
-    c.batch_execute(&format!("CREATE DATABASE {name}")).unwrap();
-    drop_at_test_end(&admin, &name);
-    // Replace the database name in the URL.
-    let url = match admin.rsplit_once('/') {
-        Some((base, _)) if admin.starts_with("postgres") => format!("{base}/{name}"),
-        _ => format!("{admin} dbname={name}"),
-    };
-    Some(url)
-}
+mod testdb;
+#[allow(unused_imports)]
+pub use testdb::{
+    db_name, drop_at_test_end, fresh_database, mode, template_clone, template_database_name,
+    test_admin_url, tmp_dir, unmigrated_database, url_for, DbMode,
+};
 
 fn admin_url() -> String {
     std::env::var("ENCOMPUTE_TEST_DATABASE_URL").unwrap()
-}
-
-pub fn db_name(url: &str) -> String {
-    url.rsplit('/').next().unwrap().to_owned()
 }
 
 /// "Backs up" `url` into database `backup` (a template copy; no connection
@@ -405,49 +316,6 @@ impl Env0 {
             }))
             .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
         (t, fail)
-    }
-}
-
-/// Removes the scratch directories of the test that made them when it
-/// ends (a directory left behind, and found again under a reused process
-/// ID, would hand a later test somebody else's anchor).
-struct ScratchDirs(Vec<PathBuf>);
-
-impl Drop for ScratchDirs {
-    fn drop(&mut self) {
-        for d in &self.0 {
-            let _ = std::fs::remove_dir_all(d);
-        }
-    }
-}
-
-thread_local! {
-    static SCRATCH: std::cell::RefCell<ScratchDirs> = const { std::cell::RefCell::new(ScratchDirs(vec![])) };
-}
-
-/// A new, empty directory: its name carries the process ID, a counter and
-/// the time, it is created exclusively (one that exists is never reused:
-/// process IDs wrap around, and earlier runs left directories behind), and
-/// it is removed when the test ends.
-pub fn tmp_dir(tag: &str) -> PathBuf {
-    loop {
-        let d = std::env::temp_dir().join(format!(
-            "encompute-control-{tag}-{}-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::SeqCst),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        match std::fs::create_dir(&d) {
-            Ok(()) => {
-                SCRATCH.with(|s| s.borrow_mut().0.push(d.clone()));
-                return d;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => panic!("{}: {e}", d.display()),
-        }
     }
 }
 

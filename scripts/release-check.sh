@@ -20,7 +20,10 @@
 # What each row needs when it is not SKIPPED:
 #   OpenFHE rows        scripts/install-openfhe.sh (.deps/openfhe) or OPENFHE_ROOT
 #   control plane,      ENCOMPUTE_TEST_DATABASE_URL, ENCOMPUTE_TEST_BAO_ADDR,
-#   tenant isolation    ENCOMPUTE_TEST_BAO_TOKEN (PostgreSQL, OpenBao dev servers)
+#   tenant isolation    ENCOMPUTE_TEST_BAO_TOKEN (PostgreSQL, OpenBao dev servers);
+#                       run through scripts/test-full.sh, which fails on a missing
+#                       service, a skipped or empty suite, or a count below the
+#                       minimums in scripts/test-manifest.json
 #   backup/restore      scripts/release/backup-drill.sh; else the enterprise E2E
 #                       (OpenFHE, the services above, pg_dump/psql); else the
 #                       Compose smoke test (docker, images :dev)
@@ -32,6 +35,10 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+# Release evidence uses cold databases: every DB-backed test migrates an empty
+# database itself, so the fast template clones of development runs can never
+# hide a broken migration or bootstrap (crates/encompute-control/tests/common/testdb.rs).
+export ENCOMPUTE_TEST_DB_MODE=cold
 LOG="$(mktemp -d)"
 trap 'rm -rf "$LOG"' EXIT
 
@@ -221,8 +228,8 @@ check "Examples" env EXAMPLES_REQUIRE="15 16 17 18 public-sector/public-health-s
 
 # --- Enterprise ------------------------------------------------------------------
 if [ "$SERVICES" = 1 ]; then
-  check "control plane" env ENCOMPUTE_REQUIRE_SERVICES=1 cargo test -q -p encompute-control -p encompute-keybroker -p encompute-verification
-  check "tenant isolation" env ENCOMPUTE_REQUIRE_SERVICES=1 cargo test -q -p encompute-control --test isolation
+  check "control plane" scripts/test-full.sh --release --runs control-plane,cli --json target/test-full/control-plane.json
+  check "tenant isolation" scripts/test-full.sh --release --runs isolation --json target/test-full/isolation.json
   check "governance attacks" scripts/governance-attacks.sh
 else
   skip "control plane" "$NO_SERVICES"
