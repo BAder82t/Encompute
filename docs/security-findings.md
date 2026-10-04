@@ -250,6 +250,35 @@ confirmed on 2026-09-29.
 | ENC-SF-2026-093 | Removing a role (`memberships/remove`) was not anchored: a database restore gave the principal the role back (rc.4) | Medium | encompute-control (`anchor.rs`, `control.rs`, `ops/tenancy.rs`, migration 0004) | fixed | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `caaf754` | `crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_removed_role_removed`, `crates/encompute-control/tests/anchor_rollback.rs::approvals_from_before_version_4_get_stable_ids` | INV-178 (extended) | api.md, deployment.md, threat-model.md, KNOWN_LIMITATIONS.md |
 | ENC-SF-2026-094 | Source-asset lists were trusted for jobs whose program binds no registered asset (the ENC-SF-2026-089 residual): an omitted or extra asset became the job's lineage, revocation scope and trust report | Medium | encompute-control (`ops/jobs.rs`) | fixed | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `1a3d68d` | `crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_assets_its_program_binds_even_its_own`, `crates/encompute-control/tests/collaboration.rs::the_derived_sources_drive_revocation_and_the_trust_report` | INV-194 (extended) | api.md, KNOWN_LIMITATIONS.md, CHANGELOG.md |
 
+### Closed on the governance branch (unreleased)
+
+Items that were listed as open and are closed by the governance event log
+(not in a released version: they ship with the release that includes the
+governance branch). Each has a test that fails against the code before.
+
+- **The state anchor grew without bound, and was rewritten whole**
+  (ENC-SF-2026-083, the open part). Version 1 held the sets of ended jobs,
+  withdrawn approvals, removed memberships and removed roles (OpenBao
+  refused an entry above 1 MiB, roughly 25,000 to 30,000 ended jobs). The
+  version-2 anchor is a constant few hundred bytes: it holds the governance
+  event log's size and head (a hash-chained, append-only log with
+  per-partition signed Merkle checkpoints), mirrored into the anchor store
+  before each anchor compare-and-set; a version-1 anchor migrates once.
+  Measured with 120,100 events: 410 bytes at the start, 417 at the end
+  (`crates/encompute-control/tests/governance_scale.rs::load_10k_events`
+  on every run, `load_100k_events_heavy` by hand). The per-spend cost of
+  re-verifying the whole ledger remains (KNOWN_LIMITATIONS.md). INV-226.
+- **The audit chain had an unanchored tail.** A checkpoint of the
+  governance log now anchors the audit head in the same compare-and-set,
+  synchronously for each security deny event and every two seconds in the
+  background, so a deny call no longer returns with its own audit event
+  or earlier ones unanchored (`0e5bd16`,
+  `crates/encompute-control/tests/audit_tail.rs::a_deny_call_anchors_the_audit_events_before_it`;
+  it failed on the previous code with the anchor's audit head at 0).
+  Ordinary audit events still wait for the next checkpoint (two seconds at
+  most), and the audit chain has no mirror: a truncated chain is detected,
+  not restored (KNOWN_LIMITATIONS.md). INV-162, INV-226 (`030b5cb`).
+
 ### Open (accepted / needs design)
 
 Known issues from the release-candidate rounds that are not fixed yet.
@@ -286,8 +315,6 @@ stated.
   process.
 - **torch and transformers CVEs** are `not_affected` exceptions in the
   vulnerability policy until 2026-12-31.
-- **The audit chain has an unanchored tail:** events after the last
-  anchor can be truncated without detection.
 - **A DP plan with no budgeted asset produces no privacy receipt**, so an
   aggregation receipt has nothing to bind.
 - **Identity providers are not bound per organization**
@@ -303,21 +330,8 @@ stated.
   declares.
 - **One control-plane process per anchor** (ENC-SF-2026-083, partly
   fixed). A lost compare-and-set now reloads and re-applies, but running
-  several replicas against one anchor is not supported; the anchor's sets
-  of ended jobs, withdrawn approvals, removed project memberships and
-  removed roles grow without bound, and the whole anchor is rewritten on each update.
-  OpenBao's KV store refuses an entry above its raft `max_entry_size`
-  (1 MiB by default, roughly 25,000 to 30,000 ended jobs); past it anchor
-  writes fail and the control plane fails closed (spends, cancellations
-  and revocation acknowledgements stop). Mitigation for now: the
-  `encompute_anchor_bytes` gauge and a warning above 512 KiB, and raising
-  `max_entry_size`. The cost of keeping the anchor grows with the
-  deployment's age as well: each privacy spend re-loads and re-verifies
-  the whole ledger when it anchors it (on top of the verification inside
-  the spend's transaction), and every security-negative operation rescans
-  all the anchored-state tables. Both fail closed. A hash-chained
-  governance event log replaces these sets, and both costs, before general
-  availability.
+  several replicas against one anchor is not supported. The anchor's
+  growth and rewrite cost are closed (see below).
 - **Evaluator upload grants are reusable until they expire**
   (ENC-SF-2026-064, partly fixed), and are not bound to a client.
 - **A co-tenant can block a victim's key upload** (ENC-SF-2026-035,

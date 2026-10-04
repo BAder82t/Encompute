@@ -137,9 +137,15 @@ Related: [support matrix](docs/support-matrix.md),
   deployment provides none. The control plane connects to PostgreSQL
   without TLS. Terminate TLS in front of every service and keep the
   database on a private network.
-- **The newest audit events are only hash-chained.** Events after the last
-  signed checkpoint (every 100 events by default) are covered by an
-  unkeyed hash chain until the next checkpoint.
+- **The newest audit events are anchored with the next checkpoint, not at
+  once.** The audit chain's head is anchored with every checkpoint of the
+  governance log: before the call returns for each security deny event
+  (a revocation, a disabled account, an ended job), and otherwise by the
+  background pass, every two seconds. An ordinary audit event (one that
+  grants or merely records, or a refused request) is covered only by the
+  unkeyed hash chain until then, and a crash or a database truncation of
+  exactly that tail inside the window is not detected. The audit chain has
+  no mirror: a truncated chain is detected, not restored.
 - **IDs can reveal existence through conflicts.** Other tenants' resources
   are "not found", but registering an ID that is already taken fails with
   a conflict. Project invitations answer the same whether the organization
@@ -172,8 +178,11 @@ Related: [support matrix](docs/support-matrix.md),
   every privacy spend is an event of the governance log (about 300 bytes),
   kept in the database and mirrored into the anchor store; nothing is
   pruned below the anchored head. 10 million spends are about 3 GB of
-  mirror, and the start check, which recomputes the whole log (about 1.6
-  seconds for 100,000 events), grows with it. A spend adds one append and
+  mirror, and the start check, which recomputes the whole log, grows with
+  it (measured in release mode on a shared, loaded machine: 4.3 seconds
+  for 120,100 events). Recovery from an older backup replays the missing
+  events from the mirror one at a time: 732 seconds for 107,600 events
+  (about 7 ms each), not optimized. A spend adds one append and
   one checkpoint to its latency (concurrent spends share a checkpoint),
   and still re-loads and re-verifies the whole ledger to checkpoint it
   (besides verifying it inside the spend), so its cost grows with the

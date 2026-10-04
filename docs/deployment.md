@@ -456,7 +456,9 @@ a budget. A duplicate delivery of the same event is charged once.
 
 The control plane signs into the **state anchor**:
 
-- the audit chain's root, at each checkpoint;
+- the audit chain's head, with every checkpoint of the governance log
+  (before the call returns for a security deny event, and otherwise at
+  most every two seconds) and at each audit checkpoint;
 - the governance event log's size and head. Each privacy spend appends its
   ledger's checkpoint (`privacy.ledger_checkpoint`: the asset, the entry
   count and the root, in the platform partition, nothing more) to the log
