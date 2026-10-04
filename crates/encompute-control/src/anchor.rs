@@ -53,8 +53,16 @@ use encompute_verification::service::{
 
 use crate::config::AnchorConfig;
 
-/// The version this release writes.
+/// The version this release writes while the governance log mirror has
+/// never been compacted.
 pub const ANCHOR_VERSION: u32 = 2;
+/// The version of an anchor that holds a [`Seal`] (the mirror was
+/// compacted): written by the first compaction and never before, so a
+/// deployment that does not compact keeps an anchor the previous release
+/// still reads, and a release that does not know seals refuses one that
+/// holds a seal (it would otherwise treat the mirror's missing prefix as
+/// truncation, or worse, not know which events the archive must hold).
+pub const ANCHOR_SEALED_VERSION: u32 = 3;
 /// The version read only to migrate it.
 pub const ANCHOR_V1_VERSION: u32 = 1;
 
@@ -107,7 +115,21 @@ pub struct MigratedFrom {
     pub digest: String,
 }
 
-/// The state anchor (version 2): constant size.
+/// What the anchor holds of a compacted mirror: the log's size and chain
+/// head at the compaction (`size` events, the last one's hash `head`) and
+/// the SHA-256 of the archive manifest (see [`crate::archive`]). The
+/// events up to `size` are in the archive, not in the mirror; the
+/// mirror's tail starts at event `size + 1` and chains from `head`.
+/// Constant size, however many events are sealed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Seal {
+    pub size: i64,
+    pub head: String,
+    pub manifest: String,
+}
+
+/// The state anchor (version 2, or 3 once sealed): constant size.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateAnchor {
@@ -124,6 +146,9 @@ pub struct StateAnchor {
     /// Set once, when a version-1 anchor was migrated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migrated_from: Option<MigratedFrom>,
+    /// Set by a compaction of the governance log mirror (version 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal: Option<Seal>,
     pub signer: String,
     pub signer_public_key: String,
     #[serde(default)]
@@ -140,6 +165,7 @@ impl StateAnchor {
             glog_size: 0,
             glog_head: empty_log_head(),
             migrated_from: None,
+            seal: None,
             signer: signer.id().into(),
             signer_public_key: signer.public_key_hex(),
             signature: String::new(),
@@ -153,7 +179,17 @@ impl StateAnchor {
         }
     }
 
+    /// The version this anchor is written as: 3 with a seal, 2 without.
+    fn version_for(&self) -> u32 {
+        if self.seal.is_some() {
+            ANCHOR_SEALED_VERSION
+        } else {
+            ANCHOR_VERSION
+        }
+    }
+
     fn sign(&mut self, signer: &ServiceSigner) -> Result<()> {
+        self.version = self.version_for();
         self.signer = signer.id().into();
         self.signer_public_key = signer.public_key_hex();
         self.signature = signer.sign(STATE_ANCHOR_V2, &self.statement())?;
@@ -162,8 +198,16 @@ impl StateAnchor {
 
     /// Checks the signature is by `public_key` (the control plane's key).
     pub fn verify(&self, public_key: &str) -> Result<()> {
-        if self.version != ANCHOR_VERSION {
+        if self.version != self.version_for() {
             return Err(anchor_err(format!("state anchor version {}", self.version)));
+        }
+        if let Some(seal) = &self.seal {
+            if seal.size < 1 || seal.size > self.glog_size {
+                return Err(anchor_err(format!(
+                    "the state anchor's seal ({} events) is not within the anchored log ({} events)",
+                    seal.size, self.glog_size
+                )));
+            }
         }
         if self.signer_public_key != public_key {
             return Err(anchor_err(
@@ -309,6 +353,17 @@ impl StoredAnchor {
         let parsed = match v.get("version").and_then(|x| x.as_u64()) {
             Some(1) => serde_json::from_value(v).map(StoredAnchor::V1),
             Some(2) => serde_json::from_value(v).map(StoredAnchor::V2),
+            // A sealed anchor: this release's format with a seal. Version 3
+            // without one, or version 2 with one, is not an anchor any
+            // release writes.
+            Some(3) if v.get("seal").is_some() => {
+                serde_json::from_value(v).map(StoredAnchor::V2)
+            }
+            Some(3) => {
+                return Err(anchor_err(
+                    "state anchor version 3 is not supported without a seal",
+                ))
+            }
             other => {
                 return Err(anchor_err(format!(
                     "state anchor version {} is not supported by this release (written by a newer one? a control plane is never downgraded, see docs/deployment.md)",
@@ -316,7 +371,15 @@ impl StoredAnchor {
                 )))
             }
         };
-        parsed.map_err(|e| anchor_err(format!("state anchor: {e}")))
+        let parsed = parsed.map_err(|e| anchor_err(format!("state anchor: {e}")))?;
+        if let StoredAnchor::V2(a) = &parsed {
+            if a.version == ANCHOR_VERSION && a.seal.is_some() {
+                return Err(anchor_err(
+                    "a state anchor with a seal is version 3, not 2 (tampered?)",
+                ));
+            }
+        }
+        Ok(parsed)
     }
 
     pub fn counter(&self) -> u64 {
@@ -352,6 +415,15 @@ pub trait AnchorStore: Send + Sync {
     /// compare-and-set on the version `allow` saw, so a segment changed
     /// meanwhile is not overwritten (the call fails and is retried).
     fn mirror_replace(&self, n: u64, lines: &str, allow: &Allow<'_>) -> Result<()>;
+    /// Deletes segment `n` (succeeding when it is already gone), durably.
+    /// `allow` sees the current content (`None` when it cannot be read)
+    /// and must accept the deletion: only a compaction deletes, and only
+    /// what its archive holds. A store that cannot delete refuses.
+    fn mirror_delete(&self, _n: u64, _allow: &Allow<'_>) -> Result<()> {
+        Err(anchor_err(
+            "this anchor store cannot delete mirror segments",
+        ))
+    }
 }
 
 /// Decides whether a segment's current content (`None` when it cannot be
@@ -570,6 +642,18 @@ impl AnchorStore for DirAnchor {
         }
         fsync_dir(&d)
     }
+
+    fn mirror_delete(&self, n: u64, allow: &Allow<'_>) -> Result<()> {
+        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let d = self.mirror_dir();
+        let p = d.join(segment_file(n));
+        if !p.exists() {
+            return Ok(());
+        }
+        allow(self.mirror_read(n).ok().as_deref())?;
+        std::fs::remove_file(&p).map_err(|e| anchor_err(format!("{}: {e}", p.display())))?;
+        fsync_dir(&d)
+    }
 }
 
 /// OpenBao/Vault KV version 2, using its check-and-set versions.
@@ -726,6 +810,29 @@ impl AnchorStore for OpenBaoKvAnchor {
                 e.message
             ))
         })
+    }
+
+    fn mirror_delete(&self, n: u64, allow: &Allow<'_>) -> Result<()> {
+        let Some((current, _)) = self.mirror_entry(n)? else {
+            return Ok(());
+        };
+        allow(Some(&current))?;
+        // The metadata endpoint removes the entry and every version of it.
+        // (No compare-and-set exists for a delete: only a compaction
+        // deletes, below the seal, where no writer replaces.)
+        let url = format!(
+            "{}/v1/{}/metadata/{}-glog/{n:012}",
+            self.addr, self.mount, self.path
+        );
+        match self
+            .agent
+            .delete(&url)
+            .set("X-Vault-Token", &self.token)
+            .call()
+        {
+            Ok(_) | Err(ureq::Error::Status(404, _)) => Ok(()),
+            Err(e) => Err(anchor_err(format!("anchor store {}: {e}", self.addr))),
+        }
     }
 }
 
@@ -1049,6 +1156,116 @@ mod tests {
         assert!(matches!(opened, Opened::V1(ref x) if **x == v1));
         assert_eq!(an.snapshot().counter, 7);
         assert_eq!(an.snapshot().glog_size, 0);
+    }
+
+    /// INV-248: the anchor of a mirror that was compacted is version 3 and
+    /// holds a seal; one that never was stays version 2, byte for byte what
+    /// the previous release wrote and reads. The previous release refuses
+    /// a sealed anchor twice over (its struct knows no seal, its version
+    /// list ends at 2); a seal cannot be added to, removed from, or moved
+    /// in a signed anchor, and neither version label fits the other form.
+    #[test]
+    fn a_sealed_anchor_is_version_3_and_refused_by_the_previous_release() {
+        /// The previous release's anchor, field for field.
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct PreviousAnchor {
+            version: u32,
+            counter: u64,
+            audit_seq: i64,
+            audit_root: String,
+            glog_size: i64,
+            glog_head: String,
+            #[serde(default)]
+            migrated_from: Option<MigratedFrom>,
+            signer: String,
+            signer_public_key: String,
+            #[serde(default)]
+            signature: String,
+        }
+        // What the previous release did with a version: 1 and 2 only.
+        fn previous_release_accepts(bytes: &[u8]) -> bool {
+            let v: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            matches!(v.get("version").and_then(|x| x.as_u64()), Some(1 | 2))
+                && serde_json::from_value::<PreviousAnchor>(v).is_ok()
+        }
+        let s = signer();
+        let key = s.public_key_hex();
+        // Never compacted: version 2, no seal field, read by the previous
+        // release.
+        let mut a = StateAnchor::empty(&s);
+        a.glog_size = 3_000;
+        a.glog_head = "ab".repeat(32);
+        a.sign(&s).unwrap();
+        assert_eq!(a.version, 2);
+        let plain = serde_json::to_vec(&a).unwrap();
+        assert!(!String::from_utf8_lossy(&plain).contains("seal"));
+        assert!(previous_release_accepts(&plain));
+        let StoredAnchor::V2(back) = StoredAnchor::parse(&plain).unwrap() else {
+            panic!("not version 2");
+        };
+        back.verify(&key).unwrap();
+        // Compacted: version 3 with the seal; the previous release refuses
+        // it, this one verifies it.
+        let seal = Seal {
+            size: 2_500,
+            head: "cd".repeat(32),
+            manifest: "ef".repeat(32),
+        };
+        let mut sealed = a.clone();
+        sealed.seal = Some(seal.clone());
+        sealed.sign(&s).unwrap();
+        assert_eq!(sealed.version, 3);
+        let bytes = serde_json::to_vec(&sealed).unwrap();
+        assert!(
+            !previous_release_accepts(&bytes),
+            "the previous release read a sealed anchor"
+        );
+        let e: std::result::Result<PreviousAnchor, _> = serde_json::from_slice(&bytes);
+        assert!(e.is_err(), "its struct knows no seal");
+        let StoredAnchor::V2(read) = StoredAnchor::parse(&bytes).unwrap() else {
+            panic!("not parsed as this release's anchor");
+        };
+        assert_eq!(read.seal, Some(seal.clone()));
+        read.verify(&key).unwrap();
+        assert!(
+            serialized_len(&sealed) < serialized_len(&a) + 256,
+            "the seal is constant in size"
+        );
+        // The seal is signed: removed, edited or moved, it does not verify.
+        for edit in [
+            |v: &mut serde_json::Value| v["seal"]["size"] = 2_000.into(),
+            |v: &mut serde_json::Value| v["seal"]["head"] = ("00".repeat(32)).into(),
+            |v: &mut serde_json::Value| v["seal"]["manifest"] = ("11".repeat(32)).into(),
+        ] {
+            let mut v = serde_json::to_value(&sealed).unwrap();
+            edit(&mut v);
+            let t: StateAnchor = serde_json::from_value(v).unwrap();
+            assert!(t.verify(&key).is_err(), "an edited seal verified");
+        }
+        // Version labels fit only their own form.
+        let mut v = serde_json::to_value(&sealed).unwrap();
+        v["version"] = 2.into();
+        let e = StoredAnchor::parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
+        assert!(e.message.contains("version 3"), "{e}");
+        let mut v = serde_json::to_value(&a).unwrap();
+        v["version"] = 3.into();
+        let e = StoredAnchor::parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
+        assert!(e.message.contains("not supported"), "{e}");
+        // A seal past the anchored log is not an anchor.
+        let mut past = sealed.clone();
+        past.seal = Some(Seal {
+            size: 3_001,
+            ..seal
+        });
+        past.sign(&s).unwrap();
+        assert!(past.verify(&key).is_err());
+        // Signed as version 2 (the old label) with a seal, it does not
+        // verify either: the label is part of what is signed.
+        let mut relabelled = sealed.clone();
+        relabelled.version = 2;
+        assert!(relabelled.verify(&key).is_err());
     }
 
     /// Review finding CP-S-8 (ENC-SF-2026-083): an update that lost the compare-and-set race

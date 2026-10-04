@@ -464,7 +464,7 @@ impl Control {
         }
         // The governance log first: everything below reads it.
         check_log_extends(&mut *c, &a, glog, &self.signer.public_key_hex(), rollback)?;
-        self.check_mirror(a.glog_size, &a.glog_head).map_err(|e| {
+        self.check_mirror(a.glog_size, &a.glog_head, a.seal.as_ref()).map_err(|e| {
             rollback(
                 "GOVERNANCE LOG",
                 format!(
@@ -569,6 +569,19 @@ impl Control {
         operator: &str,
         governance_log: Option<&str>,
     ) -> Result<Vec<String>> {
+        self.recover_with(operator, governance_log, None)
+    }
+
+    /// [`Self::recover_importing`], with the archive a compaction of the
+    /// governance log mirror wrote (`recover --archive-dir`): read only if
+    /// the restored database ends inside the sealed prefix, and checked
+    /// against the anchor's seal.
+    pub fn recover_with(
+        &self,
+        operator: &str,
+        governance_log: Option<&str>,
+        archive: Option<&Path>,
+    ) -> Result<Vec<String>> {
         use govlog::NegSet;
         let a = self.anchor.snapshot();
         let mut notes = vec![];
@@ -592,14 +605,12 @@ impl Control {
         if let Err(behind) = extends(self) {
             // The anchored events from the mirror in the anchor store,
             // exactly up to the anchored head (never an orphaned suffix).
-            let added = self
-                .import_from_mirror(a.glog_size, &a.glog_head)
-                .map_err(|e| {
-                    recovery_refused(format!(
-                        "{}; the governance log mirror cannot supply the missing events either: {}",
-                        behind.message, e.message
-                    ))
-                })?;
+            let added = self.import_from_mirror(&a, archive).map_err(|e| {
+                recovery_refused(format!(
+                    "{}; the governance log mirror cannot supply the missing events either: {}",
+                    behind.message, e.message
+                ))
+            })?;
             notes.push(format!(
                 "governance log: {added} missing events restored from the mirror in the anchor store, up to the anchored head (event {})",
                 a.glog_size
@@ -608,12 +619,12 @@ impl Control {
         }
         // A damaged mirror is rebuilt from the database's log, which now
         // extends the anchor.
-        if let Err(e) = self.check_mirror(a.glog_size, &a.glog_head) {
+        if let Err(e) = self.check_mirror(a.glog_size, &a.glog_head, a.seal.as_ref()) {
             let size = {
                 let mut c = self.db.conn()?;
                 govlog::verify_chain(&mut *c)?.0
             };
-            self.rebuild_mirror(size)?;
+            self.rebuild_mirror(size, a.seal.as_ref())?;
             notes.push(format!(
                 "governance log mirror: rebuilt from the database ({}); {size} events",
                 e.message
@@ -1304,7 +1315,7 @@ impl Control {
         }
         // The mirror first: the anchor's compare-and-set is the commit
         // point, and the anchor store must then hold every anchored event.
-        self.mirror_through(a.glog_size, size)?;
+        self.mirror_through(a.glog_size, size, a.seal.as_ref().map_or(0, |s| s.size))?;
         a.glog_size = size;
         a.glog_head = head;
         Ok(true)

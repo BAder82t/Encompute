@@ -13,9 +13,11 @@
 pub mod anchor;
 mod anchor_migration;
 pub mod api;
+pub mod archive;
 pub mod audit;
 pub mod authn;
 pub mod authz;
+pub mod compact;
 pub mod config;
 pub mod control;
 pub mod db;
