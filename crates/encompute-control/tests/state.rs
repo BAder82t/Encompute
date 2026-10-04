@@ -617,3 +617,54 @@ fn a_reservation_cannot_under_declare_its_sensitivity() {
         w.t.ok(&w.a_auditor, "GET", &format!("/v1/privacy/{d}"), None);
     assert_eq!(entries["entries"], 2, "{entries}");
 }
+
+/// ENC-SF-2026-048 (the control plane's own derivation): an organization is
+/// never sampled, since which parties contribute is public, so a
+/// reservation charged to an organization-level ledger that claims a
+/// sampling rate is refused (ENC2204). It used to be accepted with the
+/// same sensitivity and noise, and the accountant amplified the release by
+/// a subsampling that never happened.
+#[test]
+fn an_organization_level_reservation_cannot_claim_sampling() {
+    let Some(w) = world() else { return };
+    let org_budget = serde_json::to_value(encompute_ir::confidentiality::PrivacyBudget {
+        unit: encompute_ir::confidentiality::PrivacyUnit::Organization,
+        epsilon: 3.0,
+        delta: 1e-6,
+    })
+    .unwrap();
+    let asset = w.t.ok(
+        &w.a_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": "hospital-a", "kind": "dataset", "name": "orgs-2026",
+                    "digest": "b".repeat(64), "privacy_budget": org_budget}),
+        ),
+    );
+    let d = asset["id"].as_str().unwrap().to_owned();
+    let spend = |event: &str, sampled: bool| {
+        let mut r = reserve(event, 1000);
+        if sampled {
+            r["mechanism"]["sampling_rate"] = json!("0.001");
+        }
+        w.t.call(
+            &w.a_owner,
+            "POST",
+            &format!("/v1/privacy/{d}/events"),
+            Some(r),
+        )
+    };
+    let (s, v) = spend("sampled", true);
+    assert_eq!((s, v["code"].as_str()), (400, Some("ENC2204")), "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("organization"),
+        "{v}"
+    );
+    // The same release, not claiming it, is charged.
+    let (s, v) = spend("plain", false);
+    assert_eq!(s, 200, "{v}");
+    let entries =
+        w.t.ok(&w.a_auditor, "GET", &format!("/v1/privacy/{d}"), None);
+    assert_eq!(entries["entries"], 1, "{entries}");
+}

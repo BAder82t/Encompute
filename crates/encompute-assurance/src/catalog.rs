@@ -976,10 +976,15 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/collaboration.rs::every_grant_can_be_withdrawn_through_the_api"),
         (EndToEnd, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_disables_and_cancellations"),
     ]),
-    inv!("INV-198", "dp", "The control plane charges a reservation only if its declared sensitivity is at least what its own noise and mechanism imply for the ledger's privacy unit; an under-declared reservation is refused (ENC-SF-2026-048).", [
-        (Positive, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+    inv!("INV-198", "dp", "The control plane charges a reservation only if its declared sensitivity is at least what its own noise and mechanism imply for the ledger's privacy unit; an under-declared reservation is refused (ENC-SF-2026-048). It computes the cost (rho, then epsilon at the ledger's delta) from the declared sensitivity and noise variance with its own accountant, never from a declared epsilon, and refuses a mechanism that is inconsistent with the ledger: a named privacy level with other noise, no noise, a cost below the floor, and Poisson sampling claimed for an organization-level ledger (an organization is never sampled, so no amplification applies). Golden vectors of derived reservations (sensitivity, noise variance, rho, epsilon) are pinned to an independent reference. What it does not derive: the noise multiplier, clip norm and sampling rate of a release it did not plan are the spender's declarations (the multiplier only sets the floor on the sensitivity, and the charge never falls below the minimum reservation cost); a governed job's reservation is derived from its program instead (INV-241).", [
+        (Positive, "test:crates/encompute-control/tests/reservation_derivation.rs::golden_vectors_of_derived_reservations"),
+        (Positive, "test:crates/encompute-control/tests/reservation_derivation.rs::a_sampled_release_of_an_inner_unit_charges_the_clip_norm_once"),
         (Negative, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+        (Negative, "test:crates/encompute-control/tests/reservation_derivation.rs::tampered_declarations_are_refused"),
         (Adversarial, "test:crates/encompute-control/tests/state.rs::a_reservation_cannot_under_declare_its_sensitivity"),
+        (Adversarial, "test:crates/encompute-control/tests/state.rs::an_organization_level_reservation_cannot_claim_sampling"),
+        (Adversarial, "test:crates/encompute-control/tests/reservation_derivation.rs::the_declared_noise_multiplier_is_the_unverified_input"),
+        (EndToEnd, "test:crates/encompute-control/tests/state.rs::an_organization_level_reservation_cannot_claim_sampling"),
     ]),
     inv!("INV-199", "keybroker", "Every field of key broker state that gates release is authenticated under a key derived from the KEK: an edited state file does not open, an unauthenticated one opens only after its owner's explicit upgrade, every legitimate save advances the generation, and a production store that cannot authenticate state backs no broker (ENC-SF-2026-043).", [
         (Positive, "test:crates/encompute-keybroker/tests/state_integrity.rs::owner_changes_are_reauthenticated_and_generations_advance"),

@@ -16,7 +16,9 @@ pub(crate) mod revocation_heads;
 mod tenancy;
 
 pub(crate) use assets::withdraw_grants;
-pub use assets::{asset_json, check_reservation, least_sensitivity, shared_asset_json};
+pub use assets::{
+    asset_json, check_reservation, least_sensitivity, shared_asset_json, MIN_RESERVATION_RHO,
+};
 pub(crate) use custody::require_own_broker;
 pub use derived::onward_policy_id;
 pub use jobs::governance_bundle::{BUNDLE_RATE, MAX_BUNDLE_EVENTS};

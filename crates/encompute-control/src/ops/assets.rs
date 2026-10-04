@@ -1393,9 +1393,20 @@ pub fn least_sensitivity(
 
 /// A reservation must be internally consistent before it is charged: a
 /// valid mechanism, a positive noise variance and vector length, production
-/// randomness in production mode, and a declared sensitivity no smaller
-/// than its own noise implies ([`least_sensitivity`]). A spender that
-/// under-declares its sensitivity to be charged less is refused (ENC2204).
+/// randomness in production mode, no sampling for an organization unit
+/// (which parties contribute is public), and a declared sensitivity no
+/// smaller than its own noise implies ([`least_sensitivity`]). A spender
+/// that under-declares its sensitivity to be charged less is refused
+/// (ENC2204).
+///
+/// What this does not derive: the noise multiplier, clip norm and sampling
+/// rate of a release the control plane did not plan are the spender's
+/// declarations (the cost is computed from the declared sensitivity and
+/// noise variance, by the control plane's own accountant; the multiplier
+/// only sets the floor on the sensitivity). A governed job's reservation
+/// is derived from its program instead and compared with the declared one
+/// (`privacy_scopes.rs`). See `tests/reservation_derivation.rs`.
+///
 /// The least zCDP cost one reservation may have.
 pub const MIN_RESERVATION_RHO: f64 = 1e-9;
 
@@ -1435,6 +1446,18 @@ pub fn check_reservation(
         return refused(format!(
             "a reservation must charge at least rho {MIN_RESERVATION_RHO} (its noise variance {sigma2} at sensitivity {sensitivity} charges less)"
         ));
+    }
+    // An organization is never sampled: which parties contribute is public,
+    // so a sampling rate buys no privacy amplification there (the program
+    // analysis refuses it too). A reservation that claims one would have
+    // the accountant amplify a release that was never subsampled.
+    if mechanism.sampling_rate.is_some()
+        && genesis.budget.unit == encompute_ir::confidentiality::PrivacyUnit::Organization
+    {
+        return refused(
+            "the reservation claims Poisson sampling, but the ledger's privacy unit is the organization: which parties contribute is public, so an organization is never sampled and no amplification applies"
+                .into(),
+        );
     }
     let least = least_sensitivity(&genesis.budget.unit, mechanism, *sigma2, *vector_len);
     if *sensitivity < least {
