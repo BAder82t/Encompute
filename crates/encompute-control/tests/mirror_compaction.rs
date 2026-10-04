@@ -983,3 +983,132 @@ fn evidence_verifies_across_a_compaction() {
     );
     assert_eq!(head_of(&env0.url), 3_000);
 }
+
+// --- the command line ----------------------------------------------------------------
+
+/// Runs `bin` with `args` against `env0`'s database and anchor (the
+/// development signing key the harness uses, written next to the anchor).
+fn cli(bin: &str, env0: &Env0, args: &[&str]) -> (i32, String, String) {
+    let key = env0.anchor_dir.join("development-signing.key");
+    if !key.exists() {
+        std::fs::write(&key, encompute_verification::hex(&env0.seed)).unwrap();
+    }
+    let o = std::process::Command::new(bin)
+        .args(args)
+        .env("ENCOMPUTE_ENV", "development")
+        .env("ENCOMPUTE_DATABASE_URL", &env0.url)
+        .env("ENCOMPUTE_ANCHOR_DIR", &env0.anchor_dir)
+        .env("ENCOMPUTE_SIGNING_KEY_FILE", &key)
+        .output()
+        .unwrap();
+    (
+        o.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+        String::from_utf8_lossy(&o.stderr).into_owned(),
+    )
+}
+
+/// The commands an operator runs: a dry run, the compaction, the archive's
+/// verification, and a recovery of an old backup with the archive.
+#[test]
+fn the_command_line_compacts_verifies_and_recovers() {
+    let Some((env0, backups)) = log_with_backups(&[1_000], 3_000) else {
+        return;
+    };
+    let bin = env!("CARGO_BIN_EXE_encompute-control");
+    let archive = tmp_dir("archive");
+    let dir = archive.to_str().unwrap();
+    let source = dump_log(&env0.url);
+    let common = [
+        "--archive-dir",
+        dir,
+        "--keep-events",
+        "100",
+        "--min-age-days",
+        "0",
+    ];
+    let mut dry = vec!["compact-governance-mirror", "--dry-run"];
+    dry.extend(common);
+    let (code, out, err) = cli(bin, &env0, &dry);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("DRY RUN") && out.contains("sealed through event 2500"),
+        "{out}"
+    );
+    assert!(anchor_of(&env0).seal.is_none());
+    // The default window (30 days) seals nothing of events seconds old.
+    let (code, out, err) = cli(
+        bin,
+        &env0,
+        &["compact-governance-mirror", "--archive-dir", dir],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("nothing to compact"), "{out}");
+    let mut real = vec!["compact-governance-mirror"];
+    real.extend(common);
+    let (code, out, err) = cli(bin, &env0, &real);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("sealed through event 2500 (was 0)"), "{out}");
+    let (code, out, err) = cli(
+        bin,
+        &env0,
+        &["verify-governance-archive", "--archive-dir", dir],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("ARCHIVE VERIFIED: 5 segments"), "{out}");
+    // A damaged archive is reported with a failing status.
+    let seg = archive.join("segments/000000000003.jsonl");
+    let good = std::fs::read(&seg).unwrap();
+    std::fs::write(&seg, b"x").unwrap();
+    let (code, _, err) = cli(
+        bin,
+        &env0,
+        &["verify-governance-archive", "--archive-dir", dir],
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("SHA-256"), "{err}");
+    std::fs::write(&seg, good).unwrap();
+    // Recovery of an old backup: refused without the archive, done with it.
+    restore_database(&backups[0], &env0.url);
+    let (code, _, err) = cli(bin, &env0, &["recover", "--operator", "op-1"]);
+    assert_ne!(code, 0);
+    assert!(err.contains("--archive-dir"), "{err}");
+    let (code, out, err) = cli(
+        bin,
+        &env0,
+        &["recover", "--operator", "op-1", "--archive-dir", dir],
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    assert!(out.contains("RECOVERED"), "{out}");
+    assert_same_rows("recovered by the command", &source, &dump_log(&env0.url));
+}
+
+/// By hand, with the previous release's binary
+/// (`ENCOMPUTE_OLD_CONTROL_BIN=/path/to/encompute-control`, built from the
+/// sources before the seal existed): a compacted deployment's anchor is
+/// refused by it, naming the version, and an uncompacted one still starts.
+#[test]
+#[ignore = "needs the previous release's binary: ENCOMPUTE_OLD_CONTROL_BIN"]
+fn the_previous_release_refuses_a_sealed_anchor() {
+    let Ok(old) = std::env::var("ENCOMPUTE_OLD_CONTROL_BIN") else {
+        panic!("set ENCOMPUTE_OLD_CONTROL_BIN");
+    };
+    let Some((env0, _)) = log_with_backups(&[], 3_000) else {
+        return;
+    };
+    let (code, out, err) = cli(&old, &env0, &["verify-state"]);
+    assert_eq!(code, 0, "an uncompacted deployment: {out} {err}");
+    assert!(out.contains("STATE VERIFIED"), "{out}");
+    let archive = tmp_dir("archive");
+    let (env0, _) = compacted(env0, &archive);
+    assert_eq!(anchor_of(&env0).version, 3);
+    let (code, _, err) = cli(&old, &env0, &["verify-state"]);
+    assert_ne!(code, 0, "the previous release started over a sealed anchor");
+    assert!(
+        err.contains("version 3 is not supported by this release"),
+        "{err}"
+    );
+    eprintln!("OLD BINARY REFUSED: {}", err.trim());
+    // This release reads it.
+    env0.started();
+}

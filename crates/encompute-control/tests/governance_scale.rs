@@ -257,6 +257,128 @@ fn load(target: usize, per_batch: usize, label: &str) {
         c.elapsed().as_secs_f64()
     );
     assert!(t.control.anchor.snapshot().glog_size >= total);
+    compaction_at_scale(t, &backup, total, backed_up_at, label);
+}
+
+/// The database's governance tables, in bytes.
+fn db_bytes(t: &T) -> i64 {
+    t.control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT (pg_total_relation_size('governance_events')
+                   + pg_total_relation_size('governance_tree_nodes'))::bigint",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+}
+
+fn mirror_bytes(env0: &Env0) -> u64 {
+    std::fs::read_dir(env0.anchor_dir.join("governance-log"))
+        .unwrap()
+        .map(|e| e.unwrap().metadata().unwrap().len())
+        .sum()
+}
+
+/// How long the start check of the mirror alone takes.
+fn mirror_scan_secs(env0: &Env0) -> f64 {
+    let store = encompute_control::anchor::DirAnchor::new(env0.anchor_dir.clone()).unwrap();
+    let a = match encompute_control::anchor::StoredAnchor::parse(
+        &std::fs::read(env0.anchor_dir.join("state-anchor.json")).unwrap(),
+    )
+    .unwrap()
+    {
+        encompute_control::anchor::StoredAnchor::V2(a) => a,
+        other => panic!("{other:?}"),
+    };
+    let c = Instant::now();
+    encompute_control::mirror::scan(&store, a.seal.as_ref(), a.glog_size, &a.glog_head, None)
+        .unwrap();
+    c.elapsed().as_secs_f64()
+}
+
+/// The same log, compacted: the anchor stays the same size (a seal adds a
+/// few hundred bytes, however many events it covers), the mirror shrinks
+/// to the tail, the database's log is untouched (so is its size), a cold
+/// start still verifies everything, and the backup taken at the start
+/// recovers with the archive. Prints before and after as
+/// `GOVERNANCE LOAD` lines.
+fn compaction_at_scale(t: T, backup: &str, total: i64, backed_up_at: i64, label: &str) {
+    let events_before = t.control.anchor.snapshot().glog_size;
+    let (db_before, anchor_before) = (db_bytes(&t), t.control.anchor.bytes());
+    let env0 = stop(t);
+    let (files_before, _) = mirror_len(&env0);
+    let (mirror_before, scan_before) = (mirror_bytes(&env0), mirror_scan_secs(&env0));
+    let c = Instant::now();
+    let t = env0.started();
+    let start_before = c.elapsed().as_secs_f64();
+    let archive = tmp_dir("archive");
+    let mut o = encompute_control::compact::CompactOptions::new(&archive);
+    o.keep_events = (events_before / 10).max(1_000);
+    o.min_age_secs = 0;
+    let c = Instant::now();
+    let r = t.control.compact_mirror(&o).unwrap();
+    let compact_secs = c.elapsed().as_secs_f64();
+    assert!(r.sealed_after > events_before / 2, "{r:?}");
+    let (db_after, anchor_after) = (db_bytes(&t), t.control.anchor.bytes());
+    let anchor_file_after = anchor_file_len(&t.env0);
+    let env0 = stop(t);
+    let (files_after, _) = mirror_len(&env0);
+    let (mirror_after, scan_after) = (mirror_bytes(&env0), mirror_scan_secs(&env0));
+    let c = Instant::now();
+    let t = env0.started();
+    let start_after = c.elapsed().as_secs_f64();
+    assert_eq!(t.control.anchor.snapshot().glog_size, events_before);
+    eprintln!(
+        "GOVERNANCE LOAD {label}: compaction sealed {} of {events_before} events in {compact_secs:.1}s: {} segments, {} bytes archived",
+        r.sealed_after, r.archived_segments, r.archived_bytes
+    );
+    eprintln!(
+        "GOVERNANCE LOAD {label}: anchor {anchor_before} -> {anchor_after} bytes ({anchor_file_after} on disk); mirror {files_before} -> {files_after} segments, {mirror_before} -> {mirror_after} bytes; database log tables {db_before} -> {db_after} bytes"
+    );
+    eprintln!(
+        "GOVERNANCE LOAD {label}: mirror check {scan_before:.2}s -> {scan_after:.2}s; start {start_before:.1}s -> {start_after:.1}s"
+    );
+    assert!(
+        anchor_after <= anchor_before + 256 && anchor_after < 1024,
+        "the anchor went from {anchor_before} to {anchor_after} bytes"
+    );
+    assert!(
+        mirror_after < mirror_before / 2,
+        "{mirror_before} -> {mirror_after}"
+    );
+    assert!(db_after * 10 >= db_before * 9, "{db_before} -> {db_after}");
+    let env0 = stop(t);
+    // The backup from the start of the run recovers with the archive.
+    restore_database(backup, &env0.url);
+    let e = env0
+        .start()
+        .err()
+        .unwrap_or_else(|| panic!("an old backup started"));
+    assert!(e.message.contains("GOVERNANCE LOG STATE ROLLBACK"), "{e}");
+    let db = encompute_control::db::Db::connect(&env0.url).unwrap();
+    let signer =
+        encompute_verification::ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
+    let store =
+        Box::new(encompute_control::anchor::DirAnchor::new(env0.anchor_dir.clone()).unwrap());
+    let rc = encompute_control::Control::for_recovery(&recovery_config(&env0), db, signer, store)
+        .unwrap();
+    let c = Instant::now();
+    let notes = rc.recover_with("operator-1", None, Some(&archive)).unwrap();
+    let recovery = c.elapsed().as_secs_f64();
+    assert!(
+        notes.iter().any(|n| n.contains("from the mirror")),
+        "{notes:?}"
+    );
+    eprintln!(
+        "GOVERNANCE LOAD {label}: recovery of {} events from the archive and the tail (backup held {backed_up_at}): {recovery:.1}s",
+        total - backed_up_at
+    );
+    drop(rc);
+    let t = env0.started();
+    assert!(t.control.anchor.snapshot().glog_size >= total);
 }
 
 #[test]
