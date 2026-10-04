@@ -10,6 +10,12 @@ It runs in production mode: OIDC identities only, secrets from files, no
 development fallbacks. See [docs/deployment.md](../../docs/deployment.md) for
 the architecture and [docs/api.md](../../docs/api.md) for the API.
 
+Its PostgreSQL has no TLS, so `compose.yaml` sets the explicit, INSECURE
+opt-out `ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true` that production mode demands
+for a plaintext database (it warns at every start). That is acceptable for this
+local trial on a private Compose network, and not a setting to copy into a real
+deployment: production requires `sslmode=verify-full`.
+
 For TLS, an external OpenBao and a validation script, use the
 [reference production topology](../production/README.md) instead of this trial
 deployment.
