@@ -3005,7 +3005,11 @@ impl Control {
         // The reservations are anchored before the evaluator is told the
         // job started: committed spending is never forgotten.
         self.anchor_ledgers(&reserved.borrow())?;
-        if ended.get() {
+        // (`tx_anchored` anchored the refusal already: a checkpoint is made
+        // here only if the anchor does not hold the job's ending, so a start
+        // that is anchored does not chase a log other writers keep
+        // extending.)
+        if ended.get() && !self.anchored(crate::govlog::NegSet::EndedJobs, id)? {
             self.checkpoint_log()?;
         }
         r

@@ -83,6 +83,16 @@ const HELP: &[(&str, &str, &str)] = &[
         "Database state found behind the state anchor while running (privacy, audit, governance): refused",
     ),
     (
+        "encompute_anchor_cas_retry_total",
+        "counter",
+        "State anchor updates attempted again after losing the compare-and-set to another writer (each retry recomputes from the stored anchor)",
+    ),
+    (
+        "encompute_anchor_cas_retry_exhausted_total",
+        "counter",
+        "State anchor updates that lost the compare-and-set on every attempt and failed (ENC2202): persistent contention on the anchor",
+    ),
+    (
         "encompute_mirror_rewrite_bytes",
         "gauge",
         "Size in bytes of the governance log mirror's open segment as last rewritten (at most about 256 KiB)",
@@ -121,6 +131,14 @@ impl Metrics {
         *s.counters
             .entry((name.into(), check_label(label).into()))
             .or_default() += n;
+    }
+
+    /// Sets a counter to the absolute value its owner keeps (a count
+    /// read at scrape time, like a gauge).
+    pub fn set_counter(&self, name: &str, label: &str, v: u64) {
+        let mut s = self.s.lock().unwrap_or_else(|p| p.into_inner());
+        s.counters
+            .insert((name.into(), check_label(label).into()), v);
     }
 
     pub fn observe(&self, name: &str, label: &str, seconds: f64) {

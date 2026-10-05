@@ -159,6 +159,28 @@ fn write_secret(p: &Path, b: &[u8]) -> Result<()> {
         .map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", p.display())))
 }
 
+/// What a checkpoint's caller needs the anchor to hold for there to be
+/// nothing left to store: the governance log up to `glog_seq` (the event it
+/// just committed, or the log's head read right after its commit) and, for a
+/// deny event, the audit chain up to `audit_seq` (read after the commit, so
+/// the events of the same transaction are within it). A fixed target: other
+/// writers keep extending the log and the chain, and a target that moved with
+/// them would never be reached.
+#[derive(Clone, Copy, Debug)]
+struct Cover {
+    glog_seq: i64,
+    audit_seq: Option<i64>,
+}
+
+impl Cover {
+    /// Whether the anchor has got that far (the positions only: whether it
+    /// is the database's own chain it has got that far along is
+    /// [`Control::cover_holds`]).
+    fn reached_by(&self, a: &crate::anchor::StateAnchor) -> bool {
+        self.glog_seq <= a.glog_size && self.audit_seq.is_none_or(|s| s <= a.audit_seq)
+    }
+}
+
 impl Control {
     /// Connects, migrates, opens the anchor and refuses to start on any
     /// rollback of privacy or audit state.
@@ -267,6 +289,16 @@ impl Control {
     /// The `/metrics` exposition, with the gauges read at scrape time.
     pub fn render_metrics(&self) -> String {
         self.note_anchor_size();
+        self.metrics.set_counter(
+            "encompute_anchor_cas_retry_total",
+            "all",
+            self.anchor.cas_retries(),
+        );
+        self.metrics.set_counter(
+            "encompute_anchor_cas_retry_exhausted_total",
+            "all",
+            self.anchor.cas_exhausted(),
+        );
         self.metrics.render()
     }
 
@@ -1213,7 +1245,10 @@ impl Control {
             Ok(Some(govlog::append_ledger_checkpoint(t, asset, &cp)?.gseq))
         })?;
         // Whoever checkpointed past this event already anchored it.
-        self.retry_concurrent_mirror(|| self.checkpoint_log_once(appended))
+        self.checkpoint_log_once(appended.map(|glog_seq| Cover {
+            glog_seq,
+            audit_seq: None,
+        }))
     }
 
     /// The latest checkpoint of `asset`'s privacy ledger the governance log
@@ -1243,7 +1278,22 @@ impl Control {
         govlog::DENY_PENDING.with(|d| d.set(false));
         let out = self.db.tx(f)?;
         if govlog::DENY_PENDING.with(|d| d.replace(false)) || retry {
-            if let Err(e) = self.checkpoint_log() {
+            // What this call committed is anchored once the anchor holds the
+            // log's head and the audit chain's head as they were right after
+            // the commit (never as they are later: others keep adding); a
+            // checkpoint another control plane stored meanwhile may be that,
+            // and then there is nothing to store. An obligation an earlier
+            // failure left covers events this call did not see: anchored in
+            // full, as is anything this cannot read.
+            let covered = if retry {
+                None
+            } else {
+                self.heads_now().map(|(glog_seq, audit_seq)| Cover {
+                    glog_seq,
+                    audit_seq: Some(audit_seq),
+                })
+            };
+            if let Err(e) = self.checkpoint_log_once(covered) {
                 govlog::RETRY_CHECKPOINT.with(|d| d.set(true));
                 return Err(e);
             }
@@ -1262,27 +1312,7 @@ impl Control {
     /// told) and in the background (a crash between a commit and its
     /// checkpoint is caught up here).
     pub fn checkpoint_log(&self) -> Result<()> {
-        self.retry_concurrent_mirror(|| self.checkpoint_log_once(None))
-    }
-
-    /// Runs `f` again (a few times at most) when a mirror segment another
-    /// writer took first made it fail, like an anchor update that lost its
-    /// compare-and-set.
-    fn retry_concurrent_mirror(&self, f: impl Fn() -> Result<()>) -> Result<()> {
-        let mut attempt = 0;
-        loop {
-            match f() {
-                Err(e) if attempt < 3 && e.message.contains("written concurrently") => {
-                    attempt += 1;
-                    // A little jitter, so two writers do not collide again.
-                    let ns = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.subsec_nanos() as u64);
-                    std::thread::sleep(Duration::from_millis(5 * attempt + ns % 11));
-                }
-                r => return r,
-            }
-        }
+        self.checkpoint_log_once(None)
     }
 
     /// A log that does not extend the anchored head is a rollback found
@@ -1321,8 +1351,8 @@ impl Control {
         Ok(true)
     }
 
-    /// One checkpoint of the log. With `covered`, the event that needs
-    /// anchoring: nothing is done when the anchor already holds it.
+    /// One checkpoint of the log. With `covered`, what needs anchoring:
+    /// nothing is done when the anchor already holds it.
     ///
     /// The audit chain's head is anchored in the same compare-and-set
     /// (one signed anchor, one commit point), so a checkpoint that makes a
@@ -1330,10 +1360,10 @@ impl Control {
     /// it (the deny's own audit event, written in its transaction,
     /// included). The audit chain has no mirror: the anchor detects a
     /// truncated or rewritten chain, it cannot restore one.
-    fn checkpoint_log_once(&self, covered: Option<i64>) -> Result<()> {
+    fn checkpoint_log_once(&self, covered: Option<Cover>) -> Result<()> {
         self.anchor
-            .try_update(&self.signer, |a| {
-                if covered.is_some_and(|g| g <= a.glog_size) {
+            .try_update_mirrored(&self.signer, |a| {
+                if covered.is_some_and(|c| self.cover_holds(&c, a)) {
                     return Ok(false);
                 }
                 let audit_due = self.audit_head_differs(a);
@@ -1367,6 +1397,50 @@ impl Control {
                 Ok(self.advance_log(a, size, head)? || moved)
             })
             .map(|_| ())
+    }
+
+    /// The governance log's head position and the audit chain's, as the
+    /// database holds them now; `None` when they cannot be read.
+    fn heads_now(&self) -> Option<(i64, i64)> {
+        let mut c = self.db.conn().ok()?;
+        let log: i64 = c
+            .query_one("SELECT gseq FROM governance_head WHERE id", &[])
+            .ok()?
+            .get(0);
+        let audit: i64 = c
+            .query_one("SELECT seq FROM audit_head WHERE id", &[])
+            .ok()?
+            .get(0);
+        Some((log, audit))
+    }
+
+    /// Whether `a` (the anchor as just read and verified) holds what `c`
+    /// needs, by the database's own chains and not by position alone: the
+    /// anchor has got as far as `c` asks AND the database's governance log
+    /// holds the anchored head at the anchored size (and its audit chain the
+    /// anchored root at the anchored sequence, when the audit chain is
+    /// asked for). Then the events committed up to `c`'s positions are
+    /// within the chain the anchor commits to. A newer anchor that is not
+    /// this database's chain (a forged or foreign head), or one that has not
+    /// reached `c`, holds nothing: whatever cannot be read counts as not
+    /// held.
+    fn cover_holds(&self, c: &Cover, a: &crate::anchor::StateAnchor) -> bool {
+        if !c.reached_by(a) {
+            return false;
+        }
+        let Ok(mut conn) = self.db.conn() else {
+            return false;
+        };
+        let log = govlog::hash_at(&mut *conn, a.glog_size)
+            .ok()
+            .flatten()
+            .is_some_and(|h| h == a.glog_head);
+        let audit = c.audit_seq.is_none()
+            || audit::hash_at(&mut *conn, a.audit_seq)
+                .ok()
+                .flatten()
+                .is_some_and(|h| h == a.audit_root);
+        log && audit
     }
 
     /// Whether the audit head is not the anchored event (a read, no lock):
@@ -1846,4 +1920,42 @@ pub fn load_ledger(c: &mut impl GenericClient, asset: &str) -> Result<Option<Led
         .map(|r| serde_json::from_value(r.get(0)).map_err(db_err))
         .collect::<Result<_>>()?;
     Ok(Some(LedgerView { genesis, entries }))
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::*;
+
+    /// A cover is reached only by an anchor that has got as far as the event
+    /// and, for a deny event, the audit events committed with it; what comes
+    /// after does not matter, what is missing does.
+    #[test]
+    fn a_cover_is_reached_only_by_an_anchor_that_has_got_that_far() {
+        let signer =
+            encompute_verification::ServiceSigner::from_seed("control-plane", &[7; 32]).unwrap();
+        let mut a = crate::anchor::StateAnchor::empty(&signer);
+        a.glog_size = 10;
+        a.audit_seq = 50;
+        let deny = |glog_seq, audit_seq| Cover {
+            glog_seq,
+            audit_seq: Some(audit_seq),
+        };
+        assert!(deny(10, 50).reached_by(&a), "exactly reached");
+        assert!(deny(7, 40).reached_by(&a), "an anchor ahead of the event");
+        assert!(
+            !deny(11, 50).reached_by(&a),
+            "the log head is behind the event"
+        );
+        assert!(
+            !deny(10, 51).reached_by(&a),
+            "the audit head is behind its events"
+        );
+        assert!(!deny(11, 51).reached_by(&a));
+        let ledger = |glog_seq| Cover {
+            glog_seq,
+            audit_seq: None,
+        };
+        assert!(ledger(10).reached_by(&a));
+        assert!(!ledger(11).reached_by(&a));
+    }
 }

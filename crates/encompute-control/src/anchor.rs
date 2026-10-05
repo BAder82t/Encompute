@@ -45,13 +45,14 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use encompute_ir::{Code, Error, Result};
+use encompute_ir::{Cause, Code, Error, Result};
 use encompute_privacy::Checkpoint;
 use encompute_verification::service::{
     sha256_hex, verify_signed, ServiceSigner, STATE_ANCHOR, STATE_ANCHOR_V2,
 };
 
 use crate::config::AnchorConfig;
+use crate::log::LogLine;
 
 /// The version this release writes while the governance log mirror has
 /// never been compacted.
@@ -99,6 +100,24 @@ pub fn warn_if_large(service: &str, when: &str, bytes: u64) {
 fn anchor_err(m: impl Into<String>) -> Error {
     Error::new(Code::PrivacyLedger, m)
 }
+
+/// The compare-and-set found the stored anchor moved on (another writer
+/// stored first). Typed ([`Cause::AnchorConflict`]), so [`Anchor::try_update`]
+/// retries it and nothing else that shares the code (a rollback refusal is
+/// never a conflict); the code and message a caller sees are unchanged.
+fn anchor_conflict(current: u64, expected: u64) -> Error {
+    anchor_err(format!(
+        "the state anchor changed concurrently (counter {current}, expected {expected})"
+    ))
+    .caused_by(Cause::AnchorConflict)
+}
+
+/// How many times in all one anchor update is attempted when it keeps
+/// losing the compare-and-set to other writers (the first try and the
+/// retries together). Each attempt starts from the stored anchor, read and
+/// verified again, and recomputes the change from it. After that the
+/// conflict is returned (ENC2202) and counted as exhausted.
+pub const ANCHOR_CAS_ATTEMPTS: u32 = 3;
 
 /// The head of an empty governance log (no event yet).
 pub fn empty_log_head() -> String {
@@ -499,9 +518,7 @@ impl AnchorStore for DirAnchor {
         let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let current = self.load()?.map_or(0, |a| a.counter());
         if current != expected {
-            return Err(anchor_err(format!(
-                "the state anchor changed concurrently (counter {current}, expected {expected})"
-            )));
+            return Err(anchor_conflict(current, expected));
         }
         // Atomic: the new anchor is written whole (unique temporary name,
         // fsync) and renamed over the old one, then the directory is
@@ -574,6 +591,7 @@ impl AnchorStore for DirAnchor {
             anchor_err(format!(
                 "governance log mirror segment {n} exists already (written concurrently)"
             ))
+            .caused_by(Cause::MirrorConflict)
         };
         {
             use std::io::Write;
@@ -728,9 +746,7 @@ impl AnchorStore for OpenBaoKvAnchor {
             None => (0, 0),
         };
         if current != expected {
-            return Err(anchor_err(format!(
-                "the state anchor changed concurrently (counter {current}, expected {expected})"
-            )));
+            return Err(anchor_conflict(current, expected));
         }
         let body = serde_json::json!({
             "options": {"cas": kv_version},
@@ -791,7 +807,8 @@ impl AnchorStore for OpenBaoKvAnchor {
             Err(e) => match self.mirror_entry(n) {
                 Ok(Some(_)) => Err(anchor_err(format!(
                     "governance log mirror segment {n} exists already (written concurrently)"
-                ))),
+                ))
+                .caused_by(Cause::MirrorConflict)),
                 _ => Err(e),
             },
             ok => ok,
@@ -809,6 +826,7 @@ impl AnchorStore for OpenBaoKvAnchor {
                 "governance log mirror segment {n} changed meanwhile (written concurrently): {}",
                 e.message
             ))
+            .caused_by(Cause::MirrorConflict)
         })
     }
 
@@ -930,6 +948,12 @@ pub struct Anchor {
     /// anchor's lock, which a checkpoint holds while it takes the log's
     /// head: see [`Self::counter`]).
     counter: AtomicU64,
+    /// Updates that lost the compare-and-set and were attempted again, and
+    /// updates that lost it on every attempt ([`ANCHOR_CAS_ATTEMPTS`]), since
+    /// start (the `encompute_anchor_cas_retry_total` and
+    /// `encompute_anchor_cas_retry_exhausted_total` counters).
+    cas_retries: AtomicU64,
+    cas_exhausted: AtomicU64,
 }
 
 impl Anchor {
@@ -958,6 +982,8 @@ impl Anchor {
                 state: Mutex::new(state),
                 bytes,
                 counter,
+                cas_retries: AtomicU64::new(0),
+                cas_exhausted: AtomicU64::new(0),
             },
             opened,
         ))
@@ -982,6 +1008,17 @@ impl Anchor {
     /// [`Self::update`]; read the snapshot before the transaction.
     pub fn counter(&self) -> u64 {
         self.counter.load(Ordering::Relaxed)
+    }
+
+    /// Updates attempted again after a lost compare-and-set, since start.
+    pub fn cas_retries(&self) -> u64 {
+        self.cas_retries.load(Ordering::Relaxed)
+    }
+
+    /// Updates that lost the compare-and-set on every one of
+    /// [`ANCHOR_CAS_ATTEMPTS`] attempts and failed (ENC2202), since start.
+    pub fn cas_exhausted(&self) -> u64 {
+        self.cas_exhausted.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> StateAnchor {
@@ -1009,57 +1046,126 @@ impl Anchor {
     /// on `Ok(false)` or an error. Checks that must see the anchor exactly
     /// as it will be updated (a rollback check, say) belong in `f`.
     ///
-    /// If another process changed the stored anchor meanwhile (its counter
-    /// moved), the stored anchor is reloaded (and verified) and `f` applied
-    /// to it again, a few times at most.
+    /// If another process changed the stored anchor meanwhile (the
+    /// compare-and-set lost: [`Cause::AnchorConflict`], and only that), the
+    /// stored anchor is read and verified again and `f` applied to it from
+    /// scratch, after a few milliseconds of jitter, at most
+    /// [`ANCHOR_CAS_ATTEMPTS`] times in all (this is the only bound: nothing
+    /// above it retries a conflict). Nothing a lost attempt computed is
+    /// reused; the lock is released between attempts. Every retry and an
+    /// exhausted update is counted and logged.
     pub fn try_update(
         &self,
         signer: &ServiceSigner,
+        f: impl FnMut(&mut StateAnchor) -> Result<bool>,
+    ) -> Result<StateAnchor> {
+        self.try_update_bounded(signer, false, f)
+    }
+
+    /// [`Self::try_update`] for a change that also writes the governance
+    /// log's mirror (`f` fails when a mirror segment was written
+    /// concurrently by another control plane): that failure is retried like
+    /// a lost compare-and-set, within the same [`ANCHOR_CAS_ATTEMPTS`], not
+    /// on top of them.
+    pub fn try_update_mirrored(
+        &self,
+        signer: &ServiceSigner,
+        f: impl FnMut(&mut StateAnchor) -> Result<bool>,
+    ) -> Result<StateAnchor> {
+        self.try_update_bounded(signer, true, f)
+    }
+
+    fn try_update_bounded(
+        &self,
+        signer: &ServiceSigner,
+        mirrored: bool,
         mut f: impl FnMut(&mut StateAnchor) -> Result<bool>,
     ) -> Result<StateAnchor> {
-        let mut g = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let mut attempt = 0;
+        let mut attempt = 1;
         loop {
-            let mut next = g.clone();
-            if !f(&mut next)? {
-                return Ok(g.clone());
-            }
-            next.counter = g.counter + 1;
-            next.sign(signer)?;
-            // Measured before the write, so a write the store refuses for
-            // its size is still reported.
-            let bytes = serialized_len(&next);
-            warn_if_large(signer.id(), "write", bytes);
-            match self.store.store(&next, g.counter) {
-                Ok(()) => {
-                    self.bytes.store(bytes, Ordering::Relaxed);
-                    self.counter.store(next.counter, Ordering::Relaxed);
-                    *g = next.clone();
-                    return Ok(next);
+            let e = match self.try_update_once(signer, &mut f) {
+                Err(e)
+                    if e.cause == Cause::AnchorConflict
+                        || (mirrored && e.cause == Cause::MirrorConflict) =>
+                {
+                    e
                 }
-                Err(e) if attempt < 3 && e.message.contains("changed concurrently") => {
-                    attempt += 1;
-                    let stored = match self.store.load()? {
-                        Some(StoredAnchor::V2(a)) => a,
-                        Some(StoredAnchor::V1(_)) => {
-                            return Err(anchor_err(
-                                "the stored state anchor is version 1 again (replaced by an older copy?)",
-                            ))
-                        }
-                        None => return Err(anchor_err("the state anchor disappeared")),
-                    };
-                    stored.verify(&signer.public_key_hex())?;
-                    if stored.counter < g.counter {
-                        return Err(anchor_err(format!(
-                            "the stored state anchor went back from counter {} to {}",
-                            g.counter, stored.counter
-                        )));
-                    }
-                    self.counter.store(stored.counter, Ordering::Relaxed);
-                    *g = stored;
-                }
-                Err(e) => return Err(e),
+                r => return r,
+            };
+            if attempt >= ANCHOR_CAS_ATTEMPTS {
+                self.cas_exhausted.fetch_add(1, Ordering::Relaxed);
+                LogLine::new(signer.id(), "anchor_cas_exhausted")
+                    .field("attempts", attempt)
+                    .field("detail", &e.message)
+                    .field(
+                        "action",
+                        "the state anchor (or its log mirror) kept changing under this update; it is refused and, if a security-negative change was committed, anchored by the next checkpoint: persistent contention means too many control planes or background tasks write the anchor at once",
+                    )
+                    .emit();
+                return Err(e);
             }
+            self.cas_retries.fetch_add(1, Ordering::Relaxed);
+            LogLine::new(signer.id(), "anchor_cas_retry")
+                .field("attempt", attempt)
+                .field("of", ANCHOR_CAS_ATTEMPTS)
+                .emit();
+            // A little jitter, so two writers do not collide again.
+            let ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos() as u64);
+            std::thread::sleep(std::time::Duration::from_millis(
+                2 * u64::from(attempt) + ns % 5,
+            ));
+            attempt += 1;
+        }
+    }
+
+    /// One attempt of [`Self::try_update`]. A lost compare-and-set leaves
+    /// the anchor in memory at the stored one (read and verified again) and
+    /// returns the conflict.
+    fn try_update_once(
+        &self,
+        signer: &ServiceSigner,
+        f: &mut impl FnMut(&mut StateAnchor) -> Result<bool>,
+    ) -> Result<StateAnchor> {
+        let mut g = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut next = g.clone();
+        if !f(&mut next)? {
+            return Ok(g.clone());
+        }
+        next.counter = g.counter + 1;
+        next.sign(signer)?;
+        // Measured before the write, so a write the store refuses for its
+        // size is still reported.
+        let bytes = serialized_len(&next);
+        warn_if_large(signer.id(), "write", bytes);
+        match self.store.store(&next, g.counter) {
+            Ok(()) => {
+                self.bytes.store(bytes, Ordering::Relaxed);
+                self.counter.store(next.counter, Ordering::Relaxed);
+                *g = next.clone();
+                Ok(next)
+            }
+            Err(e) if e.cause == Cause::AnchorConflict => {
+                let stored = match self.store.load()? {
+                    Some(StoredAnchor::V2(a)) => a,
+                    Some(StoredAnchor::V1(_)) => return Err(anchor_err(
+                        "the stored state anchor is version 1 again (replaced by an older copy?)",
+                    )),
+                    None => return Err(anchor_err("the state anchor disappeared")),
+                };
+                stored.verify(&signer.public_key_hex())?;
+                if stored.counter < g.counter {
+                    return Err(anchor_err(format!(
+                        "the stored state anchor went back from counter {} to {}",
+                        g.counter, stored.counter
+                    )));
+                }
+                self.counter.store(stored.counter, Ordering::Relaxed);
+                *g = stored;
+                Err(e)
+            }
+            Err(e) => Err(e),
         }
     }
 }
@@ -1306,5 +1412,232 @@ mod tests {
             before.counter
         );
         assert_eq!(a2.snapshot(), before);
+    }
+
+    /// A store over a directory whose compare-and-sets lose on demand: a
+    /// rival moves the stored anchor on first (`conflicts` times), or the
+    /// store fails with `fail` (an error that is not a conflict).
+    struct Losing {
+        inner: DirAnchor,
+        dir: PathBuf,
+        conflicts: std::sync::atomic::AtomicU32,
+        stores: std::sync::atomic::AtomicU32,
+        fail: Option<Error>,
+    }
+
+    impl Losing {
+        fn new(dir: &std::path::Path, conflicts: u32, fail: Option<Error>) -> Self {
+            Self {
+                inner: DirAnchor::new(dir.to_path_buf()).unwrap(),
+                dir: dir.to_path_buf(),
+                conflicts: conflicts.into(),
+                stores: 0.into(),
+                fail,
+            }
+        }
+        fn stores(&self) -> u32 {
+            self.stores.load(Ordering::SeqCst)
+        }
+    }
+
+    impl AnchorStore for std::sync::Arc<Losing> {
+        fn describe(&self) -> String {
+            self.inner.describe()
+        }
+        fn load(&self) -> Result<Option<StoredAnchor>> {
+            self.inner.load()
+        }
+        fn store(&self, next: &StateAnchor, expected: u64) -> Result<()> {
+            self.stores.fetch_add(1, Ordering::SeqCst);
+            if let Some(e) = &self.fail {
+                return Err(e.clone());
+            }
+            if self.conflicts.load(Ordering::SeqCst) > 0 {
+                self.conflicts.fetch_sub(1, Ordering::SeqCst);
+                // Another process stores first.
+                let s = signer();
+                let (rival, _) =
+                    Anchor::open(Box::new(DirAnchor::new(self.dir.clone()).unwrap()), &s).unwrap();
+                rival.update(&s, |_| {}).unwrap();
+            }
+            self.inner.store(next, expected)
+        }
+        fn mirror_list(&self) -> Result<Vec<u64>> {
+            self.inner.mirror_list()
+        }
+        fn mirror_read(&self, n: u64) -> Result<String> {
+            self.inner.mirror_read(n)
+        }
+        fn mirror_create(&self, n: u64, lines: &str) -> Result<()> {
+            self.inner.mirror_create(n, lines)
+        }
+        fn mirror_replace(&self, n: u64, lines: &str, allow: &Allow<'_>) -> Result<()> {
+            self.inner.mirror_replace(n, lines, allow)
+        }
+    }
+
+    fn losing_anchor(
+        tag: &str,
+        conflicts: u32,
+        fail: Option<Error>,
+    ) -> (Anchor, std::sync::Arc<Losing>) {
+        let s = signer();
+        let dir = tmp(tag);
+        let (first, _) = Anchor::open(Box::new(DirAnchor::new(dir.clone()).unwrap()), &s).unwrap();
+        first.update(&s, |_| {}).unwrap();
+        let store = std::sync::Arc::new(Losing::new(&dir, conflicts, fail));
+        let (a, _) = Anchor::open(Box::new(store.clone()), &s).unwrap();
+        (a, store)
+    }
+
+    /// A compare-and-set that keeps losing is attempted exactly
+    /// [`ANCHOR_CAS_ATTEMPTS`] times, no more, and refused as it always
+    /// was; one that stops losing is stored by the retry, which starts from
+    /// the stored anchor (the rival's counter), not the one lost with.
+    #[test]
+    fn a_lost_compare_and_set_is_attempted_at_most_the_bound_in_all() {
+        let s = signer();
+        let (a, store) = losing_anchor("bound", u32::MAX, None);
+        let calls = std::cell::Cell::new(0);
+        let e = a
+            .try_update(&s, |x| {
+                calls.set(calls.get() + 1);
+                x.audit_seq += 1;
+                Ok(true)
+            })
+            .unwrap_err();
+        assert_eq!(e.code, Code::PrivacyLedger);
+        assert_eq!(e.cause, Cause::AnchorConflict);
+        assert!(
+            e.message.contains("the state anchor changed concurrently"),
+            "{e}"
+        );
+        assert_eq!(calls.get(), ANCHOR_CAS_ATTEMPTS);
+        assert_eq!(store.stores(), ANCHOR_CAS_ATTEMPTS);
+        assert_eq!(
+            (a.cas_retries(), a.cas_exhausted()),
+            (ANCHOR_CAS_ATTEMPTS as u64 - 1, 1)
+        );
+
+        let (a, store) = losing_anchor("clears", 1, None);
+        let seen = std::cell::RefCell::new(vec![]);
+        let after = a
+            .try_update(&s, |x| {
+                seen.borrow_mut().push(x.counter);
+                x.audit_seq = 7;
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(store.stores(), 2);
+        let seen = seen.into_inner();
+        assert_eq!(
+            seen[1],
+            seen[0] + 1,
+            "recomputed from the stored anchor: {seen:?}"
+        );
+        assert_eq!(after.counter, seen[1] + 1);
+        assert_eq!((a.cas_retries(), a.cas_exhausted()), (1, 0));
+    }
+
+    /// Only the typed conflict is retried: an error that shares its code
+    /// (a rollback refusal, an unavailable store) is returned at once, even
+    /// when its text reads like a conflict.
+    #[test]
+    fn a_rollback_refusal_or_any_other_failure_is_never_retried() {
+        let s = signer();
+        let (a, _) = losing_anchor("rollback-f", 0, None);
+        let calls = std::cell::Cell::new(0);
+        let e = a
+            .try_update(&s, |_| {
+                calls.set(calls.get() + 1);
+                Err(crate::control::runtime_rollback(
+                    "PRIVACY",
+                    "the ledger is behind",
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(e.cause, Cause::Unclassified);
+        assert!(e.message.contains("STATE ROLLBACK"), "{e}");
+        assert_eq!((calls.get(), a.cas_retries(), a.cas_exhausted()), (1, 0, 0));
+
+        for fail in [
+            crate::control::runtime_rollback("GOVERNANCE LOG", "behind"),
+            anchor_err("anchor store unavailable"),
+            // Not typed, so not a conflict, whatever it says.
+            anchor_err("the state anchor changed concurrently (counter 2, expected 1)"),
+        ] {
+            let (a, store) = losing_anchor("rollback-store", 0, Some(fail.clone()));
+            let e = a
+                .try_update(&s, |x| {
+                    x.audit_seq += 1;
+                    Ok(true)
+                })
+                .unwrap_err();
+            assert_eq!(e, fail);
+            assert_eq!(
+                (store.stores(), a.cas_retries(), a.cas_exhausted()),
+                (1, 0, 0)
+            );
+        }
+    }
+
+    /// A mirror segment another control plane wrote first is retried (by
+    /// the callers that write the mirror) inside the same bound, so
+    /// conflicts of either kind together never exceed it.
+    #[test]
+    fn mirror_conflicts_share_the_bound_with_compare_and_set_conflicts() {
+        let s = signer();
+        let concurrent = || {
+            anchor_err("governance log mirror segment 3 exists already (written concurrently)")
+                .caused_by(Cause::MirrorConflict)
+        };
+        // Not retried by a plain update.
+        let (a, _) = losing_anchor("mirror-plain", 0, None);
+        let calls = std::cell::Cell::new(0);
+        assert!(a
+            .try_update(&s, |_| {
+                calls.set(calls.get() + 1);
+                Err(concurrent())
+            })
+            .is_err());
+        assert_eq!(calls.get(), 1);
+        // Only the typed conflict: an error that merely reads like one is not.
+        let (a, _) = losing_anchor("mirror-untyped", 0, None);
+        let calls = std::cell::Cell::new(0);
+        assert!(a
+            .try_update_mirrored(&s, |_| {
+                calls.set(calls.get() + 1);
+                Err(anchor_err(
+                    "segment 3 exists already (written concurrently)",
+                ))
+            })
+            .is_err());
+        assert_eq!(calls.get(), 1);
+        // Retried by a mirrored one, within the bound.
+        let (a, _) = losing_anchor("mirror-only", 0, None);
+        let calls = std::cell::Cell::new(0);
+        assert!(a
+            .try_update_mirrored(&s, |_| {
+                calls.set(calls.get() + 1);
+                Err(concurrent())
+            })
+            .is_err());
+        assert_eq!((calls.get(), a.cas_exhausted()), (ANCHOR_CAS_ATTEMPTS, 1));
+        // Mixed: a mirror conflict, then a lost compare-and-set, then a mirror
+        // conflict again: three attempts in all, not three of each.
+        let (a, store) = losing_anchor("mirror-mixed", u32::MAX, None);
+        let calls = std::cell::Cell::new(0);
+        let e = a
+            .try_update_mirrored(&s, |x| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 || calls.get() == 3 {
+                    return Err(concurrent());
+                }
+                x.audit_seq += 1;
+                Ok(true)
+            })
+            .unwrap_err();
+        assert!(e.message.contains("written concurrently"), "{e}");
+        assert_eq!((calls.get(), store.stores()), (ANCHOR_CAS_ATTEMPTS, 1));
     }
 }
