@@ -180,6 +180,9 @@ and adds the runs that are not `cargo test`, read by a marker line and a count
 of check lines: the assurance report, the governance attack suite, the backup
 drill and the public-sector examples. A benchmark or research test that is
 skipped on purpose is named, with its reason, in the manifest.
+The control-plane run also needs the TLS PostgreSQL of
+`scripts/tls-test-db.sh` (as the main manifest's does); `test-governance-full.sh`
+starts a throwaway one when `ENCOMPUTE_TEST_TLS_DATABASE` is not set.
 
 Reported rows (a FAIL fails the check, a SKIP does not): fine-tuning E2E,
 examples (the public-sector examples must run: a skipped one fails the row),

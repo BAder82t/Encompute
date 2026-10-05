@@ -457,9 +457,13 @@ rollback.
   window between are covered only by the unkeyed chain hash, and there is
   no mirror of the audit chain: the anchor detects a truncation, it does
   not restore.
-- Reading the database traffic: the control plane's PostgreSQL driver is
-  configured without TLS (`crates/encompute-control/src/db.rs`). Run the
-  database on a trusted network.
+- Reading the database traffic: the control plane's PostgreSQL connection
+  is encrypted and verified only when its connection string says so
+  (`sslmode=verify-full` with `sslrootcert`, and a client certificate if the
+  server wants one; `crates/encompute-control/src/db.rs`). Production mode
+  refuses anything weaker unless a named opt-out is set, and development mode
+  and a string without `sslmode` still connect in plaintext: run those
+  databases on a trusted network.
 
 ### 4.7 Message transport attacker
 

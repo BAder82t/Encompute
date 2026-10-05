@@ -97,7 +97,9 @@ To find out what an existing deployment runs, read the `sslmode` in its
 none means plaintext), or on the database `select ssl, client_dn from
 pg_stat_ssl where pid <> pg_backend_pid()`. The key broker's client of OpenBao or Vault trusts the CA
 bundle named by `BAO_CACERT` (or `VAULT_CACERT`) instead of the public roots,
-and presents `BAO_CLIENT_CERT` with `BAO_CLIENT_KEY` when both are set.
+and presents `BAO_CLIENT_CERT` with `BAO_CLIENT_KEY` when both are set (for
+every call the broker makes to it: the Transit root key and the generation
+mark alike).
 
 **Roles** (per organization):
 
@@ -266,7 +268,10 @@ encrypted assets
   ```
 
   The mark uses the same `BAO_ADDR` and token as the Transit root key, and
-  the same rules (https, no redirects, a 10-second timeout). Grant the
+  the same rules (https, no redirects, a 10-second timeout), including the
+  TLS settings: `BAO_CACERT` (or `VAULT_CACERT`) and `BAO_CLIENT_CERT` with
+  `BAO_CLIENT_KEY` apply to the mark's calls as they do to the root key's.
+  Grant the
   broker's token only the Transit key and its own mark path:
 
   ```hcl
