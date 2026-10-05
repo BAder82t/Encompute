@@ -14,7 +14,7 @@ mod program;
 mod text;
 mod types;
 
-pub use error::{Code, Error, Result};
+pub use error::{Cause, Code, Error, Result};
 
 /// Version of the IR and its `.eir` text form (the header line is
 /// `encompute <IR_VERSION>`).

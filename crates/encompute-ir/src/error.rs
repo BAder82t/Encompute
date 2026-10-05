@@ -436,6 +436,30 @@ impl fmt::Display for Code {
 pub struct Error {
     pub code: Code,
     pub message: String,
+    /// What kind of failure this is when callers must tell apart errors
+    /// that share a code (never shown to a caller of the API: the code and
+    /// the message are what it sees).
+    pub cause: Cause,
+}
+
+/// An internal classification of an [`Error`] whose code several failures
+/// share, so code that reacts to one of them never reads the message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Cause {
+    /// No particular classification.
+    #[default]
+    Unclassified,
+    /// The state anchor's compare-and-set lost to another writer (the
+    /// stored anchor moved since it was read): nothing was stored, so the
+    /// update can be recomputed from the stored anchor and tried again.
+    /// Every other failure of the same code (a rollback refusal, an
+    /// unavailable store) is `Unclassified` and is never retried.
+    AnchorConflict,
+    /// A governance log mirror segment was written by another control plane
+    /// first (or changed meanwhile): the checkpoint that wanted it can be
+    /// recomputed from what the mirror holds now and tried again.
+    MirrorConflict,
 }
 
 impl Error {
@@ -443,7 +467,14 @@ impl Error {
         Self {
             code,
             message: message.into(),
+            cause: Cause::Unclassified,
         }
+    }
+
+    /// The same error, classified as `cause`.
+    pub fn caused_by(mut self, cause: Cause) -> Self {
+        self.cause = cause;
+        self
     }
 }
 
