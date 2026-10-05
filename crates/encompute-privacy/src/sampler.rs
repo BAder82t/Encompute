@@ -1,7 +1,8 @@
 //! Exact discrete Gaussian sampling: a line-by-line port of the reference
 //! implementation by Canonne, Kamath and Steinke, "The Discrete Gaussian
 //! for Differential Privacy" (NeurIPS 2020; github.com/IBM/
-//! discrete-gaussian-differential-privacy, discretegauss.py, Apache-2.0).
+//! discrete-gaussian-differential-privacy, discretegauss.py, Apache-2.0, see
+//! THIRD_PARTY_NOTICES.md).
 //! Rational arithmetic is exact (big integers), so no floating-point value
 //! ever shapes the output distribution.
 //!
