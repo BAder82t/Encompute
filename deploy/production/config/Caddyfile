@@ -1,0 +1,80 @@
+# The edge: the only component that publishes ports. TLS 1.2+ everywhere;
+# mutual TLS on the operations and key-broker listeners. Certificates are
+# mounted as secrets (see compose.yaml); nothing here is secret.
+{
+	admin off
+	auto_https off
+	servers {
+		protocols h1 h2
+	}
+}
+
+(server_tls) {
+	tls /run/secrets/edge.crt /run/secrets/edge.key {
+		protocols tls1.2 tls1.3
+	}
+}
+
+(mutual_tls) {
+	tls /run/secrets/edge.crt /run/secrets/edge.key {
+		protocols tls1.2 tls1.3
+		client_auth {
+			mode require_and_verify
+			trust_pool file /run/secrets/client-ca.crt
+		}
+	}
+}
+
+(headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
+
+# Clients (CLI, SDK, browsers): the control plane API, server-side TLS. The
+# API authenticates every request itself (OIDC tokens, signed service
+# requests). /metrics is not served here.
+https://:8443 {
+	import server_tls
+	import headers
+	@metrics path /metrics /metrics/*
+	respond @metrics 404
+	reverse_proxy control:8770
+}
+
+# Clients that submit encrypted jobs: the evaluator, server-side TLS.
+https://:8444 {
+	import server_tls
+	import headers
+	@metrics path /metrics /metrics/*
+	respond @metrics 404
+	reverse_proxy evaluator:8750
+}
+
+# Operations: health, readiness and metrics of every service. A client
+# certificate from the client CA is required. The metrics token is still
+# required by the services themselves.
+https://:8445 {
+	import mutual_tls
+	import headers
+	handle_path /control/* {
+		reverse_proxy control:8770
+	}
+	handle_path /evaluator/* {
+		reverse_proxy evaluator:8750
+	}
+	handle_path /keybroker/* {
+		reverse_proxy keybroker:8760
+	}
+	respond 404
+}
+
+# Key broker: attested key release and revocations. Callers are the
+# platform's own services and attested workloads: a client certificate is
+# required.
+https://:8446 {
+	import mutual_tls
+	import headers
+	reverse_proxy keybroker:8760
+}

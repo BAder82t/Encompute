@@ -33,6 +33,18 @@ unpinned="$(grep -hE '^FROM ' Dockerfile.* deploy/confidential-space*/Dockerfile
 if [ -n "$unpinned" ]; then bad "Docker base images" "not pinned by digest: $(echo "$unpinned" | tr '\n' ';')"
 else row "Docker base images" "PASS ($(grep -hcE '^FROM .*@sha256:' Dockerfile.* deploy/confidential-space*/Dockerfile | paste -sd+ - | bc) FROM lines pinned by digest)"; fi
 
+# The reference production topology's Compose images: every image is pinned by
+# digest (an environment default may carry the digest). The control plane and
+# services images carry no default: they are required variables
+# (ENCOMPUTE_CONTROL_IMAGE, ENCOMPUTE_SERVICES_IMAGE), because the published
+# v0.3.0 digests predate native TLS; the operator names a digest (the topology
+# validator, TOP-01, then checks that what runs is pinned).
+unpinned_neg="$(grep -hE '^[[:space:]]+image: ' deploy/production/compose*.yaml | grep -v '@sha256:[0-9a-f]\{64\}' | grep -vE 'image: \$\{ENCOMPUTE_(CONTROL|SERVICES)_IMAGE:\?[^}]+\}$' || true)"
+required_vars="$(grep -hcE '^[[:space:]]+image: \$\{ENCOMPUTE_(CONTROL|SERVICES)_IMAGE:\?[^}]+\}$' deploy/production/compose.yaml)"
+if [ -n "$unpinned_neg" ]; then bad "Production topology images" "not pinned by digest: $(echo "$unpinned_neg" | sed 's/^ *//' | tr '\n' ';')"
+elif [ "$required_vars" != 2 ]; then bad "Production topology images" "the control and services images must be the two required variables (found $required_vars)"
+else row "Production topology images" "PASS ($(grep -hE '^[[:space:]]+image: .*@sha256:' deploy/production/compose*.yaml | wc -l | tr -d ' ') image references pinned by digest, 2 required digest variables for the native-TLS images; the misconfigured negative-test fixture is exempt)"; fi
+
 # GitHub Actions pinned by full commit SHA, with the version as a comment.
 unpinned_uses="$(grep -hE '^[[:space:]]*(- )?uses: ' .github/workflows/*.yml | grep -vE 'uses: [^ ]+@[0-9a-f]{40} # [^ ]+$' || true)"
 if [ -n "$unpinned_uses" ]; then bad "GitHub Actions" "not pinned by commit SHA: $(echo "$unpinned_uses" | sed 's/^ *//' | tr '\n' ';')"

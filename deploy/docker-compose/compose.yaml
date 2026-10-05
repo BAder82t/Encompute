@@ -32,6 +32,12 @@ services:
       ENCOMPUTE_ENV: production
       ENCOMPUTE_LISTEN: 0.0.0.0:8770
       ENCOMPUTE_DATABASE_URL_FILE: /run/secrets/db-url
+      # This Compose deployment's PostgreSQL has no TLS and is reachable only
+      # on the Compose network, so production mode needs the explicit,
+      # INSECURE opt-out for a plaintext database. It is for this local
+      # deployment and its smoke test only: the reference production topology
+      # (deploy/production) requires sslmode=verify-full and sets no opt-out.
+      ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE: "true"
       ENCOMPUTE_SIGNING_KEY_FILE: /run/secrets/control-key
       ENCOMPUTE_OIDC_ISSUER: ${ENCOMPUTE_OIDC_ISSUER:?set in .env}
       ENCOMPUTE_OIDC_AUDIENCE: ${ENCOMPUTE_OIDC_AUDIENCE:-encompute}

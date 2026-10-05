@@ -1,0 +1,23 @@
+# The key broker's whole authority over its organization's root key:
+# wrap and unwrap the KEK, read the key's metadata, rotate it. It cannot
+# read key material (the key is not exportable), create or delete keys,
+# or touch anything else. The two auth/token paths let it inspect and renew
+# its own periodic token (the default policy is not attached).
+path "transit/encrypt/@ORG@" {
+  capabilities = ["update"]
+}
+path "transit/decrypt/@ORG@" {
+  capabilities = ["update"]
+}
+path "transit/keys/@ORG@" {
+  capabilities = ["read"]
+}
+path "transit/keys/@ORG@/rotate" {
+  capabilities = ["update"]
+}
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}

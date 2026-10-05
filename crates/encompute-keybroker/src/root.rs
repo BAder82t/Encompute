@@ -431,12 +431,29 @@ impl BaoHttp {
             token,
             // Redirects are never followed: ureq would carry X-Vault-Token
             // to whatever origin a redirect names (it strips only
-            // Authorization and Cookie). A 3xx is an error.
-            agent: ureq::AgentBuilder::new()
-                .timeout(BAO_TIMEOUT)
-                .redirects(0)
-                .build(),
+            // Authorization and Cookie). A 3xx is an error (see `answer`).
+            agent: Self::agent(None),
         })
+    }
+
+    fn agent(tls: Option<std::sync::Arc<rustls::ClientConfig>>) -> ureq::Agent {
+        let b = ureq::AgentBuilder::new().timeout(BAO_TIMEOUT).redirects(0);
+        match tls {
+            Some(c) => b.tls_config(c).build(),
+            None => b.build(),
+        }
+    }
+
+    /// Trusts the CA bundle and presents the client certificate that
+    /// `BAO_CACERT`, `BAO_CLIENT_CERT` and `BAO_CLIENT_KEY` (or the `VAULT_`
+    /// names) name; with none of them set the client is unchanged (public
+    /// web roots, no client certificate). A bundle that cannot be read or
+    /// holds no certificate is an error, never a fall back to other roots.
+    pub(crate) fn with_tls_from_env(mut self) -> Result<Self> {
+        if let Some(c) = encompute_verification::tls::provider_config_from_env()? {
+            self.agent = Self::agent(Some(c));
+        }
+        Ok(self)
     }
 
     /// From `BAO_ADDR`/`VAULT_ADDR`, and the token from `BAO_TOKEN_FILE`
@@ -460,7 +477,7 @@ impl BaoHttp {
                     .ok_or_else(|| err("set BAO_TOKEN_FILE (or BAO_TOKEN) for OpenBao/Vault"))?,
             ),
         };
-        Self::new(&addr, token)
+        Self::new(&addr, token)?.with_tls_from_env()
     }
 
     /// `GET {addr}/v1/{path}`.
@@ -536,8 +553,18 @@ impl OpenBaoTransit {
         })
     }
 
+    /// Trusts the CA bundle and presents the client certificate that the
+    /// `BAO_CACERT`, `BAO_CLIENT_CERT` and `BAO_CLIENT_KEY` names (or the
+    /// `VAULT_` names) point at; see [`BaoHttp::with_tls_from_env`]. With none
+    /// of them set the client is unchanged. `from_env` already applies it.
+    pub fn with_tls_from_env(mut self) -> Result<Self> {
+        self.http = self.http.with_tls_from_env()?;
+        Ok(self)
+    }
+
     /// From `BAO_ADDR`/`VAULT_ADDR`, and the token from `BAO_TOKEN_FILE`
-    /// (a mounted secret) or `BAO_TOKEN`/`VAULT_TOKEN`.
+    /// (a mounted secret) or `BAO_TOKEN`/`VAULT_TOKEN`. TLS settings come
+    /// from `BAO_CACERT` and `BAO_CLIENT_*` (see `with_tls_from_env`).
     pub fn from_env(mount: &str, key: &str) -> Result<Self> {
         Self::with_http(BaoHttp::from_env()?, mount, key)
     }

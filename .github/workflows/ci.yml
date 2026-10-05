@@ -162,6 +162,8 @@ jobs:
         with:
           tool: cargo-deny,cargo-audit
       - run: cargo deny check advisories bans licenses sources
+      # The OpenSSL / aws-lc / native-tls bans must actually fire.
+      - run: ./scripts/test-deny-tls-bans.sh
       - run: scripts/release/check-pins.sh
       - name: third-party notices cover the production crates
         run: cargo fetch --locked && python3 scripts/third_party_notices.py --check
@@ -277,6 +279,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The database-TLS tests need a TLS PostgreSQL that requires a client
+      # certificate (a throwaway PKI; nothing is committed).
+      - name: TLS PostgreSQL for the database-TLS tests
+        run: |
+          scripts/tls-test-db.sh up "$RUNNER_TEMP/tls-pg"
+          scripts/tls-test-db.sh env "$RUNNER_TEMP/tls-pg" | sed 's/^export //' >> "$GITHUB_ENV"
       - run: cargo clippy -p encompute-control -p encompute-keybroker -p encompute-verification --all-targets -- -D warnings
       # The runner must itself fail when a service is down or a suite is empty.
       - run: ./scripts/test-full-selftest.sh
@@ -336,9 +344,15 @@ jobs:
           . .venv/bin/activate
           pip install maturin numpy cryptography
           maturin develop --release --features openfhe
+      # Production mode requires sslmode=verify-full: the golden path runs
+      # against a TLS PostgreSQL that requires a client certificate (a
+      # throwaway PKI; nothing is committed).
+      - name: TLS PostgreSQL for production mode
+        run: |
+          scripts/tls-test-db.sh up "$RUNNER_TEMP/tls-pg"
+          scripts/tls-test-db.sh env "$RUNNER_TEMP/tls-pg" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: golden path, restart, backup and restore, revocation, canaries
         env:
-          ENCOMPUTE_E2E_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
           BAO_ADDR: http://127.0.0.1:8200
           BAO_TOKEN: ci-root
           SDK_PYTHON: .venv/bin/python

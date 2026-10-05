@@ -139,8 +139,18 @@ impl OpenBaoKvMark {
         Self::with_http(BaoHttp::new(addr, token)?, mount, broker_id)
     }
 
+    /// Trusts the CA bundle and presents the client certificate that
+    /// `BAO_CACERT`, `BAO_CLIENT_CERT` and `BAO_CLIENT_KEY` (or the `VAULT_`
+    /// names) point at: the same settings as the Transit root key. With none
+    /// of them set the client is unchanged. `from_env` already applies it.
+    pub fn with_tls_from_env(mut self) -> Result<Self> {
+        self.http = self.http.with_tls_from_env()?;
+        Ok(self)
+    }
+
     /// From `BAO_ADDR`/`VAULT_ADDR`, and the token from `BAO_TOKEN_FILE` or
-    /// `BAO_TOKEN`/`VAULT_TOKEN`: the same settings as the Transit root key.
+    /// `BAO_TOKEN`/`VAULT_TOKEN`; TLS from `BAO_CACERT` and `BAO_CLIENT_*`:
+    /// the same settings as the Transit root key.
     pub fn from_env(mount: &str, broker_id: &str) -> Result<Self> {
         Self::with_http(BaoHttp::from_env()?, mount, broker_id)
     }

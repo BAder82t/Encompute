@@ -17,6 +17,8 @@ sha2 = "0.10"
 ed25519-dalek = "2.2"
 getrandom = "0.2"
 zeroize = "1.8"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+webpki-roots = "0.26"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 
 [lints]

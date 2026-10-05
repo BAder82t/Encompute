@@ -157,7 +157,7 @@ release); `--list` prints each row's command.
 | DP | `cargo test -p encompute-privacy`, runtime `--test privacy`, `test_privacy.py`, example 09 | |
 | patient DP-SGD | `test_dpsgd.py`, example 16 | |
 | HF/PEFT | `test_huggingface.py`, example 17 | |
-| control plane | `scripts/test-full.sh --release --runs control-plane,cli` (the control-plane, key-broker, verification and CLI suites on cold databases; fails on a missing service, a skipped or empty required suite, or a count below `scripts/test-manifest.json`) | `ENCOMPUTE_TEST_DATABASE_URL`, `ENCOMPUTE_TEST_BAO_ADDR`, `ENCOMPUTE_TEST_BAO_TOKEN` |
+| control plane | `scripts/test-full.sh --release --runs control-plane,cli` (the control-plane, key-broker, verification and CLI suites on cold databases; fails on a missing service, a skipped or empty required suite, or a count below `scripts/test-manifest.json`) | `ENCOMPUTE_TEST_DATABASE_URL`, `ENCOMPUTE_TEST_BAO_ADDR`, `ENCOMPUTE_TEST_BAO_TOKEN`, and the TLS PostgreSQL of `scripts/tls-test-db.sh` (`release-check.sh` starts it when unset) |
 | tenant isolation | `scripts/test-full.sh --release --runs isolation` (`cargo test -p encompute-control --test isolation`: every route unauthenticated, wrong role, other tenant; the cross-tenant attack suite) | same services |
 | backup/restore | `scripts/release/backup-drill.sh` when present; else `scripts/enterprise-e2e.sh` (backup, restore, an older backup refused); else `deploy/docker-compose/smoke.sh` (backup, destroy, restore) | OpenFHE and the services and `pg_dump`/`psql`; or docker and the `:dev` images |
 | assurance | `assurance-report` (every security invariant) | |

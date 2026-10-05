@@ -27,6 +27,10 @@ planner choosing the mechanisms from your requirements.
 - The first supported deployment is Docker Compose
   ([deploy/docker-compose](../../deploy/docker-compose/)). Its bundled
   OpenBao runs in development mode: use your own key service for real keys.
+- The [reference production topology](../production-deployment.md): a TLS
+  edge, PostgreSQL with TLS required, an external OpenBao, secrets as files,
+  a backup drill and a validation script. Start there for anything beyond a
+  trial, and read what it does not cover.
 - [API stability](../api-stability.md): the control plane API v1 is frozen.
 - [Artifact compatibility](../compatibility.md) for upgrades.
 

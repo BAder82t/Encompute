@@ -28,6 +28,7 @@ mod reference;
 pub mod service;
 mod spec;
 pub mod ticket;
+pub mod tls;
 pub mod transcript;
 mod verify;
 

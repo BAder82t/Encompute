@@ -42,7 +42,7 @@ maturin develop --release --features openfhe
 
 | Capability | Status | Details |
 |---|---|---|
-| Remote evaluator (`encompute-evaluator serve`, `run --remote`) | **Supported** | Plain HTTP: put a TLS proxy in front of it. The evaluator binary links no client cryptography (`scripts/audit-evaluator-binary.sh`). |
+| Remote evaluator (`encompute-evaluator serve`, `run --remote`) | **Supported** | Plain HTTP, and its client of the control plane is plain HTTP: put a TLS proxy in front of it (the reference production topology does). The evaluator binary links no client cryptography (`scripts/audit-evaluator-binary.sh`). |
 | Evaluator worker processes (`--workers N`) | **Supported** | Crash restart and replay within one machine. |
 | Evaluator on several machines | **Unsupported** | Each evaluator is a single node. The control plane can schedule jobs across several registered evaluators, but one job never spans machines. |
 | Evaluation-key cache | **Supported** | Bounded (`ENCOMPUTE_KEY_CACHE_BYTES`, LRU), per session. |
@@ -87,7 +87,8 @@ maturin develop --release --features openfhe
 | Customer-managed root keys: OpenBao Transit | **Supported** | OpenBao 2.1.0 is tested in CI. |
 | Customer-managed root keys: HashiCorp Vault Transit | **Supported subset** | Same Transit API and the same adapter. Not tested in CI against Vault itself. |
 | Other KMS (AWS KMS, GCP KMS, Azure Key Vault) | **Unsupported** | No adapter yet. |
-| Docker Compose deployment | **Supported** | Control plane, PostgreSQL, OpenFHE evaluator, key broker, SecAgg coordinator, with backup, restore and a smoke test. The bundled OpenBao runs in development mode, in memory: replace it with your own KMS for real keys. |
+| Docker Compose deployment | **Supported** | Control plane, PostgreSQL, OpenFHE evaluator, key broker, SecAgg coordinator, with backup, restore and a smoke test. The bundled OpenBao runs in development mode, in memory: replace it with your own KMS for real keys, or use the reference production topology. |
+| Reference production topology ([production-deployment.md](production-deployment.md)) | **Supported subset** | One machine, Docker Compose: a TLS edge (mutual TLS on its operations and key-broker listeners), PostgreSQL that accepts only TLS, an external OpenBao in server mode (not dev mode), secrets as files, health checks, a backup drill, and `deploy/production/validate.sh`, which checks configuration (not security properties) and fails a deliberately misconfigured topology (`deploy/production/negative/run.sh`). The control plane verifies PostgreSQL itself (production requires `sslmode=verify-full`; weaker modes need named opt-outs; a client certificate) and the key broker verifies the vault itself (`BAO_CACERT`): native TLS, no sidecars, in images built from this source (the published v0.3.0 images predate it). Other HTTPS clients (CLI, SDK, identity provider keys, the state-anchor client) still trust only the public roots. No high availability, no secure-aggregation coordinator, no KMS beyond OpenBao and Vault Transit. |
 | Kubernetes, Helm | **Unsupported** | Not provided yet. |
 | Message transport | **Supported subset** | HTTP with an outbox, and in-memory. No message-broker adapter yet. |
 

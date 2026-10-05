@@ -27,6 +27,7 @@ pub mod metrics;
 pub mod mirror;
 pub mod model;
 mod ops;
+pub mod pgtls;
 pub mod transport;
 pub mod views;
 

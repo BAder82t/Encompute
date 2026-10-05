@@ -6,6 +6,8 @@
 #   scripts/release/backup-drill.sh             local services (default)
 #   scripts/release/backup-drill.sh --compose   deploy/docker-compose (smoke,
 #                                               backup.sh, restore.sh)
+#   scripts/release/backup-drill.sh --production  a RUNNING deploy/production
+#                                               topology (see production_drill)
 #
 # Prints one PASS/FAIL line per check, then a final PASS/FAIL line, and exits
 # non-zero if any check failed.
@@ -68,8 +70,9 @@ MODE=local
 case "${1:-}" in
   "") ;;
   --compose) MODE=compose ;;
-  -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
-  *) echo "usage: $0 [--compose]" >&2; exit 2 ;;
+  --production) MODE=production ;;
+  -h|--help) sed -n '2,72p' "$0"; exit 0 ;;
+  *) echo "usage: $0 [--compose | --production]" >&2; exit 2 ;;
 esac
 PY="${TOOL_PYTHON:-python3}"
 
@@ -197,6 +200,132 @@ compose_drill() {
 
 if [ "$MODE" = compose ]; then
   compose_drill
+  exit $?
+fi
+
+# =============================================================================
+# PRODUCTION MODE: a running deploy/production topology
+# =============================================================================
+# The same two cases as compose mode, against the reference production
+# topology (TLS edge, TLS-only PostgreSQL, external OpenBao). DESTRUCTIVE: it
+# destroys the topology's containers and volumes and restores them from its
+# own backup, so run it on a laboratory or staging copy. Needs the topology up
+# (deploy/production/lab-up.sh, or your own with a throwaway identity provider:
+# DRILL_OIDC_DIR holds idp.pem and the control plane trusts its jwks.json, and
+# DRILL_OIDC_ISSUER names it), and the external OpenBao unsealed.
+#   COMPOSE_PROJECT_NAME  the project (default encompute-prod)
+#   EDGE_API_PORT         the edge's API port (default 8443)
+#   DRILL_OIDC_DIR        default deploy/production/oidc-lab
+#   DRILL_OIDC_ISSUER     default https://idp.lab.test.invalid
+# Steps: state is created through the TLS edge; backup.sh; a spend after the
+# backup; FULL DISASTER (every container and volume of the stack is removed)
+# and restore.sh; the state is the backup's and the key broker opens its wrapped
+# KEK through OpenBao again; then an OLDER backup over a NEWER anchor is refused
+# and `recover` freezes the ledger.
+production_drill() {
+  local D="$ROOT/deploy/production" W
+  export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-encompute-prod}"
+  local P="$COMPOSE_PROJECT_NAME" PORT="${EDGE_API_PORT:-8443}"
+  local OIDC="${DRILL_OIDC_DIR:-$D/oidc-lab}" ISS="${DRILL_OIDC_ISSUER:-https://idp.lab.test.invalid}"
+  local CA="$D/secrets/edge-ca.crt"
+  dc() { (cd "$D" && perl -e 'alarm 240; exec @ARGV' docker compose -p "$P" "$@"); }
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "SKIP  Docker Compose is not available"; echo "BACKUP DRILL (production): SKIPPED"; exit 0
+  fi
+  if [ ! -s "$OIDC/idp.pem" ] || [ ! -s "$CA" ]; then
+    echo "SKIP  no running deploy/production lab topology (no $OIDC/idp.pem or $CA): run deploy/production/lab-up.sh"
+    echo "BACKUP DRILL (production): SKIPPED"; exit 0
+  fi
+  W="$(mktemp -d "${TMPDIR:-/tmp}/encompute-drill.XXXXXX")"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$W'" EXIT
+  tok() { "$PY" "$ROOT/scripts/test-idp.py" token "$OIDC" "$1" --iss "$ISS"; }
+  capi() { # WHO METHOD PATH [BODY]: prints the status; the body goes to $W/body
+    local args=(-sS --cacert "$CA" -o "$W/body" -w '%{http_code}' -X "$2" -H "Authorization: Bearer $(tok "$1")")
+    if [ -n "${4:-}" ]; then args+=(-H 'Content-Type: application/json' -d "$4"); fi
+    curl "${args[@]}" "https://localhost:$PORT$3"
+  }
+  wait_ready() { for _ in $(seq 150); do curl -fs --cacert "$CA" "https://localhost:$PORT/ready" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+  local RUN ORG DATASET SPENT_B1 s
+  RUN="$(rand)"; ORG="drill-$RUN"
+
+  step "production: state through the TLS edge"
+  wait_ready || { fail_check "the topology's edge does not answer /ready on :$PORT"; summary; exit 1; }
+  s="$(capi platform-admin POST /v1/organizations "{\"id\":\"$ORG\",\"display_name\":\"Drill $RUN\",\"admin\":{\"issuer\":\"$ISS\",\"subject\":\"admin-$RUN\"}}")"
+  check "organization created through the edge (201)" eq "$s" 201
+  capi "admin-$RUN" POST "/v1/organizations/$ORG/users" "{\"issuer\":\"$ISS\",\"subject\":\"owner-$RUN\",\"roles\":[\"data_owner\",\"auditor\"]}" >/dev/null
+  s="$(capi "owner-$RUN" POST /v1/assets "{\"organization\":\"$ORG\",\"kind\":\"dataset\",\"name\":\"patients\",\"digest\":\"$(printf 'c%.0s' $(seq 64))\",\"privacy_budget\":{\"unit\":\"patient\",\"epsilon\":\"3.0\",\"delta\":\"1e-6\"}}")"
+  check "dataset with a privacy budget created (201)" eq "$s" 201
+  DATASET="$(jget 'v["id"]' < "$W/body")"
+  eq "$(capi "owner-$RUN" POST "/v1/privacy/$DATASET/events" "$(reserve_body "drill-before-$RUN")")" 200 || fail_check "spend before the backup"
+  capi "owner-$RUN" GET "/v1/privacy/$DATASET" >/dev/null
+  SPENT_B1="$(jget 'v["spent"]["epsilon"]' < "$W/body")"
+
+  step "production: backup, verify, spend after the backup"
+  (cd "$D" && ./backup.sh "$W/b1") >/dev/null
+  check "backup has database, anchor, broker, evaluator and checksums" \
+    test -s "$W/b1/db.sql" -a -s "$W/b1/anchor.tar" -a -s "$W/b1/broker.tar" -a -s "$W/b1/evaluator.tar" -a -s "$W/b1/SHA256SUMS"
+  check "backup.sh --verify: checksums, archives, dump restores into a scratch database" \
+    bash -c "cd '$D' && ./backup.sh --verify '$W/b1' >/dev/null"
+  local f
+  for f in control.key evaluator.key db-password metrics-token bao-token; do cat "$D/secrets/$f"; echo; done | sed '/^$/d' > "$W/secret-values"
+  check "the backup holds no secret value (signing keys, password, tokens)" \
+    bash -c "! grep -qF -f '$W/secret-values' '$W/b1/db.sql' '$W/b1/anchor.tar' '$W/b1/broker.tar' '$W/b1/evaluator.tar'"
+  eq "$(capi "owner-$RUN" POST "/v1/privacy/$DATASET/events" "$(reserve_body "drill-after-$RUN")")" 200 || fail_check "spend after the backup"
+
+  step "production: full disaster (every container and volume removed), restore.sh"
+  dc rm -sfv edge control evaluator keybroker postgres >/dev/null 2>&1 || true
+  docker volume rm "${P}_pgdata" "${P}_anchor" "${P}_broker" "${P}_evaluator" >/dev/null 2>&1 || true
+  check "volumes are gone before the restore" bash -c "! docker volume ls -q | grep -q '^${P}_\(pgdata\|anchor\|broker\|evaluator\)\$'"
+  (cd "$D" && ./restore.sh "$W/b1") >"$W/restore1.log" 2>&1 || { tail -n 15 "$W/restore1.log"; fail_check "restore.sh"; }
+  check "restore.sh restored the anchor into the empty volume" contains "$W/restore1.log" "anchor restored"
+  check "restore.sh restored the key broker state into the empty volume" contains "$W/restore1.log" "broker restored"
+  check "the control plane is ready again through the edge" wait_ready
+  s="$(capi "admin-$RUN" GET "/v1/organizations/$ORG")"
+  check "the organization survived the disaster (200)" eq "$s" 200
+  capi "owner-$RUN" GET "/v1/privacy/$DATASET" >/dev/null || true
+  check "privacy spending is the backup's (spending after it is forgotten, as documented)" \
+    eq "$(jget 'v["spent"]["epsilon"]' < "$W/body")" "$SPENT_B1"
+  dc up -d >/dev/null 2>&1 || true
+  local healthy=0
+  for _ in $(seq 120); do
+    healthy="$(dc ps --format '{{.Health}}' 2>/dev/null | grep -c '^healthy$')"
+    [ "$healthy" = 5 ] && break; sleep 1
+  done
+  check "all 5 services are healthy again, the key broker having opened its wrapped KEK through OpenBao" eq "$healthy" 5
+
+  step "production: an older backup over a newer anchor is refused; recover freezes"
+  eq "$(capi "owner-$RUN" POST "/v1/privacy/$DATASET/events" "$(reserve_body "drill-newer-$RUN")")" 200 || fail_check "spend before the old restore"
+  (cd "$D" && ./restore.sh "$W/b1") >"$W/restore2.log" 2>&1 || true
+  check "restore.sh keeps the newer anchor" contains "$W/restore2.log" "anchor kept"
+  check "restore.sh keeps the existing key broker state" contains "$W/restore2.log" "broker kept"
+  local refused=0
+  for _ in $(seq 60); do
+    dc logs control 2>&1 | grep -q "PRIVACY STATE ROLLBACK" && { refused=1; break; }; sleep 1
+  done
+  check "the control plane refuses to start and names PRIVACY STATE ROLLBACK" eq "$refused" 1
+  check "the edge does not report the control plane ready" bash -c "! curl -fs --cacert '$CA' https://localhost:$PORT/ready >/dev/null 2>&1"
+  dc stop control >/dev/null 2>&1 || true
+  dc run --rm -T --no-deps control recover --operator drill-operator >"$W/recover.log" 2>&1 || true
+  check "recover freezes the rolled-back ledger" contains "$W/recover.log" "RECOVERED"
+  dc up -d control edge >/dev/null 2>&1 || true
+  wait_ready || true
+  capi "owner-$RUN" GET "/v1/privacy/$DATASET" >/dev/null || true
+  check "privacy view shows the ledger frozen" eq "$(jget 'v["frozen"] is not None' < "$W/body")" True
+  s="$(capi "owner-$RUN" POST "/v1/privacy/$DATASET/events" "$(reserve_body "drill-after-recovery-$RUN")")"
+  check "spend on the frozen ledger refused (409 ENC2201)" eq "$s $(jget 'v.get("code")' < "$W/body")" "409 ENC2201"
+  # Leave the topology as it was found: every service up and healthy.
+  dc up -d >/dev/null 2>&1 || true
+  for _ in $(seq 120); do
+    healthy="$(dc ps --format '{{.Health}}' 2>/dev/null | grep -c '^healthy$')"
+    [ "$healthy" = 5 ] && break; sleep 1
+  done
+  check "all 5 services are healthy after recovery" eq "$healthy" 5
+  summary
+}
+
+if [ "$MODE" = production ]; then
+  production_drill
   exit $?
 fi
 

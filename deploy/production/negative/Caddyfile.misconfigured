@@ -1,0 +1,12 @@
+# Misconfigured on purpose: TLS, but NO client certificate required on the
+# operations (8445) and key-broker (8446) listeners.
+{
+	admin off
+	auto_https off
+}
+https://:8443, https://:8444, https://:8445, https://:8446 {
+	tls /run/secrets/edge.crt /run/secrets/edge.key
+	respond /live 200
+	respond /control/live 200
+	respond 404
+}

@@ -33,9 +33,15 @@
 # Needs: release binaries (BIN, default target/release: encompute,
 # encompute-evaluator, encompute-control), python3 with `cryptography`,
 # curl, lsof, and the services:
-#   SOAK_DATABASE_URL  (default $ENCOMPUTE_TEST_DATABASE_URL) an admin URL
-#                      allowed to create roles and databases; psql, or
-#                      `docker exec $SOAK_PG_CONTAINER psql` (default enc-pg)
+#   a TLS-enabled PostgreSQL: production mode requires sslmode=verify-full, so
+#                      the control plane runs against scripts/tls-test-db.sh
+#                      (up; eval "$(scripts/tls-test-db.sh env)") with a CA and
+#                      a client certificate. Needs a libpq `psql`.
+#   In a test environment only: SOAK_ALLOW_PLAINTEXT_DATABASE=true with
+#   SOAK_DATABASE_URL (default $ENCOMPUTE_TEST_DATABASE_URL), a plaintext admin
+#   URL allowed to create roles and databases (psql, or
+#   `docker exec $SOAK_PG_CONTAINER psql`, default enc-pg), gives the control
+#   plane the named opt-out ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true (insecure).
 #   BAO_ADDR, BAO_TOKEN (default $ENCOMPUTE_TEST_BAO_ADDR, dev-root)
 # Output: SOAK_OUT (default target/soak/<UTC time>).
 set -uo pipefail
@@ -64,8 +70,15 @@ E="$BIN/encompute"; EVAL="$BIN/encompute-evaluator"; CTL="$BIN/encompute-control
 PYTHON="${TOOL_PYTHON:-python3}"
 # The soak always starts from an empty database, migrated by the real binaries:
 # it never uses the test template databases (ENCOMPUTE_TEST_DB_MODE).
-ADMIN_URL="${SOAK_DATABASE_URL:-${ENCOMPUTE_TEST_DATABASE_URL:-}}"
-: "${ADMIN_URL:?set SOAK_DATABASE_URL or ENCOMPUTE_TEST_DATABASE_URL (PostgreSQL admin URL)}"
+# shellcheck source=../lib-prod-db.sh
+. "$ROOT/scripts/lib-prod-db.sh"
+DB_MODE="$(prod_db_mode SOAK)" || exit 2
+if [ "$DB_MODE" = tls ]; then
+  ADMIN_URL="$(tls_db_url encompute "$ENCOMPUTE_TEST_TLS_DATABASE_PASSWORD" encompute)"
+else
+  ADMIN_URL="${SOAK_DATABASE_URL:-${ENCOMPUTE_TEST_DATABASE_URL:-}}"
+  : "${ADMIN_URL:?set SOAK_DATABASE_URL or ENCOMPUTE_TEST_DATABASE_URL (PostgreSQL admin URL)}"
+fi
 BAO_ADDR="${BAO_ADDR:-${ENCOMPUTE_TEST_BAO_ADDR:-}}"
 : "${BAO_ADDR:?set BAO_ADDR or ENCOMPUTE_TEST_BAO_ADDR (OpenBao)}"
 BAO_TOKEN="${BAO_TOKEN:-${ENCOMPUTE_TEST_BAO_TOKEN:-dev-root}}"
@@ -99,8 +112,11 @@ ADMIN_BASE="${ADMIN_URL%/*}"
 HOSTPART="${ADMIN_BASE#*@}"
 ADMIN_USER="${ADMIN_BASE#*://}"; ADMIN_USER="${ADMIN_USER%%:*}"
 ADMIN_DB="${ADMIN_URL##*/}"; ADMIN_DB="${ADMIN_DB%%\?*}"
+[ "$DB_MODE" = tls ] && ADMIN_DB=encompute  # the URL carries file paths after its last slash
 psql_admin() {  # psql_admin DB SQL: one value per line
-  if command -v psql >/dev/null 2>&1; then
+  if [ "$DB_MODE" = tls ]; then
+    psql "$(tls_db_url encompute "$ENCOMPUTE_TEST_TLS_DATABASE_PASSWORD" "$1")" -qtAX -c "$2"
+  elif command -v psql >/dev/null 2>&1; then
     psql "${ADMIN_BASE}/$1" -qtAX -c "$2"
   else
     docker exec -i "$PG_CONTAINER" psql -U "$ADMIN_USER" -d "$1" -qtAX -c "$2"
@@ -127,10 +143,20 @@ rand() { "$PYTHON" -c 'import secrets; print(secrets.token_hex(16))'; }
 
 say "soak $TAG: $DURATION s, sampling every $SAMPLE_SECS s, output $OUT"
 DBPASS="$(rand)"
-psql_admin "$ADMIN_DB" "CREATE ROLE $TAG LOGIN PASSWORD '$DBPASS'" >/dev/null || die "cannot create the role"
-psql_admin "$ADMIN_DB" "CREATE DATABASE $TAG OWNER $TAG" >/dev/null || die "cannot create the database"
+if [ "$DB_MODE" = tls ]; then
+  # The client-certificate rule ties the role to the certificate (CN
+  # encompute): use that role, and a database of our own.
+  psql_admin "$ADMIN_DB" "CREATE DATABASE $TAG" >/dev/null || die "cannot create the database"
+  DB_URL="$(tls_db_url encompute "$ENCOMPUTE_TEST_TLS_DATABASE_PASSWORD" "$TAG")"
+  DB_OPT_OUT=()
+else
+  psql_admin "$ADMIN_DB" "CREATE ROLE $TAG LOGIN PASSWORD '$DBPASS'" >/dev/null || die "cannot create the role"
+  psql_admin "$ADMIN_DB" "CREATE DATABASE $TAG OWNER $TAG" >/dev/null || die "cannot create the database"
+  DB_URL="postgres://$TAG:$DBPASS@$HOSTPART/$TAG"
+  # TEST ENVIRONMENT ONLY: a plaintext database, with the named opt-out.
+  DB_OPT_OUT=(ENCOMPUTE_ALLOW_PLAINTEXT_DATABASE=true)
+fi
 DB_CREATED=1
-DB_URL="postgres://$TAG:$DBPASS@$HOSTPART/$TAG"
 say "database $TAG created (fresh)"
 
 # --- OpenBao, identities, secrets --------------------------------------------------------
@@ -157,7 +183,7 @@ tok() {
 CTL_PORT="$(free_port)"; EVAL_PORT="$(free_port)"
 CTL_URL="http://127.0.0.1:$CTL_PORT"
 control_env() {
-  exec env ENCOMPUTE_ENV=production \
+  exec env ENCOMPUTE_ENV=production ${DB_OPT_OUT[@]+"${DB_OPT_OUT[@]}"} \
     ENCOMPUTE_LISTEN="127.0.0.1:$CTL_PORT" \
     ENCOMPUTE_DATABASE_URL_FILE="$W/secrets/db-url" \
     ENCOMPUTE_SIGNING_KEY_FILE="$W/secrets/control.key" \
