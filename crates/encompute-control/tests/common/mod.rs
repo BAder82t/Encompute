@@ -333,6 +333,206 @@ impl Env0 {
     }
 }
 
+/// What stands in for a rival process at a disturbed compare-and-set.
+pub type Rival = Arc<dyn Fn() + Send + Sync>;
+
+/// What a [`CasHook`] store does at the compare-and-set of the thread it is
+/// armed for (the thread that makes the call under test; every other
+/// thread's anchor writes pass through untouched).
+#[derive(Default)]
+pub struct CasState {
+    thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    /// Compare-and-sets still to be disturbed: a rival moves the stored
+    /// anchor just before them, so they lose.
+    disturb: std::sync::atomic::AtomicU32,
+    /// Compare-and-sets the armed thread has made since it was armed.
+    seen: std::sync::atomic::AtomicU32,
+    /// The number of the armed thread's compare-and-set that fails with the
+    /// store unavailable (an error that is not a conflict); 0: none.
+    fail_on: std::sync::atomic::AtomicU32,
+    /// Runs on the armed thread, in place of a rival process, before a
+    /// disturbed compare-and-set (when set); otherwise the rival is a plain
+    /// anchor update by another process.
+    rival: std::sync::Mutex<Option<(Rival, bool)>>,
+}
+
+impl CasState {
+    /// Arms the calling thread: its next `disturb` compare-and-sets lose to
+    /// a rival.
+    pub fn arm(&self, disturb: u32) {
+        *self.thread.lock().unwrap() = Some(std::thread::current().id());
+        self.seen.store(0, Ordering::SeqCst);
+        self.disturb.store(disturb, Ordering::SeqCst);
+    }
+
+    /// Makes the armed thread's `n`th compare-and-set since [`Self::arm`]
+    /// fail as an unavailable store.
+    pub fn fail_on(&self, n: u32) {
+        self.fail_on.store(n, Ordering::SeqCst);
+    }
+
+    pub fn disarm(&self) {
+        *self.thread.lock().unwrap() = None;
+        self.disturb.store(0, Ordering::SeqCst);
+        self.fail_on.store(0, Ordering::SeqCst);
+    }
+
+    /// The armed thread's compare-and-sets since it was armed.
+    pub fn seen(&self) -> u32 {
+        self.seen.load(Ordering::SeqCst)
+    }
+
+    /// The rival that runs before the next disturbed compare-and-set only.
+    pub fn set_rival(&self, f: Rival) {
+        *self.rival.lock().unwrap() = Some((f, false));
+    }
+
+    /// The rival that runs before every disturbed compare-and-set.
+    pub fn set_rival_always(&self, f: Rival) {
+        *self.rival.lock().unwrap() = Some((f, true));
+    }
+}
+
+/// A directory anchor store whose compare-and-sets can be made to lose on
+/// demand (see [`CasState`]): the seam of the anchor's retry.
+pub struct CasHook {
+    pub inner: DirAnchor,
+    pub state: Arc<CasState>,
+    /// Moves the stored anchor on, as another control plane's update would.
+    pub rival: Box<dyn Fn() + Send + Sync>,
+}
+
+impl encompute_control::anchor::AnchorStore for CasHook {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn load(&self) -> encompute_ir::Result<Option<encompute_control::anchor::StoredAnchor>> {
+        self.inner.load()
+    }
+    fn store(
+        &self,
+        next: &encompute_control::anchor::StateAnchor,
+        expected: u64,
+    ) -> encompute_ir::Result<()> {
+        let mine = *self.state.thread.lock().unwrap() == Some(std::thread::current().id());
+        if mine {
+            let n = self.state.seen.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.state.fail_on.load(Ordering::SeqCst) == n {
+                return Err(encompute_ir::Error::new(
+                    encompute_ir::Code::PrivacyLedger,
+                    "anchor store unavailable (injected)",
+                ));
+            }
+            let left = self.state.disturb.load(Ordering::SeqCst);
+            if left > 0 {
+                self.state.disturb.store(left - 1, Ordering::SeqCst);
+                let custom = {
+                    let mut r = self.state.rival.lock().unwrap();
+                    match r.as_ref() {
+                        Some((f, true)) => Some(f.clone()),
+                        Some((_, false)) => r.take().map(|(f, _)| f),
+                        None => None,
+                    }
+                };
+                match custom {
+                    Some(f) => f(),
+                    None => (self.rival)(),
+                }
+            }
+        }
+        self.inner.store(next, expected)
+    }
+    fn mirror_list(&self) -> encompute_ir::Result<Vec<u64>> {
+        self.inner.mirror_list()
+    }
+    fn mirror_read(&self, n: u64) -> encompute_ir::Result<String> {
+        self.inner.mirror_read(n)
+    }
+    fn mirror_create(&self, n: u64, lines: &str) -> encompute_ir::Result<()> {
+        self.inner.mirror_create(n, lines)
+    }
+    fn mirror_replace(
+        &self,
+        n: u64,
+        lines: &str,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_replace(n, lines, allow)
+    }
+    fn mirror_delete(
+        &self,
+        n: u64,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_delete(n, allow)
+    }
+}
+
+impl Env0 {
+    /// Starts over a [`CasHook`]: the control plane and its switch. The
+    /// rival is a plain anchor update by another process over the same
+    /// directory.
+    pub fn start_cas_hook(&self) -> (T, Arc<CasState>) {
+        let state = Arc::new(CasState::default());
+        let (dir, seed) = (self.anchor_dir.clone(), self.seed);
+        let rival_dir = dir.clone();
+        let t = self
+            .start_with(Box::new(CasHook {
+                inner: DirAnchor::new(dir).unwrap(),
+                state: state.clone(),
+                rival: Box::new(move || move_anchor(&rival_dir, &seed)),
+            }))
+            .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
+        (t, state)
+    }
+}
+
+/// Another process's update of the stored anchor: `f` changes it (counter +
+/// 1, signed).
+pub fn update_anchor(
+    dir: &std::path::Path,
+    seed: &[u8; 32],
+    f: impl Fn(&mut encompute_control::anchor::StateAnchor),
+) {
+    let signer = ServiceSigner::from_seed("control-plane", seed).unwrap();
+    let (a, _) = encompute_control::anchor::Anchor::open(
+        Box::new(DirAnchor::new(dir.to_path_buf()).unwrap()),
+        &signer,
+    )
+    .unwrap();
+    a.update(&signer, f).unwrap();
+}
+
+/// Records the log's head as anchored at (`size`, `head`) and nothing else
+/// (the audit head stays where it was).
+pub fn set_anchored_log(dir: &std::path::Path, seed: &[u8; 32], size: i64, head: &str) {
+    update_anchor(dir, seed, |x| {
+        x.glog_size = size;
+        x.glog_head = head.to_owned();
+    });
+}
+
+/// The counter of the stored anchor.
+pub fn stored_counter(dir: &std::path::Path) -> u64 {
+    use encompute_control::anchor::AnchorStore as _;
+    match DirAnchor::new(dir.to_path_buf()).unwrap().load().unwrap() {
+        Some(encompute_control::anchor::StoredAnchor::V2(a)) => a.counter,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Another process's anchor update: the stored anchor moves on (counter + 1,
+/// signed) without anything else changing.
+pub fn move_anchor(dir: &std::path::Path, seed: &[u8; 32]) {
+    let signer = ServiceSigner::from_seed("control-plane", seed).unwrap();
+    let (a, _) = encompute_control::anchor::Anchor::open(
+        Box::new(DirAnchor::new(dir.to_path_buf()).unwrap()),
+        &signer,
+    )
+    .unwrap();
+    a.update(&signer, |_| {}).unwrap();
+}
+
 /// Everything an import writes, as text, in a fixed order (the rows'
 /// `recorded_at` is the time of the transaction: not part of the log).
 pub fn dump_log(url: &str) -> Vec<String> {

@@ -13,6 +13,8 @@
 
 mod common;
 
+use std::sync::atomic::Ordering;
+
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
 
@@ -1509,6 +1511,617 @@ fn concurrent_starts_never_exceed_the_population() {
         let key = format!("population:{}", r.population);
         let cp = g.pop_ledger(r).checkpoint().unwrap();
         assert_eq!(floor(&g, &key), Some((cp.seq, cp.root)));
+    }
+}
+
+// --- concurrency: a start that loses the anchor's compare-and-set --------------------------
+//
+// A start commits its decision in one transaction under row locks (the cap
+// is enforced there, whatever happens to the anchor) and anchors it after
+// the commit. Another control plane may store the anchor first: the
+// anchoring is then attempted again from the stored anchor, and the caller
+// gets the decision (a refusal on the cap is ENC2201, not an anchor
+// conflict). The tests move the stored anchor on at the compare-and-set
+// (`CasHook`), exactly where two control planes would collide.
+
+/// The population affords one release of this program, so two jobs
+/// scheduled before either starts cannot both start.
+const FIT_ONE: &str = "dp discrete_gaussian clip_norm 1.0 noise_multiplier 25.0";
+
+/// Two queued jobs of `FIT_ONE`, in the region populations' common scope.
+fn two_jobs_for_one_release(g: &G) -> (String, String) {
+    let jobs = queued_jobs_for_one_release(g, 2);
+    (jobs[0].clone(), jobs[1].clone())
+}
+
+/// `n` queued jobs of `FIT_ONE`.
+fn queued_jobs_for_one_release(g: &G, n: usize) -> Vec<String> {
+    let _ = (g.scope(&g.a, "1.0", None), g.scope(&g.b, "1.0", None));
+    let (v, prog) = g.week("2027-w01", FIT_ONE);
+    (0..n)
+        .map(|i| {
+            let (s, j) = g.job(&v, &prog, &format!("k{i}"));
+            assert_eq!(s, 201, "{j}");
+            assert_eq!(g.state(&id(&j)), "queued", "{j}");
+            id(&j)
+        })
+        .collect()
+}
+
+fn start_on(t: &T, evaluator: &As, job: &str) -> (u16, Value) {
+    t.call(evaluator, "POST", &format!("/v1/jobs/{job}/start"), None)
+}
+
+/// A counter of a control plane's `/metrics` exposition.
+fn counter(t: &T, name: &str) -> u64 {
+    let prefix = format!("{name}{{label=\"all\"}} ");
+    t.control
+        .render_metrics()
+        .lines()
+        .find_map(|l| l.strip_prefix(&prefix).map(|v| v.parse().unwrap()))
+        .unwrap_or(0)
+}
+
+const RETRIES: &str = "encompute_anchor_cas_retry_total";
+const EXHAUSTED: &str = "encompute_anchor_cas_retry_exhausted_total";
+
+/// However the starts went, exactly `running` jobs reserved, in every
+/// ledger, the population verifies and fits, and no job is left half
+/// reserved: a job that is running holds its reservations in both regions,
+/// any other holds none.
+fn cap_held(g: &G, jobs: &[String], running: usize) {
+    let states: Vec<String> = jobs.iter().map(|j| g.state(j)).collect();
+    assert_eq!(
+        states.iter().filter(|s| *s == "running").count(),
+        running,
+        "{states:?}"
+    );
+    for r in [&g.a, &g.b] {
+        let pop = g.pop_ledger(r);
+        pop.verify().unwrap();
+        assert_eq!(G::reserves(&pop), running, "{states:?}");
+        assert!(pop.cost().unwrap().epsilon <= 1.0);
+    }
+    let mut c = g.t.control.db.conn().unwrap();
+    for (job, state) in jobs.iter().zip(&states) {
+        let rows: i64 = c
+            .query_one(
+                "SELECT count(*) FROM job_privacy_reservations WHERE job_id = $1",
+                &[job],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            rows,
+            if state == "running" { 2 } else { 0 },
+            "{job} {state}"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_that_loses_the_anchor_race_is_anchored_again_and_returned_as_it_is() {
+    let Some(g) = world() else { return };
+    let (j1, j2) = two_jobs_for_one_release(&g);
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let ev = &g.evaluator.service;
+    // The first start reserves the one release the population affords.
+    assert_eq!(start_on(&g.t, ev, &j1).0, 200);
+    // The second is refused on the cap, and committed as failed; while it
+    // anchors that, another control plane's update lands first, so its
+    // compare-and-set loses once.
+    cas.arm(1);
+    let r = start_on(&h, ev, &j2);
+    let seen = cas.seen();
+    cas.disarm();
+    // The caller gets the refusal (not the anchor conflict), after the
+    // anchoring was attempted again and stored.
+    refused(r, "ENC2201");
+    assert_eq!(seen, 2, "lost once, stored by the retry");
+    assert_eq!(counter(&h, RETRIES), 1);
+    assert_eq!(counter(&h, EXHAUSTED), 0);
+    assert_eq!(g.state(&j2), "failed");
+    assert!(
+        anchored(&h, NegSet::EndedJobs, &j2),
+        "the refusal is anchored"
+    );
+    // The retry anchored what was committed: nothing was written again.
+    assert_eq!(refusal_events(&g, &j2), (1, 1));
+    cap_held(&g, &[j1, j2], 1);
+}
+
+/// The governance log's head and the audit chain's, as the database holds
+/// them: (gseq, hash, audit seq, audit hash).
+fn heads(g: &G) -> (i64, String, i64, String) {
+    let mut c = g.t.control.db.conn().unwrap();
+    let l = c
+        .query_one("SELECT gseq, hash FROM governance_head WHERE id", &[])
+        .unwrap();
+    let a = c
+        .query_one("SELECT seq, hash FROM audit_head WHERE id", &[])
+        .unwrap();
+    (l.get(0), l.get(1), a.get(0), a.get(1))
+}
+
+/// Events a job's refusal wrote, which a retry of its anchoring must not
+/// write again: its failure in the audit chain and its ending in the log.
+fn refusal_events(g: &G, job: &str) -> (i64, i64) {
+    let mut c = g.t.control.db.conn().unwrap();
+    let failed = c
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'job.failed' AND resource_id = $1",
+            &[&job],
+        )
+        .unwrap()
+        .get(0);
+    let ended = c
+        .query_one(
+            "SELECT count(*) FROM governance_events WHERE subject_id = $1",
+            &[&job],
+        )
+        .unwrap()
+        .get(0);
+    (failed, ended)
+}
+
+/// A checkpoint another control plane stored while this one lost its
+/// compare-and-set covers a refusal only if the anchor holds it: the log
+/// head at or past the head right after the refusal committed, the audit
+/// chain at or past the refusal's audit events, and both the database's own
+/// chains. Then there is nothing to store (and nothing more is published);
+/// events added later by other writers do not matter.
+#[test]
+fn a_refusal_another_control_plane_anchored_exactly_is_not_stored_again() {
+    let Some(g) = world() else { return };
+    let jobs = queued_jobs_for_one_release(&g, 3);
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let other = std::sync::Arc::new(g.t.env0.started());
+    let ev = &g.evaluator.service;
+    assert_eq!(start_on(&g.t, ev, &jobs[0]).0, 200);
+    let dir = g.t.env0.anchor_dir.clone();
+
+    // 1. The rival checkpoints the log (the refusal and the audit head with
+    //    it) before the loser's retry: nothing is left to store, and the
+    //    loser publishes nothing more.
+    let after_rival = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    cas.set_rival(std::sync::Arc::new({
+        let (other, dir, after_rival) = (other.clone(), dir.clone(), after_rival.clone());
+        move || {
+            other.control.checkpoint_log().unwrap();
+            after_rival.store(stored_counter(&dir), Ordering::SeqCst);
+        }
+    }));
+    cas.arm(1);
+    let r = start_on(&h, ev, &jobs[1]);
+    let seen = cas.seen();
+    cas.disarm();
+    refused(r, "ENC2201");
+    assert_eq!(seen, 1, "the lost compare-and-set was the only one");
+    assert_eq!(
+        stored_counter(&dir),
+        after_rival.load(Ordering::SeqCst),
+        "nothing published after the rival's checkpoint"
+    );
+    assert_eq!((counter(&h, RETRIES), counter(&h, EXHAUSTED)), (1, 0));
+    assert!(anchored(&h, NegSet::EndedJobs, &jobs[1]));
+    assert_eq!(refusal_events(&g, &jobs[1]), (1, 1), "written once");
+
+    // 2. The rival checkpoints the log, then the audit chain grows (a
+    //    denial recorded): the new audit event is not the refusal's, the
+    //    anchor holds what the refusal committed, so there is still nothing
+    //    to store.
+    cas.set_rival(std::sync::Arc::new({
+        let other = other.clone();
+        move || {
+            other.control.checkpoint_log().unwrap();
+            other
+                .control
+                .audit_denied(encompute_control::audit::AuditDraft::new(
+                    "a-service",
+                    "req-rival",
+                    "job.start",
+                    "job",
+                    "none",
+                    encompute_control::audit::Outcome::Denied,
+                ));
+        }
+    }));
+    cas.arm(1);
+    let r = start_on(&h, ev, &jobs[2]);
+    let seen = cas.seen();
+    cas.disarm();
+    refused(r, "ENC2201");
+    assert_eq!(
+        seen, 1,
+        "covered: the later audit event is not this refusal's"
+    );
+    assert!(anchored(&h, NegSet::EndedJobs, &jobs[2]));
+    cap_held(&g, &jobs, 1);
+}
+
+/// A newer anchor does not cover a deny because it is newer. Two anchors
+/// that do not: one a rival stored before the deny committed (older than it),
+/// and one that holds the log up to the deny but not its audit events. The
+/// retry anchors the deny itself. (A job's cancellation: a deny event
+/// anchored by `tx_anchored` alone; a start also checks its refusal is
+/// anchored, which would hide a wrong cover.)
+#[test]
+fn a_newer_anchor_that_does_not_hold_the_deny_covers_nothing() {
+    let Some(g) = world() else { return };
+    let jobs = queued_jobs_for_one_release(&g, 2);
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let other = g.t.env0.started();
+    let (dir, seed) = (g.t.env0.anchor_dir.clone(), g.t.env0.seed);
+    let cancel = |job: &str| h.ok(&g.dev, "POST", &format!("/v1/jobs/{job}/cancel"), None);
+
+    // (a) The rival's checkpoint is computed before the cancellation commits
+    //     (an anchor newer than the loser's view, older than the deny): it
+    //     does not cover it; the loser stores.
+    other.control.checkpoint_log().unwrap();
+    cas.arm(1);
+    cancel(&jobs[0]);
+    let seen = cas.seen();
+    cas.disarm();
+    assert_eq!(seen, 2, "not covered: stored by the retry");
+    assert!(anchored(&h, NegSet::EndedJobs, &jobs[0]));
+
+    // (b) The rival anchors the log's head as the cancellation left it but not
+    //     the audit chain: the audit events of the deny are not held; the
+    //     loser stores.
+    cas.set_rival(std::sync::Arc::new({
+        let (dir, db) = (dir.clone(), g.t.env0.url.clone());
+        move || {
+            let mut c = postgres::Client::connect(&db, postgres::NoTls).unwrap();
+            let l = c
+                .query_one("SELECT gseq, hash FROM governance_head WHERE id", &[])
+                .unwrap();
+            set_anchored_log(&dir, &seed, l.get(0), &l.get::<_, String>(1));
+        }
+    }));
+    cas.arm(1);
+    cancel(&jobs[1]);
+    let seen = cas.seen();
+    cas.disarm();
+    assert_eq!(seen, 2, "the log is held, its audit events are not: stored");
+    assert!(anchored(&h, NegSet::EndedJobs, &jobs[1]));
+    let (_, _, audit_seq, _) = heads(&g);
+    let stored = encompute_control::anchor::Anchor::open(
+        Box::new(encompute_control::anchor::DirAnchor::new(dir.clone()).unwrap()),
+        &encompute_verification::ServiceSigner::from_seed("control-plane", &seed).unwrap(),
+    )
+    .unwrap()
+    .0
+    .snapshot();
+    assert!(
+        stored.audit_seq >= audit_seq,
+        "{} < {audit_seq}",
+        stored.audit_seq
+    );
+}
+
+/// An anchor at the right position that is not the database's chain (a head
+/// the log does not hold, an audit root the chain does not hold) covers
+/// nothing: the checkpoint finds the chain does not hold the anchored head
+/// and refuses it as the rollback it is, returned at once (not retried, not
+/// success), whatever position the anchor claims.
+#[test]
+fn an_anchor_that_is_not_the_databases_chain_covers_nothing() {
+    let Some(g) = world() else { return };
+    let jobs = queued_jobs_for_one_release(&g, 3);
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let other = std::sync::Arc::new(g.t.env0.started());
+    let ev = &g.evaluator.service;
+    assert_eq!(start_on(&g.t, ev, &jobs[0]).0, 200);
+    let (dir, seed) = (g.t.env0.anchor_dir.clone(), g.t.env0.seed);
+
+    // The log head: the rival's checkpoint holds everything (positions
+    // reached), then its head is replaced by one the log does not hold.
+    cas.set_rival(std::sync::Arc::new({
+        let (other, dir) = (other.clone(), dir.clone());
+        move || {
+            other.control.checkpoint_log().unwrap();
+            update_anchor(&dir, &seed, |x| x.glog_head = "ab".repeat(32));
+        }
+    }));
+    cas.arm(1);
+    let (status, body) = start_on(&h, ev, &jobs[1]);
+    let seen = cas.seen();
+    cas.disarm();
+    assert!(status >= 400, "{body}");
+    assert_eq!(code(&body), "ENC2202", "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("GOVERNANCE LOG STATE ROLLBACK"),
+        "{body}"
+    );
+    assert_eq!(seen, 1, "the retry never reached a store");
+    assert_eq!(g.state(&jobs[1]), "failed", "the committed refusal stands");
+    // (The lost compare-and-set before it was retried once; the rollback
+    // refusal was not.)
+    assert_eq!((counter(&h, RETRIES), counter(&h, EXHAUSTED)), (1, 0));
+}
+
+#[test]
+fn an_audit_root_the_chain_does_not_hold_covers_nothing() {
+    let Some(g) = world() else { return };
+    let jobs = queued_jobs_for_one_release(&g, 2);
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let other = std::sync::Arc::new(g.t.env0.started());
+    let ev = &g.evaluator.service;
+    assert_eq!(start_on(&g.t, ev, &jobs[0]).0, 200);
+    let (dir, seed) = (g.t.env0.anchor_dir.clone(), g.t.env0.seed);
+    cas.set_rival(std::sync::Arc::new({
+        let (other, dir) = (other.clone(), dir.clone());
+        move || {
+            other.control.checkpoint_log().unwrap();
+            update_anchor(&dir, &seed, |x| x.audit_root = "cd".repeat(32));
+        }
+    }));
+    cas.arm(1);
+    let (status, body) = start_on(&h, ev, &jobs[1]);
+    let seen = cas.seen();
+    cas.disarm();
+    assert!(status >= 400, "{body}");
+    assert_eq!(code(&body), "ENC2202", "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("AUDIT STATE ROLLBACK"),
+        "{body}"
+    );
+    assert_eq!(seen, 1);
+    assert_eq!(g.state(&jobs[1]), "failed");
+    assert_eq!((counter(&h, RETRIES), counter(&h, EXHAUSTED)), (1, 0));
+}
+
+/// The real failure: another control plane keeps winning the anchor's
+/// compare-and-set (it is busy writing events and checkpointing), and its
+/// checkpoints hold this start's refusal. Anchoring the log up to its
+/// current head chases a head that moves under every attempt and never
+/// catches up; the refusal needs the anchor to hold its own event, which
+/// it already does after the first lost compare-and-set.
+#[test]
+fn a_refusal_a_busy_rival_anchors_is_not_starved_by_the_rival() {
+    let Some(g) = world() else { return };
+    let (j1, j2) = two_jobs_for_one_release(&g);
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let other = std::sync::Arc::new(g.t.env0.started());
+    let ev = &g.evaluator.service;
+    assert_eq!(start_on(&g.t, ev, &j1).0, 200);
+    let (dir, seed) = (g.t.env0.anchor_dir.clone(), g.t.env0.seed);
+    // Before every compare-and-set of the loser, the rival checkpoints the
+    // log (the refusal in it), writes a newer event of its own and moves
+    // the anchor on once more.
+    let rival = {
+        let other = other.clone();
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        move || {
+            other.control.checkpoint_log().unwrap();
+            let (other, i) = (other.clone(), n.fetch_add(1, Ordering::SeqCst));
+            // (On a thread of its own: another process's.)
+            std::thread::spawn(move || {
+                other
+                    .control
+                    .db
+                    .tx(|t| {
+                        encompute_control::govlog::append(
+                            t,
+                            encompute_control::govlog::Draft::new(
+                                encompute_trust::govlog::Partition::Platform,
+                                encompute_control::govlog::kind::ROLE_REMOVED,
+                                &format!("rival_subject_{i}"),
+                            ),
+                        )
+                        .map(|_| ())
+                    })
+                    .unwrap();
+            })
+            .join()
+            .unwrap();
+            move_anchor(&dir, &seed);
+        }
+    };
+    let rival = std::sync::Arc::new(rival);
+    cas.set_rival_always(rival);
+    cas.arm(u32::MAX);
+    let r = start_on(&h, ev, &j2);
+    let seen = cas.seen();
+    cas.disarm();
+    refused(r, "ENC2201");
+    assert_eq!(seen, 1, "the retry found the refusal anchored");
+    assert_eq!((counter(&h, RETRIES), counter(&h, EXHAUSTED)), (1, 0));
+    assert!(anchored(&h, NegSet::EndedJobs, &j2));
+    cap_held(&g, &[j1, j2], 1);
+}
+
+#[test]
+fn two_starts_meeting_at_the_anchor_reserve_once_and_both_get_their_answer() {
+    let Some(g) = world() else { return };
+    let (j1, j2) = two_jobs_for_one_release(&g);
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let other = std::sync::Arc::new(g.t.env0.started());
+    let ev = g.evaluator.service.clone();
+    // The first start commits its reservation; at its compare-and-set,
+    // the second start (another control plane) runs through: it finds the
+    // reservation (row locks), is refused on the cap and anchors its
+    // refusal, which moves the anchor under the first.
+    let second: std::sync::Arc<std::sync::Mutex<Option<(u16, Value)>>> = Default::default();
+    cas.set_rival(std::sync::Arc::new({
+        let (other, ev, second, j2) = (other.clone(), ev.clone(), second.clone(), j2.clone());
+        move || {
+            *second.lock().unwrap() = Some(start_on(&other, &ev, &j2));
+        }
+    }));
+    cas.arm(1);
+    let first = start_on(&h, &ev, &j1);
+    cas.disarm();
+    assert_eq!(first.0, 200, "{}", first.1);
+    refused(
+        second.lock().unwrap().take().expect("the rival ran"),
+        "ENC2201",
+    );
+    // The first lost the compare-and-set once and anchored again; the
+    // refusal it met was not its to retry.
+    assert_eq!(counter(&h, RETRIES), 1);
+    assert_eq!(counter(&h, EXHAUSTED), 0);
+    assert_eq!(counter(&other, RETRIES), 0);
+    assert!(anchored(&other, NegSet::EndedJobs, &j2));
+    // The reservation of the first is anchored too: the floors hold both
+    // ledgers' latest checkpoints.
+    cap_held(&g, &[j1, j2], 1);
+    for r in [&g.a, &g.b] {
+        let key = format!("population:{}", r.population);
+        let cp = g.pop_ledger(r).checkpoint().unwrap();
+        assert_eq!(floor(&g, &key), Some((cp.seq, cp.root)));
+    }
+}
+
+#[test]
+fn an_anchor_that_never_settles_refuses_after_the_bound_and_leaves_the_refusal_to_anchor() {
+    let Some(g) = world() else { return };
+    let jobs = queued_jobs_for_one_release(&g, 3);
+    let (j1, j2, j3) = (jobs[0].clone(), jobs[1].clone(), jobs[2].clone());
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let ev = &g.evaluator.service;
+    assert_eq!(start_on(&g.t, ev, &j1).0, 200);
+    // Every compare-and-set of the second start loses.
+    cas.arm(u32::MAX);
+    let (status, body) = start_on(&h, ev, &j2);
+    let seen = cas.seen();
+    cas.disarm();
+    assert!(status >= 400, "{body}");
+    // ENC2202 as before, the anchor conflict (not a rollback refusal),
+    // after exactly the bound of attempts: no more, no loop.
+    assert_eq!(code(&body), "ENC2202", "{body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(message.contains("changed concurrently"), "{body}");
+    assert!(!message.contains("STATE ROLLBACK"), "{body}");
+    assert_eq!(seen, encompute_control::anchor::ANCHOR_CAS_ATTEMPTS);
+    assert_eq!(counter(&h, RETRIES), u64::from(seen) - 1);
+    assert_eq!(counter(&h, EXHAUSTED), 1);
+    // What the start committed stands, as it always did (a refusal on the
+    // cap: failed, nothing reserved, written once), and is not anchored yet;
+    // the obligation stays on this thread, so the next anchored call
+    // settles it.
+    assert_eq!(g.state(&j2), "failed");
+    assert!(!anchored(&h, NegSet::EndedJobs, &j2));
+    assert_eq!(refusal_events(&g, &j2), (1, 1));
+    assert!(encompute_control::govlog::RETRY_CHECKPOINT.with(|d| d.get()));
+    cap_held(&g, &jobs, 1);
+    // The next anchored call on the thread (another refused start)
+    // anchors both.
+    refused(start_on(&h, ev, &j3), "ENC2201");
+    assert!(!encompute_control::govlog::RETRY_CHECKPOINT.with(|d| d.get()));
+    assert!(anchored(&h, NegSet::EndedJobs, &j2));
+    assert!(anchored(&h, NegSet::EndedJobs, &j3));
+    assert_eq!(counter(&h, EXHAUSTED), 1);
+}
+
+/// A start whose retried anchoring then fails (the anchor store went away
+/// after the lost compare-and-set) has committed its reservation: the
+/// evaluator's retry of the start anchors it and is acknowledged, reserving
+/// nothing twice (the crash window between the commit and the anchoring, on
+/// the retry path).
+#[test]
+fn a_start_whose_retried_anchoring_failed_is_finished_by_the_evaluators_retry() {
+    let Some(g) = world() else { return };
+    let (j1, j2) = two_jobs_for_one_release(&g);
+    let (h, cas) = g.t.env0.start_cas_hook();
+    let ev = &g.evaluator.service;
+    // The first attempt loses the compare-and-set, the retry finds the
+    // store unavailable.
+    cas.arm(1);
+    cas.fail_on(2);
+    let (status, body) = start_on(&h, ev, &j1);
+    cas.disarm();
+    assert!(status >= 400, "{body}");
+    assert!(
+        body["message"].as_str().unwrap().contains("unavailable"),
+        "{body}"
+    );
+    // Committed (running, its reservations in both regions), not anchored.
+    assert_eq!(g.state(&j1), "running");
+    cap_held(&g, &[j1.clone(), j2], 1);
+    // The evaluator's retry anchors it and is acknowledged.
+    let again = start_on(&h, ev, &j1);
+    assert_eq!(again.0, 200, "{}", again.1);
+    for r in [&g.a, &g.b] {
+        let key = format!("population:{}", r.population);
+        let cp = g.pop_ledger(r).checkpoint().unwrap();
+        assert_eq!(floor(&g, &key), Some((cp.seq, cp.root)));
+    }
+}
+
+#[test]
+fn many_concurrent_starts_across_two_control_planes_reserve_exactly_what_fits() {
+    let Some(g) = world() else { return };
+    let _ = (g.scope(&g.a, "1.0", None), g.scope(&g.b, "1.0", None));
+    // Eight jobs of one program, scheduled before any starts; the
+    // population affords four of them (a fifth would pass its cap).
+    let second = evaluator(
+        &g.t,
+        &g.platform,
+        "evaluator-2",
+        &["openfhe", "openfhe-exact"],
+        &["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"],
+        4,
+    );
+    let (v, prog) = g.week("2027-w01", DP);
+    let mut jobs = vec![];
+    for i in 0..8 {
+        let (s, j) = g.job(&v, &prog, &format!("k{i}"));
+        assert_eq!(s, 201, "{j}");
+        assert_eq!(g.state(&id(&j)), "queued", "{j}");
+        jobs.push(id(&j));
+    }
+    let evaluators = [&g.evaluator, &second];
+    let who: Vec<&As> = jobs
+        .iter()
+        .map(|job| {
+            let mut c = g.t.control.db.conn().unwrap();
+            let e: String = c
+                .query_one("SELECT evaluator_id FROM jobs WHERE id = $1", &[job])
+                .unwrap()
+                .get(0);
+            &evaluators.iter().find(|x| x.id == e).unwrap().service
+        })
+        .collect();
+    let (h, _) = g.t.env0.start_cas_hook();
+    let barrier = std::sync::Barrier::new(jobs.len());
+    let results: Vec<(u16, Value)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = jobs
+            .iter()
+            .enumerate()
+            .map(|(i, job)| {
+                let (g, h, who, barrier) = (&g, &h, &who, &barrier);
+                sc.spawn(move || {
+                    let t = if i % 2 == 0 { &g.t } else { h };
+                    barrier.wait();
+                    start_on(t, who[i], job)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    // Exactly what fits reserved, whatever the callers were told.
+    let exhausted = counter(&g.t, EXHAUSTED) + counter(&h, EXHAUSTED);
+    let retries = counter(&g.t, RETRIES) + counter(&h, RETRIES);
+    let started = results.iter().filter(|(s, _)| *s == 200).count();
+    let cap = results.iter().filter(|(_, r)| code(r) == "ENC2201").count();
+    let unsettled = results.iter().filter(|(_, r)| code(r) == "ENC2202").count();
+    eprintln!("many starts: started {started}, refused on the cap {cap}, anchor unsettled {unsettled} (exhausted {exhausted}), anchor retries {retries}");
+    assert_eq!(started + cap + unsettled, 8, "{results:?}");
+    // An unsettled answer is only ever the exhausted bound, counted.
+    assert!(unsettled as u64 <= exhausted, "{results:?}");
+    cap_held(&g, &jobs, 4);
+    // Each refused job was refused on the cap, committed as failed.
+    for (job, (s, r)) in jobs.iter().zip(&results) {
+        if *s >= 400 && code(r) == "ENC2201" {
+            assert_eq!(g.state(job), "failed", "{r}");
+        }
     }
 }
 
