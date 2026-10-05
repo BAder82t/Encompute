@@ -6,6 +6,26 @@ Work toward confidential cross-agency computation
 ([docs/public-sector.md](docs/public-sector.md)). None of it is part of
 0.3.
 
+- **Concurrent job starts are no longer refused because of an anchor
+  race (bug fix).** A start decides under row locks and commits, then
+  anchors the result. When another control plane stored the state anchor
+  first, the update was attempted four times without a pause and, if it
+  lost them all, the call returned ENC2202 ("the state anchor changed
+  concurrently") instead of the decision it had committed, for example the
+  refusal on the population cap (ENC2201). That was fail-closed (the cap
+  was never exceeded) but a spurious refusal of an ordinary concurrent
+  start: 5 of 40 runs of a four-start test across two control planes. The
+  anchor conflict is now a typed condition (never confused with the
+  rollback refusals that share ENC2202, which are never retried) and is
+  retried at most three times in all, one bound that also covers a mirror
+  segment written concurrently, each time from the stored anchor read and
+  verified again; a refusal that another control plane's checkpoint
+  already anchored needs no second store. Nothing is reserved or audited
+  again: the cap, enforced by the row locks before any anchoring, is
+  unchanged, and after three lost attempts ENC2202 is returned as before.
+  New metrics `encompute_anchor_cas_retry_total` and
+  `encompute_anchor_cas_retry_exhausted_total` and log lines
+  `anchor_cas_retry` and `anchor_cas_exhausted`. INV-252.
 - **Governance log mirror: compaction and batched recovery.** The mirror
   in the anchor store can be compacted into an archive the state anchor's
   seal commits to (`encompute-control compact-governance-mirror`,

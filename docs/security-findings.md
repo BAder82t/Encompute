@@ -337,6 +337,35 @@ ship with the release that merges it.
   the two never meet. Test:
   `crates/encompute-openfhe-client/tests/key_tags.rs::another_clients_keys_under_the_victims_tag_are_never_used`;
   INV-171 (extended).
+- **Concurrent starts were refused with a spurious ENC2202** (a
+  correctness finding, not an exposure: fail-closed). A governed job's
+  start decides under row locks and commits, then anchors its result. When
+  another control plane stored the state anchor first, the update was
+  attempted four times without a pause; a start that lost them all returned
+  ENC2202 ("the state anchor changed concurrently") in place of the
+  decision it had committed (typically the refusal on the population cap,
+  ENC2201, with the job failed). The privacy cap was never exceeded: it is
+  enforced by the row locks before any anchoring, and the committed
+  refusal is kept and anchored by the next checkpoint. Measured on the
+  unmodified tree: 5 failures in 40 runs of
+  `concurrent_starts_never_exceed_the_population`, every one the deny
+  checkpoint of a refused start (`tx_anchored`, `checkpoint_log`, four
+  attempts lost). Now the conflict is a typed condition, never confused
+  with the rollback refusals that share ENC2202 (those are never retried),
+  and is attempted at most three times in all, each from the stored anchor
+  read and verified again (one bound, also covering a mirror segment
+  written concurrently); a deny another control plane's checkpoint
+  already anchored (the anchor has reached the log's head and the audit
+  chain's head as they were right after the commit, and the database's own
+  chains hold the anchored head and root) needs no second store, so a start
+  does not chase a log other writers keep extending; the retries and the exhausted case are counted
+  and logged. Tests:
+  `crates/encompute-control/tests/privacy_scopes.rs::a_refusal_a_busy_rival_anchors_is_not_starved_by_the_rival`
+  (fails against the old retry: ENC2202),
+  `an_anchor_that_never_settles_refuses_after_the_bound_and_leaves_the_refusal_to_anchor`,
+  `many_concurrent_starts_across_two_control_planes_reserve_exactly_what_fits`,
+  `crates/encompute-control/src/anchor.rs::a_rollback_refusal_or_any_other_failure_is_never_retried`;
+  INV-252.
 
 ### Open (accepted / needs design)
 

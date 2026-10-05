@@ -159,9 +159,19 @@ Related: [support matrix](docs/support-matrix.md),
   unless `ENCOMPUTE_METRICS_PUBLIC=true`. Scrapers set up for rc.3 need
   the token.
 - **One control-plane process per state anchor.** A lost compare-and-set
-  reloads and retries, but replicas sharing one anchor are not supported.
-  The anchor is rewritten on each update (it is constant in size: a few
-  hundred bytes).
+  reloads and retries (three attempts in all, each recomputed from the
+  stored anchor, counted in `encompute_anchor_cas_retry_total`), but
+  replicas sharing one anchor are not supported. The anchor is rewritten
+  on each update (it is constant in size: a few hundred bytes). Before this
+  release a start that lost four attempts in a row to another control
+  plane was refused with ENC2202 although its decision (a refusal on the
+  privacy cap, say) had been committed: fail-closed but a spurious
+  refusal of an ordinary concurrent start, measured in 5 of 40 runs of a
+  four-start test with two control planes. Under heavy contention (eight
+  simultaneous starts on two control planes) an update can still lose all
+  three attempts: the call returns ENC2202 (`encompute_anchor_cas_retry_exhausted_total`),
+  the decision stays committed, the cap is unchanged, and the evaluator's
+  retry of the start (or the next checkpoint) anchors it.
 - **A job's sources are declarations, not data.** The control plane never
   sees inputs, so it cannot tell which data a client actually encrypts. It
   derives a job's sources from what its program declares: the purpose, and

@@ -1267,6 +1267,16 @@ Every refusal is ENC2605.
     the time each rewrite takes (`encompute_mirror_write_seconds`);
   - service accounts still holding `security_admin`
     (`encompute_legacy_service_admins`, a gauge that should be 0);
+  - contention on the state anchor: updates that lost the anchor's
+    compare-and-set to another control plane (or found a mirror segment
+    written meanwhile) and were attempted again from the stored anchor
+    (`encompute_anchor_cas_retry_total`, a counter; a few under concurrent
+    load are normal), and updates that lost it on all three attempts and
+    were refused with ENC2202 (`encompute_anchor_cas_retry_exhausted_total`,
+    which should stay 0: it also logs an `anchor_cas_exhausted` line; each
+    retry logs `anchor_cas_retry`). A start's decision is committed before
+    it is anchored, so an exhausted start returns ENC2202 with its decision
+    kept and anchored by the next checkpoint, or by the evaluator's retry;
   - the size of the signed state anchor in bytes
     (`encompute_anchor_bytes`, a gauge). It is constant: security-negative
     transitions and privacy ledger checkpoints are governance log events,
