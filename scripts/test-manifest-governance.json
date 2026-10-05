@@ -3,7 +3,7 @@
   "extends": "test-manifest.json",
   "comment": "The governance branch's full run: main's manifest (extends) with every minimum raised to what this tree measured, the suites it adds, and the runs that are not cargo test (the assurance report, the governance attack suite, the backup drill, the public-sector examples; read by marker and count lines). A minimum can only go up here, and a lower number anywhere is a test removed: reviewed. Run it with scripts/test-governance-full.sh.",
   "runs": [
-    {"id": "control-plane", "min_tests": 650, "min_db_backed": 430, "allowed_skips": [{"match": "spend_latency", "reason": "a latency benchmark run by hand: cargo test --release -p encompute-control --test spend_latency -- --ignored --nocapture"}, {"match": "the_previous_release_refuses_a_sealed_anchor", "reason": "needs the previous release's binary: ENCOMPUTE_OLD_CONTROL_BIN=... cargo test --release -p encompute-control --test mirror_compaction -- --ignored --nocapture the_previous_release"}, {"match": "load_100k_events_heavy", "reason": "the governance log load test above 100,000 events (minutes) run by hand: cargo test --release -p encompute-control --test governance_scale -- --ignored --nocapture load_100k_events_heavy"}]},
+    {"id": "control-plane", "min_tests": 674, "min_db_backed": 430, "allowed_skips": [{"match": "spend_latency", "reason": "a latency benchmark run by hand: cargo test --release -p encompute-control --test spend_latency -- --ignored --nocapture"}, {"match": "the_previous_release_refuses_a_sealed_anchor", "reason": "needs the previous release's binary: ENCOMPUTE_OLD_CONTROL_BIN=... cargo test --release -p encompute-control --test mirror_compaction -- --ignored --nocapture the_previous_release"}, {"match": "load_100k_events_heavy", "reason": "the governance log load test above 100,000 events (minutes) run by hand: cargo test --release -p encompute-control --test governance_scale -- --ignored --nocapture load_100k_events_heavy"}]},
     {"id": "cli", "min_tests": 62},
     {"id": "workspace-rest", "min_tests": 607},
     {"id": "assurance", "command": ["bash", "-c", "cargo build -q --release -p encompute-assurance --bins --examples && target/release/assurance-report"], "parser": "lines", "needs": ["openfhe"], "min_tests": 18},
@@ -17,6 +17,7 @@
     {"name": "encompute-keybroker/grant_pinning", "min_tests": 5},
     {"name": "encompute-keybroker/lib", "min_tests": 5},
     {"name": "encompute-keybroker/root_keys", "min_tests": 5},
+    {"name": "encompute-keybroker/provider_tls", "min_tests": 2},
     {"name": "encompute-cli/bin:encompute", "min_tests": 7},
     {"name": "encompute-cli/jobs_run", "min_tests": 5},
     {"name": "encompute-cli/keys_lifecycle", "min_tests": 8},
