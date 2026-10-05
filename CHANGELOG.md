@@ -6,6 +6,12 @@ Work toward confidential cross-agency computation
 ([docs/public-sector.md](docs/public-sector.md)). None of it is part of
 0.3.
 
+- A job submission that leaves the job `authorized` (it was not placed on an
+  evaluator) now says why in the control plane's log: `schedule_no_candidate`
+  (no ready evaluator fits the job: the backend, the profile and the count of
+  ready evaluators are logged) and `schedule_failed` (the scheduling step
+  returned an error). The API answers as before: the job is returned in the
+  state it is in. Before, both outcomes were silent.
 - **Concurrent job starts are no longer refused because of an anchor
   race (bug fix).** A start decides under row locks and commits, then
   anchors the result. When another control plane stored the state anchor

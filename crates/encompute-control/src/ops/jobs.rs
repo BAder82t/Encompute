@@ -876,7 +876,7 @@ impl Control {
                 other => {
                     if let Ok((ref v, true)) = other {
                         let id = v["id"].as_str().unwrap_or_default().to_owned();
-                        let _ = self.schedule_job(&id);
+                        self.schedule_after(&id);
                         return Ok((self.job_view(ctx, &id)?, true));
                     }
                     return other;
@@ -2501,7 +2501,7 @@ impl Control {
             self.checkpoint_log()?;
         }
         out?;
-        let _ = self.schedule_job(id);
+        self.schedule_after(id);
         self.job_view(ctx, id)
     }
 
@@ -2668,6 +2668,20 @@ impl Control {
         Ok(())
     }
 
+    /// Schedules a job that was just submitted or approved, for callers that
+    /// answer with the job as it stands (its state says whether it was
+    /// placed): an error is not returned to them, but it is logged, so a job
+    /// left authorized without a reason can be diagnosed.
+    fn schedule_after(&self, id: &str) {
+        if let Err(e) = self.schedule_job(id) {
+            LogLine::new(&self.service_id, "schedule_failed")
+                .field("job", id)
+                .field("code", e.code)
+                .field("error", &e.message)
+                .emit();
+        }
+    }
+
     /// Schedules one authorized job: only an evaluator that registered the
     /// job's backend and parameter profile, is ready, heard from recently,
     /// and has capacity. Among those, the one with the lowest estimated
@@ -2769,6 +2783,15 @@ impl Control {
                 })
                 .min()
             else {
+                // Nothing to place it on: logged, because the caller of a job
+                // submission is not told (it sees the job still authorized).
+                LogLine::new(&self.service_id, "schedule_no_candidate")
+                    .field("job", id)
+                    .field("backend", &j.backend)
+                    .field("profile", &j.profile)
+                    .field("ready_evaluators", candidates.len())
+                    .field("governed", governed.is_some())
+                    .emit();
                 return Ok((false, false));
             };
             let t0 = now();
