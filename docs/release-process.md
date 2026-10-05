@@ -173,6 +173,22 @@ the migrations and the bootstrap work. Changing a minimum in
 proves the runner fails on a dead PostgreSQL or OpenBao, an empty, skipped or
 short suite and a smaller total (CI runs it).
 
+The runner also records which code it tested. Before it writes anything it
+reads, from Git itself, the commit (`git rev-parse HEAD`), the tree
+(`git rev-parse HEAD^{tree}`) and whether the checkout is clean
+(`git status --porcelain`: a modified tracked file or an untracked file counts;
+ignored paths do not), and the summary JSON carries `git_commit`, `git_tree`,
+`git_clean_start` and `git_clean_end` (sampled again when the suites are done,
+before the summary is written). The start values are the authoritative ones.
+With `--release` a dirty checkout, or Git metadata that cannot be read or is not
+a full object id, stops the run before any suite and is never recorded as
+ambiguous provenance; a run that moves the commit or leaves the checkout dirty
+fails. A run without `--release` records and warns instead. The branch name is
+deliberately not recorded: branches move, the commit and tree do not. Evidence
+for a release is a summary whose `git_commit` and `git_tree` are those of the
+commit being released. `--repo DIR` names the checkout to read (used by the
+self-test, which runs the real runner against a throwaway repository).
+
 Reported rows (a FAIL fails the check, a SKIP does not): fine-tuning E2E,
 examples, enterprise E2E, Compose deployment, build pins, reproducibility
 (`--repro`), TFHE-rs research, the Confidential Space image, and the live

@@ -170,6 +170,68 @@ out="$(scripts/test-full.sh --release --mode template 2>&1)"; code=$?
 if [ $code -ne 0 ] && echo "$out" | tail -n 1 | grep -qx "FULL TEST FAILED"; then echo "PASS  --release refuses template databases"
 else echo "FAIL  --release with template (exit $code)"; fails=$((fails + 1)); fi
 
+# Provenance: the summary records the exact commit and tree the run started on,
+# and a release run refuses a dirty or unreadable checkout before any suite.
+# Real runner, throwaway repository, fixture suites.
+R="$W/repo"; mkdir -p "$R"
+git -C "$R" init -q && git -C "$R" config user.email selftest@example.invalid && git -C "$R" config user.name selftest
+echo one > "$R/tracked.txt"; git -C "$R" add tracked.txt && git -C "$R" commit -q -m selftest
+jget() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1]))[sys.argv[2]]; print("null" if v is None else str(v).lower() if isinstance(v,bool) else v)' "$1" "$2"; }
+{ section a 5; } > "$W/out.txt"
+cat > "$W/pm.json" <<JSON
+{"manifest_version": 1,
+ "runs": [{"id": "r", "command": ["bash", "-c", "touch $W/ran; cat $W/out.txt"], "min_tests": 5}],
+ "suites": [$(suite s/a a 5)]}
+JSON
+prov_case() {  # prov_case NAME WANT_EXIT(0|1) EXPECT_RAN(yes|no) PATTERN... -- RUNNER_ARGS...
+  local name="$1" want="$2" ran="$3"; shift 3
+  local pats=(); while [ "$1" != "--" ]; do pats+=("$1"); shift; done; shift
+  rm -f "$W/ran" "$W/s.json"
+  local out code ok=1
+  out="$(scripts/test-full.sh --manifest "$W/pm.json" --json "$W/s.json" "$@" 2>&1)"; code=$?
+  if [ "$want" = 1 ]; then [ $code -ne 0 ] || ok=0; echo "$out" | grep -qx "FULL TEST FAILED" || ok=0
+  else [ $code -eq 0 ] || ok=0; echo "$out" | grep -qx "FULL TEST PASSED" || ok=0; fi
+  if [ "$ran" = yes ]; then [ -f "$W/ran" ] || ok=0; else [ ! -f "$W/ran" ] || ok=0; fi
+  for pat in "${pats[@]}"; do echo "$out" | grep -qE -- "$pat" || { ok=0; echo "    missing: $pat"; }; done
+  if [ $ok = 1 ]; then echo "PASS  $name"; else echo "FAIL  $name (exit $code, suites ran: $([ -f "$W/ran" ] && echo yes || echo no))"; echo "$out" | sed 's/^/    | /'; fails=$((fails + 1)); fi
+}
+json_is() {  # json_is NAME KEY VALUE
+  local got; got="$(jget "$W/s.json" "$2" 2>&1)"
+  if [ "$got" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: $2 is '$got', wanted '$3'"; fails=$((fails + 1)); fi
+}
+
+prov_case "a clean checkout is recorded and the run passes" 0 yes "commit [0-9a-f]{40}  tree [0-9a-f]{40}  clean" -- --repo "$R"
+json_is "the summary records the commit Git reports" git_commit "$(git -C "$R" rev-parse HEAD)"
+json_is "the summary records the tree Git reports" git_tree "$(git -C "$R" rev-parse 'HEAD^{tree}')"
+json_is "a clean start is recorded as clean" git_clean_start true
+json_is "a clean end is recorded as clean" git_clean_end true
+
+echo two >> "$R/tracked.txt"
+prov_case "a modified tracked file is recorded as not clean (development run)" 0 yes "WARNING: the checkout is not clean" -- --repo "$R"
+json_is "a tracked modification gives git_clean_start false" git_clean_start false
+git -C "$R" checkout -q -- tracked.txt
+
+echo x > "$R/untracked.txt"
+prov_case "an untracked file is recorded as not clean (development run)" 0 yes "WARNING: the checkout is not clean" -- --repo "$R"
+json_is "an untracked file gives git_clean_start false" git_clean_start false
+prov_case "a release run refuses a dirty start before any suite runs" 1 no "DIRTY CHECKOUT" "untracked.txt" -- --release --repo "$R"
+rm -f "$R/untracked.txt"
+
+mkdir -p "$W/notgit"
+prov_case "a release run refuses unavailable git metadata before any suite runs" 1 no "PROVENANCE UNAVAILABLE" -- --release --repo "$W/notgit"
+prov_case "a development run without git metadata records none and says so" 0 yes "WARNING: no git provenance" -- --repo "$W/notgit"
+json_is "unavailable metadata is recorded as null, never guessed" git_commit null
+
+cat > "$W/pm.json" <<JSON
+{"manifest_version": 1,
+ "runs": [{"id": "r", "command": ["bash", "-c", "touch $W/ran; echo changed >> $R/tracked.txt; cat $W/out.txt"], "min_tests": 5}],
+ "suites": [$(suite s/a a 5)]}
+JSON
+prov_case "a release run that leaves the checkout dirty fails" 1 yes "left the checkout dirty" -- --release --repo "$R"
+json_is "the dirty end is recorded" git_clean_end false
+git -C "$R" checkout -q -- tracked.txt
+
+
 echo
 if [ $fails -eq 0 ]; then echo "SELFTEST PASSED"; else echo "SELFTEST FAILED: $fails case(s)"; fi
 exit $((fails > 0))

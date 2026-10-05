@@ -37,6 +37,29 @@ ORDER = ["postgres", "openbao", "tls-postgres", "openfhe", "migrations", "tfhe",
 # --- Dependencies ----------------------------------------------------------------
 
 
+def git_sample(repo):
+    """The commit, tree and working-tree state of `repo`, read from Git itself
+    (`rev-parse HEAD`, `rev-parse HEAD^{tree}`, `status --porcelain`: tracked
+    changes and untracked files both count; ignored paths do not). Returns
+    (sample, None), or (None, why) when Git cannot say or says something that is
+    not a full object id: provenance is never guessed."""
+    def git(*args):
+        p = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60)
+        if p.returncode != 0:
+            raise OSError("git %s: %s" % (" ".join(args), (p.stderr or p.stdout).strip() or "exit %d" % p.returncode))
+        return p.stdout
+    try:
+        commit = git("rev-parse", "HEAD").strip()
+        tree = git("rev-parse", "HEAD^{tree}").strip()
+        dirty = [l for l in git("status", "--porcelain").splitlines() if l.strip()]
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, str(e)
+    for what, v in (("commit", commit), ("tree", tree)):
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v):
+            return None, "git printed %r as the %s, not a full object id" % (v, what)
+    return {"commit": commit, "tree": tree, "dirty": dirty}, None
+
+
 def tcp_reachable(url, default_port):
     u = urlparse(url)
     host, port = u.hostname, u.port or default_port
@@ -322,6 +345,8 @@ def main():
     ap.add_argument("--json", help="the machine-readable summary (default target/test-full/summary.json)")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--no-nocapture", action="store_true", help="do not pass --nocapture to cargo")
+    ap.add_argument("--repo", default=str(ROOT),
+                    help="the checkout whose Git commit and tree the summary records (default: this repository)")
     a = ap.parse_args()
 
     def fail(msg):
@@ -358,6 +383,23 @@ def main():
         print("total minimum: %d" % total_min)
         return
 
+    # Provenance first, before the runner writes anything: what is tested is
+    # this commit and tree, and only if the checkout is clean at the start. With
+    # --release a dirty or unreadable checkout stops the run before any suite;
+    # otherwise it is recorded and warned about.
+    git_start, git_why = git_sample(a.repo)
+    if git_start is None:
+        if a.release:
+            fail("PROVENANCE UNAVAILABLE: %s\nA release run records the exact commit and tree it tested." % git_why)
+        print("WARNING: no git provenance (%s); the summary records none" % git_why)
+    elif git_start["dirty"]:
+        shown = "\n".join("    " + l for l in git_start["dirty"][:10])
+        more = "" if len(git_start["dirty"]) <= 10 else "\n    ... %d more" % (len(git_start["dirty"]) - 10)
+        if a.release:
+            fail("DIRTY CHECKOUT: %d path(s) differ from commit %s:\n%s%s\nA release run tests a clean, committed tree."
+                 % (len(git_start["dirty"]), git_start["commit"][:12], shown, more))
+        print("WARNING: the checkout is not clean (%d path(s)); the summary records git_clean_start: false" % len(git_start["dirty"]))
+
     env = dict(os.environ)
     env["ENCOMPUTE_REQUIRE_SERVICES"] = "1"
     env["ENCOMPUTE_TEST_DB_MODE"] = a.mode
@@ -369,6 +411,9 @@ def main():
 
     manifest_rel = os.path.relpath(a.manifest, ROOT) if str(a.manifest).startswith(str(ROOT)) else a.manifest
     print("FULL TEST RUN  manifest %s  databases: %s" % (manifest_rel, a.mode))
+    if git_start:
+        print("  commit %s  tree %s  %s" % (git_start["commit"], git_start["tree"],
+                                           "clean" if not git_start["dirty"] else "NOT CLEAN"))
     if a.mode != "cold":
         print("  (template mode: fast development databases, not release evidence)")
     print()
@@ -537,6 +582,15 @@ def main():
     if not any(v[0] == "fail" for v in blocked.values()) and total < total_min:
         failures.append("total %d tests, the manifest's minimum is %d" % (total, total_min))
 
+    git_end, end_why = git_sample(a.repo)
+    if a.release and git_start is not None:
+        if git_end is None:
+            failures.append("provenance unavailable at the end of the run: %s" % end_why)
+        elif (git_end["commit"], git_end["tree"]) != (git_start["commit"], git_start["tree"]):
+            failures.append("the checkout moved during the run: %s -> %s" % (git_start["commit"][:12], git_end["commit"][:12]))
+        elif git_end["dirty"]:
+            failures.append("the run left the checkout dirty (%d path(s), first: %s)" % (len(git_end["dirty"]), git_end["dirty"][0]))
+
     print()
     print("Total tests: %d (minimum %d)" % (total, total_min))
     print("DB-backed test databases taken: %d" % exec_log_total)
@@ -550,6 +604,10 @@ def main():
     summary = {
         "manifest": manifest_rel,
         "manifest_sha256": hashlib.sha256(Path(a.manifest).read_bytes()).hexdigest(),
+        "git_commit": git_start["commit"] if git_start else None,
+        "git_tree": git_start["tree"] if git_start else None,
+        "git_clean_start": (not git_start["dirty"]) if git_start else None,
+        "git_clean_end": (not git_end["dirty"]) if git_end else None,
         "database_mode": a.mode,
         "duration_s": round(time.time() - t_start, 1),
         "precheck": {d: {"status": "PASS" if v[0] else "FAIL", "detail": v[1]} for d, v in pre.items()},
