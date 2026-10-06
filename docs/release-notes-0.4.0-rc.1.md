@@ -10,14 +10,17 @@ security review; one is planned before 0.4.0. The stable release remains
 
 Governed projects ([public-sector.md](public-sector.md)): organizations keep
 ownership and key control, authorize specific purposes, and receive evidence of
-what was authorized, computed and released.
+what was authorized, the execution claims made, and what was released
+(receipts are signed claims, not proofs of honest execution).
 
-- Governance keys, purposes, owner-signed authorizations with four-eyes
-  approval, immutable dataset versions, strict validity windows,
+- Governance keys, purposes, owner-signed authorizations with optional
+  per-job four-eyes approval, immutable dataset versions, strict validity windows,
   non-retroactive revocation.
 - Sovereign key custody and two-part key release: a key broker releases a key
   only for a signed authorization plus a short-lived, single-use release
-  ticket, so a compromised control plane can only deny.
+  ticket. A compromised control plane cannot by itself forge an owner
+  authorization or obtain a key for a purpose, program or release outside the
+  signed authorization; it can still deny service.
 - Release classes and forms, derived results with lineage, retention, auditor
   access.
 - A hash-chained governance log with per-project partitions, a constant-size
@@ -32,8 +35,10 @@ what was authorized, computed and released.
   reference production topology.
 
 Scale of the change over 0.3.0: 14 new database migrations (0005 to 0018),
-assurance invariants 150 to 179, 30 new `ENC27xx` error codes, no new crates
-and no new third-party packages.
+assurance invariants 150 to 179, 30 new `ENC27xx` error codes. `Cargo.lock` gains 19 third-party
+crates since 0.3.0 (native TLS and certificate handling: among them
+`tokio-postgres-rustls`, `tokio-rustls` and `x509-cert`; `rcgen` is for tests
+only); the SBOM lists exactly what ships.
 
 ## Other changes since 0.3.0
 

@@ -112,7 +112,7 @@ See [public-sector.md](public-sector.md).
 
 | Capability | State | Details |
 |---|---|---|
-| Governed projects, owner-signed authorizations, purposes, four eyes | Release candidate | Governance keys, one authorization per owner, purpose, program and dataset version, strict windows, non-retroactive revocation. |
+| Governed projects, owner-signed authorizations, purposes, optional per-job four eyes | Release candidate | Governance keys, one authorization per owner, purpose, program and dataset version, strict windows, non-retroactive revocation. |
 | Sovereign key custody and two-part key release | Release candidate | Each institution's keys stay at a key broker it registered; a broker releases only with the owner's signed authorization and a single-use ticket. Rollback guard through a generation mark in the owner's KMS (OpenBao Transit and KV tested; no other KMS). |
 | Release classes, derived results, retention, auditor | Release candidate | Compiler-checked release forms; derived results with lineage consent; deletion dates; a read-only auditor organization. |
 | Governance log, anchor, verifiable audit | Release candidate | Needs the control plane's state anchor outside the database's failure domain. |
