@@ -4,6 +4,7 @@
 
 | Release | Status | Security fixes |
 |---|---|---|
+| 0.4.0 release candidates (`0.4.0-rc.N`) | pre-release; governance functionality, not production-ready, no independent review yet | yes, on the latest candidate |
 | 0.3.x | current stable release. The independent review of 0.3.0-rc.3 reported findings that are fixed in 0.3.0, several only partly; the fixes themselves have not been independently reviewed. The review package is in [security-review/](security-review/) | yes |
 | 0.3.0 release candidates (`0.3.0-rc.N`) | historical; superseded by 0.3.0 | no: upgrade to 0.3.0 |
 | `main` | development | yes |

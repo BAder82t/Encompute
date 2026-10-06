@@ -1,17 +1,19 @@
 # Confidential cross-agency computation
 
-> **Status: in development after 0.3.0; not released.** Nothing on this
-> page is part of Encompute 0.3. It describes what is being designed and
-> built, so that institutions, reviewers and design partners can comment on
-> it. Features, names and formats may change before they ship. Where this
-> page says Encompute "refuses" or "checks" something, it describes the
-> design or unreleased code, not released behaviour. What is built so far
-> is listed under "Development status" below.
+> **Status: available in the 0.4.0 release-candidate line (`0.4.0-rc.1`).
+> This is pre-release functionality undergoing release validation. An
+> independent external security review is planned before 0.4.0; it is not yet
+> claimed production-ready.** It is
+> not part of the stable 0.3 release. Features, names and formats may still
+> change before 0.4.0. Parts of this page describe designs that are not
+> built; what is in the release candidate is listed under "Status in
+> 0.4.0-rc.1" below.
 
 Encompute lets public institutions compute across organizational
 boundaries without centralizing sensitive data. Each institution retains
 ownership and key control, authorizes specific purposes, and receives
-verifiable evidence of what was computed and released.
+signed, auditable evidence of what was authorized, the execution claims
+made, and what was released.
 
 In short: compute across institutions without pooling sensitive records.
 
@@ -90,7 +92,7 @@ on the existing confidential fine-tuning.
    source authorized. It becomes a new asset with its own lineage and
    release rules.
 7. Anyone holding the institutions' public keys can check the evidence:
-   what was computed, over which versions, under which authorizations and
+   the execution claims made, over which versions, under which authorizations and
    approvals, where, and what was released.
 
 Authorization windows are strict. Evidence from a computation that ran
@@ -207,19 +209,21 @@ Encompute will not be:
 - a full data catalog;
 - a user interface for every workflow.
 
-## Development status
+## Status in 0.4.0-rc.1
 
-Built on the development branch, not released:
+Included in the 0.4.0 release candidate (pre-release, not production-ready):
 
 - **Phase 1, governed projects and owner-signed authorizations.**
-  Governance keys, purposes, owner authorizations with four-eyes
-  approval, immutable dataset versions, strict validity windows and
+  Governance keys, purposes, owner authorizations (with optional
+  per-job four-eyes approval), immutable dataset versions, strict validity windows and
   non-retroactive revocation.
 - **Phase 2, sovereign keys and two-part key release.** Each
   institution's key broker releases a key only when it holds that
   institution's signed authorization and a short-lived, single-use
-  release ticket for the job; a ticket alone releases nothing, so a
-  compromised control plane can only deny. Governed projects always keep
+  release ticket for the job; a ticket alone releases nothing. A compromised
+  control plane cannot by itself forge an owner authorization or obtain a
+  key for a purpose, program or release outside the signed authorization;
+  it can still deny service. Governed projects always keep
   each source's key at a broker its own institution registered, never at
   a platform broker, and keys are bound to brokers one by one. The
   broker's own state cannot be rolled back to undo a revocation or reset

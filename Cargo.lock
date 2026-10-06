@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-analysis"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-ir",
  "encompute-verification",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-assurance"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "ed25519-dalek",
  "encompute-analysis",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-attestation"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "ed25519-dalek",
  "encompute-ir",
@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-backend"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-ckks",
  "encompute-ir",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-ckks"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-analysis",
  "encompute-ir",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-cli"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-control"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-evaluator"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-analysis",
  "encompute-attestation",
@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-exact"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-analysis",
  "encompute-backend",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-ir"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "proptest",
  "serde",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-keybroker"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-openfhe"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-openfhe-client"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-openfhe-exact"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-backend",
  "encompute-exact",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-planner"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-analysis",
  "encompute-ir",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-privacy"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "chacha20",
  "ed25519-dalek",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-protocol"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-ir",
  "proptest",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-py"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "ed25519-dalek",
  "encompute-backend",
@@ -1120,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-runtime"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "ed25519-dalek",
  "encompute-analysis",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-secagg"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "chacha20",
  "chacha20poly1305",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-tfhe"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-backend",
  "encompute-exact",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-tfhe-client"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-backend",
  "encompute-exact",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-training"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-trust"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "ed25519-dalek",
  "encompute-attestation",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-verification"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "ed25519-dalek",
  "encompute-ir",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "encompute-vfhe"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "encompute-backend",
  "encompute-exact",

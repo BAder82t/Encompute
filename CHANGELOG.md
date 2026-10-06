@@ -5,11 +5,15 @@
 > connection that is not `sslmode=verify-full`. See "BREAKING (production
 > mode)" in the second Unreleased section below before upgrading.
 
-## Unreleased (public-sector governance, not in 0.3)
+## 0.4.0-rc.1 — release candidate (public-sector governance)
 
-Work toward confidential cross-agency computation
-([docs/public-sector.md](docs/public-sector.md)). None of it is part of
-0.3.
+Governed cross-organization computation
+([docs/public-sector.md](docs/public-sector.md)). Pre-release: not claimed
+production-ready, and the new authorization, key, revocation and log surface
+has not had an independent security review. None of it is part of 0.3.
+The notes in the next section (production mode: native TLS) also ship in
+this release candidate. Release notes:
+[docs/release-notes-0.4.0-rc.1.md](docs/release-notes-0.4.0-rc.1.md).
 
 - A job submission that leaves the job `authorized` (it was not placed on an
   evaluator) now says why in the control plane's log: `schedule_no_candidate`
@@ -511,7 +515,7 @@ Work toward confidential cross-agency computation
   part), INV-245 (derived results), INV-246 (retention), INV-230
   (privacy scopes and populations) and INV-241 (aggregate mode); 167
   invariants.
-## Unreleased (production mode: native TLS and the reference topology)
+## 0.4.0-rc.1 — production mode: native TLS and the reference topology
 
 ### Third-party notices: two ported files were missing from THIRD_PARTY_NOTICES.md
 
