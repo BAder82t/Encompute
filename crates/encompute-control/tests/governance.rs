@@ -986,7 +986,9 @@ fn a_revoked_authorization_is_unusable_from_its_revocation_time_only() {
 fn version_4_databases_migrate_to_standard_projects() {
     // A migration test starts from an older schema in either database mode:
     // a template clone is already at the newest one.
-    let Some(url) = unmigrated_database() else { return };
+    let Some(url) = unmigrated_database() else {
+        return;
+    };
     let db = encompute_control::db::Db::connect(&url).unwrap();
     assert_eq!(db.migrate_to(4).unwrap(), 4);
     db.conn()
