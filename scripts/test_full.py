@@ -22,7 +22,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MANIFEST = ROOT / "scripts" / "test-manifest.json"
+# The governance manifest extends scripts/test-manifest.json with the suites, allowed
+# skips and minimums of the governed code paths, so it is the repository's manifest:
+# every caller that names no --manifest (CI, the release check) gets all of it.
+DEFAULT_MANIFEST = ROOT / "scripts" / "test-manifest-governance.json"
 LABELS = {
     "postgres": "PostgreSQL",
     "openbao": "OpenBao",

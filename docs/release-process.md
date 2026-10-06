@@ -173,8 +173,10 @@ the migrations and the bootstrap work. Changing a minimum in
 proves the runner fails on a dead PostgreSQL or OpenBao, an empty, skipped or
 short suite and a smaller total (CI runs it).
 
-The governance suites run the same way: `scripts/test-governance-full.sh`
-(`scripts/test-full.sh --release` on `scripts/test-manifest-governance.json`).
+The governance suites run the same way, and `scripts/test-manifest-governance.json`
+is the runner's default manifest, so a call that names none (CI, the release
+check) gets all of it; `scripts/test-governance-full.sh` is
+`scripts/test-full.sh --release` on it, with the TLS PostgreSQL provided.
 That manifest extends the main one (it can raise a minimum, never lower one)
 and adds the runs that are not `cargo test`, read by a marker line and a count
 of check lines: the assurance report, the governance attack suite, the backup

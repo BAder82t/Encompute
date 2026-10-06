@@ -47,7 +47,7 @@ Without those variables the service-backed tests skip and still "pass". A
 plain `cargo test` is for development: `ENCOMPUTE_REQUIRE_SERVICES=1` turns a
 skip into a failure, and `scripts/test-full.sh` goes further. It checks
 PostgreSQL, OpenBao, OpenFHE and the migrations first, runs the suites listed
-in `scripts/test-manifest.json`, and fails on a missing service, a skipped,
+in `scripts/test-manifest-governance.json` (which extends `scripts/test-manifest.json`), and fails on a missing service, a skipped,
 empty or failed required suite, or a test count below the recorded minimums
 (it prints `FULL TEST PASSED` or `FULL TEST FAILED` and writes a JSON summary to
 `target/test-full/summary.json`). Release gates use it.
