@@ -372,22 +372,23 @@ provided by a proxy in front of each service.
 The Compose deployment defines one default network with no segmentation
 and runs no TLS proxy. The evaluator's API has no caller authentication.
 With a control plane configured, running a job and uploading a program or
-keys need a job grant naming the program (for a program upload, checked
-before anything is compiled), the key lookup needs one too, and
-`/v1/info` lists only the program a presented grant names. Result fetches
-by job ID are open. Upload grants are reusable until
-they expire and are not bound to one client. The default key-upload limit
-is 4 GiB per request.
+keys need a grant: a job needs the job grant, an upload needs an upload
+grant (bound to the client that submitted the job, the program or key ID
+and the evaluator, and spent by one upload; a program upload is checked
+before anything is compiled), the key lookup needs one for exactly those
+keys, and `/v1/info` lists only the program a presented upload grant
+names. Result fetches by job ID are open. Spent grants are kept in memory
+on one node. The default key-upload limit is 4 GiB per request.
 
 **Questions.**
 
 1. What must a production deployment put in front of each service, and
    should the services refuse to start without it?
-2. Is the evaluator API (result fetch by job ID without a grant; reusable
-   upload grants) acceptable for a multi-tenant evaluator?
-   A client that knows another client's OpenFHE key tag can make that
-   client's key upload fail until its own keys are evicted; results are
-   never computed under the wrong keys. Is that residual acceptable?
+2. Is the evaluator API (result fetch by job ID without a grant; spent
+   upload grants kept in one node's memory) acceptable for a multi-tenant
+   evaluator? Loaded evaluation keys sit under a tag of the key tag and
+   the key material's SHA-256, so a client that knows another client's
+   OpenFHE key tag cannot block or replace that client's keys.
 3. What memory exhaustion is possible through the evaluator's upload
    limits and 8 HTTP threads?
 

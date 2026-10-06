@@ -14,7 +14,8 @@ Related: [support matrix](docs/support-matrix.md),
 - **No formal proof of the whole system.** The cryptographic building
   blocks (CKKS, BinFHE, BGV, Ed25519, HPKE, secure aggregation, the
   discrete Gaussian) have published analyses. Their composition in
-  Encompute has none. The assurance suite tests 150 security invariants
+  Encompute has none. The assurance suite tests 175 security invariants
+  (150 in 0.3; the rest cover the public-sector governance work below)
   with positive, negative, adversarial and end-to-end evidence. A passing
   report means those invariants held for the tested cases. It does not
   prove the system secure.
@@ -144,7 +145,8 @@ Related: [support matrix](docs/support-matrix.md),
 - **Native TLS clients cover two connections, not every one.** The control
   plane's PostgreSQL connection honours `sslmode` (up to `verify-full`),
   `sslrootcert`, `sslcert` and `sslkey` in its connection string, and the
-  key broker's connection to OpenBao or Vault takes a private CA
+  key broker's connection to OpenBao or Vault (the root key and the
+  generation mark in its KV engine alike) takes a private CA
   (`BAO_CACERT`) and a client certificate (`BAO_CLIENT_CERT`,
   `BAO_CLIENT_KEY`). Production mode requires `sslmode=verify-full` for
   the database; weaker settings need the named opt-outs
@@ -165,9 +167,15 @@ Related: [support matrix](docs/support-matrix.md),
   availability, Kubernetes, KMS adapters beyond OpenBao and Vault, volume
   encryption, or a vault holding the state anchor behind a private CA (the
   anchor client does not take `BAO_CACERT` yet).
-- **The newest audit events are only hash-chained.** Events after the last
-  signed checkpoint (every 100 events by default) are covered by an
-  unkeyed hash chain until the next checkpoint.
+- **The newest audit events are anchored with the next checkpoint, not at
+  once.** The audit chain's head is anchored with every checkpoint of the
+  governance log: before the call returns for each security deny event
+  (a revocation, a disabled account, an ended job), and otherwise by the
+  background pass, every two seconds. An ordinary audit event (one that
+  grants or merely records, or a refused request) is covered only by the
+  unkeyed hash chain until then, and a crash or a database truncation of
+  exactly that tail inside the window is not detected. The audit chain has
+  no mirror: a truncated chain is detected, not restored.
 - **IDs can reveal existence through conflicts.** Other tenants' resources
   are "not found", but registering an ID that is already taken fails with
   a conflict. Project invitations answer the same whether the organization
@@ -181,8 +189,19 @@ Related: [support matrix](docs/support-matrix.md),
   unless `ENCOMPUTE_METRICS_PUBLIC=true`. Scrapers set up for rc.3 need
   the token.
 - **One control-plane process per state anchor.** A lost compare-and-set
-  reloads and retries, but replicas sharing one anchor are not supported.
-  The whole anchor is rewritten on each update.
+  reloads and retries (three attempts in all, each recomputed from the
+  stored anchor, counted in `encompute_anchor_cas_retry_total`), but
+  replicas sharing one anchor are not supported. The anchor is rewritten
+  on each update (it is constant in size: a few hundred bytes). Before this
+  release a start that lost four attempts in a row to another control
+  plane was refused with ENC2202 although its decision (a refusal on the
+  privacy cap, say) had been committed: fail-closed but a spurious
+  refusal of an ordinary concurrent start, measured in 5 of 40 runs of a
+  four-start test with two control planes. Under heavy contention (eight
+  simultaneous starts on two control planes) an update can still lose all
+  three attempts: the call returns ENC2202 (`encompute_anchor_cas_retry_exhausted_total`),
+  the decision stays committed, the cap is unchanged, and the evaluator's
+  retry of the start (or the next checkpoint) anchors it.
 - **A job's sources are declarations, not data.** The control plane never
   sees inputs, so it cannot tell which data a client actually encrypts. It
   derives a job's sources from what its program declares: the purpose, and
@@ -194,21 +213,40 @@ Related: [support matrix](docs/support-matrix.md),
   are not compared with the registry; only the IDs are. Checking that a
   registered asset ID names a real asset also tells a submitter who
   already knows an ID that it exists.
-- **The anchor's sets of ended jobs, withdrawn approvals, removed
-  project memberships and removed roles grow without bound.** Every
-  spend, cancellation, withdrawal and removal rewrites and re-signs the
-  whole anchor. OpenBao's KV store refuses entries above its raft
-  `max_entry_size` (1 MiB by default), which is roughly 25,000 to 30,000
-  ended jobs; past it anchor writes fail, and the control plane fails
-  closed: privacy spends, cancellations and revocation acknowledgements
-  stop. Watch the `encompute_anchor_bytes` gauge (the control plane also
-  logs `anchor_size_warning` above 512 KiB) and raise `max_entry_size` before it is
-  reached. The anchoring cost also grows with the deployment's age: each
-  privacy spend re-loads and re-verifies the whole ledger to anchor it
-  (besides verifying it inside the spend), and every revocation, disable,
-  cancellation, withdrawal or removal rescans all the anchored-state
-  tables. Both fail closed. A hash-chained governance event log will
-  replace these sets, and these costs, before general availability.
+- **The governance log grows without bound; its mirror can be
+  compacted.** The state anchor is constant in size, but every
+  security-negative transition and every privacy spend is an event of the
+  governance log (about 300 bytes), kept in the database. **The database's
+  log is never compacted** (nothing is pruned there: the start check, the
+  negative sets, proofs and evidence read all of it), so the database
+  grows with it, and so does the start check, which recomputes the whole
+  log (measured in release mode on a loaded machine: 4.3 seconds for
+  120,100 events; 10 million spends are about 3 GB). The mirror in the
+  anchor store can be compacted into an archive you keep
+  (`compact-governance-mirror`, docs/deployment.md): the anchor store then
+  holds the tail, and the anchor grows by a seal of a few hundred bytes
+  once, not with the log. Without compaction the mirror grows as before.
+  An old backup that ends inside the sealed prefix needs the archive to
+  recover (`recover --archive-dir`); without it, recovery refuses and says
+  so. A compaction is an anchor version bump: no downgrade after the first
+  one. It is run by an operator only: nothing schedules or triggers one.
+  Deleting the sealed segments from OpenBao KV was exercised against a real
+  OpenBao 2.1.0 development server (in-memory storage); production's raft
+  storage uses the same KV API but its durability and `max_entry_size`
+  behaviour under a prune are not exercised, and a Vault server was not
+  tried. Recovery from an older backup imports the missing events in
+  batches: approximately 6x on the 120k-event fixture in this
+  environment, not a guaranteed benchmark (replaying 107,600 events took
+  about 1,011 seconds one at a time and about 160 seconds batched, on a
+  heavily loaded machine; 732 seconds one at a time on a quieter one). A spend
+  adds one append and one checkpoint to its latency (concurrent spends
+  share a checkpoint), and still re-loads and re-verifies the whole ledger
+  to checkpoint it (besides verifying it inside the spend), so its cost
+  grows with the ledger's age. Not built: pruning or summarizing the
+  database's log (it needs signed snapshots of every negative set, of
+  each partition's tree and of every reader's view, and the start check
+  would then trust the snapshot instead of recomputing the history), and a
+  snapshot of the log's frontier for startup.
 - **An anchor restored from the same backup forgets later spend.** When
   the database and the anchor are restored together, privacy spend rolls
   back to the backup. Keep the anchor outside the backup set, in the
@@ -217,21 +255,98 @@ Related: [support matrix](docs/support-matrix.md),
   in memory until the evaluator restarts.
 - **Trust Graph queries are quadratic** in the number of records.
 - **The control plane bounds privacy reservations, but does not recompute
-  them.** A reservation whose declared sensitivity is below what its own
-  noise implies is refused, but its noise multiplier and sampling rate are
-  the coordinator's declaration.
-- **Key broker state can be rolled back to an older authenticated copy.**
-  The state file is authenticated under a key derived from the KEK, so an
-  edited file does not open. An older copy that was genuinely
-  authenticated still opens, and restoring it brings revoked keys back.
+  them, except for a governed job's.** A reservation against an asset is
+  charged by the control plane's own accountant from its declared
+  sensitivity and noise variance (never from a declared epsilon). It is
+  refused when the declared sensitivity is below what its own noise
+  implies for the ledger's unit, when its mechanism is inconsistent (a
+  privacy level with other noise, no noise, a cost below the floor,
+  Poisson sampling claimed for an organization-level ledger), or when it
+  is not drawn with the production generator. What stays the
+  coordinator's declaration is the noise multiplier, the clip norm and the
+  sampling rate of a release the control plane did not plan: the
+  multiplier only sets the floor on the sensitivity, so a reservation that
+  over-declares it lowers its own floor, bounded below by the minimum
+  reservation cost, and a sampling rate is the amplification the
+  coordinator's attested workload vouches for. A governed job's release is different: the
+  control plane computes it from the job's program (sensitivity, noise and
+  mechanism), reserves it itself when the job starts, and refuses a
+  coordinator's report that differs.
+- **Privacy scopes and populations bound what the platform records, not
+  what a coordinator releases.** The release is made off the platform by a
+  SecAgg coordinator: the control plane reserves the job's cost before the
+  job runs and refuses one that no scope or population can pay for, but a
+  coordinator that releases without reporting is stopped only by what the
+  parties check themselves (a coordinator's attestation bound to the plan,
+  and the privacy receipts naming the scope and population ledgers). The
+  noise is central: the coordinator sees the sum before noise.
+- **A coordinator that releases something larger and never reports it is
+  not caught by the control plane.** It reserves the cost it computes from
+  the job's program and refuses a job as unaccounted if no commit is
+  reported, but it cannot see a release: what the coordinator actually
+  releases depends on the attested coordinator and the SecAgg parties'
+  checks.
+- **A population's exhaustion is visible through failure text.** A project
+  whose job fails with "population ... has spent" learns that other
+  projects (or versions) used the series' budget, though not how or which.
+  Totals of a scope are shared with the project's members by design.
+- **Creating a population changes asset-ledger behaviour for its series.**
+  Once an organization creates a population, a reservation against the
+  per-asset ledger of any asset of that series is refused (ENC2719, also
+  outside governed projects): a series is accounted by its population or by
+  its assets' own ledgers, never both. Series without a population are
+  unchanged.
+- **Four eyes means two principals, not two humans.** Scope and population
+  approvals compare principal IDs (like job approvals, and
+  with the same assumption of one identity per person): one person holding two accounts
+  passes. A superseding population gives a series a fresh cap by the
+  owners' deliberate, four-eyed act; the old population's spending stays on
+  record.
+- **A scope's `max_sources_per_unit` is the owners' claim.** The
+  sensitivity is multiplied by the number of sources one privacy unit may
+  appear in; the control plane does not know how many agencies a person
+  is registered with. Undeclared, a scoped release assumes every
+  participant, which is safe and can waste budget. A person in more
+  sources than declared is charged too little: the declaration is part of
+  the program every owner authorizes. Across populations the same person
+  is charged in each (that is the multiplication), so budgets of
+  different agencies still do not compose against one another.
+- **A reserved release is never refunded.** A governed job reserves its
+  differential-privacy release when it starts, before any noise exists. A
+  job that then fails, is cancelled or is revoked keeps its charge (the
+  release may have happened, and the control plane cannot tell); budget is
+  only ever spent.
+- **A population's cap is allocated once.** It is never raised, lowered or
+  closed, and there is no way to withdraw a proposed scope (a mistaken
+  proposal stays proposed; propose another with the right cap). Raising a
+  cap needs a new series.
+- **Recovery cannot rebuild a population or scope whose rows the database
+  lost.** A missing ledger is refused at start and a frozen one stays
+  frozen; but `recover` re-creates a frozen placeholder only for an asset's
+  ledger, so a lost population or scope needs its rows restored from a
+  backup that holds them (the governance log's checkpoint still refuses
+  every older state).
+- **A key broker without a generation mark can be rolled back to an older
+  authenticated copy.** The state file is authenticated under a key derived
+  from the KEK, so an edited file does not open. A governed production
+  broker must also keep a generation mark in the organization's KMS
+  (`--generation-mark openbao`); it then refuses an older copy, or a forked
+  one, and grants nothing while the mark is unreachable. A standard broker
+  may run without a mark: there an older copy that was genuinely
+  authenticated still opens, and restoring it brings revoked keys back, so
+  rollback is guarded by procedure only. The first start under a mark
+  trusts the state file it finds, unless the operator passes the expected
+  generation and MAC (`--expect-generation`, `--expect-state-mac`).
   Revocation does not crypto-shred: an old state file plus the unchanged
   KEK still yields the revoked keys. Keep broker backups access-controlled.
-- **Evaluator upload grants are reusable** until they expire, and are not
-  bound to a client.
-- **A co-tenant can block a victim's evaluation-key upload.** A client that
-  knows another client's key tag (it is in every ciphertext) can upload
-  keys under it first; the victim's upload is then refused until that
-  entry is evicted. The victim never gets a wrong result.
+- **Spent upload grants are remembered in memory, one node.** An upload
+  grant admits one upload; the evaluator keeps the spent ones until they
+  expire and, after a restart, refuses every grant issued before it
+  started (the grants not yet used are asked for again). That holds if the
+  control plane's clock is not ahead of the evaluator's by more than the
+  time between a grant's use and the restart. Several evaluator replicas
+  behind one address would each keep their own memory: one grant could be
+  spent once on each.
 - **Secrets have environment-variable fallbacks.** `*_FILE` is preferred,
   but production mode also accepts the plain variable (for example
   `ENCOMPUTE_DATABASE_URL`, `BAO_TOKEN`).
@@ -267,13 +382,22 @@ Related: [support matrix](docs/support-matrix.md),
 - **Attestation trusts the TEE vendor** and its attestation service (for
   Confidential Space: Google's verifier and launcher), and the reviewed
   image: the image digest is the measurement.
-- **One key broker per confidential training job.** A training spec names
-  exactly one key broker. A workload trusts every broker its spec names for
-  every asset, so with several, one broker could grant a key of its own
-  choosing for an asset another owner's broker holds (a participant's
-  contribution key among them). Jobs whose owners each run their own broker
-  need a per-asset broker binding first; until then every asset of a job is
-  protected by the one broker the spec names.
+- **Several key brokers per training job need a per-asset binding.** A
+  training spec without `asset_brokers` still names exactly one key broker:
+  a workload would trust every broker the spec names for every asset, so
+  with several, one broker could grant a key of its own choosing for an
+  asset another owner's broker holds (a participant's contribution key
+  among them). With `asset_brokers`, a spec may name several brokers: each
+  key is bound to one broker, and a workload accepts that key's grant only
+  from that broker, under its pinned grant-signing key. The spec also says
+  whose each broker is (`broker_organizations`): a participant's dataset
+  and contribution keys go to its own broker, or, if it runs none, to the
+  model owner's; never to another participant's. Two limits remain. Who
+  runs a broker is the spec's word, which each participant checks before
+  approving the spec (in a sovereign project the control plane also checks
+  each source's owner broker when it plans). And the local `finetune` run
+  holds every key at the model owner's broker, so there its binding names
+  that one broker.
 
 ## Differential privacy
 
@@ -361,6 +485,306 @@ Related: [support matrix](docs/support-matrix.md),
 - **The plan validator is only partly independent.** It recomputes the
   program's semantics and applies its own floor of core requirements, but
   its exact-equality check still uses the planner's own derivation.
+
+## Public-sector governance (not part of 0.3)
+
+Governed projects are being built after 0.3 (see
+[docs/public-sector.md](docs/public-sector.md)). What exists so far has
+these limits:
+
+- **`source_revoked_at` is not erasure.** Revoking a source marks the
+  derived results downstream and blocks their new use, derivation and
+  export; it does not recall or delete anything already released. Copies
+  recipients hold, and results exported before the revocation, stay
+  where they are; the control plane records the later revocation and
+  never claims otherwise. Only derived results recorded through
+  `POST /v1/jobs/{id}/derived-assets` are marked; an asset registered
+  with parents by other means is not (every governed use walks its
+  ancestors all the same).
+- **Export keys are the custodian's word.** The custodian's signed
+  release record names each recipient's export key; neither the control
+  plane nor the broker can check that the key belongs to that
+  organization. A custodian that names a wrong key exports to whoever
+  holds it.
+- **An owner's `max_releases` counts exports separately from key
+  releases.** The control plane counts exports of results released under
+  an authorization, and jobs reading them, through every derivation hop.
+  Each key broker counts the releases and exports it makes itself: a
+  lineage owner's authorization installed at a custodian's broker is
+  counted there, separately from its own broker's count.
+- **Lineage owners share their governance key with custodians.** A
+  custodian's broker releases or exports a derived result's key only with
+  an authorization of every organization whose data it derives from,
+  verified under that organization's governance key, which the
+  custodian's owner pins at its broker from the control plane's signed
+  attestation of it (`encompute keys governance-key pin-lineage`), and
+  each lineage owner must install its authorization there. A lineage
+  owner's revocation reaches a custodian's broker from the control plane
+  once anchored (deny-only), or directly as a signed revocation; the
+  control plane stops issuing tickets at once. A rotated lineage owner's
+  key is pinned again from a newer attestation; results bound under the
+  old key ID are then neither released nor exported until the custodian
+  has the control plane's co-signature re-issued
+  (`POST /v1/assets/{id}/release-cosignature`) and re-binds the key
+  (`encompute keys rebind-lineage`). A pinned lineage key is relied on
+  only while its attestation is younger than the broker's maximum age
+  (24 hours by default): a key revoked at the control plane stays usable
+  at a custodian's broker for up to that long unless the revocation is
+  attested there sooner, and a broker whose owner does not re-attest stops
+  releasing derived results after it.
+- **Retention blocks use; it does not delete data.** Once a dataset
+  version's `delete_after` passes, Encompute expires it, blocks every
+  further use of it and of what was derived from it, tells its key broker,
+  and records all of it; deleting the data itself (and its key material,
+  where the owner's KMS keeps it) is the owner's storage's job, and
+  Encompute never claims it happened. Results released or exported
+  before the deletion date stay where they are. Expiry runs in the
+  background every few seconds, so a version may be expired a little
+  after its deletion date; every check also compares the deletion date
+  itself, so nothing uses it in between. `evidence_retention_until` is
+  recorded and only ever extended, but nothing purges evidence yet: the
+  control plane keeps all of it.
+- **Replacing the control-plane key at a broker is the owner's word.**
+  `--replace-control-key` accepts whatever other key the operator types,
+  recorded in the broker's state and printed as an audit line; the broker
+  cannot check that the control plane's key really changed.
+- **The custodian is trusted for derived data it holds.** The custodian
+  runs the broker that holds a derived result's key. Its lineage checks
+  defend against a compromised control plane and a careless custodian,
+  not a malicious one, which holds the key material. The control plane
+  attests lineage owners' keys and co-signs release records, so a
+  compromised control plane and a malicious custodian together could fake
+  a lineage owner's consent; neither can alone.
+- **No decryption tickets.** Tickets of kind `decrypt` are neither issued
+  nor accepted; exports cover released results for now.
+- **Boolean releases still leak through repeated questions.** A
+  boolean-only output reveals one bit per job; a bounded category a few.
+  Probing limits bound this channel, they do not eliminate it: an
+  authorization whose ceiling admits boolean-only releases must set
+  `max_executions` and `max_releases`, and one job releases at most
+  `max_outputs_per_job` boolean-only outputs per source (one by default).
+  Within those limits, well-chosen questions about the same records still
+  add up. Statistics over records belong in the differential-privacy
+  classes, which account for what repeated releases reveal.
+- **Output forms are what the compiler can show.** A bounded category
+  rests on the integer range analysis; a boolean on the output's type.
+  Neither says what the bit means: owners approve the program itself.
+- **Four eyes assume one identity per person.** Quorums count distinct
+  user identities (identity provider issuer and subject). If one person
+  holds two identities, in one identity provider or two, the control plane
+  counts two people. Giving each person one identity is an onboarding
+  control of the organization's identity provider, outside Encompute.
+- **Role combinations with auditor are not yet removed everywhere.**
+  Auditor separation is enforced in organizations taking part in governed
+  projects. Elsewhere, and for combinations made before (bootstrap admins
+  hold admin, operator and auditor in the platform organization), they
+  remain; `GET /v1/security/legacy-service-admins` lists them
+  (`auditor_combinations`) and a later migration removes them. Such an
+  auditor stays read-only in governed projects.
+- **Auditor organizations read no privacy ledgers yet.** A ledger is its
+  asset owner's until privacy scopes give a project its own ledger.
+- **Residency (placement) is only as good as its evidence.** A location
+  an evaluator reports about itself is self-declared and never satisfies
+  a production deployment; one a person who is a security admin of its
+  operator declares is attributable, not proven (an operator can declare
+  falsely or move the machine afterwards, and the declaration lapses after
+  at most 366 days); only an attested zone is checked cryptographically,
+  and today the control plane obtains none from an evaluator: the attested
+  zone is the key broker's, taken from the Confidential Space token each
+  time a workload asks for a key. Grants and job views record each
+  location's evidence level, and a plan's text labels it "attested" or
+  "declared".
+- **A key broker judges the zone only.** It cannot see an operator or an
+  evaluator ID, so a constraint that names only those is enforced by the
+  control plane that issues the ticket, not by the broker; a compromised
+  control plane could therefore send a ticket to an evaluator of an
+  operator the owner excluded (never to a zone the owner excluded).
+- **The locations table is compiled in and reviewed in the repository.**
+  Version 1 covers Google Cloud, AWS and Azure regions and an
+  organization's own premises by country. An unknown provider, region or
+  zone is refused, never ignored; adding one is a code change, and a new
+  table version makes every governed plan made with the old one invalid
+  (plan again). Plans made before placement existed must also be made
+  again.
+- **Operator separation assumes an honest control plane.** An evaluator's
+  operator is the control plane's record of its service account; no
+  signature of the operator binds an evaluator, its URL and its key to it,
+  so a compromised control plane could misname one. The governance report
+  says so wherever it reports operator separation or where an evaluator
+  ran ("assuming an honest control plane"), and a test fails if it does
+  not; it reads placement only from the grant the control plane signed, and
+  shows the project's own constraints as unchecked, because the bundle
+  carries only their digest.
+- **The project's constraints are the control plane's unless an owner pins
+  them.** An owner's signed authorization may pin the digest of the project
+  constraints it accepts (`limits.project_placement_digest`); its broker
+  then requires the binding to name it. Without a pin, a compromised
+  control plane could drop them for that owner's keys (never the owner's
+  own constraints, which the broker reads from the authorization).
+- **A changed project constraint stops an owner-pinned job.** When the
+  project's constraints change after an owner pinned their digest, a new
+  job is refused with "the project's placement constraints changed since the
+  owner pinned them; the owner must re-authorize" (ENC2710), and the owner's
+  broker refuses likewise.
+- **Running jobs are not re-checked.** Placement is judged at submission,
+  scheduling, start and every release ticket; a job already running is not
+  stopped when its evaluator moves or constraints tighten (its receipt
+  records where it ran). Export and derived-result tickets carry no
+  placement: an export is a release to a named recipient's key, not a
+  placement.
+- **A TEE is never usable in a governed plan**, even without a location
+  rule: a TEE offer carries no attested location, and the control plane
+  offers none today. Declared locations rest on an authenticated session
+  of a security admin of the operator, not on a signature.
+- **Upgrading in-flight governed jobs.** Jobs planned before this release
+  have no placement context and fail at their next scheduling or start
+  (ENC2710); queued jobs fail at start. Plan and submit them again.
+- **Region is not jurisdiction.** A region says where a machine is, not
+  whose law reaches it; the legal assessment of a location stays with the
+  owner, which is why constraints also name allowed operators.
+- **Placement covers the machines Encompute schedules.** A governed job
+  runs on an evaluator, never at a party. A TEE offer carries no attested
+  location in a plan, so it never satisfies a constraint (the control
+  plane plans no TEE yet). Plaintext at an institution's own premises,
+  network routing, copies made outside Encompute and lawful access by the
+  state that hosts a machine are not controlled. Ciphertexts copied to a
+  prohibited place stay FHE-protected, which a stricter owner may still
+  not accept.
+- **The client's own placement check is in the CLI.** `jobs run
+  --placement` refuses before sending anything; the Python and native SDKs
+  do not carry it yet.
+- **An evaluator operator separate from the owners can still cheat by
+  one bit.** Operator separation keeps the machines' operator from being a
+  source owner or a decryptor; a malicious operator could return one bit
+  of an input attribute in place of the expected Boolean. The output-width
+  check and `max_releases` bound this; they do not prevent it. Verified
+  execution would close it and is out of scope.
+- **Loosening a project's constraints needs every member to propose the
+  same thing.** One member refusing, or gone, blocks it by design; a
+  member removed from the project stops counting. Tightening is
+  immediate and cannot be undone by one member.
+- **`Objective::Minimize` orders by release rank, principals who learn
+  plaintext and latency.** The bits a release carries are not told apart
+  yet, and the planner does not itself refuse an output wider than a
+  source's class: a governed submission does (ENC2709).
+- **A compromised control plane can still deny and delay.** It cannot
+  release a key without an owner-signed authorization installed at the
+  owner's broker, but it can withhold tickets and delay revocation
+  messages. The owner's local revocation at its broker does not depend on
+  it.
+- **The ticket's anchor counter is carried but not yet checked** by
+  brokers.
+- **Governed releases are serialized** at a broker with a generation mark:
+  each one waits for the compare-and-set in the organization's KMS.
+- **The generation mark needs a KMS write permission** scoped to one KV-v2
+  path, in addition to Transit. Revoking an authorization offline, and
+  binding a key to a source version, are operator acts on the broker.
+- **Standard key brokers may run without a generation mark** (see "A key
+  broker without a generation mark" above).
+
+- **A governed job's report cannot read SATISFIED yet.** The cross-agency
+  report shows "Decryption control" as NOT EVIDENCED: who holds the key to
+  a result is not recorded in signed evidence in this release (the key
+  model is an open decision), and the report never claims one. The verdict
+  is then "not fully evidenced" and `verify` exits 3 (`--allow-unchecked`
+  accepts that). Rows for residency, record linkage and privacy scopes
+  read NOT APPLICABLE only when the signed binding shows they are not
+  declared, and NOT EVIDENCED when they are declared; the privacy row of a
+  job whose program releases a differential-privacy aggregate is NOT
+  EVIDENCED whether or not an authorization pins a scope, because the
+  release is charged to a project's scope and the sources' populations and
+  nothing in this release's evidence shows those ledgers. There is no separate
+  project charter: the Project row shows each data owner's signed
+  acceptance of the purpose.
+- **A shared view's authorizations are cards.** The signed document of
+  another organization names its approvers, so the shared bundle shows a
+  card (approvers as pseudonyms). What rests on a card is UNCHECKED until
+  its owner discloses the signed document. Per-job approvals are the
+  control plane's own record, not signed, and are not counted.
+- **Bundles are not signed by the control plane,** and carry no software
+  provenance (release manifest, Sigstore bundle, evaluator image) yet; the
+  report says so. A bundle holds at most 5,000 of the log events that
+  concern its job, each proven against the checkpoint; a run that does not begin at the log's first event cannot show who
+  joined before it, so the control plane's (unsigned) member list stays
+  required to witness, never dropped. Only events of the project's own
+  log are in the run: a user or service-account disable (organization or
+  platform log) is not, which is why per-job approvals are not counted.
+  The job's owners and its submitter must witness the checkpoint;
+  recipients that are neither need not. `exported_at` is the time of the log
+  state, not of the request. The plaintext guard is a heuristic.
+- **Starting a job spends its privacy budget before its first key
+  ticket.** Start reserves the job's release in its scopes and populations
+  last, and a key ticket is asked for after it. If the evidence for the
+  evaluator's location lapses, or the placement or a quorum changes, between
+  the two, the ticket is refused and the job fails with the budget already
+  spent. That errs toward spending too much, never too little; nothing
+  refunds it.
+- **A start can race the revocation of one of its sources.** Start locks the
+  job and then its source rows; a revocation and a key ticket lock the
+  source first and the job second, so two of them can deadlock. PostgreSQL
+  aborts one, the control plane retries the transaction (up to three times;
+  a start resets what it had done at each attempt) and the outcome is as if
+  they had run one after the other. A caller that loses all three attempts
+  sees an error and retries.
+- **An evaluator's location events cost a scan.** Finding the governed
+  projects that plan or run on an evaluator reads every plan's document, and
+  each event is appended once per such project while the evaluator's row is
+  locked. Fine for tens of projects and evaluators; a deployment with many
+  more would want an index of the plans' admissible sets.
+- **A scope's allocation shows its cap to every member.** The event in the
+  project's log names the purpose (by its ID), the privacy unit, epsilon
+  and delta of the scope, and is read by every member organization and
+  auditor of the project, by design: members see what the project may
+  spend, never a population's spending or another organization's ledger.
+- **A restore cannot bring back a lost placement version.** The log holds a
+  version's number and digest, not its constraints, so recovery records the
+  loss in the project's log and the project is held to the version the
+  database has until a member's security admin tightens it again; the
+  owners' own constraints in their signed authorizations are unaffected.
+- **Governed aggregates are central DP.** A differentially private
+  aggregate released in a governed project is noised by the coordinator,
+  which sees the exact aggregate first (see "Differential privacy" above).
+  Each institution's budget is accounted in its own scope and population,
+  but the noise is not added by anyone the institutions do not trust with
+  the sum. The governance report does not evidence the privacy row of such
+  a job.
+- **Record linkage is not built, and when it is it will be pseudonymous,
+  not anonymous.** The design (a proposal, with its open decisions and an
+  external review scope) lets whoever holds a linkage key, or a linkage
+  authority, recompute the pseudonym of any person it can identify, and
+  lets an institution that colludes with the evaluator's operator learn
+  which of its people appear in another institution's records. Until it is
+  built and has been through external cryptographic review, nothing in
+  Encompute links records across institutions, and the per-subject limits
+  an authorization can carry (`max_subjects_per_job`,
+  `max_evaluations_per_subject`) are not enforced.
+- **A recipient-held decryption key would rest on non-collusion.** In the
+  key model planned for record-level exact computation, the recipient
+  institution holds the key that decrypts the result; confidentiality of
+  the inputs against it then depends on the evaluator's operator not
+  colluding with it, and the report is to say so wherever it applies. That
+  model is not built. In this release who holds the key to a governed
+  result is not recorded in signed evidence, and the report row
+  "Decryption control" reads NOT EVIDENCED.
+- **No threshold or multi-key decryption.** One holder decrypts a result;
+  OpenFHE's threshold support is not used, and it is unverified for the
+  BinFHE scheme that exact programs run on. A stronger profile (an
+  attested decryptor, or threshold keys) is research.
+- **The attack suite refuses single actors, not coalitions.**
+  `scripts/governance-attacks.sh` shows each attack refused with its code
+  and its trail. It does not show what an institution colluding with the
+  evaluator's operator, or with another member, learns from what both can
+  see; the sections above and the threat model say what that is.
+- **A request refused before any job is looked up leaves no audit event.**
+  A person asking for a release ticket is refused (ENC2602) and appears
+  in the request log; a refused ticket request by a job's own scheduled
+  evaluator is audited (`release_ticket.denied`).
+- **Every governed use rests on the institutions' own declarations.**
+  Encompute binds a computation to the dataset version an owner
+  registered, by digest, and to the purpose it declared. It does not check
+  that the data is true, that the purpose is lawful, or that the people it
+  concerns were told (see "Technical enforcement and legal authority" in
+  [docs/public-sector.md](docs/public-sector.md)).
 
 ## Compatibility and upgrades
 

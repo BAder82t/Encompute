@@ -4,6 +4,7 @@ use proptest::prelude::*;
 
 fn header(kind: Kind) -> Header {
     Header {
+        governance_id: None,
         kind,
         scheme: "CKKS".into(),
         backend: "openfhe".into(),
@@ -17,6 +18,7 @@ fn header(kind: Kind) -> Header {
 
 fn expect(kind: Kind) -> Expect<'static> {
     Expect {
+        governance_id: None,
         kind,
         scheme: "CKKS",
         backend: "openfhe",
@@ -128,4 +130,44 @@ proptest! {
     fn arbitrary_bytes_never_panic(b in prop::collection::vec(any::<u8>(), 0..300)) {
         let _ = Envelope::decode(&b);
     }
+}
+
+/// A governed envelope carries its GovernanceId: it opens only where the
+/// same binding is expected, never under another or none, and a standard
+/// envelope never opens where a governed one is expected. Standard headers
+/// do not serialize the field (their bytes are unchanged).
+#[test]
+fn the_governance_binding_is_enforced_both_ways() {
+    let governed = |g: Option<&str>| {
+        Envelope::new(
+            Header {
+                governance_id: g.map(str::to_owned),
+                ..header(Kind::Inputs)
+            },
+            vec![("x".into(), vec![1])],
+        )
+        .encode()
+    };
+    let g1 = "1".repeat(64);
+    let g2 = "2".repeat(64);
+    let want = |g: Option<&'static str>| Expect {
+        governance_id: g,
+        ..expect(Kind::Inputs)
+    };
+    let g1s: &'static str = Box::leak(g1.clone().into_boxed_str());
+    let g2s: &'static str = Box::leak(g2.clone().into_boxed_str());
+    open(&governed(Some(&g1)), &want(Some(g1s))).unwrap();
+    for (bytes, e) in [
+        (governed(Some(&g1)), want(Some(g2s))),
+        (governed(Some(&g1)), want(None)),
+        (governed(None), want(Some(g1s))),
+    ] {
+        assert_eq!(
+            open(&bytes, &e).unwrap_err().code,
+            Code::GovernancePurposeMismatch
+        );
+    }
+    open(&governed(None), &want(None)).unwrap();
+    let standard = serde_json::to_string(&header(Kind::Inputs)).unwrap();
+    assert!(!standard.contains("governance_id"));
 }

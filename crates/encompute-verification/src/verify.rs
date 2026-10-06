@@ -1,9 +1,7 @@
 use encompute_ir::{Code, Error, Result};
 
 use crate::identity::EvaluatorIdentity;
-use crate::receipt::{
-    ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence, RECEIPT_VERSION,
-};
+use crate::receipt::{ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence};
 use crate::spec::ExecutionSpec;
 
 /// What the verifier expects, from its own compilation and its own copy of
@@ -57,15 +55,7 @@ impl SignedExecutionReceipt {
     pub fn verify_signature(&self, trusted: &EvaluatorIdentity) -> Result<()> {
         self.check_form()?;
         let r = &self.receipt;
-        if r.version != RECEIPT_VERSION {
-            return Err(Error::new(
-                Code::Receipt,
-                format!(
-                    "receipt version {} (this Encompute reads {RECEIPT_VERSION})",
-                    r.version
-                ),
-            ));
-        }
+        r.check_version()?;
         if self.evaluator_public_key != trusted.public_key_hex() {
             return Err(Error::new(
                 Code::Receipt,

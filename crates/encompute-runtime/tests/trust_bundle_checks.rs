@@ -403,6 +403,8 @@ fn an_invalid_training_spec_in_a_bundle_fails_the_report() {
         },
         participants: vec![],
         key_brokers: [("broker".to_owned(), h('9'))].into(),
+        asset_brokers: Default::default(),
+        broker_organizations: Default::default(),
         coordinator_key: h('8'),
         initial_adapter_digest: h('7'),
     };
@@ -417,7 +419,7 @@ fn an_invalid_training_spec_in_a_bundle_fails_the_report() {
         &[],
         Evidence::TrainingSpec(Box::new(spec)),
     );
-    let (_, problems) = bundle.rebuild();
+    let problems = bundle.rebuild().problems;
     assert!(
         problems
             .iter()

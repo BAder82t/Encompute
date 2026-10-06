@@ -184,6 +184,110 @@ impl fmt::Display for Release {
     }
 }
 
+/// The form in which a value may be released: the owners' limit on what a
+/// release looks like, beside who may learn it ([`Release`]). A value
+/// whose sources declare forms is released only in one of them, which the
+/// compiler must prove from the program (ENC1907):
+/// - `Boolean`: a scalar `bool`;
+/// - `BoundedCategory { max }`: a scalar `bool` or integer proven to lie in
+///   `[0, max]`;
+/// - `Aggregate`: the result of an aggregation boundary;
+/// - `DpAggregate`: an aggregate with differential privacy;
+/// - `DerivedArtifact`: a model, adapter, checkpoint or model update
+///   derived under the owners' permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseForm {
+    Boolean,
+    BoundedCategory { max: u64 },
+    Aggregate,
+    DpAggregate,
+    DerivedArtifact,
+}
+
+impl ReleaseForm {
+    pub fn name(self) -> &'static str {
+        match self {
+            ReleaseForm::Boolean => "boolean",
+            ReleaseForm::BoundedCategory { .. } => "bounded_category",
+            ReleaseForm::Aggregate => "aggregate",
+            ReleaseForm::DpAggregate => "dp_aggregate",
+            ReleaseForm::DerivedArtifact => "derived_artifact",
+        }
+    }
+
+    /// A form without a parameter, by name (`bounded_category` takes its
+    /// maximum separately).
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            ReleaseForm::Boolean,
+            ReleaseForm::Aggregate,
+            ReleaseForm::DpAggregate,
+            ReleaseForm::DerivedArtifact,
+        ]
+        .into_iter()
+        .find(|f| f.name() == s)
+    }
+
+    /// Whether a release in form `self` is also one in form `other`: the
+    /// same form, or a category bounded no higher.
+    pub fn within(self, other: ReleaseForm) -> bool {
+        match (self, other) {
+            (ReleaseForm::BoundedCategory { max: a }, ReleaseForm::BoundedCategory { max: b }) => {
+                a <= b
+            }
+            (a, b) => a == b,
+        }
+    }
+}
+
+impl fmt::Display for ReleaseForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReleaseForm::BoundedCategory { max } => write!(f, "bounded_category {max}"),
+            x => f.write_str(x.name()),
+        }
+    }
+}
+
+/// Release forms joined: `None` allows any form; otherwise the forms both
+/// allow (a bounded category at the lower maximum). Never wider than either.
+pub fn meet_forms(
+    a: &Option<BTreeSet<ReleaseForm>>,
+    b: &Option<BTreeSet<ReleaseForm>>,
+) -> Option<BTreeSet<ReleaseForm>> {
+    match (a, b) {
+        (None, x) | (x, None) => x.clone(),
+        (Some(a), Some(b)) => Some(
+            a.iter()
+                .filter_map(|&x| {
+                    b.iter().find_map(|&y| match (x, y) {
+                        (
+                            ReleaseForm::BoundedCategory { max: m },
+                            ReleaseForm::BoundedCategory { max: n },
+                        ) => Some(ReleaseForm::BoundedCategory { max: m.min(n) }),
+                        _ if x == y => Some(x),
+                        _ => None,
+                    })
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Whether forms `declared` are at least as strict as `registered`: every
+/// declared form is within one registered form (`None` allows any form).
+pub fn forms_within(
+    declared: &Option<BTreeSet<ReleaseForm>>,
+    registered: &Option<BTreeSet<ReleaseForm>>,
+) -> bool {
+    match (declared, registered) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        (Some(d), Some(r)) => d.iter().all(|&f| r.iter().any(|&g| f.within(g))),
+    }
+}
+
 /// Whose privacy a budget protects: the unit two neighbouring datasets
 /// differ by. Explicit, because one training example is not always one
 /// person.
@@ -566,6 +670,25 @@ pub struct AssetPolicy {
     /// Differential-privacy budget for everything released from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy: Option<PrivacyBudget>,
+    /// The forms anything released from it may take; absent: any form.
+    /// Skipped when absent, so policies without forms keep their PolicyId.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forms: Option<BTreeSet<ReleaseForm>>,
+}
+
+impl AssetPolicy {
+    /// At most one bounded category (a set of them is its largest).
+    pub fn check_forms(&self) -> Result<()> {
+        let bounded = self
+            .forms
+            .iter()
+            .flatten()
+            .filter(|f| matches!(f, ReleaseForm::BoundedCategory { .. }));
+        if bounded.count() > 1 {
+            return Err(bad("an asset names at most one bounded_category form"));
+        }
+        Ok(())
+    }
 }
 
 /// Owners' consent for derived values of one kind.
@@ -798,7 +921,25 @@ pub struct AggregationRule {
     /// Differential privacy applied to the aggregate before release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp: Option<DpMechanism>,
+    /// How many of the aggregation's sources one privacy unit may appear
+    /// in (one person registered with two agencies, say). A unit's
+    /// influence on the released aggregate is multiplied by it, so it is
+    /// multiplied into the sensitivity ([`MAX_SOURCES_PER_UNIT`] bounds it).
+    /// Absent: a governed (scoped) release assumes the worst case, every
+    /// participant; a release outside governed scopes assumes 1 as always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sources_per_unit: Option<u32>,
+    /// The labels of the aggregate vector's strata, in order (its layout).
+    /// A digest of them is bound into every contribution, so a party that
+    /// orders or names its strata differently is refused, not summed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Vec<String>>,
 }
+
+/// The most sources one privacy unit may be declared to appear in.
+pub const MAX_SOURCES_PER_UNIT: u32 = 4096;
+/// The most strata a layout may have, and the longest label.
+pub const MAX_LAYOUT_STRATA: usize = 4096;
 
 /// All confidentiality declarations of a program.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -879,6 +1020,9 @@ impl Confidentiality {
             if let Some(b) = &a.policy.privacy {
                 b.validate()?;
             }
+            a.policy
+                .check_forms()
+                .map_err(|e| bad(format!("asset {}: {}", a.id, e.message)))?;
             for (k, d) in &a.policy.derive {
                 if d.release == Release::Public && !d.to.is_empty() {
                     return Err(bad(format!(
@@ -919,6 +1063,47 @@ impl Confidentiality {
             a.codec.validate()?;
             if let Some(dp) = &a.dp {
                 dp.validate()?;
+            }
+            if let Some(m) = a.max_sources_per_unit {
+                if a.dp.is_none() {
+                    return Err(Error::new(
+                        Code::AggregationPlan,
+                        format!(
+                            "aggregate {:?}: max_sources_per_unit scales a privacy sensitivity, so it needs `dp`",
+                            a.output
+                        ),
+                    ));
+                }
+                if m == 0 || m > MAX_SOURCES_PER_UNIT {
+                    return Err(Error::new(
+                        Code::AggregationPlan,
+                        format!(
+                            "aggregate {:?}: max_sources_per_unit must be 1 to {MAX_SOURCES_PER_UNIT}, got {m}",
+                            a.output
+                        ),
+                    ));
+                }
+            }
+            if let Some(l) = &a.layout {
+                let mut seen = BTreeSet::new();
+                if l.is_empty()
+                    || l.len() > MAX_LAYOUT_STRATA
+                    || l.iter().any(|x| {
+                        x.is_empty()
+                            || x.len() > 128
+                            || x.contains('"')
+                            || x.chars().any(char::is_control)
+                    })
+                    || !l.iter().all(|x| seen.insert(x.as_str()))
+                {
+                    return Err(Error::new(
+                        Code::AggregationPlan,
+                        format!(
+                            "aggregate {:?}: a layout lists 1 to {MAX_LAYOUT_STRATA} distinct, non-empty stratum labels",
+                            a.output
+                        ),
+                    ));
+                }
             }
         }
         Ok(())

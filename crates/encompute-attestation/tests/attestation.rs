@@ -298,6 +298,7 @@ fn grants_open_only_in_their_session() {
         attestation_digest: "00".repeat(32),
         expires_at: NOW + 300,
         broker_public_key: String::new(),
+        governance: None,
     };
     let key = [42u8; 32];
     let broker = GrantSigner::from_seed(&[8; 32]);
@@ -338,6 +339,7 @@ fn grants_are_signed_by_the_broker() {
         attestation_digest: "00".repeat(32),
         expires_at: NOW + 300,
         broker_public_key: String::new(),
+        governance: None,
     };
     let broker = GrantSigner::from_seed(&[8; 32]);
     let g = seal_grant(header.clone(), &b, &[42; 32], &broker).unwrap();
@@ -686,4 +688,94 @@ fn confidential_space_keys_are_refreshed() {
     }
     // Without a refresh (a JWKS file), nothing changes.
     assert!(verify(ConfidentialSpaceProvider::new(EMPTY, AUD).unwrap(), &good).is_err());
+}
+
+#[test]
+fn gce_zone_extracted() {
+    use encompute_attestation::WorkloadLocation;
+    let w = world();
+    let verify = |e: &AttestationEvidence| {
+        Verifier::new()
+            .with(cs_provider())
+            .verify(e, &cs_policy(), &w.challenge, NOW + 1)
+            .unwrap()
+    };
+    // The zone the signed token names, as the workload's location.
+    let v = verify(&cs_evidence(&w, |_| {}));
+    let loc = v.location.expect("the token names a zone");
+    assert_eq!(
+        loc,
+        WorkloadLocation {
+            provider: "gcp".into(),
+            zone: "us-central1-a".into()
+        }
+    );
+    let l = loc.resolve().unwrap();
+    assert_eq!(
+        (
+            l.jurisdiction.as_str(),
+            l.region.as_str(),
+            l.zone.as_deref()
+        ),
+        ("US", "us-central1", Some("us-central1-a"))
+    );
+    l.check().unwrap();
+    // No `gce` claim, or one without a zone: no location (never a guess).
+    assert_eq!(
+        verify(&cs_evidence(&w, |c| {
+            c["submods"].as_object_mut().unwrap().remove("gce");
+        }))
+        .location,
+        None
+    );
+    assert_eq!(
+        verify(&cs_evidence(&w, |c| c["submods"]["gce"] = json!({"project_id": "p"}))).location,
+        None
+    );
+    assert_eq!(
+        verify(&cs_evidence(&w, |c| c["submods"]["gce"] = json!({"zone": ""}))).location,
+        None
+    );
+    // A zone the table does not know is reported as the cloud said it and
+    // is refused when resolved: an unknown location is never admitted.
+    let v = verify(&cs_evidence(&w, |c| {
+        c["submods"]["gce"] = json!({"zone": "mars-west1-a"})
+    }));
+    assert_eq!(v.location.as_ref().unwrap().zone, "mars-west1-a");
+    assert!(v.location.unwrap().resolve().is_err());
+    // The zone is part of the signed token: another key's token carrying
+    // another zone is no evidence at all.
+    let b = w.binding();
+    let mut c = cs_claims(&b.nonce().unwrap());
+    c["submods"]["gce"] = json!({"zone": "europe-west3-a"});
+    let forged = AttestationEvidence {
+        version: EVIDENCE_VERSION,
+        provider: PROVIDER.into(),
+        binding: b,
+        evidence: token(&c, ATTACKER, "test-key-1"),
+    };
+    assert_eq!(cs_code(&w, &forged), Code::Attestation);
+}
+
+#[test]
+fn a_mock_platform_names_its_zone_in_its_signed_claims() {
+    use encompute_attestation::mock::{MockHardware, MockProvider};
+    let hw = MockHardware::from_seed(&[3; 32]);
+    let w = world();
+    let b = w.binding();
+    let at = hw
+        .attester("sha256:img")
+        .issued_at(NOW)
+        .located("gcp", "europe-west3-b")
+        .attest(&w.challenge, &b)
+        .unwrap();
+    let mut p = AttestationPolicy::new(SPEC, Some(POLICY));
+    p.allowed_tee = vec![TeeKind::Mock];
+    p.allowed_images = vec!["sha256:img".into()];
+    p.allow_development = true;
+    let v = Verifier::new()
+        .with(MockProvider::new(&hw.public_key()).unwrap())
+        .verify(&at, &p, &w.challenge, NOW + 1)
+        .unwrap();
+    assert_eq!(v.location.unwrap().resolve().unwrap().jurisdiction, "DE");
 }

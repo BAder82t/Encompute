@@ -1,0 +1,10 @@
+# Synthetic rows: id, income gap in currency units (declared minus recorded).
+# Invented; no real person or record. Values sit on and beside the bands.
+SYN-0001 0
+SYN-0002 1999
+SYN-0003 2000
+SYN-0004 5400
+SYN-0005 7999
+SYN-0006 8000
+SYN-0007 31250
+SYN-0008 100000

@@ -17,14 +17,17 @@
 
 mod backend;
 pub mod canonical;
+pub mod governance;
 mod hash;
 pub mod http;
 mod identity;
+pub mod placement;
 pub mod proof;
 mod receipt;
 mod reference;
 pub mod service;
 mod spec;
+pub mod ticket;
 pub mod tls;
 pub mod transcript;
 mod verify;
@@ -41,10 +44,12 @@ pub use proof::{
 };
 pub use receipt::{
     ExecutionReceipt, SignedExecutionReceipt, VerificationEvidence, WorkloadAttestationRef,
-    RECEIPT_VERSION,
+    GOVERNED_RECEIPT_VERSION, RECEIPT_VERSION,
 };
 pub use reference::ReferenceTranscriptEvaluator;
-pub use service::{JobGrant, MessageEnvelope, ServiceHeaders, ServiceSigner};
+pub use service::{
+    JobGrant, MessageEnvelope, ServiceHeaders, ServiceSigner, UploadGrant, UploadKind,
+};
 pub use spec::{ExecutionSpec, ExecutionSpecId, PolicyId, PrivacyPolicyId, SPEC_VERSION};
 pub use transcript::{SemanticTranscript, TranscriptId, TRANSCRIPT_VERSION};
 pub use verify::{verify_receipt, ExpectedExecution, VerifiedReceipt};

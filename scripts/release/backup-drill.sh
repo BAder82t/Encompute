@@ -847,9 +847,16 @@ OUT="$(ENCOMPUTE_TOKEN="$(tok b-dev)" "$E" jobs run "$W/score.encompute" --proje
 check "a new job runs after the restore (CKKS result correct, trust SATISFIED)" \
   eq "$(close "$OUT" 0.01 0.04 0.09 0.81) $(grep -c 'Trust report *SATISFIED' "$W/job2.err")" "True 1"
 
-step "7b. database loss only: the surviving anchor is kept and the same backup restores"
+step "7b. database loss only: the surviving anchor is kept and a backup as new as it restores"
+# The anchor now covers the audit events the job after the restore wrote (it
+# anchors the audit chain's head with every checkpoint of the governance log),
+# so b1 is older than it: a fresh backup of the running deployment, anchor
+# first, is as new as the surviving anchor. (b1 over this anchor is refused:
+# step 8.)
+backup "$BACKUPS/b1b"
+snapshot "$W/pre-b1b"
 stop "$KB_PID" "$EVAL_PID" "$CTL_PID"
-restore "$BACKUPS/b1" > "$W/restore2.txt"
+restore "$BACKUPS/b1b" > "$W/restore2.txt"
 check "database-only restore keeps the existing anchor and broker state" eq \
   "$(grep -c 'anchor kept' "$W/restore2.txt") $(grep -c 'broker kept' "$W/restore2.txt")" "1 1"
 ctl verify-state >"$W/verify2.txt" 2>&1 || true
@@ -859,7 +866,46 @@ start_evaluator || die "the evaluator did not re-register"
 start_keybroker || die "the key broker did not restart"
 check "privacy state equals the backup after the database-only restore" eq \
   "$(ok a-owner GET "/v1/privacy/$DS1" | canon)|$(ok a-owner GET "/v1/privacy/$DS2" | canon)" \
-  "$(canon < "$W/pre/privacy-$DS1.json")|$(canon < "$W/pre/privacy-$DS2.json")"
+  "$(canon < "$W/pre-b1b/privacy-$DS1.json")|$(canon < "$W/pre-b1b/privacy-$DS2.json")"
+
+step "7c. the LATEST backup (b1) is older than the surviving anchor: refused naming AUDIT until recover records the gap"
+# The disaster an operator really has: the database is lost, the newest
+# backup predates the last anchored checkpoint. Nothing the governance log
+# records moved since b1, so the refusal is the audit chain's.
+stop "$KB_PID" "$EVAL_PID" "$CTL_PID"
+restore "$BACKUPS/b1" > "$W/restore7c.txt"
+check "restoring b1 keeps the newer anchor" contains "$W/restore7c.txt" "anchor kept"
+check "b1 holds no audit gap event yet" \
+  eq "$(sql_in "SELECT count(*) FROM audit_events WHERE action = 'audit.gap.recorded'")" 0
+B1_AUDIT_HEAD="$(sql_in "SELECT seq FROM audit_head WHERE id")"
+if start_control; then
+  fail_check "the control plane refuses to start on b1 over the newer anchor"
+  stop "$CTL_PID"
+else
+  wait "$CTL_PID" 2>/dev/null && rc=0 || rc=$?
+  check "the control plane refuses to start on b1 (exit $rc, not ready)" \
+    test "$rc" -ne 0 -a "$(curl -fs "$CTL_URL/ready" >/dev/null 2>&1 && echo up || echo down)" = down
+  check "the refusal names AUDIT STATE ROLLBACK and STARTUP REFUSED" \
+    eq "$(grep -c 'AUDIT STATE ROLLBACK.*STARTUP REFUSED' "$CTL_LOG")" 1
+fi
+ctl verify-state >"$W/verify7c.txt" 2>&1 && fail_check "verify-state refuses b1 over the newer anchor" \
+  || check "verify-state refuses b1 (AUDIT STATE ROLLBACK)" \
+    eq "$(grep -c "AUDIT STATE ROLLBACK" "$W/verify7c.txt")" 1
+ctl recover --operator drill-operator >"$W/recover7c.txt" 2>&1 || true
+check "recover says the audit events after b1 were lost and the gap is recorded" \
+  eq "$(grep -c "audit chain: events after $B1_AUDIT_HEAD were lost; the gap is recorded" "$W/recover7c.txt") $(grep -c RECOVERED "$W/recover7c.txt")" "1 1"
+check "the gap is an event of the audit chain (audit.gap.recorded, by drill-operator)" \
+  eq "$(sql_in "SELECT count(*) FROM audit_events WHERE action = 'audit.gap.recorded' AND actor = 'drill-operator'")" 1
+check "the chain is b1's plus the gap event: the lost events are not restored" \
+  eq "$(sql_in "SELECT seq FROM audit_head WHERE id")" "$((B1_AUDIT_HEAD + 1))"
+ctl verify-state >"$W/verify7c2.txt" 2>&1 || true
+check "verify-state after recovery: STATE VERIFIED" contains "$W/verify7c2.txt" "STATE VERIFIED"
+start_control || die "the control plane did not start after the audit recovery: $(tail -n 3 "$CTL_LOG")"
+start_evaluator || die "the evaluator did not re-register"
+start_keybroker || die "the key broker did not restart"
+pass "control plane starts after recovering the audit gap"
+check "nothing governed moved since b1: no ledger was frozen, $DS1 and $DS2 are not frozen" \
+  eq "$(sql_in "SELECT count(*) FROM audit_events WHERE action = 'privacy.ledger.frozen'") $(ok a-owner GET "/v1/privacy/$DS1" | jget 'v["frozen"]') $(ok a-owner GET "/v1/privacy/$DS2" | jget 'v["frozen"]')" "0 None None"
 
 step "8. an OLDER backup over a NEWER anchor is refused; recovery freezes"
 PRE_DS1_SPENT="$(jget 'v["spent"]["epsilon"]' < "$W/pre/privacy-$DS1.json")"
@@ -872,6 +918,10 @@ ok b-owner POST "/v1/assets/$MODEL2/revoke" >/dev/null
 if [ "$BAO_OK" = 1 ]; then
   for _ in $(seq 50); do [ "$(broker_key_state model-8)" = destroyed ] && break; sleep 0.2; done
 fi
+# The revocation is a governance log event, newer than b1; its checkpoint
+# wrote it to the log's mirror next to the anchor before the anchor.
+check "the governance log mirror next to the anchor holds the revocation" \
+  test "$(cat "$LIVE"/anchor/governance-log/*.jsonl | grep -c "\"subject\":\"$MODEL2\"")" -ge 1
 stop "$KB_PID" "$EVAL_PID" "$CTL_PID"
 restore "$BACKUPS/b1" > "$W/restore3.txt"
 check "restoring the older backup keeps the newer anchor" contains "$W/restore3.txt" "anchor kept"
@@ -882,16 +932,28 @@ else
   wait "$CTL_PID" 2>/dev/null && rc=0 || rc=$?
   check "the control plane refuses to start on the older backup (exit $rc, not ready)" \
     test "$rc" -ne 0 -a "$(curl -fs "$CTL_URL/ready" >/dev/null 2>&1 && echo up || echo down)" = down
-  check "the refusal names PRIVACY STATE ROLLBACK and STARTUP REFUSED" \
-    eq "$(grep -c 'PRIVACY STATE ROLLBACK.*STARTUP REFUSED' "$CTL_LOG")" 1
+  check "the refusal names GOVERNANCE LOG STATE ROLLBACK and STARTUP REFUSED" \
+    eq "$(grep -c 'GOVERNANCE LOG STATE ROLLBACK.*STARTUP REFUSED' "$CTL_LOG")" 1
 fi
 if ctl verify-state >"$W/verify3.txt" 2>&1; then
   fail_check "verify-state refuses the older backup"
 else
-  check "verify-state refuses the older backup (PRIVACY STATE ROLLBACK, ledger $DS1)" \
-    eq "$(grep -c "PRIVACY STATE ROLLBACK.*$DS1" "$W/verify3.txt")" 1
+  check "verify-state refuses the older backup (GOVERNANCE LOG STATE ROLLBACK)" \
+    eq "$(grep -c "GOVERNANCE LOG STATE ROLLBACK" "$W/verify3.txt")" 1
 fi
+# The mirror rolled back too (its newest segment gone): recovery is refused.
+cp -a "$LIVE/anchor/governance-log" "$W/mirror-copy"
+rm -f "$(ls "$LIVE"/anchor/governance-log/*.jsonl | sort | tail -n 1)"
+ctl recover --operator drill-operator >"$W/recover0.txt" 2>&1 || true
+check "recover with a truncated mirror is refused" \
+  eq "$(grep -c "RECOVERY REFUSED" "$W/recover0.txt") $(grep -c RECOVERED "$W/recover0.txt")" "1 0"
+rm -rf "$LIVE/anchor/governance-log" && cp -a "$W/mirror-copy" "$LIVE/anchor/governance-log"
+# With the mirror intact, recovery restores the missing events from it on
+# its own, up to the anchored head.
 ctl recover --operator drill-operator >"$W/recover.txt" 2>&1 || true
+check "recover restores the governance log from the mirror" contains "$W/recover.txt" "from the mirror"
+check "recover re-applies the revocation the backup forgot" \
+  eq "$(grep -c "asset $MODEL2: revocation re-applied" "$W/recover.txt")" 1
 check "recover --operator freezes exactly the rolled-back ledger ($DS1, not $DS2)" eq \
   "$(grep -c "privacy ledger $DS1: frozen" "$W/recover.txt") $(grep -c "privacy ledger $DS2" "$W/recover.txt") $(grep -c RECOVERED "$W/recover.txt")" \
   "1 0 1"

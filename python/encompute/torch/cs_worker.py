@@ -180,7 +180,11 @@ def check_job(job: dict) -> dict:
         raise JobRefused("the round's seed is a non-negative 63-bit integer")
     if not isinstance(micro, int) or not 1 <= micro <= 4096:
         raise JobRefused("the microbatch is between 1 and 4096 records")
-    if "#" in job["broker"]:
+    urls = job.get("broker_urls")
+    if urls is not None and not (isinstance(urls, dict) and all(
+            isinstance(b, str) and isinstance(u, str) for b, u in urls.items())):
+        raise JobRefused("broker_urls maps key broker IDs to their addresses")
+    if "#" in job["broker"] or any("#" in u for u in (urls or {}).values()):
         raise JobRefused("the broker's grant-signing key comes from the training spec, not the "
                          "descriptor")
     # The input adapter: the spec's initial one, or the one the coordinator
@@ -248,10 +252,12 @@ def run(job: dict) -> dict:
     _say("Attester", {"confidential-space": "Google Confidential Space launcher",
                       "mock": "MOCK (development only)"}.get(attester, attester))
 
-    # 1. Attest and receive the keys, sealed to this in-memory session.
+    # 1. Attest and receive the keys, sealed to this in-memory session. The
+    # key IDs are the spec's (one definition, with the per-asset broker
+    # binding's), never names this worker makes up.
     seed = os.urandom(32)
-    dataset_key_id = f"dataset-{mine['asset_id']}"
-    output_key_id = f"contribution-{party}"
+    ids = _native.training_participant_keys(json.dumps(spec), party)
+    dataset_key_id, output_key_id = ids["dataset"], ids["contribution"]
     arg = (os.environ.get("ENCOMPUTE_TEE_SOCKET", "") if attester == "confidential-space"
            else os.environ.get("ENCOMPUTE_MOCK_SEED", ""))
     t1 = time.perf_counter()
@@ -259,10 +265,13 @@ def run(job: dict) -> dict:
         # The session attests as this participant: only its own dataset
         # and output keys are released to it. Grants are accepted only
         # under the broker keys the spec names.
+        # With several brokers, each key goes to its own broker's address
+        # (broker_urls); a bound broker without one fails closed.
         keys, record = _native.acquire_session_keys(
             json.dumps(spec), job["broker"],
-            [f"{model_id}.{party}", dataset_key_id, f"adapters.{party}", output_key_id],
-            seed, attester, arg, os.environ.get("ENCOMPUTE_MOCK_IMAGE", ""), party)
+            [ids["model"], dataset_key_id, ids["adapters"], output_key_id],
+            seed, attester, arg, os.environ.get("ENCOMPUTE_MOCK_IMAGE", ""), party,
+            broker_urls=job.get("broker_urls"))
     except _native.NativeError as e:
         raise JobRefused(f"KEY RELEASE DENIED: {e.args[0]}: {e.args[1]}") from None
     keys = dict(keys)

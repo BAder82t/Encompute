@@ -34,6 +34,17 @@ pub fn requirement(r: &TrustRequirement) -> String {
         }
         TrustRequirement::ExecutionRegion { region } => format!("everything runs in {region}"),
         TrustRequirement::SignedEvidence => "every execution leaves signed evidence".into(),
+        TrustRequirement::KeyCustody {
+            organization,
+            broker,
+            ..
+        } => format!("key held by {broker}, the key broker of {organization}"),
+        TrustRequirement::Placement => {
+            "ciphertext steps run only where the placement constraints admit".into()
+        }
+        TrustRequirement::OperatorSeparation => {
+            "the evaluator's operator is neither a source owner nor a decryptor".into()
+        }
     }
 }
 
@@ -58,6 +69,19 @@ pub fn plan(p: &ConfidentialExecutionPlan) -> String {
         p.context.profile.expands_to().join("; ")
     );
     requirements(&mut s, &p.requirements);
+    if let Some(pl) = &p.placement {
+        let _ = writeln!(s, "\nPlacement\n{RULE}");
+        if pl.admissible.is_empty() {
+            let _ = writeln!(s, "  no evaluator is admissible");
+        }
+        for e in &pl.admissible {
+            let at = e.location.as_ref().map_or_else(
+                || "location not recorded".to_owned(),
+                |l| format!("{} ({})", l.display(), e.evidence.label()),
+            );
+            let _ = writeln!(s, "  {} operated by {}: {at}", e.id, e.operator);
+        }
+    }
     let _ = writeln!(s, "\nSelected mechanisms\n{RULE}");
     for st in &p.steps {
         let _ = writeln!(s, "{}", st.id);

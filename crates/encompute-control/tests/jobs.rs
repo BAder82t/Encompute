@@ -70,7 +70,12 @@ fn state_machine_is_explicit() {
         (Planned, WaitingForApproval),
         (Planned, Authorized),
         (WaitingForApproval, Authorized),
+        // A governed job whose per-job approvals lapsed before scheduling.
+        (Authorized, WaitingForApproval),
         (Authorized, Queued),
+        // A scheduled governed job whose evaluator's location evidence was
+        // only renewed is scheduled again at start (audited as job.requeued).
+        (Queued, Authorized),
         (Queued, Running),
         (Running, Verifying),
         (Verifying, Succeeded),
@@ -452,7 +457,7 @@ fn restart_preserves_jobs_and_never_replays() {
         evaluator: ev,
         ..
     } = w;
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     let get = |id: &str| {
         t.ok(&b_dev, "GET", &format!("/v1/jobs/{id}"), None)["state"]
             .as_str()
@@ -476,6 +481,16 @@ fn restart_preserves_jobs_and_never_replays() {
     t.control.expire_evaluators().unwrap();
     assert_eq!(get(&running), "failed");
     assert_eq!(get(&queued), "failed");
+    // Both ended jobs were anchored before the call returned (the policy is
+    // uniform: any path that ends a job checkpoints the log).
+    for j in [&running, &queued] {
+        assert!(
+            t.control
+                .anchored(encompute_control::govlog::NegSet::EndedJobs, j)
+                .unwrap(),
+            "{j} is not anchored as ended"
+        );
+    }
     let v = t.ok(&b_dev, "GET", &format!("/v1/jobs/{running}"), None);
     assert!(v["error"].as_str().unwrap().contains("not replayed"), "{v}");
     let _ = ev;
@@ -602,7 +617,7 @@ fn production_plans_are_checked_against_the_control_planes_floor() {
         None,
         5,
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
     prod.verify_stored_plan(&program, &good).unwrap();
     let refused = |f: &dyn Fn(&mut encompute_planner::ConfidentialExecutionPlan), why: &str| {
         let mut bad = good.clone();

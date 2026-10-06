@@ -37,6 +37,11 @@ pub struct ExecutionSpec {
     /// (ADR-013); absent without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy_policy_id: Option<String>,
+    /// Hex `GovernanceId` of the governed project's binding (purpose,
+    /// linkage, input versions, releases); absent outside governed
+    /// projects, so their spec IDs are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance_id: Option<String>,
 }
 
 /// `SHA256("encompute.execution-spec.v1" || 0x00 || canonical spec)`.
@@ -64,6 +69,13 @@ impl ExecutionSpec {
     pub fn id(&self) -> ExecutionSpecId {
         let bytes = self.canonical_bytes().expect("strings and integers only");
         ExecutionSpecId(tagged(SPEC, &bytes))
+    }
+
+    /// This spec under a governed project's `binding`: the spec ID then
+    /// changes with the purpose, linkage, input versions and releases.
+    pub fn governed(mut self, binding: &crate::governance::GovernanceBinding) -> Self {
+        self.governance_id = Some(binding.id().hex());
+        self
     }
 }
 

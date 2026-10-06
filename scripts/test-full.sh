@@ -17,7 +17,8 @@
 # PostgreSQL of scripts/tls-test-db.sh (eval "$(scripts/tls-test-db.sh env)")
 # for the database-TLS tests, and OpenFHE
 # (OPENFHE_ROOT or .deps/openfhe) for the runs that list them. The manifest is
-# scripts/test-manifest.json: reviewed whenever a minimum changes.
+# scripts/test-manifest-governance.json (it extends scripts/test-manifest.json):
+# reviewed whenever a minimum changes.
 # scripts/test-full-selftest.sh proves this runner fails when it should.
 set -uo pipefail
 cd "$(dirname "$0")/.."

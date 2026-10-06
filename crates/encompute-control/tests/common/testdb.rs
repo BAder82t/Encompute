@@ -345,15 +345,36 @@ pub fn unmigrated_database() -> Option<String> {
 
 // --- Directories ----------------------------------------------------------------
 
-/// A new, empty directory for one test. Never a reused one: the process ID
-/// repeats across runs, and a stale anchor left under a reused name made a
-/// later test see another run's history. `create_dir` fails on an existing
-/// directory, so the name is retried until it is new.
+/// The directories the running test made, removed when it ends (a
+/// directory left behind would only fill the temporary directory: names are
+/// never reused).
+struct ScratchDirs(Vec<PathBuf>);
+
+impl Drop for ScratchDirs {
+    fn drop(&mut self) {
+        for d in &self.0 {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<ScratchDirs> = const { std::cell::RefCell::new(ScratchDirs(vec![])) };
+}
+
+/// A new, empty directory for one test, removed when the test ends. Never a
+/// reused one: the process ID repeats across runs, and a stale anchor left
+/// under a reused name made a later test see another run's history.
+/// `create_dir` fails on an existing directory, so the name is retried until
+/// it is new.
 pub fn tmp_dir(tag: &str) -> PathBuf {
     for _ in 0..100 {
         let d = std::env::temp_dir().join(unique_name(&format!("encompute-control-{tag}")));
         match std::fs::create_dir(&d) {
-            Ok(()) => return d,
+            Ok(()) => {
+                SCRATCH.with(|s| s.borrow_mut().0.push(d.clone()));
+                return d;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => panic!("{}: {e}", d.display()),
         }

@@ -3,8 +3,9 @@
 
 Everything that decides what must run is data in the manifest
 (scripts/test-manifest.json). This file only knows how to check a
-dependency, run a command, read cargo's output, and compare the two. It never
-reports success for a suite it did not see run.
+dependency, run a command, read cargo's output (or, for a command that is not
+cargo test, the marker and count lines its suite declares), and compare the
+two. It never reports success for a suite it did not see run.
 """
 import argparse
 import hashlib
@@ -21,7 +22,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MANIFEST = ROOT / "scripts" / "test-manifest.json"
+# The governance manifest extends scripts/test-manifest.json with the suites, allowed
+# skips and minimums of the governed code paths, so it is the repository's manifest:
+# every caller that names no --manifest (CI, the release check) gets all of it.
+DEFAULT_MANIFEST = ROOT / "scripts" / "test-manifest-governance.json"
 LABELS = {
     "postgres": "PostgreSQL",
     "openbao": "OpenBao",
@@ -184,9 +188,39 @@ def precheck(deps, env):
 # --- Manifest --------------------------------------------------------------------
 
 
+def read_manifest(path, chain=()):
+    """The manifest at `path` with the one it "extends" merged under it.
+
+    A run or suite with the id or name of one in the base is merged onto it
+    field by field (so it can raise a minimum without repeating the command);
+    any other is added. Nothing can be removed, and a minimum may only go up.
+    """
+    path = Path(path).resolve()
+    m = json.loads(path.read_text())
+    files, errors = [path], []
+    if not m.get("extends"):
+        return m, files, errors
+    base_path = (path.parent / m["extends"]).resolve()
+    if base_path in chain or base_path == path:
+        return m, files, ["extends loops back to %s" % base_path.name]
+    base, bfiles, errors = read_manifest(base_path, chain + (path,))
+    files += bfiles
+    for key, ident in (("runs", "id"), ("suites", "name")):
+        merged = {e[ident]: dict(e) for e in base.get(key, [])}
+        for e in m.get(key, []):
+            old = merged.get(e[ident])
+            if old is not None:
+                for k in ("min_tests", "min_db_backed"):
+                    if k in e and e[k] < old.get(k, 0):
+                        errors.append("%s %s lowers %s from %s to %s" % (key[:-1], e[ident], k, old[k], e[k]))
+            merged[e[ident]] = {**(old or {}), **e}
+        m[key] = list(merged.values())
+    return m, files, errors
+
+
 def load_manifest(path):
-    m = json.loads(Path(path).read_text())
-    errors = []
+    m, files, errors = read_manifest(path)
+    m["files"] = [str(f) for f in files]
     runs = {r["id"]: r for r in m.get("runs", [])}
     if len(runs) != len(m.get("runs", [])):
         errors.append("duplicate run ids")
@@ -197,6 +231,8 @@ def load_manifest(path):
                 errors.append("run %s: unknown dependency %s" % (r["id"], d))
         if not isinstance(r.get("command"), list) or not r["command"]:
             errors.append("run %s: no command" % r["id"])
+        if r.get("parser", "cargo") not in ("cargo", "lines"):
+            errors.append("run %s: unknown parser %s" % (r["id"], r["parser"]))
     for s in m.get("suites", []):
         if s["name"] in names:
             errors.append("duplicate suite %s" % s["name"])
@@ -205,6 +241,10 @@ def load_manifest(path):
         if s["run"] not in runs:
             errors.append("suite %s: unknown run %s" % (s["name"], s["run"]))
             continue
+        if runs[s["run"]].get("parser") == "lines":
+            for k in ("marker", "count"):
+                if not s.get(k):
+                    errors.append("suite %s: a lines suite needs a %s pattern" % (s["name"], k))
         if s.get("required", True):
             if s.get("min_tests", 0) < 1:
                 errors.append("required suite %s needs min_tests >= 1" % s["name"])
@@ -300,6 +340,31 @@ def parse_cargo(text, amap):
         if s["ignored"] > named:
             s["skips"].append("ignored: %d test(s) marked #[ignore]" % (s["ignored"] - named))
     return suites
+
+
+def parse_lines(text, suites):
+    """The same shape as parse_cargo, for a command that is not `cargo test`.
+
+    Each suite declares regular expressions: `marker` (a line that must appear:
+    the command's own verdict), `count` (one match per passing check), and
+    optionally `fail` (a failing check) and `skip` (a skipped one). A suite
+    whose marker never appears is as good as not run.
+    """
+    out = {}
+    for s in suites:
+        pats = {k: re.compile(s[k]) for k in ("marker", "count", "fail", "skip") if s.get(k)}
+        sec = {"passed": 0, "failed": 0, "ignored": 0, "skips": [], "seen": 0}
+        for line in text.splitlines():
+            if "marker" in pats and pats["marker"].search(line):
+                sec["seen"] = 1
+            if "count" in pats and pats["count"].search(line):
+                sec["passed"] += 1
+            elif "fail" in pats and pats["fail"].search(line):
+                sec["failed"] += 1
+            if "skip" in pats and pats["skip"].search(line):
+                sec["skips"].append(line.strip()[:200])
+        out[s["target"]] = sec
+    return out
 
 
 def run_command(run, env, logdir, nocapture):
@@ -486,7 +551,10 @@ def main():
             continue
         code, secs, log = run_command(r, renv, logdir, not a.no_nocapture)
         text = log.read_text(errors="replace")
-        parsed = parse_cargo(text, amap) if r.get("parser", "cargo") == "cargo" else {}
+        if r.get("parser", "cargo") == "lines":
+            parsed = parse_lines(text, [s for s in suites if s["run"] == r["id"]])
+        else:
+            parsed = parse_cargo(text, amap)
         info.update(exit=code, seconds=round(secs, 1), tests=sum(s["passed"] for s in parsed.values()),
                     binaries={k: {"passed": v["passed"], "failed": v["failed"], "ignored": v["ignored"]}
                               for k, v in sorted(parsed.items())})
@@ -516,7 +584,9 @@ def main():
                    "min_tests": s.get("min_tests", 0), "tests": 0, "failed": 0, "skips": [], "allowed_skips": []}
             results[name] = res
             if sec is None or sec["seen"] == 0:
-                res["status"], res["why"] = "FAIL", "did not run (the binary reported no result)"
+                res["status"] = "FAIL"
+                res["why"] = ("its marker line was not found: %s" % s["marker"] if s.get("marker")
+                              else "did not run (the binary reported no result)")
                 continue
             res["tests"], res["failed"] = sec["passed"], sec["failed"]
             bad = []
@@ -604,6 +674,7 @@ def main():
     summary = {
         "manifest": manifest_rel,
         "manifest_sha256": hashlib.sha256(Path(a.manifest).read_bytes()).hexdigest(),
+        "manifest_files": {Path(f).name: hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in m["files"]},
         "git_commit": git_start["commit"] if git_start else None,
         "git_tree": git_start["tree"] if git_start else None,
         "git_clean_start": (not git_start["dirty"]) if git_start else None,

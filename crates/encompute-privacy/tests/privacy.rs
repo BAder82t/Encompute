@@ -31,6 +31,9 @@ fn budget(epsilon: f64) -> PrivacyBudget {
 
 fn spec(round: u32, epsilon: f64) -> ReleaseSpec {
     ReleaseSpec {
+        sources_per_unit: 1,
+        layout_id: None,
+        job_id: None,
         round_id: format!("{round:064x}"),
         output: "global_gradient".into(),
         policy_id: Some("aa".repeat(32)),
@@ -54,10 +57,12 @@ fn spec(round: u32, epsilon: f64) -> ReleaseSpec {
             Charged {
                 asset_id: "gradient-a".into(),
                 budget: budget(epsilon),
+                scoped: None,
             },
             Charged {
                 asset_id: "gradient-b".into(),
                 budget: budget(epsilon),
+                scoped: None,
             },
         ],
     }
@@ -422,6 +427,7 @@ fn preset_levels_charge_their_effective_noise() {
                 charged: vec![Charged {
                     asset_id: "gradient-a".into(),
                     budget: budget.clone(),
+                    scoped: None,
                 }],
                 ..base.clone()
             };
@@ -477,6 +483,7 @@ fn preset_levels_charge_their_effective_noise() {
         charged: vec![Charged {
             asset_id: "gradient-a".into(),
             budget,
+            scoped: None,
         }],
         ..base
     };

@@ -63,6 +63,10 @@ pub struct Header {
     /// SHA-256 of the evaluation-key payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
+    /// Hex `GovernanceId` of a governed project's execution; absent
+    /// otherwise (standard headers are unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance_id: Option<String>,
     pub items: Vec<Item>,
 }
 
@@ -77,6 +81,9 @@ pub struct Expect<'a> {
     pub parameter_set_id: &'a str,
     pub program_id: Option<&'a str>,
     pub key_id: Option<&'a str>,
+    /// The governed binding the envelope must carry, exactly: `None` for a
+    /// standard execution, where a governed envelope is refused too.
+    pub governance_id: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +122,22 @@ impl Envelope {
         let digest = Sha256::digest(&out);
         out.extend_from_slice(&digest);
         out
+    }
+
+    /// The header alone, without the checksum or the payload: to read what
+    /// an upload claims (its key ID) before the whole envelope is
+    /// processed. Nothing here is verified; a full [`Envelope::decode`] of
+    /// the same bytes decides.
+    pub fn peek_header(bytes: &[u8]) -> Result<Header> {
+        if bytes.len() < 4 + 2 + 4 + 32 || &bytes[..4] != MAGIC {
+            return Err(bad("not an Encompute envelope"));
+        }
+        let hlen = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
+        if hlen > MAX_HEADER || 10 + hlen > bytes.len() - 32 {
+            return Err(bad("envelope header length is invalid"));
+        }
+        serde_json::from_slice(&bytes[10..10 + hlen])
+            .map_err(|e| bad(format!("envelope header: {e}")))
     }
 
     /// Parse and verify structure and checksum. Does not check bindings;
@@ -208,6 +231,12 @@ impl Envelope {
             if h.key_id.as_deref() != Some(k) {
                 return Err(Error::new(Code::WrongKey, "made under a different key"));
             }
+        }
+        if h.governance_id.as_deref() != e.governance_id {
+            return Err(Error::new(
+                Code::GovernancePurposeMismatch,
+                "made for another governed project, purpose or binding",
+            ));
         }
         Ok(())
     }

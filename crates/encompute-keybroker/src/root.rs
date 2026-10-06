@@ -34,7 +34,10 @@ use zeroize::Zeroizing;
 use encompute_ir::{Code, Error, Result};
 use encompute_verification::{hex, unhex};
 
-use crate::store::{KeyContext, LocalKekStore, SecretStore, StoreSecurity, StoredKey};
+use crate::store::{
+    has_pending, pending_path, promote_pending, write_private_new, KeyContext, LocalKekStore,
+    SecretStore, StoreSecurity, StoredKey,
+};
 use crate::KeyMaterial;
 
 fn err(msg: impl Into<String>) -> Error {
@@ -62,6 +65,16 @@ pub trait RootKeyProvider: Send + Sync {
     fn rewrap(&self, ciphertext: &str, aad: &[u8]) -> Result<(String, u64)>;
     /// Creates a new root key version; returns it.
     fn rotate(&self) -> Result<u64>;
+    /// Makes every root key version older than `version` unable to decrypt
+    /// anything, for good (a KEK wrapped under one, in an old backup, then
+    /// never opens): the last step of a crypto-shred. Irreversible, and
+    /// shared with every other secret wrapped under this root key.
+    fn retire_before(&self, _version: u64) -> Result<()> {
+        Err(err(format!(
+            "root key provider {} cannot retire old root key versions",
+            self.provider()
+        )))
+    }
 }
 
 /// The broker's KEK, wrapped under a root key. Not secret.
@@ -99,7 +112,7 @@ pub struct RootRotation {
 pub struct RootWrappedKekStore {
     kek: LocalKekStore,
     wrapped: WrappedKek,
-    provider: Box<dyn RootKeyProvider>,
+    provider: std::sync::Arc<dyn RootKeyProvider>,
     path: PathBuf,
 }
 
@@ -117,6 +130,7 @@ impl RootWrappedKekStore {
         if organization.is_empty() {
             return Err(err("a root-wrapped KEK needs an organization"));
         }
+        let provider: std::sync::Arc<dyn RootKeyProvider> = provider.into();
         let aad = kek_aad(organization);
         if !path.exists() {
             let mut k = Zeroizing::new([0u8; 32]);
@@ -205,6 +219,61 @@ impl RootWrappedKekStore {
             new_version,
         })
     }
+
+    /// Retires every root key version older than the one the live KEK is
+    /// wrapped under (see [`RootKeyProvider::retire_before`]), so that an
+    /// older wrapped KEK (a backup's, or one replaced by a revocation or a
+    /// root rotation) can never be opened again, and the asset keys under
+    /// it with it. Rotate the root key first (`rotate_root`) so the live KEK
+    /// is under a version newer than every copy to retire; every other KEK
+    /// wrapped under this root key must have been re-wrapped by then, or it
+    /// is lost.
+    pub fn retire_older_root_versions(&self) -> Result<u64> {
+        // A wrapped KEK a revocation left pending may still be needed by
+        // the state saved under it: start the broker (it adopts and
+        // promotes it) before retiring what could open it.
+        if has_pending(&self.path) {
+            return Err(err(format!(
+                "a rotated KEK is still pending beside {} (`.next.` files): start the broker once \
+                 so a state that names it takes effect; delete a file no saved state names; then \
+                 retire the old root key versions",
+                self.path.display()
+            )));
+        }
+        let v = self.wrapped.key_version;
+        self.provider.retire_before(v)?;
+        Ok(v)
+    }
+
+    fn read_wrapped(&self, path: &Path) -> Result<(WrappedKek, LocalKekStore)> {
+        let wrapped: WrappedKek = serde_json::from_slice(
+            &std::fs::read(path).map_err(|e| err(format!("{}: {e}", path.display())))?,
+        )
+        .map_err(|e| err(format!("{}: {e}", path.display())))?;
+        let w = &self.wrapped;
+        if wrapped.format != WRAPPED_KEK_FORMAT
+            || wrapped.organization != w.organization
+            || wrapped.provider != w.provider
+            || wrapped.key_ref != w.key_ref
+        {
+            return Err(err(format!(
+                "{}: this wrapped KEK is not of this organization, provider and root key",
+                path.display()
+            )));
+        }
+        let pt = self
+            .provider
+            .decrypt(&wrapped.ciphertext, &kek_aad(&wrapped.organization))?;
+        let k: [u8; 32] = pt
+            .as_slice()
+            .try_into()
+            .map_err(|_| err("the root key provider returned a KEK of the wrong length"))?;
+        let kek = LocalKekStore::from_key(k);
+        if kek.kek_id() != wrapped.kek_id {
+            return Err(err("the unwrapped KEK does not match its fingerprint"));
+        }
+        Ok((wrapped, kek))
+    }
 }
 
 fn write_new(path: &Path, w: &WrappedKek) -> Result<()> {
@@ -254,25 +323,87 @@ impl SecretStore for RootWrappedKekStore {
     fn state_mac(&self, state: &[u8]) -> Result<Option<[u8; 32]>> {
         Ok(Some(self.kek.mac_state(state)))
     }
+
+    fn begin_rekey(&self) -> Result<Option<Box<dyn SecretStore>>> {
+        let mut k = Zeroizing::new([0u8; 32]);
+        getrandom::getrandom(k.as_mut()).map_err(|e| err(format!("no randomness: {e}")))?;
+        let kek = LocalKekStore::from_key(*k);
+        let (ciphertext, key_version) = self
+            .provider
+            .encrypt(k.as_ref(), &kek_aad(&self.wrapped.organization))?;
+        let wrapped = WrappedKek {
+            key_version,
+            kek_id: kek.kek_id(),
+            ciphertext,
+            ..self.wrapped.clone()
+        };
+        write_private_new(
+            &pending_path(&self.path, &wrapped.kek_id),
+            &serde_json::to_vec_pretty(&wrapped).expect("serializable"),
+        )?;
+        Ok(Some(Box::new(Self {
+            kek,
+            wrapped,
+            provider: self.provider.clone(),
+            path: self.path.clone(),
+        })))
+    }
+
+    fn commit_rekey(&self) -> Result<()> {
+        if !promote_pending(&self.path, &self.wrapped.kek_id)? {
+            let live: WrappedKek = serde_json::from_slice(
+                &std::fs::read(&self.path)
+                    .map_err(|e| err(format!("{}: {e}", self.path.display())))?,
+            )
+            .map_err(|e| err(format!("{}: {e}", self.path.display())))?;
+            if live.kek_id != self.wrapped.kek_id {
+                return Err(err(format!(
+                    "{}: the rotated KEK is neither pending nor live",
+                    self.path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn adopt_pending(&mut self, kek_id: &str) -> Result<bool> {
+        let pending = pending_path(&self.path, kek_id);
+        if !pending.exists() {
+            return Ok(false);
+        }
+        let (wrapped, kek) = self.read_wrapped(&pending)?;
+        if wrapped.kek_id != kek_id {
+            return Err(err(format!(
+                "{}: the pending KEK is not the one its name says",
+                pending.display()
+            )));
+        }
+        self.wrapped = wrapped;
+        self.kek = kek;
+        Ok(true)
+    }
 }
 
 // --- OpenBao / HashiCorp Vault Transit ----------------------------------------
 
-/// A root key in OpenBao or HashiCorp Vault's Transit engine (same API).
-/// The token comes from the environment or a mounted file, never from a
-/// command line or config file.
-pub struct OpenBaoTransit {
-    addr: String,
-    mount: String,
-    key: String,
+/// The HTTP rules every call to OpenBao or HashiCorp Vault follows (Transit
+/// root keys and the KV-v2 generation mark alike): https, or plain http on
+/// loopback only; the token from the environment or a mounted file, never a
+/// command line or config file; redirects never followed; every call bounded
+/// by a timeout.
+pub(crate) struct BaoHttp {
+    pub(crate) addr: String,
     token: Zeroizing<String>,
     agent: ureq::Agent,
 }
 
-impl OpenBaoTransit {
+/// How long one OpenBao/Vault call may take.
+pub(crate) const BAO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl BaoHttp {
     /// `addr`: e.g. `https://bao.internal:8200`. Plain HTTP is accepted only
     /// for loopback addresses (local development containers).
-    pub fn new(addr: &str, mount: &str, key: &str, token: Zeroizing<String>) -> Result<Self> {
+    pub(crate) fn new(addr: &str, token: Zeroizing<String>) -> Result<Self> {
         let addr = addr.trim_end_matches('/').to_owned();
         // The loopback host must end the authority: `http://127.0.0.1.evil`,
         // `http://localhost.evil` and `http://127.0.0.1:1@evil` are not
@@ -289,24 +420,14 @@ impl OpenBaoTransit {
             .any(|p| addr.strip_prefix(p).is_some_and(authority_ends));
         if !addr.starts_with("https://") && !loopback {
             return Err(err(format!(
-                "root key provider address {addr} must use https (plain http only on loopback)"
+                "OpenBao/Vault address {addr} must use https (plain http only on loopback)"
             )));
-        }
-        let ok = |s: &str| {
-            !s.is_empty()
-                && s.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        };
-        if !ok(mount) || !ok(key) {
-            return Err(err("malformed transit mount or key name"));
         }
         if token.is_empty() {
             return Err(err("no OpenBao/Vault token"));
         }
         Ok(Self {
             addr,
-            mount: mount.into(),
-            key: key.into(),
             token,
             // Redirects are never followed: ureq would carry X-Vault-Token
             // to whatever origin a redirect names (it strips only
@@ -316,9 +437,7 @@ impl OpenBaoTransit {
     }
 
     fn agent(tls: Option<std::sync::Arc<rustls::ClientConfig>>) -> ureq::Agent {
-        let b = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(10))
-            .redirects(0);
+        let b = ureq::AgentBuilder::new().timeout(BAO_TIMEOUT).redirects(0);
         match tls {
             Some(c) => b.tls_config(c).build(),
             None => b.build(),
@@ -330,7 +449,7 @@ impl OpenBaoTransit {
     /// names) name; with none of them set the client is unchanged (public
     /// web roots, no client certificate). A bundle that cannot be read or
     /// holds no certificate is an error, never a fall back to other roots.
-    pub fn with_tls_from_env(mut self) -> Result<Self> {
+    pub(crate) fn with_tls_from_env(mut self) -> Result<Self> {
         if let Some(c) = encompute_verification::tls::provider_config_from_env()? {
             self.agent = Self::agent(Some(c));
         }
@@ -339,10 +458,10 @@ impl OpenBaoTransit {
 
     /// From `BAO_ADDR`/`VAULT_ADDR`, and the token from `BAO_TOKEN_FILE`
     /// (a mounted secret) or `BAO_TOKEN`/`VAULT_TOKEN`.
-    pub fn from_env(mount: &str, key: &str) -> Result<Self> {
+    pub(crate) fn from_env() -> Result<Self> {
         let var = |names: &[&str]| names.iter().find_map(|n| std::env::var(n).ok());
         let addr = var(&["BAO_ADDR", "VAULT_ADDR"])
-            .ok_or_else(|| err("set BAO_ADDR (or VAULT_ADDR) to the root key provider"))?;
+            .ok_or_else(|| err("set BAO_ADDR (or VAULT_ADDR) to the OpenBao/Vault server"))?;
         let token = match var(&["BAO_TOKEN_FILE", "VAULT_TOKEN_FILE"]) {
             Some(f) => {
                 check_token_file(Path::new(&f))?;
@@ -353,11 +472,101 @@ impl OpenBaoTransit {
                         .to_owned(),
                 )
             }
-            None => Zeroizing::new(var(&["BAO_TOKEN", "VAULT_TOKEN"]).ok_or_else(|| {
-                err("set BAO_TOKEN_FILE (or BAO_TOKEN) for the root key provider")
-            })?),
+            None => Zeroizing::new(
+                var(&["BAO_TOKEN", "VAULT_TOKEN"])
+                    .ok_or_else(|| err("set BAO_TOKEN_FILE (or BAO_TOKEN) for OpenBao/Vault"))?,
+            ),
         };
-        Self::new(&addr, mount, key, token)?.with_tls_from_env()
+        Self::new(&addr, token)?.with_tls_from_env()
+    }
+
+    /// `GET {addr}/v1/{path}`.
+    pub(crate) fn get(&self, path: &str) -> std::result::Result<ureq::Response, Box<ureq::Error>> {
+        self.agent
+            .get(&format!("{}/v1/{path}", self.addr))
+            .set("X-Vault-Token", &self.token)
+            .call()
+            .map_err(Box::new)
+    }
+
+    /// `POST {addr}/v1/{path}` with a JSON body.
+    pub(crate) fn post(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> std::result::Result<ureq::Response, Box<ureq::Error>> {
+        self.agent
+            .post(&format!("{}/v1/{path}", self.addr))
+            .set("X-Vault-Token", &self.token)
+            .send_json(body)
+            .map_err(Box::new)
+    }
+}
+
+/// The `errors` an OpenBao/Vault refusal names.
+pub(crate) fn bao_errors(resp: ureq::Response) -> String {
+    resp.into_json::<serde_json::Value>()
+        .ok()
+        .and_then(|v| {
+            v["errors"].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// A root key in OpenBao or HashiCorp Vault's Transit engine (same API).
+/// The token comes from the environment or a mounted file, never from a
+/// command line or config file.
+pub struct OpenBaoTransit {
+    http: BaoHttp,
+    mount: String,
+    key: String,
+}
+
+/// A mount or key name: letters, digits, `-`, `_`, `.`.
+pub(crate) fn bao_name_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+impl OpenBaoTransit {
+    /// `addr`: e.g. `https://bao.internal:8200`. Plain HTTP is accepted only
+    /// for loopback addresses (local development containers).
+    pub fn new(addr: &str, mount: &str, key: &str, token: Zeroizing<String>) -> Result<Self> {
+        let http = BaoHttp::new(addr, token)?;
+        Self::with_http(http, mount, key)
+    }
+
+    fn with_http(http: BaoHttp, mount: &str, key: &str) -> Result<Self> {
+        if !bao_name_ok(mount) || !bao_name_ok(key) {
+            return Err(err("malformed transit mount or key name"));
+        }
+        Ok(Self {
+            http,
+            mount: mount.into(),
+            key: key.into(),
+        })
+    }
+
+    /// Trusts the CA bundle and presents the client certificate that the
+    /// `BAO_CACERT`, `BAO_CLIENT_CERT` and `BAO_CLIENT_KEY` names (or the
+    /// `VAULT_` names) point at; see [`BaoHttp::with_tls_from_env`]. With none
+    /// of them set the client is unchanged. `from_env` already applies it.
+    pub fn with_tls_from_env(mut self) -> Result<Self> {
+        self.http = self.http.with_tls_from_env()?;
+        Ok(self)
+    }
+
+    /// From `BAO_ADDR`/`VAULT_ADDR`, and the token from `BAO_TOKEN_FILE`
+    /// (a mounted secret) or `BAO_TOKEN`/`VAULT_TOKEN`. TLS settings come
+    /// from `BAO_CACERT` and `BAO_CLIENT_*` (see `with_tls_from_env`).
+    pub fn from_env(mount: &str, key: &str) -> Result<Self> {
+        Self::with_http(BaoHttp::from_env()?, mount, key)
     }
 
     /// A reply's JSON body: only a 2xx answer counts. With redirects off,
@@ -375,31 +584,16 @@ impl OpenBaoTransit {
     }
 
     fn call(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
-        let url = format!("{}/v1/{}/{}", self.addr, self.mount, path);
-        let r = self
-            .agent
-            .post(&url)
-            .set("X-Vault-Token", &self.token)
-            .send_json(body);
-        match r {
+        match self
+            .http
+            .post(&format!("{}/{path}", self.mount), body)
+            .map_err(|e| *e)
+        {
             Ok(resp) => self.answer(resp),
-            Err(ureq::Error::Status(code, resp)) => {
-                let detail = resp
-                    .into_json::<serde_json::Value>()
-                    .ok()
-                    .and_then(|v| {
-                        v["errors"].as_array().map(|a| {
-                            a.iter()
-                                .filter_map(|x| x.as_str())
-                                .collect::<Vec<_>>()
-                                .join("; ")
-                        })
-                    })
-                    .unwrap_or_default();
-                Err(err(format!(
-                    "root key provider refused ({code}): {detail}; no key is released without it"
-                )))
-            }
+            Err(ureq::Error::Status(code, resp)) => Err(err(format!(
+                "root key provider refused ({code}): {}; no key is released without it",
+                bao_errors(resp)
+            ))),
             Err(e) => Err(unavailable(self.provider(), e)),
         }
     }
@@ -452,7 +646,7 @@ impl RootKeyProvider for OpenBaoTransit {
     }
 
     fn key_ref(&self) -> String {
-        format!("{}/{}/keys/{}", self.addr, self.mount, self.key)
+        format!("{}/{}/keys/{}", self.http.addr, self.mount, self.key)
     }
 
     fn security(&self) -> StoreSecurity {
@@ -495,14 +689,19 @@ impl RootKeyProvider for OpenBaoTransit {
         self.encrypt(&pt, aad)
     }
 
+    fn retire_before(&self, version: u64) -> Result<()> {
+        self.call(
+            &format!("keys/{}/config", self.key),
+            serde_json::json!({"min_decryption_version": version}),
+        )
+        .map(|_| ())
+    }
+
     fn rotate(&self) -> Result<u64> {
         self.call(&format!("keys/{}/rotate", self.key), serde_json::json!({}))?;
-        let url = format!("{}/v1/{}/keys/{}", self.addr, self.mount, self.key);
         let v = self.answer(
-            self.agent
-                .get(&url)
-                .set("X-Vault-Token", &self.token)
-                .call()
+            self.http
+                .get(&format!("{}/keys/{}", self.mount, self.key))
                 .map_err(|e| unavailable(self.provider(), e))?,
         )?;
         v["data"]["latest_version"]
@@ -542,6 +741,27 @@ impl DevelopmentRootKey {
             &std::fs::read(&self.path).map_err(|e| err(format!("{}: {e}", self.path.display())))?,
         )
         .map_err(|e| err(format!("{}: {e}", self.path.display())))
+    }
+
+    fn save(&self, roots: &DevRoots) -> Result<()> {
+        let tmp = self.path.with_extension("tmp");
+        let _ = std::fs::remove_file(&tmp);
+        {
+            use std::io::Write;
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(0o600);
+            }
+            let mut f = o
+                .open(&tmp)
+                .map_err(|e| err(format!("{}: {e}", tmp.display())))?;
+            f.write_all(&serde_json::to_vec(roots).expect("serializable"))
+                .map_err(|e| err(format!("{}: {e}", tmp.display())))?;
+        }
+        std::fs::rename(&tmp, &self.path).map_err(|e| err(format!("{}: {e}", self.path.display())))
     }
 
     fn cipher(roots: &DevRoots, version: u64) -> Result<ChaCha20Poly1305> {
@@ -616,31 +836,19 @@ impl RootKeyProvider for DevelopmentRootKey {
         self.encrypt(&pt, aad)
     }
 
+    fn retire_before(&self, version: u64) -> Result<()> {
+        let mut roots = self.load()?;
+        roots.versions.retain(|v, _| *v >= version);
+        self.save(&roots)
+    }
+
     fn rotate(&self) -> Result<u64> {
         let mut roots = self.load()?;
         let next = roots.versions.keys().last().map_or(1, |v| v + 1);
         let mut k = Zeroizing::new([0u8; 32]);
         getrandom::getrandom(k.as_mut()).map_err(|e| err(format!("no randomness: {e}")))?;
         roots.versions.insert(next, hex(k.as_ref()));
-        let tmp = self.path.with_extension("tmp");
-        let _ = std::fs::remove_file(&tmp);
-        {
-            use std::io::Write;
-            let mut o = std::fs::OpenOptions::new();
-            o.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                o.mode(0o600);
-            }
-            let mut f = o
-                .open(&tmp)
-                .map_err(|e| err(format!("{}: {e}", tmp.display())))?;
-            f.write_all(&serde_json::to_vec(&roots).expect("serializable"))
-                .map_err(|e| err(format!("{}: {e}", tmp.display())))?;
-        }
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| err(format!("{}: {e}", self.path.display())))?;
+        self.save(&roots)?;
         Ok(next)
     }
 }

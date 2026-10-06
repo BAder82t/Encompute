@@ -50,6 +50,8 @@ fn context(profile: Profile) -> PlanningContext {
         preferences: Preferences::default(),
         facts: facts(true),
         training: None,
+        custody: Vec::new(),
+        placement: None,
     }
 }
 
@@ -66,6 +68,7 @@ fn signer() -> EvaluatorSigner {
 fn receipt(plan: &ConfidentialExecutionPlan) -> SignedExecutionReceipt {
     let s = signer();
     ExecutionReceipt {
+        grant_digest: None,
         version: RECEIPT_VERSION,
         execution_id: "00000000-0000-4000-8000-000000000000".into(),
         spec_id: hex('1'),

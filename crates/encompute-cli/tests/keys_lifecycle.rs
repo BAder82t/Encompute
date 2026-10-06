@@ -514,6 +514,64 @@ fn openbao_keys_lifecycle_through_the_cli() {
     ok(&strs(&run(&["keys", "challenge"], "modelco")), &env);
 }
 
+/// A revocation through the CLI crypto-shreds: it replaces the KEK, says so,
+/// and an older copy of the state file no longer opens under the KEK that is
+/// current afterwards.
+#[test]
+fn revoking_through_the_cli_replaces_the_kek() {
+    let d = Dir::new("shred");
+    setup(&d);
+    let (kek, b) = (d.p("k.kek"), d.p("b.json"));
+    let a = protect(&d, "prod-policy.json", &["--kek", &kek]);
+    ok(&strs(&a), &[]);
+    let kek_id = |path: &str| -> String {
+        let s: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        s["kek_id"].as_str().unwrap().to_owned()
+    };
+    let (old_state, old_id) = (std::fs::read(&b).unwrap(), kek_id(&b));
+    ok(
+        &[
+            "keys", "rotate", "--asset", "weights", "--broker", &b, "--kek", &kek,
+        ],
+        &[],
+    );
+    let out = ok(
+        &[
+            "keys",
+            "revoke",
+            "--asset",
+            "weights",
+            "--version",
+            "1",
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+        ],
+        &[],
+    );
+    assert!(out.contains("key version 1 revoked"), "{out}");
+    assert!(out.contains("KEK replaced"), "{out}");
+    assert_ne!(kek_id(&b), old_id);
+    // No KEK left pending beside the live one.
+    let pending: Vec<_> = std::fs::read_dir(&d.0)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".next."))
+        .collect();
+    assert!(pending.is_empty(), "{pending:?}");
+    // The new state opens; the old one (from before the revocation) does
+    // not, under the current KEK.
+    ok(&["keys", "challenge", "--broker", &b, "--kek", &kek], &[]);
+    std::fs::write(&b, old_state).unwrap();
+    let e = refused(
+        &["keys", "challenge", "--broker", &b, "--kek", &kek],
+        &[],
+        "ENC2004",
+    );
+    assert!(e.contains("open it with that store"), "{e}");
+}
+
 /// Review finding KB-2 (ENC-SF-2026-043): a broker state file without its authentication tag
 /// (one written before 0.3.0-rc.4, or with the tag stripped) is refused, and
 /// opens again only after its owner has checked and confirmed it.
@@ -586,4 +644,484 @@ fn an_unauthenticated_broker_state_needs_its_owner_to_upgrade_it() {
     state["mode"] = serde_json::json!("development");
     std::fs::write(&b, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     refused(&rotate, &[], "ENC2004");
+}
+
+/// Governed projects at the broker, offline: an authorization is installed
+/// only once the owner's governance key is pinned and only if that key
+/// signed it; the owner revokes it locally and it is never reinstalled; a
+/// key is bound to one source version; and the no-ticket escape is refused
+/// outside development.
+#[test]
+fn governed_broker_commands() {
+    let d = Dir::new("governed");
+    let root = setup(&d);
+    let b = d.p("b.json");
+    let org = ["--organization", "tax-agency"];
+    ok(
+        &strs(&protect(
+            &d,
+            "dev-policy.json",
+            &["--development", org[0], org[1]],
+        )),
+        &[],
+    );
+    let keygen = |f: &str| -> String {
+        let v: serde_json::Value =
+            serde_json::from_str(&ok(&["governance", "keygen", "--out", &d.p(f)], &[])).unwrap();
+        v["public_key"].as_str().unwrap().to_owned()
+    };
+    let pk = keygen("gov.key");
+    keygen("rogue.key");
+    let h = |c: char| c.to_string().repeat(64);
+    let body = serde_json::json!({
+        "version": 2, "party": "tax-agency", "project": "prj_1",
+        "purpose_id": h('1'), "asset_version_id": h('3'),
+        "asset_digest_commitment": h('4'),
+        "program": {"kind": "program", "program_id": h('a')},
+        "policy_id": h('d'), "release_class": "boolean-only",
+        "recipients": ["benefits-agency"], "per_job_four_eyes": false,
+        "limits": {"max_executions": 100, "max_releases": 100},
+        "valid_from": 1, "valid_until": 4_000_000_000u64, "issued_at": 1,
+        "nonce": "ab".repeat(16), "approvals": []
+    });
+    std::fs::write(d.p("auth.json"), body.to_string()).unwrap();
+    let sign = |key: &str, out: &str| {
+        let s = ok(
+            &["governance", "sign", "--key", &d.p(key), &d.p("auth.json")],
+            &[],
+        );
+        std::fs::write(d.p(out), s).unwrap();
+    };
+    sign("gov.key", "signed.json");
+    sign("rogue.key", "forged.json");
+    let install = |f: &str| {
+        vec![
+            "keys".to_owned(),
+            "authorization".into(),
+            "install".into(),
+            d.p(f),
+            "--broker".into(),
+            b.clone(),
+        ]
+    };
+    // No governance key pinned yet.
+    refused(&strs(&install("signed.json")), &[], "ENC2708");
+    ok(
+        &["keys", "bind-version", "weights", &h('3'), "--broker", &b],
+        &[],
+    );
+    refused(
+        &["keys", "bind-version", "weights", &h('8'), "--broker", &b],
+        &[],
+        "ENC2704",
+    );
+    ok(
+        &[
+            "keys",
+            "governance-key",
+            "pin",
+            "--key",
+            &pk,
+            "--broker",
+            &b,
+        ],
+        &[],
+    );
+    // A lineage owner's governance key is pinned only from the control
+    // plane's attestation of it, verified under the control-plane key.
+    {
+        use encompute_runtime::trust::authz::{
+            governance_key_id, GovernanceKeyAttestation, GovernanceKeyStatus,
+        };
+        use encompute_runtime::verification::ServiceSigner;
+        let lineage_pk = keygen("lineage.key");
+        let attest = |signer: &ServiceSigner, out: &str| {
+            let a = GovernanceKeyAttestation {
+                version: 1,
+                organization: "statistics-agency".into(),
+                key_id: governance_key_id(&lineage_pk),
+                public_key: lineage_pk.clone(),
+                status: GovernanceKeyStatus::Active,
+                revoked_at: None,
+                issued_at: 100,
+            }
+            .sign(signer)
+            .unwrap();
+            std::fs::write(d.p(out), serde_json::to_string(&a).unwrap()).unwrap();
+        };
+        let control = ServiceSigner::from_seed("control-plane", &[42; 32]).unwrap();
+        let rogue = ServiceSigner::from_seed("control-plane", &[43; 32]).unwrap();
+        attest(&control, "attestation.json");
+        attest(&rogue, "forged-attestation.json");
+        let ck = control.public_key_hex();
+        let pin = |f: &str, key: Option<&str>| {
+            let mut v = vec![
+                "keys".to_owned(),
+                "governance-key".into(),
+                "pin-lineage".into(),
+                "--for".into(),
+                "statistics-agency".into(),
+                "--attestation".into(),
+                d.p(f),
+                "--broker".into(),
+                b.clone(),
+            ];
+            if let Some(k) = key {
+                v.extend(["--control-key".to_owned(), k.to_owned()]);
+            }
+            v
+        };
+        refused(&strs(&pin("attestation.json", None)), &[], "ENC2708");
+        refused(
+            &strs(&pin("forged-attestation.json", Some(&ck))),
+            &[],
+            "ENC2708",
+        );
+        let out = ok(&strs(&pin("attestation.json", Some(&ck))), &[]);
+        assert!(out.contains("pinned"), "{out}");
+        // That pinned the control-plane key in the broker's state: another
+        // key is refused, whatever it signed.
+        let rk = rogue.public_key_hex();
+        let err = refused(
+            &strs(&pin("forged-attestation.json", Some(&rk))),
+            &[],
+            "ENC2605",
+        );
+        assert!(err.contains("--replace-control-key"), "{err}");
+        // Only the owner's explicit replacement changes it, recorded as an
+        // audit line.
+        let mut replace = pin("forged-attestation.json", Some(&rk));
+        replace.push("--replace-control-key".into());
+        let (c, out, err) = encompute(&strs(&replace), &[]);
+        assert_eq!(c, 0, "{out}{err}");
+        assert!(
+            err.contains("AUDIT key_broker.control_key.replaced")
+                && err.contains(&format!("previous={ck}"))
+                && err.contains(&format!("new={rk}")),
+            "{err}"
+        );
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&b).unwrap()).unwrap();
+        assert_eq!(state["control_key"], rk.as_str());
+        // The original key is now the other one.
+        refused(&strs(&pin("attestation.json", Some(&ck))), &[], "ENC2605");
+    }
+    refused(&strs(&install("forged.json")), &[], "ENC2708");
+    let out = ok(&strs(&install("signed.json")), &[]);
+    let id = out
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(':')
+        .to_owned();
+    assert_eq!(id.len(), 64, "{out}");
+    ok(
+        &[
+            "keys",
+            "authorization",
+            "revoke",
+            &id,
+            "--reason",
+            "withdrawn",
+            "--broker",
+            &b,
+        ],
+        &[],
+    );
+    refused(&strs(&install("signed.json")), &[], "ENC2706");
+    // The development escape is refused outside development.
+    refused(
+        &[
+            "keys",
+            "serve",
+            "--no-require-ticket",
+            "--control-key",
+            &h('a'),
+            "--mock-root",
+            &root,
+            "--broker",
+            &b,
+        ],
+        &[("ENCOMPUTE_ENV", "production")],
+        "ENC2605",
+    );
+    refused(
+        &[
+            "keys",
+            "serve",
+            "--no-require-ticket",
+            "--mock-root",
+            &root,
+            "--broker",
+            &b,
+        ],
+        &[("ENCOMPUTE_ENV", "development")],
+        "ENC2605",
+    );
+}
+
+/// The state's generation mark through the CLI: a governed production
+/// broker does not serve without one, a production broker refuses a file
+/// mark, a state saved under a mark needs it for every command, and an
+/// older copy of the state is refused. With OpenBao, the mark lives in a
+/// KV-v2 engine.
+#[test]
+fn generation_mark_through_the_cli() {
+    let d = Dir::new("mark");
+    let root = setup(&d);
+    let b = d.p("b.json");
+    let kek = d.p("kek");
+    let org = ["--organization", "tax-agency"];
+    // A governed production broker without a mark does not start.
+    ok(
+        &strs(&protect(
+            &d,
+            "prod-policy.json",
+            &["--kek", &kek, org[0], org[1]],
+        )),
+        &[],
+    );
+    let pk: serde_json::Value = serde_json::from_str(&ok(
+        &["governance", "keygen", "--out", &d.p("gov.key")],
+        &[],
+    ))
+    .unwrap();
+    let pk = pk["public_key"].as_str().unwrap().to_owned();
+    ok(
+        &[
+            "keys",
+            "governance-key",
+            "pin",
+            "--key",
+            &pk,
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+        ],
+        &[],
+    );
+    let err = refused(
+        &[
+            "keys",
+            "serve",
+            "--control-key",
+            &"a".repeat(64),
+            "--mock-root",
+            &root,
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+        ],
+        &[("ENCOMPUTE_ENV", "production")],
+        "ENC2605",
+    );
+    assert!(err.contains("generation mark"), "{err}");
+    // A production broker refuses a development (file) mark.
+    let file_mark = format!("file:{}", d.p("mark.json"));
+    refused(
+        &[
+            "keys",
+            "rotate",
+            "--asset",
+            "weights",
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+            "--generation-mark",
+            &file_mark,
+        ],
+        &[],
+        "ENC2605",
+    );
+    // Malformed mark settings.
+    for bad in [
+        vec!["--generation-mark", "openbao"],
+        vec!["--generation-mark", "kms"],
+        vec!["--kv-mount", "secret"],
+    ] {
+        let mut a = vec![
+            "keys", "rotate", "--asset", "weights", "--broker", &b, "--kek", &kek,
+        ];
+        a.extend(bad);
+        refused(&a, &[], "ENC2004");
+    }
+
+    // A development broker under a file mark.
+    let db = d.p("dev.json");
+    let mut a = protect(&d, "dev-policy.json", &["--development"]);
+    let i = a.iter().position(|s| s == &b).unwrap();
+    a[i] = db.clone();
+    a.extend(["--generation-mark".into(), file_mark.clone()]);
+    ok(&strs(&a), &[]);
+    std::fs::copy(&db, d.p("older.json")).unwrap();
+    let rotate = |mark: bool| {
+        let mut a = vec!["keys", "rotate", "--asset", "weights", "--broker", &db];
+        if mark {
+            a.extend(["--generation-mark", file_mark.as_str()]);
+        }
+        encompute(&a, &[])
+    };
+    assert_eq!(rotate(true).0, 0);
+    // Saved under a mark: refused without it.
+    let (c, _, err) = rotate(false);
+    assert_ne!(c, 0);
+    assert!(err.contains("error[ENC2713]"), "{err}");
+    // The older copy is refused.
+    std::fs::copy(d.p("older.json"), &db).unwrap();
+    let (c, _, err) = rotate(true);
+    assert_ne!(c, 0);
+    assert!(
+        err.contains("error[ENC2713]") && err.contains("older"),
+        "{err}"
+    );
+
+    // In OpenBao KV-v2, with the Transit root key's settings.
+    let Some((addr, token)) = bao() else { return };
+    bao_admin(
+        &addr,
+        &token,
+        "sys/mounts/encompute-kv",
+        serde_json::json!({"type": "kv", "options": {"version": "2"}}),
+    );
+    let id = format!(
+        "cli-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let pb = d.p("prod-mark.json");
+    let env = [("BAO_ADDR", addr.as_str()), ("BAO_TOKEN", token.as_str())];
+    let mark = ["--generation-mark", "openbao", "--kv-mount", "encompute-kv"];
+    let mut a = protect(&d, "prod-policy.json", &["--kek", &kek]);
+    let i = a.iter().position(|s| s == &b).unwrap();
+    a[i] = pb.clone();
+    let j = a.iter().position(|s| s == "modelco").unwrap();
+    a[j] = id.clone();
+    a.extend(mark.iter().map(|s| s.to_string()));
+    ok(&strs(&a), &env);
+    std::fs::copy(&pb, d.p("prod-older.json")).unwrap();
+    let mut rotate = vec![
+        "keys", "rotate", "--asset", "weights", "--broker", &pb, "--kek", &kek,
+    ];
+    rotate.extend(mark);
+    ok(&rotate, &env);
+    std::fs::copy(d.p("prod-older.json"), &pb).unwrap();
+    let err = refused(&rotate, &env, "ENC2713");
+    assert!(err.contains("older"), "{err}");
+}
+
+/// The first start under a generation mark trusts the state file; the
+/// operator can pin what it expects (`--expect-generation`,
+/// `--expect-state-mac`), and a state that does not match is refused
+/// before any mark is written.
+#[test]
+fn first_generation_mark_checks_the_expected_state() {
+    let d = Dir::new("expect");
+    setup(&d);
+    let b = d.p("b.json");
+    let kek = d.p("kek");
+    let mark_file = d.p("mark.json");
+    let file_mark = format!("file:{mark_file}");
+    ok(
+        &strs(&protect(
+            &d,
+            "dev-policy.json",
+            &["--development", "--kek", &kek],
+        )),
+        &[],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&b).unwrap()).unwrap();
+    let generation = v["generation"].as_u64().unwrap().to_string();
+    let mac = v["mac"].as_str().unwrap().to_owned();
+    let rotate = |extra: &[&str]| {
+        let mut a = vec![
+            "keys",
+            "rotate",
+            "--asset",
+            "weights",
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+            "--generation-mark",
+            &file_mark,
+        ];
+        a.extend(extra);
+        a.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    };
+    // The expectation needs a mark.
+    refused(
+        &[
+            "keys",
+            "rotate",
+            "--asset",
+            "weights",
+            "--broker",
+            &b,
+            "--kek",
+            &kek,
+            "--expect-generation",
+            "1",
+        ],
+        &[],
+        "ENC2004",
+    );
+    // Another generation, or another MAC: refused, and no mark written.
+    let err = refused(
+        &strs(&rotate(&["--expect-generation", "7"])),
+        &[],
+        "ENC2713",
+    );
+    assert!(err.contains("expected"), "{err}");
+    let err = refused(
+        &strs(&rotate(&[
+            "--expect-generation",
+            &generation,
+            "--expect-state-mac",
+            &"0".repeat(64),
+        ])),
+        &[],
+        "ENC2713",
+    );
+    assert!(err.contains("expected"), "{err}");
+    assert!(!Path::new(&mark_file).exists());
+    // The state the operator expects: the mark is created from it.
+    ok(
+        &strs(&rotate(&[
+            "--expect-generation",
+            &generation,
+            "--expect-state-mac",
+            &mac,
+        ])),
+        &[],
+    );
+    assert!(Path::new(&mark_file).exists());
+    // Without an expectation the first marking says what it trusted.
+    let d2 = d.p("b2.json");
+    let mut a = protect(&d, "dev-policy.json", &["--development", "--kek", &kek]);
+    let i = a.iter().position(|s| s == &b).unwrap();
+    a[i] = d2.clone();
+    ok(&strs(&a), &[]);
+    let (c, _, err) = encompute(
+        &[
+            "keys",
+            "rotate",
+            "--asset",
+            "weights",
+            "--broker",
+            &d2,
+            "--kek",
+            &kek,
+            "--generation-mark",
+            &format!("file:{}", d.p("mark2.json")),
+        ],
+        &[],
+    );
+    assert_eq!(c, 0, "{err}");
+    assert!(err.contains("--expect-generation"), "{err}");
 }

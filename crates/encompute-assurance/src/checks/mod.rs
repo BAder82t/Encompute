@@ -1,5 +1,6 @@
 //! The assurance checks, by name (`check:<name>` in the catalog).
 
+pub mod governance;
 pub mod planner;
 pub mod privacy;
 pub mod receipts;
@@ -72,6 +73,18 @@ pub const CHECKS: &[Check] = &[
     Check {
         name: "dp_multi_process_double_spend",
         run: privacy::multi_process_double_spend,
+    },
+    Check {
+        name: "governance_authorization_property",
+        run: governance::authorization_property,
+    },
+    Check {
+        name: "governance_release_class_order",
+        run: governance::release_class_order,
+    },
+    Check {
+        name: "governance_placement_property",
+        run: governance::placement_property,
     },
 ];
 

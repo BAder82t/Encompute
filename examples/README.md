@@ -82,6 +82,14 @@ Encompute, run **00** first.
 | 19 | [Exact programs on OpenFHE exact](19_openfhe_exact/) | intermediate | the `openfhe` build, Python SDK; about 1 GiB of scratch space |
 | 20 | [Optimized exact execution](20_openfhe_optimization/) | intermediate | Python SDK; the encrypted comparison needs the `openfhe` build and about 2 GiB of memory |
 
+**Public sector** (synthetic data, command line, file ledgers):
+[public-sector/](public-sector/): [public health statistics](public-sector/public-health-statistics/),
+weekly disease counts from four regional authorities with a privacy budget
+shared across weeks, versions and projects; and a [bounded
+signal](public-sector/fraud-signal/), a category released to one agency and
+never the value behind it (single source, no record linkage). Intermediate;
+default build.
+
 ## Learning paths
 
 - **Beginner:** 00, 01, 02, 06, 11.

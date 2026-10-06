@@ -625,9 +625,20 @@ fn cross_tenant_attacks_fail() {
         Some(json!({"id": "evil", "kind": "automation", "public_key": b_ci.public_key_hex()})),
         "A registers into B",
     );
+    // SecAgg coordinators are platform services. An organization may
+    // operate evaluators of its own, but never the platform's, nor
+    // another organization's.
     let (s, _) = t.call(&w.a_admin, "POST", "/v1/organizations/hospital-a/service-accounts",
-        Some(json!({"id": "evil-eval", "kind": "evaluator", "public_key": ServiceSigner::from_seed("x", &[11; 32]).unwrap().public_key_hex()})));
-    assert_eq!(s, 400, "tenants cannot register platform evaluators");
+        Some(json!({"id": "evil-agg", "kind": "secagg", "public_key": ServiceSigner::from_seed("x", &[11; 32]).unwrap().public_key_hex()})));
+    assert_eq!(s, 400, "tenants cannot register platform coordinators");
+    for org in ["platform", "modelco"] {
+        let (s, _) = t.call(&w.a_admin, "POST", &format!("/v1/organizations/{org}/service-accounts"),
+            Some(json!({"id": "evil-eval", "kind": "evaluator", "public_key": ServiceSigner::from_seed("y", &[12; 32]).unwrap().public_key_hex()})));
+        assert!(
+            s == 403 || s == 404,
+            "{org}: tenants cannot register evaluators for others ({s})"
+        );
+    }
     // A disabled service account is refused.
     t.ok(
         &w.b_admin,
@@ -855,7 +866,7 @@ fn oidc_tokens_and_production_refusals() {
         oidc,
         env: Env::Development,
     };
-    let t = env0.start().unwrap();
+    let t = env0.started();
     t.control
         .bootstrap(issuer, "alice", Some("alice@hospital-a.example"))
         .unwrap();

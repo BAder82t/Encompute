@@ -100,6 +100,8 @@ fn spec() -> TrainingSpec {
             })
             .collect(),
         key_brokers: [("modelco".to_string(), h('5'))].into(),
+        asset_brokers: BTreeMap::new(),
+        broker_organizations: BTreeMap::new(),
         coordinator_key: hex(&coordinator().verifying_key().to_bytes()),
         initial_adapter_digest: h('0'),
     }

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Restores a backup from DIR into a stopped deployment (volumes empty, or
 # being replaced), then starts the control plane, which refuses to start if
-# the database is older than the state anchor (PRIVACY/AUDIT STATE ROLLBACK).
+# the database is older than the state anchor (PRIVACY/AUDIT STATE ROLLBACK):
+# any backup older than the last anchored checkpoint (in practice older than a
+# couple of seconds or the last deny event) is refused until
+# `docker compose run --rm control recover --operator NAME` records the
+# rewind (the audit events after the backup are lost: the chain has no mirror).
 #
 #   ./restore.sh DIR
 #

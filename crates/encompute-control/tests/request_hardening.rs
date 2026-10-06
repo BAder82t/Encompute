@@ -306,7 +306,7 @@ fn production_metrics_need_the_metrics_token() {
         None,
         5,
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
     assert_eq!(get(&c, None), 401, "production default: closed");
     c.metrics_access = MetricsAccess::Token(zeroize::Zeroizing::new("scrape-secret".into()));
     assert_eq!(get(&c, None), 401);
@@ -317,4 +317,28 @@ fn production_metrics_need_the_metrics_token() {
     // Development's default stays public.
     let Some(t) = setup() else { return };
     assert_eq!(t.call(&As::Nobody, "GET", "/metrics", None).0, 200);
+}
+
+/// The governance codes the control plane answers with each have a status
+/// of their own: a refusal an owner's declarations cause is 403, a conflict
+/// of state 409, an evidence bundle that cannot be produced or accepted as
+/// it is 422, never the default 400 by omission.
+#[test]
+fn governance_codes_have_their_own_statuses() {
+    use encompute_control::api::status_of;
+    for (code, status) in [
+        (Code::GovernanceAggregateDeclaration, 403),
+        (Code::GovernanceAggregateLayout, 403),
+        (Code::GovernancePrivacyScope, 403),
+        (Code::GovernanceLocationEvidence, 403),
+        (Code::GovernanceOperatorSeparation, 403),
+        (Code::GovernancePrivacyAllocation, 409),
+        (Code::GovernancePlacementChange, 409),
+        (Code::GovernanceBundleMalformed, 422),
+        (Code::GovernanceBundleUnverified, 422),
+        (Code::GovernanceBundlePlaintext, 422),
+        (Code::GovernanceBundleLimit, 422),
+    ] {
+        assert_eq!(status_of(code), status, "{code}");
+    }
 }

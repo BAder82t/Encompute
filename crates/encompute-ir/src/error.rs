@@ -66,6 +66,9 @@ pub enum Code {
     AggregationRequired,
     /// Confidentiality declarations are malformed (ENC1906).
     PolicyDeclaration,
+    /// A released value's form is not one its sources allow, or the
+    /// compiler cannot prove it is (ENC1907).
+    ReleaseForm,
     /// Attestation evidence is malformed, forged, tampered with, from an
     /// unknown provider, or does not bind the claimed workload (ENC2001).
     Attestation,
@@ -155,6 +158,70 @@ pub enum Code {
     /// A service request or message is unsigned, from an unknown service,
     /// for another recipient, expired or replayed (ENC2607).
     ServiceAuthentication,
+    /// An evaluator upload grant was presented again after an upload with it
+    /// succeeded (or while one with it is still running): each grant admits
+    /// exactly one upload (ENC2608).
+    UploadGrantReplayed,
+    /// A governed project's source has no active owner-signed authorization, or an authorization's owner signature does not verify against the organization's active governance key (ENC2701).
+    GovernanceAuthorizationMissing,
+    /// The purpose of a governed job, program or authorization differs from the governed purpose, or the purpose is not active or not accepted (ENC2702).
+    GovernancePurposeMismatch,
+    /// The program (or program set) is not the one the owner authorized (ENC2703).
+    GovernanceProgramNotAuthorized,
+    /// A dataset version does not match the authorized version, or a registered version would change (ENC2704).
+    GovernanceAssetVersionMismatch,
+    /// An authorization or purpose is outside its validity window (expiry is strict) (ENC2705).
+    GovernanceAuthorizationExpired,
+    /// An authorization or purpose was withdrawn, revoked or retired (ENC2706).
+    GovernanceAuthorizationRevoked,
+    /// Four-eyes approval is incomplete: distinct humans of the approving organization are required (ENC2707).
+    GovernanceFourEyesIncomplete,
+    /// The organization's governance key is revoked, not approved, or absent (ENC2708).
+    GovernanceKeyRevoked,
+    /// A release exceeds its release class or output form (ENC2709).
+    GovernanceReleaseClass,
+    /// Residency or placement constraints are unsatisfied (ENC2710).
+    GovernanceResidency,
+    /// The linkage policy differs from the authorized one (ENC2711).
+    GovernanceLinkageMismatch,
+    /// A key-release ticket is invalid, expired or replayed (ENC2712).
+    GovernanceReleaseTicket,
+    /// A key broker's state is older than, or forked from, the generation mark kept in the organization's KMS, or the mark cannot be read or advanced (ENC2713).
+    GovernanceBrokerStateRollback,
+    /// An owner authorization's usage limit (releases or executions) is exhausted at the key broker (ENC2714).
+    GovernanceAuthorizationLimit,
+    /// Key custody refused: in a sovereign project an asset's key must be held by a key broker its own organization registered, never a platform broker or another organization's (ENC2715).
+    GovernanceCustody,
+    /// Auditor separation: an auditor is read-only and exclusive of every other role in an organization taking part in a governed project, and an auditor organization never owns, submits, receives, approves or holds keys there (ENC2716).
+    GovernanceAuditorSeparation,
+    /// A revocation head refused: it is not the next head of its organization in the project (a skipped or repeated number, a date in the future or before the previous head), its root is not the control plane's own fold of the organization's revocations in the log, or it is for another project or an organization that does not take part (ENC2717).
+    GovernanceRevocationHead,
+    /// A checkpoint witness refused: it does not witness the control plane's stored checkpoint of the project at that size (another size, partition or root), so it cannot count towards it (ENC2718).
+    GovernanceCheckpointWitness,
+    /// A privacy scope is missing, not active, or not the job's: a governed release is charged only to a scope allocated (with four-eyes) for its population, project, purpose and program, and an unrelated project has none (ENC2719).
+    GovernancePrivacyScope,
+    /// A privacy population or scope allocation is refused: another organization's or unknown population, a cap above the population's, another privacy unit or delta, a scope already allocated, or a proposal approved by its own submitter (ENC2720).
+    GovernancePrivacyAllocation,
+    /// An aggregate's declarations are refused: a reservation whose sources-per-unit is below what the program declares (or its default, every participant), or a linkage other than none (ENC2721).
+    GovernanceAggregateDeclaration,
+    /// An aggregate's layout is refused: a contribution's stratum layout is not the one the plan declares (ENC2722).
+    GovernanceAggregateLayout,
+    /// A location declaration or registration refused: the caller is not a person who is a security admin of the evaluator's operator organization, the location is not one the locations table knows (or its jurisdiction or zone is inconsistent), an attested location is not replaced by a declaration, or location evidence is stale or too weak for the claim (ENC2723).
+    GovernanceLocationEvidence,
+    /// A project's placement constraints were not changed: the constraints are invalid (an unknown region, an empty allow list), the change is not based on the current version, the project is not governed, or the change loosens them and not every member organization has proposed it yet (ENC2724).
+    GovernancePlacementChange,
+    /// Operator separation refused: every evaluator that could run the job is operated by a source owner or by an organization that holds a decryption key for the output, or a SecAgg coordinator is also a contributor (ENC2725).
+    GovernanceOperatorSeparation,
+    /// A client refused to send ciphertexts to an evaluator outside its own placement constraints: the evaluator it pinned is at a location, operated by an organization, or known by evidence the constraints do not admit, or the pin set says nothing about where it is (ENC2726).
+    GovernanceClientPlacement,
+    /// A governance evidence bundle is malformed: an unknown format version, section or field, a section digest that does not match its manifest, a manifest or graph root that is not the content's, a missing section, or edited, reordered or omitted content (ENC2727).
+    GovernanceBundleMalformed,
+    /// A governance evidence bundle was refused for what it cannot prove: the exporter could not verify what it was about to write, a signature does not verify under the pinned key, or a pin is missing for a key the bundle's conclusion rests on (ENC2728).
+    GovernanceBundleUnverified,
+    /// A governance evidence bundle would carry what it must not: a string over the length cap outside the allowlisted text fields, or other organizations' private metadata in a shared view (ENC2729).
+    GovernanceBundlePlaintext,
+    /// A governance evidence bundle is over its limits: the project's log has more events than one bundle carries, or the view asked for does not exist (ENC2730).
+    GovernanceBundleLimit,
 }
 
 impl Code {
@@ -189,6 +256,7 @@ impl Code {
             Code::Declassification => "ENC1904",
             Code::AggregationRequired => "ENC1905",
             Code::PolicyDeclaration => "ENC1906",
+            Code::ReleaseForm => "ENC1907",
             Code::Attestation => "ENC2001",
             Code::WorkloadPolicy => "ENC2002",
             Code::Freshness => "ENC2003",
@@ -220,13 +288,44 @@ impl Code {
             Code::InsecureConfiguration => "ENC2605",
             Code::Scheduling => "ENC2606",
             Code::ServiceAuthentication => "ENC2607",
+            Code::UploadGrantReplayed => "ENC2608",
+            Code::GovernanceAuthorizationMissing => "ENC2701",
+            Code::GovernancePurposeMismatch => "ENC2702",
+            Code::GovernanceProgramNotAuthorized => "ENC2703",
+            Code::GovernanceAssetVersionMismatch => "ENC2704",
+            Code::GovernanceAuthorizationExpired => "ENC2705",
+            Code::GovernanceAuthorizationRevoked => "ENC2706",
+            Code::GovernanceFourEyesIncomplete => "ENC2707",
+            Code::GovernanceKeyRevoked => "ENC2708",
+            Code::GovernanceReleaseClass => "ENC2709",
+            Code::GovernanceResidency => "ENC2710",
+            Code::GovernanceLinkageMismatch => "ENC2711",
+            Code::GovernanceReleaseTicket => "ENC2712",
+            Code::GovernanceBrokerStateRollback => "ENC2713",
+            Code::GovernanceAuthorizationLimit => "ENC2714",
+            Code::GovernanceCustody => "ENC2715",
+            Code::GovernanceAuditorSeparation => "ENC2716",
+            Code::GovernanceRevocationHead => "ENC2717",
+            Code::GovernanceCheckpointWitness => "ENC2718",
+            Code::GovernancePrivacyScope => "ENC2719",
+            Code::GovernancePrivacyAllocation => "ENC2720",
+            Code::GovernanceAggregateDeclaration => "ENC2721",
+            Code::GovernanceAggregateLayout => "ENC2722",
+            Code::GovernanceLocationEvidence => "ENC2723",
+            Code::GovernancePlacementChange => "ENC2724",
+            Code::GovernanceOperatorSeparation => "ENC2725",
+            Code::GovernanceClientPlacement => "ENC2726",
+            Code::GovernanceBundleMalformed => "ENC2727",
+            Code::GovernanceBundleUnverified => "ENC2728",
+            Code::GovernanceBundlePlaintext => "ENC2729",
+            Code::GovernanceBundleLimit => "ENC2730",
         }
     }
 }
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 60] = [
+    pub const ALL: [Code; 92] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -256,6 +355,7 @@ impl Code {
         Code::Declassification,
         Code::AggregationRequired,
         Code::PolicyDeclaration,
+        Code::ReleaseForm,
         Code::Attestation,
         Code::WorkloadPolicy,
         Code::Freshness,
@@ -287,6 +387,37 @@ impl Code {
         Code::InsecureConfiguration,
         Code::Scheduling,
         Code::ServiceAuthentication,
+        Code::UploadGrantReplayed,
+        Code::GovernanceAuthorizationMissing,
+        Code::GovernancePurposeMismatch,
+        Code::GovernanceProgramNotAuthorized,
+        Code::GovernanceAssetVersionMismatch,
+        Code::GovernanceAuthorizationExpired,
+        Code::GovernanceAuthorizationRevoked,
+        Code::GovernanceFourEyesIncomplete,
+        Code::GovernanceKeyRevoked,
+        Code::GovernanceReleaseClass,
+        Code::GovernanceResidency,
+        Code::GovernanceLinkageMismatch,
+        Code::GovernanceReleaseTicket,
+        Code::GovernanceBrokerStateRollback,
+        Code::GovernanceAuthorizationLimit,
+        Code::GovernanceCustody,
+        Code::GovernanceAuditorSeparation,
+        Code::GovernanceRevocationHead,
+        Code::GovernanceCheckpointWitness,
+        Code::GovernancePrivacyScope,
+        Code::GovernancePrivacyAllocation,
+        Code::GovernanceAggregateDeclaration,
+        Code::GovernanceAggregateLayout,
+        Code::GovernanceLocationEvidence,
+        Code::GovernancePlacementChange,
+        Code::GovernanceOperatorSeparation,
+        Code::GovernanceClientPlacement,
+        Code::GovernanceBundleMalformed,
+        Code::GovernanceBundleUnverified,
+        Code::GovernanceBundlePlaintext,
+        Code::GovernanceBundleLimit,
     ];
 
     pub fn parse(s: &str) -> Option<Code> {
@@ -305,6 +436,30 @@ impl fmt::Display for Code {
 pub struct Error {
     pub code: Code,
     pub message: String,
+    /// What kind of failure this is when callers must tell apart errors
+    /// that share a code (never shown to a caller of the API: the code and
+    /// the message are what it sees).
+    pub cause: Cause,
+}
+
+/// An internal classification of an [`Error`] whose code several failures
+/// share, so code that reacts to one of them never reads the message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Cause {
+    /// No particular classification.
+    #[default]
+    Unclassified,
+    /// The state anchor's compare-and-set lost to another writer (the
+    /// stored anchor moved since it was read): nothing was stored, so the
+    /// update can be recomputed from the stored anchor and tried again.
+    /// Every other failure of the same code (a rollback refusal, an
+    /// unavailable store) is `Unclassified` and is never retried.
+    AnchorConflict,
+    /// A governance log mirror segment was written by another control plane
+    /// first (or changed meanwhile): the checkpoint that wanted it can be
+    /// recomputed from what the mirror holds now and tried again.
+    MirrorConflict,
 }
 
 impl Error {
@@ -312,7 +467,14 @@ impl Error {
         Self {
             code,
             message: message.into(),
+            cause: Cause::Unclassified,
         }
+    }
+
+    /// The same error, classified as `cause`.
+    pub fn caused_by(mut self, cause: Cause) -> Self {
+        self.cause = cause;
+        self
     }
 }
 

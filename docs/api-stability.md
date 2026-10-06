@@ -150,6 +150,12 @@ Changes since 0.3.0-rc.3:
 - `FineTuneResult.resume`, `infer`, `export_adapter` and `export_peft`
   take `revocations=`: owners' own trust bundles whose revocations are
   honoured as well as the run's.
+- `Project.finetune` and `encompute.torch.job.prepare` take
+  `asset_brokers=` (optional): asset or key IDs bound to the key broker
+  that holds each key, in the training spec (exactly the keys its workers
+  acquire). New native helpers `training_key_ids` and
+  `training_participant_keys` define those key IDs; a confidential job
+  descriptor may carry `broker_urls` (broker ID to address).
 - `private_dataset` and `private_text_dataset` take `public_units=`, a
   number of privacy units the owner approves for publication.
   `private_dataset` returns a `PrivateDataset` (a tuple with a
@@ -253,7 +259,9 @@ evaluators must run the same Encompute minor release.
 
 The key broker's HTTP API (`POST /v1/challenge`, `/v1/attest`,
 `/v1/release`, `/v1/messages`; `GET /live`, `/ready`) is experimental in
-the same way.
+the same way, and so are the routes of a governed broker
+(`/v1/release/governed`, `/v1/authorizations`,
+`/v1/authorizations/revoke`), which are not part of 0.3.
 
 ## Rust crates: internal
 

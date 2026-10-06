@@ -173,6 +173,19 @@ the migrations and the bootstrap work. Changing a minimum in
 proves the runner fails on a dead PostgreSQL or OpenBao, an empty, skipped or
 short suite and a smaller total (CI runs it).
 
+The governance suites run the same way, and `scripts/test-manifest-governance.json`
+is the runner's default manifest, so a call that names none (CI, the release
+check) gets all of it; `scripts/test-governance-full.sh` is
+`scripts/test-full.sh --release` on it, with the TLS PostgreSQL provided.
+That manifest extends the main one (it can raise a minimum, never lower one)
+and adds the runs that are not `cargo test`, read by a marker line and a count
+of check lines: the assurance report, the governance attack suite, the backup
+drill and the public-sector examples. A benchmark or research test that is
+skipped on purpose is named, with its reason, in the manifest.
+The control-plane run also needs the TLS PostgreSQL of
+`scripts/tls-test-db.sh` (as the main manifest's does); `test-governance-full.sh`
+starts a throwaway one when `ENCOMPUTE_TEST_TLS_DATABASE` is not set.
+
 The runner also records which code it tested. Before it writes anything it
 reads, from Git itself, the commit (`git rev-parse HEAD`), the tree
 (`git rev-parse HEAD^{tree}`) and whether the checkout is clean
@@ -190,7 +203,11 @@ commit being released. `--repo DIR` names the checkout to read (used by the
 self-test, which runs the real runner against a throwaway repository).
 
 Reported rows (a FAIL fails the check, a SKIP does not): fine-tuning E2E,
-examples, enterprise E2E, Compose deployment, build pins, reproducibility
+examples (the public-sector examples must run: a skipped one fails the row),
+governance attacks (`scripts/governance-attacks.sh`, which needs the same
+services as the control plane row and runs 27 attacks against the governance
+surface, each of which must be refused with its ENC code and leave its
+trail), enterprise E2E, Compose deployment, build pins, reproducibility
 (`--repro`), TFHE-rs research, the Confidential Space image, and the live
 Confidential Space checks, which need a GCP project and stay manual.
 

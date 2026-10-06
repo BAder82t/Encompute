@@ -3,9 +3,15 @@
 //! (`BAO_CLIENT_CERT`, `BAO_CLIENT_KEY`), and the unchanged default.
 //!
 //! The provider is a stand-in HTTPS server in this process (it answers every
-//! Transit call with a fixed ciphertext), so the test needs no services and
-//! always runs. The settings are process environment variables, so one test
-//! runs every case in order.
+//! Transit call with a fixed ciphertext, and every KV-v2 write with a new
+//! version), so the tests need no services and always run. The settings are
+//! process environment variables, so the tests take turns (`ENV`) and each
+//! runs its cases in order.
+//!
+//! The generation mark in the organization's KMS (`OpenBaoKvMark`) shares the
+//! provider's HTTP client rules, so the second test checks that it too trusts
+//! a private CA, presents the client certificate, and refuses an untrusted
+//! server, with its token never sent to one.
 
 #[path = "../../encompute-control/tests/common/tlspki.rs"]
 mod tlspki;
@@ -13,11 +19,14 @@ mod tlspki;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use encompute_keybroker::{OpenBaoTransit, RootKeyProvider};
+use encompute_keybroker::{GenerationMark, Mark, OpenBaoKvMark, OpenBaoTransit, RootKeyProvider};
 use tlspki::{Ca, TempDir, Use};
 use zeroize::Zeroizing;
+
+/// Serializes the tests: they set process environment variables.
+static ENV: Mutex<()> = Mutex::new(());
 
 /// An HTTPS server; `served` counts the requests it answered.
 fn serve(config: Arc<rustls::ServerConfig>) -> (u16, Arc<AtomicUsize>) {
@@ -52,7 +61,7 @@ fn serve(config: Arc<rustls::ServerConfig>) -> (u16, Arc<AtomicUsize>) {
                         }
                     }
                 }
-                let body = r#"{"data":{"ciphertext":"vault:v1:c3R1Yg=="}}"#;
+                let body = r#"{"data":{"ciphertext":"vault:v1:c3R1Yg==","version":1}}"#;
                 let _ = write!(
                     t,
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -94,6 +103,7 @@ fn encrypt(port: u16, host: &str) -> Result<(String, u64), String> {
 
 #[test]
 fn private_ca_and_client_certificate() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let ca: Ca = tlspki::ca("provider-ca");
     let other = tlspki::ca("other-ca");
     let clients = tlspki::ca("client-ca");
@@ -189,5 +199,97 @@ fn private_ca_and_client_certificate() {
         Zeroizing::new("t".into())
     )
     .is_ok());
+    clear();
+}
+
+/// `advance` through a generation mark built from the environment: the new
+/// compare-and-set version, or the error (from `from_env` or the call).
+fn advance(port: u16, host: &str) -> Result<u64, String> {
+    std::env::set_var("BAO_ADDR", format!("https://{host}:{port}"));
+    std::env::set_var("BAO_TOKEN", "t");
+    let m = OpenBaoKvMark::from_env("kv", "broker-a").map_err(|e| e.to_string())?;
+    let mark = Mark {
+        broker_id: "broker-a".into(),
+        generation: 1,
+        state_mac: "00".repeat(32),
+    };
+    m.advance(&mark, 0).map_err(|e| e.to_string())
+}
+
+#[test]
+fn the_generation_mark_honours_the_same_tls_settings() {
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let ca: Ca = tlspki::ca("provider-ca");
+    let other = tlspki::ca("other-ca");
+    let clients = tlspki::ca("client-ca");
+    let dir = TempDir::new("bao-mark");
+    let ca_file = dir.put("ca.pem", &ca.pem);
+    let other_file = dir.put("other.pem", &other.pem);
+    let missing_file = dir.path("missing.pem");
+
+    let server_leaf = tlspki::leaf(&ca, &["localhost"], "openbao", Use::Server, false);
+    let (port, served) = serve(tlspki::server_config(&server_leaf, None));
+    let (mtls_port, mtls_served) = serve(tlspki::server_config(&server_leaf, Some(&clients)));
+    let mine = tlspki::leaf(&clients, &[], "keybroker", Use::Client, false);
+    let cert_file = dir.put("client.crt", &mine.cert_pem);
+    let key_file = dir.put("client.key", &mine.key_pem);
+
+    // Nothing configured: the public roots, as before; the private CA's
+    // server is refused before any request (and so any token) is sent.
+    clear();
+    let e = advance(port, "localhost").unwrap_err();
+    assert!(e.contains("UnknownIssuer"), "{e}");
+    assert_eq!(served.load(Ordering::SeqCst), 0);
+
+    // The private CA, by either name: the mark's compare-and-set is served.
+    std::env::set_var("BAO_CACERT", &ca_file);
+    assert_eq!(advance(port, "localhost").unwrap(), 1);
+    clear();
+    std::env::set_var("VAULT_CACERT", &ca_file);
+    assert_eq!(advance(port, "localhost").unwrap(), 1);
+    assert_eq!(served.load(Ordering::SeqCst), 2);
+
+    // Another CA, or the right CA and the wrong host name: refused, and the
+    // server saw nothing.
+    clear();
+    std::env::set_var("BAO_CACERT", &other_file);
+    let e = advance(port, "localhost").unwrap_err();
+    assert!(e.contains("UnknownIssuer"), "{e}");
+    std::env::set_var("BAO_CACERT", &ca_file);
+    let e = advance(port, "127.0.0.1").unwrap_err();
+    assert!(e.contains("not valid for name"), "{e}");
+    assert_eq!(served.load(Ordering::SeqCst), 2);
+
+    // An unusable bundle stops the mark, as it stops the root key.
+    clear();
+    std::env::set_var("BAO_CACERT", &missing_file);
+    let e = advance(port, "localhost").unwrap_err();
+    assert!(e.contains(missing_file.as_str()), "{e}");
+
+    // Mutual TLS: refused without the client certificate, served with it.
+    clear();
+    std::env::set_var("BAO_CACERT", &ca_file);
+    let before = mtls_served.load(Ordering::SeqCst);
+    assert!(advance(mtls_port, "localhost").is_err());
+    assert_eq!(mtls_served.load(Ordering::SeqCst), before);
+    std::env::set_var("BAO_CLIENT_CERT", &cert_file);
+    std::env::set_var("BAO_CLIENT_KEY", &key_file);
+    assert_eq!(advance(mtls_port, "localhost").unwrap(), 1);
+    assert!(mtls_served.load(Ordering::SeqCst) > before);
+
+    // Constructed directly (tests, embedding): the settings are not read,
+    // until `with_tls_from_env` asks for them.
+    clear();
+    std::env::set_var("BAO_CACERT", &missing_file);
+    let direct = || {
+        OpenBaoKvMark::new(
+            "https://bao.internal:8200",
+            "kv",
+            "b",
+            Zeroizing::new("t".into()),
+        )
+    };
+    assert!(direct().is_ok());
+    assert!(direct().unwrap().with_tls_from_env().is_err());
     clear();
 }

@@ -16,9 +16,13 @@ encompute-evaluator.workspace = true
 encompute-analysis.workspace = true
 encompute-ckks.workspace = true
 encompute-exact.workspace = true
+encompute-trust.workspace = true
+encompute-secagg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
 getrandom = "0.2"
 zeroize = "1.8"
 ed25519-dalek = "2.2"
@@ -31,6 +35,8 @@ r2d2_postgres = "0.18"
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
+encompute-attestation.workspace = true
+encompute-keybroker.workspace = true
 p256 = { version = "0.13", features = ["pkcs8", "jwk", "pem", "ecdsa"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 # Throwaway certificates for the TLS tests (ring, never aws-lc).

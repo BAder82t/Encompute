@@ -99,7 +99,30 @@ maturin develop --release --features openfhe
 | Python SDK (`encompute`) | **Supported** | Compile, run, test, explain, policies, planner, `Project`, `Client`. Requires Python 3.11 or later; CI tests 3.11 and 3.12. See [api-stability.md](api-stability.md) for which names are stable. |
 | `encompute.torch` | **Supported** | Needs the `torch` or `huggingface` extra. |
 | `encompute` CLI | **Supported** | Development-only flags (`--development`, `--mock-root`, `attest mock-root`, `attest simulate-launcher`, `plan --allow-development`) are unsupported in production. |
-| Assurance suite (`assurance-report`) | **Supported** (release gate) | Not published. 150 invariants. |
+| Assurance suite (`assurance-report`) | **Supported** (release gate) | Not published. 150 invariants in 0.3.0 (175 on the public-sector development branch). |
+
+## Governed projects (after 0.3.0, not released)
+
+None of this is part of 0.3.0 and none of it has a support status yet: it
+is built on the development branch, has had no external security review,
+and its formats and names may change before it ships. The table says what
+is built, what is not, and what has not been shown.
+See [public-sector.md](public-sector.md).
+
+| Capability | State | Details |
+|---|---|---|
+| Governed projects, owner-signed authorizations, purposes, four eyes | Built, not released | Governance keys, one authorization per owner, purpose, program and dataset version, strict windows, non-retroactive revocation. |
+| Sovereign key custody and two-part key release | Built, not released | Each institution's keys stay at a key broker it registered; a broker releases only with the owner's signed authorization and a single-use ticket. Rollback guard through a generation mark in the owner's KMS (OpenBao Transit and KV tested; no other KMS). |
+| Release classes, derived results, retention, auditor | Built, not released | Compiler-checked release forms; derived results with lineage consent; deletion dates; a read-only auditor organization. |
+| Governance log, anchor, verifiable audit | Built, not released | Needs the control plane's state anchor outside the database's failure domain. |
+| Privacy scopes and aggregate mode (statistics) | Built, not released | Secure aggregation with differential privacy; central DP. Examples: [public-health-statistics](../examples/public-sector/public-health-statistics/). |
+| Residency and operators | Built, not released | Constraints decide placement; declared locations are attributable, not proven; only attested zones are checked cryptographically, and today only by the key broker. |
+| Cross-agency report and evidence bundle | Built, not released | The report cannot read SATISFIED yet (decryption control and linkage are not evidenced). |
+| Bounded-category release to one agency | Built, not released | Single source, no linkage. Example: [fraud-signal](../examples/public-sector/fraud-signal/). |
+| Confidential model collaboration | Experimental, as in 0.3.0 | Examples 15 to 18; no separate governed example. |
+| Record linkage, record-level exact computation across institutions | **Unsupported**: not built | Needs external cryptographic review before it ships. Example A and the flagship demo wait for it. |
+| Recipient-held, attested-decryptor or threshold decryption of a governed result | **Unsupported**: not built | The report row "Decryption control" is NOT EVIDENCED. |
+| Release gating | In `scripts/release-check.sh` | The Examples row requires both public-sector examples to run; the governance attacks row runs `scripts/governance-attacks.sh` when the test services are configured; the assurance row runs the governance invariants. |
 
 ## Platforms
 

@@ -109,6 +109,8 @@ fn fixture_spec() -> TrainingSpec {
             })
             .collect(),
         key_brokers: [("modelco".to_string(), h('5'))].into(),
+        asset_brokers: Default::default(),
+        broker_organizations: Default::default(),
         coordinator_key: h('6'),
         initial_adapter_digest: h('7'),
     }
@@ -193,6 +195,9 @@ fn checkpoint_resume() {
         let _ = std::fs::remove_dir_all(&ledgers);
         std::fs::create_dir_all(&ledgers).unwrap();
         let rs = ReleaseSpec {
+            sources_per_unit: 1,
+            layout_id: None,
+            job_id: None,
             round_id: "01".repeat(32),
             output: "update".into(),
             policy_id: s.policy_id.clone(),
@@ -219,6 +224,7 @@ fn checkpoint_resume() {
                     epsilon: 8.0,
                     delta: 1e-5,
                 },
+                scoped: None,
             }],
         };
         release(

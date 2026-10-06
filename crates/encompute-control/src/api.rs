@@ -32,13 +32,45 @@
 //! | POST | `/v1/jobs/{id}/cancel`, `/approve`, `/start`, `/complete`, `/receipt` | |
 //! | POST, GET | `/v1/evaluators` | |
 //! | POST | `/v1/evaluators/{id}/status` | |
+//! | POST | `/v1/evaluators/{id}/location-declarations` | a person who is a security admin of the evaluator's operator declares where it runs |
+//! | GET, POST | `/v1/projects/{id}/placement` | governed projects: the project's placement constraints (members and auditors read them); a member's security admin tightens them at once, and loosening needs every member |
+//! | POST | `/v1/privacy/populations` | governed projects: a person of the owning organization creates the privacy population (the hard cap) of one of its dataset series |
+//! | GET | `/v1/privacy/populations/{id}` | the owning organization: its cap, spending across scopes, scopes |
+//! | POST | `/v1/privacy/scopes` | a security admin of the population's organization proposes a scope of it for a project, purpose and program |
+//! | POST | `/v1/privacy/scopes/{id}/approve` | a different security admin of that organization approves (four eyes) |
+//! | GET | `/v1/privacy/scopes/{id}`, `/v1/projects/{id}/privacy-scopes` | the owner in full; the project's members and auditors its totals |
+//! | GET | `/v1/privacy/scopes/{id}/ledger` | the owner's auditors and data owners, the project's auditor organizations: the scope's entries |
+//! | POST | `/v1/privacy/scopes/{id}/events` | a SecAgg service the owner authorized, or the owner's data owners: a governed job's reservation or commit |
+//! | POST | `/v1/privacy/scopes/{id}/spenders` | the owner authorizes a SecAgg service to report a scope's events |
 //! | GET | `/v1/privacy/{asset}`, `/v1/privacy/{asset}/ledger` | |
 //! | POST | `/v1/privacy/{asset}/events` | |
 //! | POST | `/v1/privacy/{asset}/spenders` | owners authorize a SecAgg service |
 //! | GET | `/v1/trust/{job}` | |
-//! | GET | `/v1/audit?organization=&after=&limit=` | |
+//! | GET | `/v1/audit?organization=&after=&limit=` | an organization's trail |
+//! | GET | `/v1/audit?project=&after=&limit=` | a governed project's events, as every participant sees them |
 //! | POST | `/v1/audit/checkpoints` | |
 //! | POST | `/v1/messages` | services only |
+//! | POST, GET | `/v1/organizations/{id}/governance-keys` | governed projects: an organization's governance public keys |
+//! | POST | `/v1/organizations/{id}/governance-keys/{key}/approve`, `.../revoke` | a different security admin approves |
+//! | GET | `/v1/organizations/{id}/governance-key-attestation?key_id=` | the control plane's signed attestation of an organization's governance key (active, or the one named), to members of organizations sharing a project with it |
+//! | POST, GET | `/v1/projects/{id}/purposes` | governed projects |
+//! | GET | `/v1/purposes/{id}` | |
+//! | POST | `/v1/purposes/{id}/approve`, `/accept`, `/retire` | acceptance carries the organization's governance-key signature |
+//! | POST | `/v1/authorizations` | owner authorizations (v2), proposed without approvals |
+//! | GET | `/v1/authorizations/{id}` | to the owner's members: the document to sign |
+//! | POST | `/v1/authorizations/{id}/approve`, `/signature`, `/revoke` | four eyes, then the owner's governance-key signature |
+//! | GET | `/v1/projects/{id}/audit?after=&limit=` | a governed project's shared log: events with inclusion proofs against the latest signed checkpoint, the checkpoint and its witnesses (members and auditors) |
+//! | GET | `/v1/projects/{id}/checkpoints/latest?since=` | the latest signed checkpoint, its witnesses and, from `since`, the control plane's signed consistency proof |
+//! | POST | `/v1/projects/{id}/checkpoints/{size}/witnesses` | a member organization's security admin countersigns a checkpoint with the organization's governance key |
+//! | GET | `/v1/projects/{id}/revocation-heads/{org}/draft` | the organization's revocations in the project as sorted leaves with the root its next head must carry (its security admins and the project's auditors) |
+//! | POST | `/v1/projects/{id}/revocation-heads` | an organization's security admin submits its signed revocation head |
+//! | POST, GET | `/v1/organizations/{id}/key-brokers` | an organization's own key brokers (sovereign custody); a security admin registers |
+//! | POST | `/v1/jobs/{id}/release-ticket` | governed projects: the scheduled evaluator asks for a key-release ticket |
+//! | POST | `/v1/jobs/{id}/derived-assets` | governed projects: a person of a recipient records a succeeded job's result as a derived asset |
+//! | POST | `/v1/assets/{id}/exports` | governed projects: the custodian of a derived result asks for an export ticket to one recipient |
+//! | GET | `/v1/assets/{id}/release-cosignature` | governed projects: the control plane's co-signature of a derived result's release record in force, to its custodian's members |
+//! | POST | `/v1/assets/{id}/release-cosignature` | governed projects: a security admin of the custodian has it re-issued with the lineage owners' current governance keys (after a rotation) |
+//! | POST | `/v1/assets/{id}/retention` | a dataset version's owner brings its deletion date forward or extends its evidence retention |
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -96,9 +128,46 @@ pub fn status_of(code: Code) -> u16 {
     match code {
         Code::Unauthenticated | Code::ServiceAuthentication => 401,
         Code::Forbidden | Code::ExportDenied => 403,
+        // Governance refusals (ENC2701..ENC2712, ENC2715..ENC2716,
+        // ENC2719, ENC2721..ENC2723, ENC2725): the request is understood
+        // and refused by an owner's authorization, purpose, key state,
+        // placement or aggregate declaration.
+        Code::GovernanceAuthorizationMissing
+        | Code::GovernancePurposeMismatch
+        | Code::GovernanceProgramNotAuthorized
+        | Code::GovernanceAssetVersionMismatch
+        | Code::GovernanceAuthorizationExpired
+        | Code::GovernanceAuthorizationRevoked
+        | Code::GovernanceFourEyesIncomplete
+        | Code::GovernanceKeyRevoked
+        | Code::GovernanceReleaseClass
+        | Code::GovernanceResidency
+        | Code::GovernanceLinkageMismatch
+        | Code::GovernanceReleaseTicket
+        | Code::GovernanceCustody
+        | Code::GovernanceAuditorSeparation
+        | Code::GovernanceLocationEvidence
+        | Code::GovernanceOperatorSeparation
+        | Code::GovernanceClientPlacement
+        | Code::GovernancePrivacyScope
+        | Code::GovernanceAggregateDeclaration
+        | Code::GovernanceAggregateLayout => 403,
         Code::NotFound => 404,
-        Code::Conflict | Code::PrivacyBudgetExceeded => 409,
-        Code::PlanningFailed | Code::PlanInvalid => 422,
+        Code::Conflict
+        | Code::PrivacyBudgetExceeded
+        | Code::GovernanceRevocationHead
+        | Code::GovernanceCheckpointWitness
+        | Code::GovernancePlacementChange
+        | Code::GovernancePrivacyAllocation => 409,
+        // A governance evidence bundle the request could not produce or
+        // accept as it is: malformed, unverifiable, carrying plaintext, or
+        // over its limits.
+        Code::PlanningFailed
+        | Code::PlanInvalid
+        | Code::GovernanceBundleMalformed
+        | Code::GovernanceBundleUnverified
+        | Code::GovernanceBundlePlaintext
+        | Code::GovernanceBundleLimit => 422,
         Code::Scheduling => 503,
         Code::Remote | Code::InsecureConfiguration | Code::PrivacyLedger => 500,
         _ => 400,
@@ -331,6 +400,104 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "projects", id, "members", "remove"]) => {
             ok(control.remove_project_member(ctx, id, parse(&r.body)?)?)
         }
+        ("POST", ["v1", "organizations", id, "governance-keys"]) => {
+            created(control.propose_governance_key(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "organizations", id, "governance-keys"]) => {
+            ok(control.list_governance_keys(ctx, id)?)
+        }
+        ("GET", ["v1", "organizations", id, "governance-key-attestation"]) => {
+            let q = query(&r.url);
+            ok(control.governance_key_attestation(ctx, id, q.get("key_id").map(String::as_str))?)
+        }
+        ("POST", ["v1", "organizations", id, "governance-keys", key, "approve"]) => {
+            ok(control.approve_governance_key(ctx, id, key)?)
+        }
+        ("POST", ["v1", "organizations", id, "governance-keys", key, "revoke"]) => {
+            ok(control.revoke_governance_key(ctx, id, key)?)
+        }
+        ("POST", ["v1", "projects", id, "purposes"]) => {
+            created(control.propose_purpose(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "projects", id, "purposes"]) => ok(control.list_purposes(ctx, id)?),
+        ("GET", ["v1", "purposes", id]) => ok(control.get_purpose(ctx, id)?),
+        ("POST", ["v1", "purposes", id, "approve"]) => ok(control.approve_purpose(ctx, id)?),
+        ("POST", ["v1", "purposes", id, "accept"]) => {
+            ok(control.accept_purpose(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "purposes", id, "retire"]) => {
+            let body: crate::model::RetirePurpose = if r.body.is_empty() {
+                Default::default()
+            } else {
+                parse(&r.body)?
+            };
+            ok(control.retire_purpose_with_head(ctx, id, body.revocation_head)?)
+        }
+        ("POST", ["v1", "authorizations"]) => {
+            created(control.propose_authorization(ctx, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "authorizations", id]) => ok(control.get_authorization(ctx, id)?),
+        ("POST", ["v1", "authorizations", id, "approve"]) => {
+            ok(control.approve_authorization(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "authorizations", id, "signature"]) => {
+            ok(control.sign_authorization(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "authorizations", id, "revoke"]) => {
+            ok(control.revoke_authorization(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "projects", id, "audit"]) => {
+            let q = query(&r.url);
+            let after = number(&q, "after")?.unwrap_or(0);
+            let limit = number(&q, "limit")?.unwrap_or(100);
+            if limit == 0 {
+                return Err(bad("limit is a whole number from 1"));
+            }
+            let limit = limit.min(crate::ops::PROJECT_LOG_MAX_PAGE as u64) as i64;
+            ok(control.project_audit_log(ctx, id, after, limit)?)
+        }
+        ("GET", ["v1", "projects", id, "checkpoints", "latest"]) => {
+            let since = number(&query(&r.url), "since")?;
+            ok(control.project_checkpoint_latest(ctx, id, since)?)
+        }
+        ("GET", ["v1", "projects", id, "revocation-heads", org, "draft"]) => {
+            ok(control.revocation_head_draft(ctx, id, org)?)
+        }
+        ("POST", ["v1", "projects", id, "revocation-heads"]) => {
+            let head: encompute_trust::govlog::SignedRevocationHead = parse(&r.body)?;
+            let org = head.body.organization.clone();
+            match control.submit_revocation_head(ctx, id, head) {
+                Ok(v) => created(v),
+                // The log moved on, or the head was not the next: the
+                // current draft is in the answer, so a retry is one call.
+                Err(e) if e.code == Code::GovernanceRevocationHead => {
+                    let mut body = json!({"code": e.code.as_str(), "message": e.message,
+                                          "retryable": true});
+                    if let Ok(d) = control.revocation_head_draft(ctx, id, &org) {
+                        body["draft"] = d;
+                    }
+                    Ok((409, body))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        ("POST", ["v1", "projects", id, "checkpoints", size, "witnesses"]) => {
+            let size: u64 = size
+                .parse()
+                .map_err(|_| bad("a checkpoint is named by its size (a whole number)"))?;
+            let (new, v) = control.submit_checkpoint_witness(ctx, id, size, parse(&r.body)?)?;
+            if new {
+                created(v)
+            } else {
+                ok(v)
+            }
+        }
+        ("POST", ["v1", "organizations", id, "key-brokers"]) => {
+            created(control.register_key_broker(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "organizations", id, "key-brokers"]) => {
+            ok(control.list_key_brokers(ctx, id)?)
+        }
         ("POST", ["v1", "projects", id, "policies"]) => {
             created(control.propose_policy(ctx, id, parse(&r.body)?)?)
         }
@@ -347,6 +514,18 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
             ok(control.withdraw_asset_approval(ctx, id, parse(&r.body)?)?)
         }
         ("POST", ["v1", "assets", id, "revoke"]) => ok(control.revoke_asset(ctx, id)?),
+        ("POST", ["v1", "assets", id, "exports"]) => {
+            created(control.export_asset(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "assets", id, "release-cosignature"]) => {
+            ok(control.release_cosignature(ctx, id)?)
+        }
+        ("POST", ["v1", "assets", id, "release-cosignature"]) => {
+            created(control.reissue_release_cosignature(ctx, id)?)
+        }
+        ("POST", ["v1", "assets", id, "retention"]) => {
+            ok(control.update_retention(ctx, id, parse(&r.body)?)?)
+        }
 
         ("POST", ["v1", "plans"]) => created(control.create_plan(ctx, parse(&r.body)?)?),
 
@@ -365,6 +544,15 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "jobs", id, "cancel"]) => ok(control.cancel_job(ctx, id)?),
         ("POST", ["v1", "jobs", id, "approve"]) => ok(control.approve_job(ctx, id)?),
         ("POST", ["v1", "jobs", id, "start"]) => ok(control.start_job(ctx, id)?),
+        ("POST", ["v1", "jobs", id, "upload-grants"]) => {
+            created(control.issue_upload_grant(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "jobs", id, "release-ticket"]) => {
+            created(control.issue_release_ticket(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "jobs", id, "derived-assets"]) => {
+            created(control.register_derived_asset(ctx, id, parse(&r.body)?)?)
+        }
         ("POST", ["v1", "jobs", id, "complete"]) => {
             ok(control.complete_job(ctx, id, parse(&r.body)?)?)
         }
@@ -391,7 +579,44 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         ("POST", ["v1", "evaluators", id, "status"]) => {
             ok(control.evaluator_status(ctx, id, parse(&r.body)?)?)
         }
+        ("POST", ["v1", "evaluators", id, "location-declarations"]) => {
+            created(control.declare_evaluator_location(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "projects", id, "placement"]) => {
+            ok(control.project_placement_view(ctx, id)?)
+        }
+        ("POST", ["v1", "projects", id, "placement"]) => {
+            ok(control.set_project_placement(ctx, id, parse(&r.body)?)?)
+        }
 
+        ("POST", ["v1", "privacy", "populations"]) => {
+            created(control.create_population(ctx, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "privacy", "populations", id]) => ok(control.get_population(ctx, id)?),
+        ("POST", ["v1", "privacy", "populations", id, "approve"]) => {
+            ok(control.approve_population(ctx, id)?)
+        }
+        ("POST", ["v1", "privacy", "scopes"]) => {
+            created(control.propose_scope(ctx, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "privacy", "scopes", id]) => ok(control.get_scope(ctx, id)?),
+        ("GET", ["v1", "privacy", "scopes", id, "ledger"]) => {
+            ok(control.scope_ledger_export(ctx, id)?)
+        }
+        ("POST", ["v1", "privacy", "scopes", id, "approve"]) => ok(control.approve_scope(ctx, id)?),
+        ("POST", ["v1", "privacy", "scopes", id, "events"]) => {
+            ok(control.privacy_spend_scoped(ctx, id, parse(&r.body)?)?)
+        }
+        ("POST", ["v1", "privacy", "scopes", id, "spenders"]) => {
+            let v: Value = parse(&r.body)?;
+            let svc = v["service"]
+                .as_str()
+                .ok_or_else(|| bad("name the SecAgg service"))?;
+            ok(control.authorize_scope_spender(ctx, id, svc)?)
+        }
+        ("GET", ["v1", "projects", id, "privacy-scopes"]) => {
+            ok(control.list_project_scopes(ctx, id)?)
+        }
         ("GET", ["v1", "privacy", asset]) => ok(control.privacy_view(ctx, asset)?),
         ("GET", ["v1", "privacy", asset, "ledger"]) => ok(control.privacy_export(ctx, asset)?),
         ("POST", ["v1", "privacy", asset, "events"]) => {
@@ -406,9 +631,31 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         }
 
         ("GET", ["v1", "trust", job]) => ok(control.trust_report(ctx, job)?),
+        ("GET", ["v1", "jobs", id, "governance-bundle"]) => {
+            let q = query(&r.url);
+            ok(control.governance_bundle(
+                ctx,
+                id,
+                q.get("view").map(String::as_str),
+                q.get("organization").map(String::as_str),
+            )?)
+        }
 
         ("GET", ["v1", "audit"]) => {
             let q = query(&r.url);
+            let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit = q
+                .get("limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200)
+                .clamp(1, 1000);
+            // A governed project's events, shared by everyone taking part.
+            if let Some(project) = q.get("project") {
+                if q.contains_key("organization") {
+                    return Err(bad("name an organization or a project, not both"));
+                }
+                return ok(control.project_audit(ctx, project, after, limit)?);
+            }
             let org = q
                 .get("organization")
                 .cloned()
@@ -420,17 +667,17 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
                 &[Role::Auditor, Role::OrganizationAdmin, Role::SecurityAdmin],
                 "reading the audit trail",
             )?;
-            let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
-            let limit = q
-                .get("limit")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(200)
-                .clamp(1, 1000);
             let mut c = control.db.conn()?;
-            ok(
-                serde_json::to_value(audit::list(&mut *c, Some(&org), after, limit)?)
-                    .expect("serializable"),
-            )
+            // Another organization's people who acted on this one (an
+            // invitation, a removal, a revocation that failed its job)
+            // appear as `organization/kind`; each event's hash covers the
+            // actor as recorded.
+            let mut labels = crate::views::Labels::default();
+            let mut events = audit::list(&mut *c, Some(&org), after, limit)?;
+            for e in &mut events {
+                e.actor = labels.label_outside(&mut *c, &e.actor, Some(&org))?;
+            }
+            ok(serde_json::to_value(events).expect("serializable"))
         }
         ("POST", ["v1", "audit", "checkpoints"]) => {
             require(
@@ -452,6 +699,114 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
         _ => Err(not_found("route", &format!("{m} {path}"))),
     }
 }
+
+/// A whole-number query parameter: absent is `None`, anything else that
+/// does not parse is a refusal (never a silent default).
+fn number(q: &BTreeMap<String, String>, name: &str) -> Result<Option<u64>> {
+    q.get(name)
+        .map(|v| {
+            v.parse()
+                .map_err(|_| bad(format!("{name} is a whole number")))
+        })
+        .transpose()
+}
+
+/// Every authenticated route of [`route`], as (method, path with `{}` for
+/// each ID). Tests enumerate it: every `POST` is a mutation an auditor is
+/// refused (`every_mutating_route_refuses_an_auditor`), every `GET` is
+/// scanned for other organizations' private metadata
+/// (`governance_views_canary_scan`); a unit test keeps it equal to the
+/// router, so a new route is covered by both from the start.
+pub const ROUTES: &[(&str, &str)] = &[
+    ("GET", "/v1/whoami"),
+    ("POST", "/v1/organizations"),
+    ("GET", "/v1/organizations/{}"),
+    ("POST", "/v1/organizations/{}/users"),
+    ("POST", "/v1/organizations/{}/service-accounts"),
+    ("POST", "/v1/organizations/{}/service-accounts/{}/disable"),
+    ("POST", "/v1/organizations/{}/users/{}/disable"),
+    ("POST", "/v1/organizations/{}/memberships/remove"),
+    ("GET", "/v1/security/legacy-service-admins"),
+    ("POST", "/v1/organizations/{}/key-rotations"),
+    ("POST", "/v1/projects"),
+    ("GET", "/v1/projects"),
+    ("GET", "/v1/projects/{}"),
+    ("POST", "/v1/projects/{}/members"),
+    ("POST", "/v1/projects/{}/members/remove"),
+    ("POST", "/v1/organizations/{}/governance-keys"),
+    ("GET", "/v1/organizations/{}/governance-keys"),
+    ("GET", "/v1/organizations/{}/governance-key-attestation"),
+    ("POST", "/v1/organizations/{}/governance-keys/{}/approve"),
+    ("POST", "/v1/organizations/{}/governance-keys/{}/revoke"),
+    ("POST", "/v1/projects/{}/purposes"),
+    ("GET", "/v1/projects/{}/purposes"),
+    ("GET", "/v1/purposes/{}"),
+    ("POST", "/v1/purposes/{}/approve"),
+    ("POST", "/v1/purposes/{}/accept"),
+    ("POST", "/v1/purposes/{}/retire"),
+    ("POST", "/v1/authorizations"),
+    ("GET", "/v1/authorizations/{}"),
+    ("POST", "/v1/authorizations/{}/approve"),
+    ("POST", "/v1/authorizations/{}/signature"),
+    ("POST", "/v1/authorizations/{}/revoke"),
+    ("GET", "/v1/projects/{}/audit"),
+    ("GET", "/v1/projects/{}/checkpoints/latest"),
+    ("GET", "/v1/projects/{}/revocation-heads/{}/draft"),
+    ("POST", "/v1/projects/{}/revocation-heads"),
+    ("POST", "/v1/projects/{}/checkpoints/{}/witnesses"),
+    ("POST", "/v1/organizations/{}/key-brokers"),
+    ("GET", "/v1/organizations/{}/key-brokers"),
+    ("POST", "/v1/projects/{}/policies"),
+    ("POST", "/v1/policies/{}/approve"),
+    ("POST", "/v1/assets"),
+    ("GET", "/v1/assets"),
+    ("GET", "/v1/assets/{}"),
+    ("GET", "/v1/assets/{}/lineage"),
+    ("POST", "/v1/assets/{}/approvals"),
+    ("POST", "/v1/assets/{}/approvals/withdraw"),
+    ("POST", "/v1/assets/{}/revoke"),
+    ("POST", "/v1/assets/{}/exports"),
+    ("GET", "/v1/assets/{}/release-cosignature"),
+    ("POST", "/v1/assets/{}/release-cosignature"),
+    ("POST", "/v1/assets/{}/retention"),
+    ("POST", "/v1/plans"),
+    ("POST", "/v1/jobs"),
+    ("GET", "/v1/jobs"),
+    ("GET", "/v1/jobs/{}"),
+    ("POST", "/v1/jobs/{}/cancel"),
+    ("POST", "/v1/jobs/{}/approve"),
+    ("POST", "/v1/jobs/{}/start"),
+    ("POST", "/v1/jobs/{}/upload-grants"),
+    ("POST", "/v1/jobs/{}/release-ticket"),
+    ("POST", "/v1/jobs/{}/derived-assets"),
+    ("POST", "/v1/jobs/{}/complete"),
+    ("POST", "/v1/jobs/{}/receipt"),
+    ("POST", "/v1/evaluators"),
+    ("GET", "/v1/evaluators"),
+    ("POST", "/v1/evaluators/{}/status"),
+    ("POST", "/v1/evaluators/{}/location-declarations"),
+    ("GET", "/v1/projects/{}/placement"),
+    ("POST", "/v1/projects/{}/placement"),
+    ("POST", "/v1/privacy/populations"),
+    ("GET", "/v1/privacy/populations/{}"),
+    ("POST", "/v1/privacy/populations/{}/approve"),
+    ("POST", "/v1/privacy/scopes"),
+    ("GET", "/v1/privacy/scopes/{}"),
+    ("GET", "/v1/privacy/scopes/{}/ledger"),
+    ("POST", "/v1/privacy/scopes/{}/approve"),
+    ("POST", "/v1/privacy/scopes/{}/events"),
+    ("POST", "/v1/privacy/scopes/{}/spenders"),
+    ("GET", "/v1/projects/{}/privacy-scopes"),
+    ("GET", "/v1/privacy/{}"),
+    ("GET", "/v1/privacy/{}/ledger"),
+    ("POST", "/v1/privacy/{}/events"),
+    ("POST", "/v1/privacy/{}/spenders"),
+    ("GET", "/v1/trust/{}"),
+    ("GET", "/v1/jobs/{}/governance-bundle"),
+    ("GET", "/v1/audit"),
+    ("POST", "/v1/audit/checkpoints"),
+    ("POST", "/v1/messages"),
+];
 
 /// Serves the API on `listen` with `workers` × 4 connection threads until
 /// the process exits (see [`encompute_verification::http`] for the limits:
@@ -493,5 +848,46 @@ impl http::Handler for Api {
             },
         );
         http::Response::new(resp.status, resp.content_type, resp.body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ROUTES;
+
+    /// [`ROUTES`] is exactly the router's table, in order.
+    #[test]
+    fn routes_list_every_route_of_the_router() {
+        let src = include_str!("api.rs");
+        let start = src.find("fn route(").expect("the router");
+        let end = src[start..].find("pub const ROUTES").expect("the list") + start;
+        let mut found = vec![];
+        for line in src[start..end].lines().map(str::trim) {
+            let Some(method) = ["GET", "POST"]
+                .into_iter()
+                .find(|m| line.starts_with(&format!("(\"{m}\", [")))
+            else {
+                continue;
+            };
+            let segs = &line[line.find('[').unwrap() + 1..line.find(']').unwrap()];
+            let path: String = segs
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(|x| {
+                    if x.starts_with('"') {
+                        format!("/{}", x.trim_matches('"'))
+                    } else {
+                        "/{}".to_owned()
+                    }
+                })
+                .collect();
+            found.push((method.to_owned(), path));
+        }
+        let listed: Vec<(String, String)> = ROUTES
+            .iter()
+            .map(|(m, p)| ((*m).to_owned(), (*p).to_owned()))
+            .collect();
+        assert_eq!(found, listed, "ROUTES must list every route of the router");
     }
 }

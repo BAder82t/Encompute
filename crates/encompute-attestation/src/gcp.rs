@@ -66,6 +66,16 @@ struct Submods {
     confidential_space: SpaceClaims,
     #[serde(default)]
     nvidia_gpu: Option<GpuClaims>,
+    /// The Compute Engine instance: where the workload runs.
+    #[serde(default)]
+    gce: Option<GceClaims>,
+}
+
+#[derive(Default, Deserialize)]
+struct GceClaims {
+    /// `us-central1-a`.
+    #[serde(default)]
+    zone: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -317,6 +327,16 @@ impl AttestationProvider for ConfidentialSpaceProvider {
         }
         let mut m = format!("{PROVIDER}\0").into_bytes();
         m.extend_from_slice(image.as_bytes());
+        // The cloud's own claim of the zone, taken from the signed token.
+        let location = c
+            .submods
+            .gce
+            .map(|g| g.zone)
+            .filter(|z| !z.is_empty())
+            .map(|zone| crate::WorkloadLocation {
+                provider: "gcp".into(),
+                zone,
+            });
         let gpu = c.submods.nvidia_gpu.map(|g| VerifiedGpu {
             confidential_mode: g.cc_mode == "ON",
             models: g.gpus.into_iter().map(|d| d.hwmodel).collect(),
@@ -334,6 +354,7 @@ impl AttestationProvider for ConfidentialSpaceProvider {
             issued_at: Some(c.iat),
             expires_at: Some(c.exp),
             gpu,
+            location,
         })
     }
 }

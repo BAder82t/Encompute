@@ -18,7 +18,7 @@ use encompute_ir::confidentiality::{
 };
 use encompute_ir::{Code, Error, Result};
 use encompute_privacy::ledger::{Checkpoint, Genesis, LedgerView};
-use encompute_privacy::{Charged, Csprng, PrivacyReceipt, ReleaseSpec};
+use encompute_privacy::{Charged, ChargedScope, Csprng, PrivacyReceipt, ReleaseSpec};
 use encompute_verification::canonical::canonical_json;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +46,14 @@ const CODEC_DOMAIN: &str = "encompute.aggregation-codec.v1";
 const KEYS_DOMAIN: &str = "encompute.contribution-keys.v1";
 const ASSET_DOMAIN: &str = "encompute.aggregate-asset.v1";
 const PLAN_DOMAIN: &str = "encompute.aggregation-plan.v1";
+const LAYOUT_DOMAIN: &str = "encompute.aggregation-layout.v1";
+
+/// The digest of an aggregate's stratum labels, in order: what every
+/// contribution names as its `layout_id`, so a party whose strata are
+/// ordered or named differently is refused, not summed.
+pub fn layout_id(labels: &[String]) -> Result<String> {
+    digest(LAYOUT_DOMAIN, &labels)
+}
 
 /// The asset ID of the aggregate a receipt released:
 /// `SHA256("encompute.aggregate-asset.v1", receipt ID, output)`, hex.
@@ -77,6 +85,10 @@ pub struct ContributionMetadata {
     /// Digest of the advertised protocol keys (c_pk, s_pk).
     pub keys_digest: String,
     pub attestation_id: Option<String>,
+    /// The digest of the aggregate's stratum labels ([`layout_id`]), when
+    /// the plan declares a layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_id: Option<String>,
 }
 
 /// Round 0 as a party sends it: its protocol keys and its signed metadata.
@@ -113,6 +125,37 @@ pub struct PlanParticipant {
     /// The asset's privacy budget (ADR-013), charged per release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<PrivacyBudget>,
+    /// The population and scope this asset's releases are charged to,
+    /// instead of its own ledger: the owners' allocation, bound into the
+    /// plan (and so the spec ID) every party approves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped: Option<ScopedBudget>,
+}
+
+/// An asset's privacy population (the authoritative cap over its series)
+/// and the scope of this project's purpose within it: both genesis
+/// documents, as the owners allocated them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopedBudget {
+    pub population: Genesis,
+    pub scope: Genesis,
+}
+
+impl ScopedBudget {
+    /// The two ledgers a release is charged to, scope first.
+    fn charges(&self) -> [Charged; 2] {
+        let charge = |g: &Genesis| Charged {
+            asset_id: g.asset_id.clone(),
+            budget: g.budget.clone(),
+            scoped: Some(ChargedScope {
+                genesis: g.clone(),
+                scope_id: self.scope.asset_id.clone(),
+                population_id: self.population.asset_id.clone(),
+            }),
+        };
+        [charge(&self.scope), charge(&self.population)]
+    }
 }
 
 /// The aggregate's derived policy.
@@ -158,6 +201,21 @@ pub struct AggregationPlan {
     /// attestation. Parties join only rounds of the plan they approved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_plan_id: Option<String>,
+    /// How many sources one privacy unit may appear in, if declared
+    /// (multiplied into the sensitivity). Absent: every participant when
+    /// the releases are scoped, 1 otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sources_per_unit: Option<u32>,
+    /// The digest of the aggregate's stratum labels ([`layout_id`]), if the
+    /// program declares them: every contribution must name it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_id: Option<String>,
+    /// The governed job this aggregation runs for: its reservations name it
+    /// and take its identity, so the control plane (which reserves a job's
+    /// release when the job starts) and the coordinator charge one entry,
+    /// once. Bound into the spec ID like everything else here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 impl AggregationPlan {
@@ -169,6 +227,12 @@ impl AggregationPlan {
     ) -> Self {
         let a = &b.aggregate_policy;
         Self {
+            job_id: None,
+            max_sources_per_unit: b.max_sources_per_unit,
+            layout_id: b
+                .layout
+                .as_ref()
+                .map(|l| layout_id(l).expect("a layout is serializable")),
             version: PLAN_VERSION,
             program_id: program_id.to_owned(),
             policy_id: policy_id.map(str::to_owned),
@@ -184,6 +248,7 @@ impl AggregationPlan {
                     input: k.input.clone(),
                     asset: k.asset.clone(),
                     budget: k.budget.clone(),
+                    scoped: None,
                 })
                 .collect(),
             minimum: b.minimum,
@@ -203,6 +268,18 @@ impl AggregationPlan {
         }
     }
 
+    /// This plan, run for governed job `job`.
+    pub fn with_job(mut self, job: &str) -> Self {
+        self.job_id = Some(job.to_owned());
+        self
+    }
+
+    /// The ID releases of a round are identified by: the governed job's, if
+    /// the plan is for one, else the round's `round_id`.
+    pub fn release_id(&self, round_id: &str) -> String {
+        self.job_id.clone().unwrap_or_else(|| round_id.to_owned())
+    }
+
     /// This plan, bound to the approved confidential execution plan.
     pub fn with_execution_plan(mut self, plan_id: &str) -> Self {
         self.execution_plan_id = Some(plan_id.to_owned());
@@ -211,6 +288,24 @@ impl AggregationPlan {
 
     pub fn participant(&self, party: &PartyId) -> Option<&PlanParticipant> {
         self.participants.iter().find(|p| &p.party == party)
+    }
+
+    /// Every ledger a round of this plan may charge, by subject ID: each
+    /// budgeted asset's own, each scoped asset's scope and population.
+    pub fn ledger_subjects(&self) -> BTreeSet<&str> {
+        let mut out = BTreeSet::new();
+        for p in &self.participants {
+            match &p.scoped {
+                Some(sb) => {
+                    out.insert(sb.scope.asset_id.as_str());
+                    out.insert(sb.population.asset_id.as_str());
+                }
+                None => {
+                    out.insert(p.asset.as_str());
+                }
+            }
+        }
+        out
     }
 
     /// `SHA256("encompute.aggregation-plan.v1", canonical plan)`: what an
@@ -233,8 +328,20 @@ impl AggregationPlan {
         let privacy_policy_id = self.privacy_policy_id.clone().ok_or_else(|| {
             Error::new(Code::PrivacyPolicy, "a DP plan without a privacy policy ID")
         })?;
+        let scoped = self.participants.iter().any(|p| p.scoped.is_some());
+        let mut charged = vec![];
+        for p in contributors.iter().filter_map(|c| self.participant(c)) {
+            match (&p.scoped, &p.budget) {
+                (Some(sb), _) => charged.extend(sb.charges()),
+                (None, Some(budget)) => {
+                    charged.push(Charged::asset(p.asset.clone(), budget.clone()))
+                }
+                (None, None) => {}
+            }
+        }
         Ok(Some(ReleaseSpec {
-            round_id: round_id.to_owned(),
+            round_id: self.release_id(round_id),
+            job_id: self.job_id.clone(),
             output: self.output.clone(),
             policy_id: self.policy_id.clone(),
             privacy_policy_id,
@@ -242,17 +349,114 @@ impl AggregationPlan {
             mechanism: dp.clone(),
             codec: self.codec,
             vector_len: self.vector_len,
-            charged: contributors
-                .iter()
-                .filter_map(|p| self.participant(p))
-                .filter_map(|p| {
-                    p.budget.clone().map(|budget| Charged {
-                        asset_id: p.asset.clone(),
-                        budget,
-                    })
-                })
-                .collect(),
+            charged,
+            sources_per_unit: self.sources_per_unit(scoped),
+            layout_id: self.layout_id.clone(),
         }))
+    }
+
+    /// How many sources a privacy unit is assumed to span: what the
+    /// program declares; else, for scoped releases, every participant (the
+    /// worst case, never a guess in the unit's favour); else 1, as ever.
+    pub fn sources_per_unit(&self, scoped: bool) -> u32 {
+        self.max_sources_per_unit.unwrap_or(if scoped {
+            u32::try_from(self.participants.len())
+                .unwrap_or(u32::MAX)
+                .max(1)
+        } else {
+            1
+        })
+    }
+
+    /// This plan with each named asset's releases charged to a scope and
+    /// population (see [`ScopedBudget`]). Every budgeted participant must
+    /// be named: scoping some and not others would leave the rest on the
+    /// per-asset budgets that a new version resets.
+    pub fn with_scopes(mut self, mut scopes: BTreeMap<String, ScopedBudget>) -> Result<Self> {
+        for p in &mut self.participants {
+            if let Some(sb) = scopes.remove(&p.asset) {
+                p.scoped = Some(sb);
+            }
+        }
+        if let Some(extra) = scopes.keys().next() {
+            return Err(Error::new(
+                Code::AggregationPlan,
+                format!("the scoping names asset {extra}, which this aggregation does not read"),
+            ));
+        }
+        self.check_scopes()?;
+        Ok(self)
+    }
+
+    /// The scoped participants are consistent: every budgeted participant
+    /// is scoped (or none is), each scope belongs to its population at its
+    /// unit and delta with no more than the asset's declared budget, all
+    /// scopes are for one project, purpose and program, and no ledger is
+    /// charged twice.
+    pub fn check_scopes(&self) -> Result<()> {
+        let bad = |m: String| Err(Error::new(Code::GovernancePrivacyScope, m));
+        let scoped: Vec<&PlanParticipant> = self
+            .participants
+            .iter()
+            .filter(|p| p.scoped.is_some())
+            .collect();
+        if scoped.is_empty() {
+            return Ok(());
+        }
+        let mut subjects = BTreeSet::new();
+        let mut binding: Option<(&encompute_privacy::Scoping, String)> = None;
+        for p in &self.participants {
+            let Some(budget) = &p.budget else {
+                if p.scoped.is_some() {
+                    return bad(format!(
+                        "{}'s asset has no privacy budget to scope",
+                        p.party
+                    ));
+                }
+                continue;
+            };
+            let Some(sb) = &p.scoped else {
+                return bad(format!(
+                    "{}'s asset is budgeted but not scoped: when any participant is scoped, every budgeted one must be",
+                    p.party
+                ));
+            };
+            encompute_privacy::scoped::check_genesis_pair(&sb.population, &sb.scope)?;
+            let pop = &sb.population.budget;
+            if pop.unit != budget.unit || pop.delta != budget.delta || pop.epsilon > budget.epsilon
+            {
+                return bad(format!(
+                    "population {} does not fit {}'s declared budget: the same privacy unit and delta, and a cap no larger than the asset's epsilon {}",
+                    sb.population.asset_id, p.party, budget.epsilon
+                ));
+            }
+            for id in [&sb.scope.asset_id, &sb.population.asset_id, &p.asset] {
+                if !subjects.insert(id.clone()) {
+                    return bad(format!(
+                        "{id} names more than one ledger of this aggregation"
+                    ));
+                }
+            }
+            if let encompute_privacy::Scoping::Scope {
+                project,
+                purpose,
+                program,
+                ..
+            } = sb.scope.scoping.as_ref().expect("a scope")
+            {
+                let key = (project.clone(), purpose.clone(), program.clone());
+                match &binding {
+                    None => binding = Some((sb.scope.scoping.as_ref().expect("a scope"), format!("{key:?}"))),
+                    Some((_, k)) if *k != format!("{key:?}") => {
+                        return bad(
+                            "the scopes are for different projects, purposes or programs: one aggregation is one project's purpose".into(),
+                        )
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Every aggregate a round of this plan produces is a release: it
@@ -293,6 +497,11 @@ impl AggregationPlan {
         let (Some(budget), Some(ppid)) = (&p.budget, &self.privacy_policy_id) else {
             return Ok(None);
         };
+        // A scoped asset is charged to its scope and population, never to
+        // a ledger of its own (see [`Self::scoped_views`]).
+        if p.scoped.is_some() {
+            return Ok(None);
+        }
         let path = dir.join(format!("{}.ledger", p.asset));
         if path.exists() {
             return encompute_privacy::ledger::read(&path).map(Some);
@@ -303,9 +512,42 @@ impl AggregationPlan {
                 asset_id: p.asset.clone(),
                 budget: budget.clone(),
                 privacy_policy_id: ppid.clone(),
+                scoping: None,
             },
             entries: vec![],
         }))
+    }
+
+    /// The scope's and the population's ledgers of a scoped participant, as
+    /// found in `dir`, by ID. They must exist: owners allocate them, a
+    /// round never creates one (ENC2719).
+    pub fn scoped_views(
+        &self,
+        dir: &Path,
+        p: &PlanParticipant,
+    ) -> Result<Vec<(String, LedgerView)>> {
+        let Some(sb) = &p.scoped else {
+            return Ok(vec![]);
+        };
+        [&sb.scope, &sb.population]
+            .into_iter()
+            .map(|g| {
+                let path = dir.join(format!("{}.ledger", g.asset_id));
+                encompute_privacy::check_asset_file_name(&g.asset_id)?;
+                if !path.exists() {
+                    return Err(Error::new(
+                        Code::GovernancePrivacyScope,
+                        format!(
+                            "no privacy {} {} at {}: it is allocated by its owners, never created by a round",
+                            if g.is_population() { "population" } else { "scope" },
+                            g.asset_id,
+                            path.display()
+                        ),
+                    ));
+                }
+                Ok((g.asset_id.clone(), encompute_privacy::ledger::read(&path)?))
+            })
+            .collect()
     }
 }
 
@@ -430,6 +672,15 @@ impl AggregationSpec {
             a.validate()?;
         }
         self.plan.check_release_privacy()?;
+        self.plan.check_scopes()?;
+        if let Some(m) = self.plan.max_sources_per_unit {
+            if m == 0 || m > encompute_ir::confidentiality::MAX_SOURCES_PER_UNIT {
+                return bad(format!(
+                    "max_sources_per_unit must be 1 to {}, got {m}",
+                    encompute_ir::confidentiality::MAX_SOURCES_PER_UNIT
+                ));
+            }
+        }
 
         self.plan
             .codec
@@ -455,14 +706,22 @@ impl AggregationSpec {
     /// Why `other` is not this spec, field by field (for errors).
     pub fn difference(&self, other: &AggregationSpec) -> Option<String> {
         let (a, b) = (&self.plan, &other.plan);
-        let fields: [(&str, bool); 12] = [
+        let fields: [(&str, bool); 14] = [
             ("program", a.program_id != b.program_id),
             ("PolicyID", a.policy_id != b.policy_id),
             ("output", a.output != b.output),
             ("vector shape", a.vector_len != b.vector_len),
             ("codec (clip, scale, modulus)", a.codec != b.codec),
             ("aggregation function", a.function != b.function),
-            ("participants", a.participants != b.participants),
+            (
+                "participants (assets, budgets, scopes)",
+                a.participants != b.participants,
+            ),
+            ("governed job", a.job_id != b.job_id),
+            (
+                "sources per unit or layout",
+                (a.max_sources_per_unit, &a.layout_id) != (b.max_sources_per_unit, &b.layout_id),
+            ),
             (
                 "minimum or collusion bound",
                 (a.minimum, a.colluding) != (b.minimum, b.colluding),
@@ -536,11 +795,18 @@ pub struct RoundParticipant {
     pub round: AggregationRound,
     identity: SigningKey,
     protocol: Participant,
+    /// The digest of the strata labels THIS party holds (from its own
+    /// values' manifest), never the plan's: what its metadata names.
+    layout_id: Option<String>,
 }
 
 /// What a party checks before contributing, beyond the spec.
 #[derive(Default)]
 pub struct JoinOptions<'a> {
+    /// The stratum labels of this party's own values, in order. A plan that
+    /// declares a layout needs them, and they must digest to its layout
+    /// (ENC2722): a party never copies the plan's digest.
+    pub labels: Option<Vec<String>>,
     /// The attestation of the workload holding this party's key.
     pub attestation: Option<AttestationRecord>,
     /// The last round sequence this party joined (replay protection).
@@ -632,31 +898,46 @@ impl RoundCoordinator {
         let plan = &self.spec.plan;
         let all: Vec<PartyId> = plan.participants.iter().map(|p| p.party.clone()).collect();
         if let Some(r) = plan.release_spec(&self.round.id()?, None, &all)? {
-            for c in &r.charged {
-                let p = plan
-                    .participants
-                    .iter()
-                    .find(|p| p.asset == c.asset_id)
-                    .expect("from plan");
-                let view = plan.ledger_view(dir, p)?.expect("budgeted");
-                r.check(c, &view)?;
+            let views = self.views_in(dir)?;
+            // The population (the authoritative cap) first, then the rest.
+            for populations in [true, false] {
+                for c in &r.charged {
+                    let is_population =
+                        c.scoped.as_ref().is_some_and(|s| s.genesis.is_population());
+                    if is_population == populations {
+                        let view = views
+                            .get(&c.asset_id)
+                            .expect("every charged ledger is shown");
+                        r.check(c, view)?;
+                    }
+                }
             }
         }
         self.ledger_dir = Some(dir.to_owned());
         Ok(self)
     }
 
-    /// The budgeted assets' ledgers, for parties to check before joining.
-    pub fn ledger_views(&self) -> Result<BTreeMap<String, LedgerView>> {
+    /// Every budgeted ledger of the plan found in `dir`, by subject: each
+    /// budgeted asset's own, and each scoped asset's scope and population
+    /// (which must exist).
+    fn views_in(&self, dir: &Path) -> Result<BTreeMap<String, LedgerView>> {
         let mut out = BTreeMap::new();
-        if let Some(dir) = &self.ledger_dir {
-            for p in &self.spec.plan.participants {
-                if let Some(v) = self.spec.plan.ledger_view(dir, p)? {
-                    out.insert(p.asset.clone(), v);
-                }
+        for p in &self.spec.plan.participants {
+            if let Some(v) = self.spec.plan.ledger_view(dir, p)? {
+                out.insert(p.asset.clone(), v);
             }
+            out.extend(self.spec.plan.scoped_views(dir, p)?);
         }
         Ok(out)
+    }
+
+    /// The budgeted ledgers, for parties to check before joining: each
+    /// budgeted asset's own, and each scoped asset's scope and population.
+    pub fn ledger_views(&self) -> Result<BTreeMap<String, LedgerView>> {
+        match &self.ledger_dir {
+            Some(dir) => self.views_in(dir),
+            None => Ok(BTreeMap::new()),
+        }
     }
 }
 
@@ -710,6 +991,7 @@ impl RoundParticipant {
         opts: JoinOptions<'_>,
     ) -> Result<Self> {
         let JoinOptions {
+            labels,
             attestation,
             last_sequence,
             ledger,
@@ -721,8 +1003,9 @@ impl RoundParticipant {
         if let Some(known) = known {
             let empty = BTreeMap::new();
             let shown = all_ledgers.unwrap_or(&empty);
+            let subjects = approved.plan.ledger_subjects();
             for (asset, cp) in known {
-                if !approved.plan.participants.iter().any(|p| &p.asset == asset) {
+                if !subjects.contains(asset.as_str()) {
                     continue;
                 }
                 let view = shown.get(asset).ok_or_else(|| {
@@ -770,6 +1053,17 @@ impl RoundParticipant {
             )));
         }
         approved.check_sampled_contributors()?;
+        let own_layout = labels.as_deref().map(layout_id).transpose()?;
+        if approved.plan.layout_id.is_some() && own_layout != approved.plan.layout_id {
+            return Err(Error::new(
+                Code::GovernanceAggregateLayout,
+                format!(
+                    "this party's strata are not the plan's layout: its own labels digest to {} but the plan declares {}; its values would be summed with another stratum's",
+                    own_layout.as_deref().unwrap_or("none (no labels given)"),
+                    approved.plan.layout_id.as_deref().unwrap_or("none")
+                ),
+            ));
+        }
         if approved.attestation.is_some() && attestation.is_none() {
             return Err(Error::new(
                 Code::AggregationUnauthorized,
@@ -804,13 +1098,27 @@ impl RoundParticipant {
             if let Some(release) =
                 plan.release_spec(&round.id()?, None, std::slice::from_ref(party))?
             {
-                if let Some(c) = release.charged.first() {
-                    let view = ledger.ok_or_else(|| {
+                // Each ledger this party's release is charged to: its
+                // asset's own, or its scope and its population (both must
+                // be shown, intact, extend what this party saw, and afford
+                // the round).
+                let mut charged: Vec<&Charged> = release.charged.iter().collect();
+                charged
+                    .sort_by_key(|c| !c.scoped.as_ref().is_some_and(|s| s.genesis.is_population()));
+                for c in charged {
+                    let (shown, seen) = match &c.scoped {
+                        None => (ledger, seen),
+                        Some(_) => (
+                            all_ledgers.and_then(|m| m.get(&c.asset_id)),
+                            known.and_then(|k| k.get(&c.asset_id)),
+                        ),
+                    };
+                    let view = shown.ok_or_else(|| {
                         Error::new(
                             Code::PrivacyLedger,
                             format!(
-                                "the coordinator did not show asset {}'s privacy ledger",
-                                me.asset
+                                "the coordinator did not show the privacy ledger of {} (asset {})",
+                                c.asset_id, me.asset
                             ),
                         )
                     })?;
@@ -854,6 +1162,7 @@ impl RoundParticipant {
             round: round.clone(),
             identity,
             protocol,
+            layout_id: own_layout,
         })
     }
 
@@ -880,6 +1189,7 @@ impl RoundParticipant {
             vector_len: plan.vector_len,
             keys_digest: keys_digest(&advertise),
             attestation_id: advertise.signed.body.attestation_id.clone(),
+            layout_id: self.layout_id.clone(),
         };
         Ok(Join {
             metadata: Signed::new(&self.identity, METADATA_DOMAIN, metadata)?,
@@ -1141,6 +1451,16 @@ impl RoundCoordinator {
                 "{party}'s contribution names the wrong {what} for this round"
             )));
         }
+        if b.layout_id != plan.layout_id {
+            return Err(Error::new(
+                Code::GovernanceAggregateLayout,
+                format!(
+                    "{party}'s strata are not the plan's layout: its contribution names layout {} but the plan declares {}; contributions with another order or naming of strata would be summed value by value",
+                    b.layout_id.as_deref().unwrap_or("none"),
+                    plan.layout_id.as_deref().unwrap_or("none")
+                ),
+            ));
+        }
         if b.attestation_id != a.signed.body.attestation_id {
             return Err(binding(format!(
                 "{party}'s metadata names another attestation"
@@ -1398,6 +1718,7 @@ pub fn verify_aggregation_receipt(
             || b.execution_spec_id != spec.training_execution_spec_id
             || b.codec_id != m.codec_id
             || b.vector_len != plan.vector_len
+            || b.layout_id != plan.layout_id
             || b.attestation_id.as_ref() != m.attestations.get(&b.party)
         {
             return Err(binding(format!(
@@ -1532,3 +1853,7 @@ pub fn identity_of(party: &PartyId, key: &SigningKey) -> PartyIdentity {
 #[cfg(test)]
 #[path = "round_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "aggregate_tests.rs"]
+mod aggregate_tests;

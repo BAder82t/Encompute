@@ -260,6 +260,13 @@ impl JobState {
             (Created, Planning) | (Planning, Planned) => true,
             (Planned, WaitingForApproval) | (Planned, Authorized) => true,
             (WaitingForApproval, Authorized) => true,
+            // A governed job whose per-job approvals stopped counting
+            // before it was scheduled (an approver disabled, or no longer
+            // holding the role) waits for approval again.
+            (Authorized, WaitingForApproval) => true,
+            // A scheduled governed job whose evaluator's evidence was only
+            // renewed (same machine, same location) is scheduled again.
+            (Queued, Authorized) => true,
             (Authorized, Queued) | (Queued, Running) | (Running, Verifying) => true,
             (Verifying, Succeeded) => true,
             // Any live job can fail or be cancelled; finished ones cannot.
@@ -316,12 +323,267 @@ pub struct CreateServiceAccount {
 pub struct CreateProject {
     pub organization: String,
     pub name: String,
+    /// `standard` (the default) or `governed`; immutable.
+    #[serde(default)]
+    pub governance: Option<GovernanceMode>,
+    /// Organizations to invite; each one's admin accepts
+    /// (`POST /v1/projects/{id}/members`).
+    #[serde(default)]
+    pub organizations: Vec<String>,
+    /// Key custody, fixed by the mode: `sovereign` for a governed project
+    /// (`standard` is refused), `standard` for a standard one.
+    #[serde(default)]
+    pub custody: Option<Custody>,
+}
+
+/// Who holds the keys of a project's sources. In sovereign custody every
+/// source's key is held by a key broker its own organization registered
+/// (`POST /v1/organizations/{org}/key-brokers`), never a platform broker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Custody {
+    Standard,
+    Sovereign,
+}
+
+impl Custody {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Custody::Standard => "standard",
+            Custody::Sovereign => "sovereign",
+        }
+    }
+}
+
+/// An organization registers one of its own key-broker service accounts
+/// as its key broker. Only public information: the key it signs grants
+/// with, the kind of KMS behind it, the key namespace it serves, and where
+/// it says it runs.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterKeyBroker {
+    /// The broker's service-account ID (kind `keybroker`, of this
+    /// organization).
+    pub id: String,
+    /// Hex Ed25519 key the broker signs key grants with.
+    pub grant_public_key: String,
+    /// The KMS behind the broker (`openbao-transit`, `aws-kms`, ...).
+    pub provider_kind: String,
+    /// The key namespace it serves in that KMS.
+    pub key_ref_namespace: String,
+    /// Where it says it runs (self-declared, never evidence): string
+    /// fields such as `country` or `region`.
+    #[serde(default)]
+    pub location: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The scheduled evaluator asks for a release ticket for one source.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestReleaseTicket {
+    /// Hex `AssetVersionId` of the source whose key the workload needs.
+    pub asset_version_id: String,
+}
+
+/// The job's initiator asks for an upload grant for its scheduled job: one
+/// program, or one set of evaluation keys (by key ID), uploaded once to the
+/// job's evaluator.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestUploadGrant {
+    pub kind: encompute_verification::UploadKind,
+    /// Keys only: the key ID (hex SHA-256 of the key material, which holds
+    /// the key tag) the upload carries. Required for keys, refused for a
+    /// program.
+    #[serde(default)]
+    pub key_id: Option<String>,
+}
+
+/// A recipient records a governed job's released result as a derived
+/// asset it holds as custodian (a dataset version of its own).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterDerivedAsset {
+    /// The job's output the result is.
+    pub output: String,
+    pub kind: AssetKind,
+    /// The result's series and version label (its name is
+    /// `series@version`).
+    pub series: String,
+    pub version: String,
+    pub digest: String,
+    /// The key at the custodian's own key broker.
+    pub key_ref: KeyRef,
+    /// The onward policy it is held under (the IR asset policy, in its
+    /// canonical JSON form): never wider than its parents' registered
+    /// policies joined.
+    pub ir_policy: serde_json::Value,
+    /// Its release class: within the output's, every parent's and every
+    /// authorization's.
+    pub release_class: encompute_verification::governance::ReleaseClass,
+    /// The custodian's release record of it, signed with its governance
+    /// key.
+    pub release_record: encompute_trust::authz::SignedReleaseRecord,
+}
+
+/// The custodian asks for an export ticket of a derived result to one
+/// recipient.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestExport {
+    pub recipient: String,
+    /// The export's release class (default: the result's own): within the
+    /// result's and every ancestor authorization's.
+    #[serde(default)]
+    pub release_class: Option<encompute_verification::governance::ReleaseClass>,
+}
+
+/// A project's mode. A governed project computes across organizations for
+/// declared purposes under owner-signed authorizations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernanceMode {
+    #[default]
+    Standard,
+    Governed,
+}
+
+impl GovernanceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GovernanceMode::Standard => "standard",
+            GovernanceMode::Governed => "governed",
+        }
+    }
+}
+
+/// An organization's governance public key (hex Ed25519). The private key
+/// stays in the organization's KMS or HSM.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposeGovernanceKey {
+    pub public_key: String,
+    #[serde(default)]
+    pub kms_key_ref: Option<String>,
+}
+
+/// A purpose of a governed project (the control plane adds the project and
+/// version, and computes the PurposeId).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposePurpose {
+    /// The proposing member organization.
+    pub organization: String,
+    pub name: String,
+    #[serde(default = "first_revision")]
+    pub revision: u32,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub legal_basis_ref: Option<String>,
+    pub modes: std::collections::BTreeSet<encompute_verification::governance::PurposeMode>,
+    pub allowed_release_classes:
+        std::collections::BTreeSet<encompute_verification::governance::ReleaseClass>,
+    pub recipients: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub linkage_policy_id: Option<String>,
+    #[serde(default)]
+    pub min_aggregate_parties: Option<u32>,
+    pub valid_from: u64,
+    pub valid_until: u64,
+}
+
+fn first_revision() -> u32 {
+    1
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptPurpose {
+    pub acceptance: encompute_trust::authz::SignedPurposeAcceptance,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposeAuthorization {
+    /// The authorization, without approvals.
+    pub body: encompute_trust::authz::AuthorizationV2,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveAuthorization {
+    /// The role the approver approves in (one it holds).
+    pub role: Role,
+}
+
+/// The owner's governance-key signature over the approved body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationSignature {
+    pub public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeAuthorization {
+    pub reason: String,
+    /// The owner's signed revocation, when it has one (the key broker
+    /// needs it).
+    #[serde(default)]
+    pub revocation: Option<encompute_trust::authz::SignedRevocationV2>,
+    /// Governed projects: the owner's next signed revocation head, covering
+    /// this revocation. Accepted together with it (both or neither);
+    /// without one the revocation is recorded and the head is owed.
+    #[serde(default)]
+    pub revocation_head: Option<encompute_trust::govlog::SignedRevocationHead>,
+}
+
+/// Retiring a purpose: in a governed project, optionally with the
+/// proposer's next signed revocation head (see [`RevokeAuthorization`]).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetirePurpose {
+    #[serde(default)]
+    pub revocation_head: Option<encompute_trust::govlog::SignedRevocationHead>,
+}
+
+/// How an organization takes part in a project: as a member, or (governed
+/// projects only) as an auditor organization, which reads the project's
+/// shared records and changes nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Participation {
+    #[default]
+    Member,
+    Auditor,
+}
+
+impl Participation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Participation::Member => "member",
+            Participation::Auditor => "auditor",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "member" => Ok(Participation::Member),
+            "auditor" => Ok(Participation::Auditor),
+            _ => Err(bad(format!("unknown participation {s:?}"))),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddProjectMember {
     pub organization: String,
+    /// Invitations only: `member` (the default) or `auditor`.
+    #[serde(default)]
+    pub participation: Option<Participation>,
 }
 
 /// Removes a principal's role in an organization (all its roles there when
@@ -360,6 +622,53 @@ pub struct RegisterAsset {
     /// A privacy budget for the asset: creates its privacy ledger.
     #[serde(default)]
     pub privacy_budget: Option<encompute_ir::confidentiality::PrivacyBudget>,
+    /// A dataset version: its series and version label (both or neither;
+    /// the name is then `series@version`). A version is immutable.
+    #[serde(default)]
+    pub series: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The project the asset is registered for. In a project with
+    /// sovereign custody the asset's key must be held by a key broker the
+    /// asset's own organization registered.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// A dataset version's deletion date (Unix seconds; versions only,
+    /// never changed): no job uses the version from then on, and no grant
+    /// outlives it.
+    #[serde(default)]
+    pub delete_after: Option<u64>,
+    /// Until when the owner keeps a dataset version (Unix seconds;
+    /// versions only, fixed): never after `delete_after`, which can then
+    /// never be brought forward past it.
+    #[serde(default)]
+    pub retention_until: Option<u64>,
+    /// Until when the evidence about a dataset version (receipts, audit,
+    /// anchors, release records) is kept (Unix seconds; versions only): it
+    /// may later be extended, never shortened.
+    #[serde(default)]
+    pub evidence_retention_until: Option<u64>,
+    /// A dataset version's registered confidentiality policy (the IR
+    /// asset policy, in its JSON form; versions only, never changed): a
+    /// governed job's program declares a policy at least as strict for it.
+    #[serde(default)]
+    pub ir_policy: Option<serde_json::Value>,
+    /// A dataset version's release-class ceiling (versions only, never
+    /// changed): every output of a governed job reading it is within it.
+    #[serde(default)]
+    pub release_class: Option<encompute_verification::governance::ReleaseClass>,
+}
+
+/// An owner's change of a dataset version's retention: its deletion date
+/// brought forward (never pushed back), its evidence retention extended
+/// (never shortened). At least one.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRetention {
+    #[serde(default)]
+    pub delete_after: Option<u64>,
+    #[serde(default)]
+    pub evidence_retention_until: Option<u64>,
 }
 
 /// Where an asset's key lives. Only references: the key broker holds the
@@ -371,6 +680,34 @@ pub struct KeyRef {
     pub provider: String,
     pub key_ref: String,
     pub key_version: u64,
+}
+
+/// A privacy population: the hard cap on every release from one
+/// organization's series of datasets (all versions, every project).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePopulation {
+    pub organization: String,
+    pub series: String,
+    pub budget: encompute_ir::confidentiality::PrivacyBudget,
+    /// The active population of the series this one replaces for new scopes.
+    #[serde(default)]
+    pub supersedes: Option<String>,
+}
+
+/// A proposed privacy scope: a share of a population for one project,
+/// purpose (by name) and, optionally, program.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposeScope {
+    pub population: String,
+    pub project: String,
+    pub purpose: String,
+    #[serde(default)]
+    pub program_id: Option<String>,
+    /// The scope's cap, at the population's unit and delta: no more than
+    /// the population's.
+    pub epsilon: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,6 +736,16 @@ pub struct SubmitJob {
     pub requested_output: String,
     #[serde(default)]
     pub policy: Option<String>,
+    /// Governed projects (required there, refused elsewhere): the active
+    /// purpose the job runs for (its PurposeId, hex). Its name is
+    /// `purpose`, and the program's declared purpose.
+    #[serde(default)]
+    pub purpose_id: Option<String>,
+    /// Governed projects (required there, refused elsewhere): each program
+    /// output's release class and recipients, within the purpose and every
+    /// source's authorization.
+    #[serde(default)]
+    pub outputs: Option<BTreeMap<String, encompute_verification::governance::GovernanceOutput>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -441,6 +788,11 @@ pub struct RegisterEvaluator {
     /// Worker threads the evaluator uses for one job's gates.
     #[serde(default)]
     pub max_parallel_gates: Option<i32>,
+    /// Where it runs. Its own claim: recorded as self-declared, and never
+    /// enough for a production deployment; a person who is a security
+    /// admin of its operator declares it (`location-declarations`).
+    #[serde(default)]
+    pub location: Option<crate::ops::placement::LocationInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -488,4 +840,20 @@ pub struct JobView {
     /// Worker threads the chosen evaluator uses per job (its advertised
     /// `max_parallel_gates`), when it said.
     pub evaluator_parallel_gates: Option<u32>,
+    /// Governed projects: the purpose (PurposeId) the job runs for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose_id: Option<String>,
+    /// Governed projects: the GovernanceId its execution spec carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub governance_id: Option<String>,
+    /// Governed projects, once scheduled: where the job was placed, its
+    /// evaluator's operator and location with the evidence level at
+    /// scheduling. The same for every member (it is infrastructure, not an
+    /// organization's private metadata).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<encompute_verification::placement::GrantPlacement>,
+    /// Governed projects: why an authorized job is not scheduled yet,
+    /// when no evaluator is admissible for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement_waiting: Option<String>,
 }

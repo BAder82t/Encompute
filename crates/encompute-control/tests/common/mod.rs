@@ -8,15 +8,19 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+
+pub mod gov;
 
 use encompute_control::anchor::DirAnchor;
 use encompute_control::api::{handle, Request};
 use encompute_control::authn::{dev_token, Authenticator, DEV_ISSUER};
 use encompute_control::config::{Env, OidcIssuer};
 use encompute_control::db::Db;
+pub use encompute_control::govlog::NegSet;
 use encompute_control::transport::InMemoryTransport;
 use encompute_control::Control;
 use encompute_verification::ServiceSigner;
@@ -39,6 +43,7 @@ fn admin_url() -> String {
 pub fn backup_database(url: &str, backup: &str) {
     drop_at_test_end(&admin_url(), backup);
     let mut c = postgres::Client::connect(&admin_url(), postgres::NoTls).unwrap();
+    drop_at_test_end(&admin_url(), backup);
     let live = db_name(url);
     // A dropped pool closes its connections asynchronously: end them first.
     for _ in 0..50 {
@@ -82,6 +87,21 @@ pub fn restore_database(backup: &str, url: &str) {
     panic!("the backup database stayed in use");
 }
 
+/// Runs `sql` on `url` with the user triggers of `tables` disabled: what an
+/// attacker with the database's credentials can do.
+pub fn attacker(url: &str, tables: &[&str], sql: &str) {
+    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    for t in tables {
+        c.batch_execute(&format!("ALTER TABLE {t} DISABLE TRIGGER USER"))
+            .unwrap();
+    }
+    c.batch_execute(sql).unwrap();
+    for t in tables {
+        c.batch_execute(&format!("ALTER TABLE {t} ENABLE TRIGGER USER"))
+            .unwrap();
+    }
+}
+
 /// The configuration `encompute-control recover` would run with on
 /// `env0`'s database and anchor.
 pub fn recovery_config(env0: &Env0) -> encompute_control::config::Config {
@@ -108,8 +128,504 @@ pub fn run_recovery(env0: &Env0) -> Vec<String> {
     let db = Db::connect(&env0.url).unwrap();
     let signer = ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
     let store = Box::new(DirAnchor::new(env0.anchor_dir.clone()).unwrap());
-    let rc = Control::for_recovery(&recovery_config(env0), db, signer, store).unwrap();
+    let rc = Control::for_recovery(&recovery_config(env0), db, signer, store)
+        .unwrap_or_else(|e| panic!("the control plane failed to open for recovery: {e}"));
     rc.recover("operator-1").unwrap()
+}
+
+/// Runs `encompute-control recover --governance-log FILE` with `export`
+/// (an `export-governance-log` taken before the restore): its notes.
+pub fn run_recovery_importing(env0: &Env0, export: &str) -> Vec<String> {
+    let db = Db::connect(&env0.url).unwrap();
+    let signer = ServiceSigner::from_seed("control-plane", &env0.seed).unwrap();
+    let store = Box::new(DirAnchor::new(env0.anchor_dir.clone()).unwrap());
+    let rc = Control::for_recovery(&recovery_config(env0), db, signer, store)
+        .unwrap_or_else(|e| panic!("the control plane failed to open for recovery: {e}"));
+    rc.recover_importing("operator-1", Some(export)).unwrap()
+}
+
+/// Puts the events of `export` that `url`'s governance log lacks back
+/// (what `recover --governance-log` does first).
+pub fn import_log(url: &str, export: &str) -> u64 {
+    let db = Db::connect(url).unwrap();
+    db.tx(|t| encompute_control::govlog::import(t, export))
+        .unwrap()
+}
+
+/// Restores `backup` over `env0`'s database after the governance log moved
+/// on: the start is refused (GOVERNANCE LOG STATE ROLLBACK), and so is a
+/// recovery without the missing events. Returns an export of the log taken
+/// before the restore (what an operator keeps with `encompute-control
+/// export-governance-log`).
+pub fn restore_behind_the_log(env0: &Env0, backup: &str) -> String {
+    let export = export_log(&env0.url);
+    restore_database(backup, &env0.url);
+    let e = env0
+        .start()
+        .err()
+        .expect("a database behind the anchored governance log started");
+    assert!(e.message.contains("GOVERNANCE LOG STATE ROLLBACK"), "{e}");
+    export
+}
+
+/// [`restore_behind_the_log`], then the operator puts the governance log's
+/// missing events back (from a newer copy of its tables, or an export):
+/// the database's other tables stay as restored.
+pub fn restore_keeping_log(env0: &Env0, backup: &str) {
+    let export = restore_behind_the_log(env0, backup);
+    assert!(import_log(&env0.url, &export) > 0);
+}
+
+/// `encompute-control export-governance-log` of `url`'s database.
+pub fn export_log(url: &str) -> String {
+    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    encompute_control::govlog::export(&mut c, 0).unwrap()
+}
+
+/// Whether the transition putting `id` in `set` is anchored (its
+/// governance log event lies within the anchored size).
+pub fn anchored(t: &T, set: NegSet, id: &str) -> bool {
+    t.control.anchored(set, id).unwrap()
+}
+
+/// The IDs of a negative set, as the governance log records them.
+pub fn log_set(t: &T, set: NegSet) -> Vec<String> {
+    let mut c = t.control.db.conn().unwrap();
+    encompute_control::govlog::negative_set(&mut *c, set).unwrap()
+}
+
+/// Whether recovery recorded the row of `id` as lost.
+pub fn is_lost(t: &T, id: &str) -> bool {
+    let mut c = t.control.db.conn().unwrap();
+    c.query_opt(
+        "SELECT 1 FROM governance_events WHERE kind = 'row.lost' AND subject_id = $1",
+        &[&id],
+    )
+    .unwrap()
+    .is_some()
+}
+
+/// A directory anchor store whose anchor writes fail while `fail` is set
+/// (a crash between the governance log mirror's write and the anchor's).
+pub struct FlakyAnchor {
+    pub inner: DirAnchor,
+    pub fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl encompute_control::anchor::AnchorStore for FlakyAnchor {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn load(&self) -> encompute_ir::Result<Option<encompute_control::anchor::StoredAnchor>> {
+        self.inner.load()
+    }
+    fn store(
+        &self,
+        next: &encompute_control::anchor::StateAnchor,
+        expected: u64,
+    ) -> encompute_ir::Result<()> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(encompute_ir::Error::new(
+                encompute_ir::Code::PrivacyLedger,
+                "anchor store unavailable (injected)",
+            ));
+        }
+        self.inner.store(next, expected)
+    }
+    fn mirror_list(&self) -> encompute_ir::Result<Vec<u64>> {
+        self.inner.mirror_list()
+    }
+    fn mirror_read(&self, n: u64) -> encompute_ir::Result<String> {
+        self.inner.mirror_read(n)
+    }
+    fn mirror_create(&self, n: u64, lines: &str) -> encompute_ir::Result<()> {
+        self.inner.mirror_create(n, lines)
+    }
+    fn mirror_replace(
+        &self,
+        n: u64,
+        lines: &str,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_replace(n, lines, allow)
+    }
+    fn mirror_delete(
+        &self,
+        n: u64,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_delete(n, allow)
+    }
+}
+
+/// A directory anchor store that kills the process (as a crash would)
+/// when the anchor is written while `armed` is set: after the governance
+/// log mirror's write, before the anchor's compare-and-set.
+pub struct KillAnchor {
+    pub inner: DirAnchor,
+    pub armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl encompute_control::anchor::AnchorStore for KillAnchor {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn load(&self) -> encompute_ir::Result<Option<encompute_control::anchor::StoredAnchor>> {
+        self.inner.load()
+    }
+    fn store(
+        &self,
+        next: &encompute_control::anchor::StateAnchor,
+        expected: u64,
+    ) -> encompute_ir::Result<()> {
+        if self.armed.load(Ordering::SeqCst) {
+            std::process::exit(137);
+        }
+        self.inner.store(next, expected)
+    }
+    fn mirror_list(&self) -> encompute_ir::Result<Vec<u64>> {
+        self.inner.mirror_list()
+    }
+    fn mirror_read(&self, n: u64) -> encompute_ir::Result<String> {
+        self.inner.mirror_read(n)
+    }
+    fn mirror_create(&self, n: u64, lines: &str) -> encompute_ir::Result<()> {
+        self.inner.mirror_create(n, lines)
+    }
+    fn mirror_replace(
+        &self,
+        n: u64,
+        lines: &str,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_replace(n, lines, allow)
+    }
+    fn mirror_delete(
+        &self,
+        n: u64,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_delete(n, allow)
+    }
+}
+
+impl Env0 {
+    /// Starts over a [`KillAnchor`]: the control plane and its trigger.
+    pub fn start_killable(&self) -> (T, Arc<std::sync::atomic::AtomicBool>) {
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t = self
+            .start_with(Box::new(KillAnchor {
+                inner: DirAnchor::new(self.anchor_dir.clone()).unwrap(),
+                armed: armed.clone(),
+            }))
+            .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
+        (t, armed)
+    }
+
+    /// Starts over a [`FlakyAnchor`]: the control plane and its switch.
+    pub fn start_flaky(&self) -> (T, Arc<std::sync::atomic::AtomicBool>) {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t = self
+            .start_with(Box::new(FlakyAnchor {
+                inner: DirAnchor::new(self.anchor_dir.clone()).unwrap(),
+                fail: fail.clone(),
+            }))
+            .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
+        (t, fail)
+    }
+}
+
+/// What stands in for a rival process at a disturbed compare-and-set.
+pub type Rival = Arc<dyn Fn() + Send + Sync>;
+
+/// What a [`CasHook`] store does at the compare-and-set of the thread it is
+/// armed for (the thread that makes the call under test; every other
+/// thread's anchor writes pass through untouched).
+#[derive(Default)]
+pub struct CasState {
+    thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    /// Compare-and-sets still to be disturbed: a rival moves the stored
+    /// anchor just before them, so they lose.
+    disturb: std::sync::atomic::AtomicU32,
+    /// Compare-and-sets the armed thread has made since it was armed.
+    seen: std::sync::atomic::AtomicU32,
+    /// The number of the armed thread's compare-and-set that fails with the
+    /// store unavailable (an error that is not a conflict); 0: none.
+    fail_on: std::sync::atomic::AtomicU32,
+    /// Runs on the armed thread, in place of a rival process, before a
+    /// disturbed compare-and-set (when set); otherwise the rival is a plain
+    /// anchor update by another process.
+    rival: std::sync::Mutex<Option<(Rival, bool)>>,
+}
+
+impl CasState {
+    /// Arms the calling thread: its next `disturb` compare-and-sets lose to
+    /// a rival.
+    pub fn arm(&self, disturb: u32) {
+        *self.thread.lock().unwrap() = Some(std::thread::current().id());
+        self.seen.store(0, Ordering::SeqCst);
+        self.disturb.store(disturb, Ordering::SeqCst);
+    }
+
+    /// Makes the armed thread's `n`th compare-and-set since [`Self::arm`]
+    /// fail as an unavailable store.
+    pub fn fail_on(&self, n: u32) {
+        self.fail_on.store(n, Ordering::SeqCst);
+    }
+
+    pub fn disarm(&self) {
+        *self.thread.lock().unwrap() = None;
+        self.disturb.store(0, Ordering::SeqCst);
+        self.fail_on.store(0, Ordering::SeqCst);
+    }
+
+    /// The armed thread's compare-and-sets since it was armed.
+    pub fn seen(&self) -> u32 {
+        self.seen.load(Ordering::SeqCst)
+    }
+
+    /// The rival that runs before the next disturbed compare-and-set only.
+    pub fn set_rival(&self, f: Rival) {
+        *self.rival.lock().unwrap() = Some((f, false));
+    }
+
+    /// The rival that runs before every disturbed compare-and-set.
+    pub fn set_rival_always(&self, f: Rival) {
+        *self.rival.lock().unwrap() = Some((f, true));
+    }
+}
+
+/// A directory anchor store whose compare-and-sets can be made to lose on
+/// demand (see [`CasState`]): the seam of the anchor's retry.
+pub struct CasHook {
+    pub inner: DirAnchor,
+    pub state: Arc<CasState>,
+    /// Moves the stored anchor on, as another control plane's update would.
+    pub rival: Box<dyn Fn() + Send + Sync>,
+}
+
+impl encompute_control::anchor::AnchorStore for CasHook {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn load(&self) -> encompute_ir::Result<Option<encompute_control::anchor::StoredAnchor>> {
+        self.inner.load()
+    }
+    fn store(
+        &self,
+        next: &encompute_control::anchor::StateAnchor,
+        expected: u64,
+    ) -> encompute_ir::Result<()> {
+        let mine = *self.state.thread.lock().unwrap() == Some(std::thread::current().id());
+        if mine {
+            let n = self.state.seen.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.state.fail_on.load(Ordering::SeqCst) == n {
+                return Err(encompute_ir::Error::new(
+                    encompute_ir::Code::PrivacyLedger,
+                    "anchor store unavailable (injected)",
+                ));
+            }
+            let left = self.state.disturb.load(Ordering::SeqCst);
+            if left > 0 {
+                self.state.disturb.store(left - 1, Ordering::SeqCst);
+                let custom = {
+                    let mut r = self.state.rival.lock().unwrap();
+                    match r.as_ref() {
+                        Some((f, true)) => Some(f.clone()),
+                        Some((_, false)) => r.take().map(|(f, _)| f),
+                        None => None,
+                    }
+                };
+                match custom {
+                    Some(f) => f(),
+                    None => (self.rival)(),
+                }
+            }
+        }
+        self.inner.store(next, expected)
+    }
+    fn mirror_list(&self) -> encompute_ir::Result<Vec<u64>> {
+        self.inner.mirror_list()
+    }
+    fn mirror_read(&self, n: u64) -> encompute_ir::Result<String> {
+        self.inner.mirror_read(n)
+    }
+    fn mirror_create(&self, n: u64, lines: &str) -> encompute_ir::Result<()> {
+        self.inner.mirror_create(n, lines)
+    }
+    fn mirror_replace(
+        &self,
+        n: u64,
+        lines: &str,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_replace(n, lines, allow)
+    }
+    fn mirror_delete(
+        &self,
+        n: u64,
+        allow: &encompute_control::anchor::Allow<'_>,
+    ) -> encompute_ir::Result<()> {
+        self.inner.mirror_delete(n, allow)
+    }
+}
+
+impl Env0 {
+    /// Starts over a [`CasHook`]: the control plane and its switch. The
+    /// rival is a plain anchor update by another process over the same
+    /// directory.
+    pub fn start_cas_hook(&self) -> (T, Arc<CasState>) {
+        let state = Arc::new(CasState::default());
+        let (dir, seed) = (self.anchor_dir.clone(), self.seed);
+        let rival_dir = dir.clone();
+        let t = self
+            .start_with(Box::new(CasHook {
+                inner: DirAnchor::new(dir).unwrap(),
+                state: state.clone(),
+                rival: Box::new(move || move_anchor(&rival_dir, &seed)),
+            }))
+            .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"));
+        (t, state)
+    }
+}
+
+/// Another process's update of the stored anchor: `f` changes it (counter +
+/// 1, signed).
+pub fn update_anchor(
+    dir: &std::path::Path,
+    seed: &[u8; 32],
+    f: impl Fn(&mut encompute_control::anchor::StateAnchor),
+) {
+    let signer = ServiceSigner::from_seed("control-plane", seed).unwrap();
+    let (a, _) = encompute_control::anchor::Anchor::open(
+        Box::new(DirAnchor::new(dir.to_path_buf()).unwrap()),
+        &signer,
+    )
+    .unwrap();
+    a.update(&signer, f).unwrap();
+}
+
+/// Records the log's head as anchored at (`size`, `head`) and nothing else
+/// (the audit head stays where it was).
+pub fn set_anchored_log(dir: &std::path::Path, seed: &[u8; 32], size: i64, head: &str) {
+    update_anchor(dir, seed, |x| {
+        x.glog_size = size;
+        x.glog_head = head.to_owned();
+    });
+}
+
+/// The counter of the stored anchor.
+pub fn stored_counter(dir: &std::path::Path) -> u64 {
+    use encompute_control::anchor::AnchorStore as _;
+    match DirAnchor::new(dir.to_path_buf()).unwrap().load().unwrap() {
+        Some(encompute_control::anchor::StoredAnchor::V2(a)) => a.counter,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Another process's anchor update: the stored anchor moves on (counter + 1,
+/// signed) without anything else changing.
+pub fn move_anchor(dir: &std::path::Path, seed: &[u8; 32]) {
+    let signer = ServiceSigner::from_seed("control-plane", seed).unwrap();
+    let (a, _) = encompute_control::anchor::Anchor::open(
+        Box::new(DirAnchor::new(dir.to_path_buf()).unwrap()),
+        &signer,
+    )
+    .unwrap();
+    a.update(&signer, |_| {}).unwrap();
+}
+
+/// Everything an import writes, as text, in a fixed order (the rows'
+/// `recorded_at` is the time of the transaction: not part of the log).
+pub fn dump_log(url: &str) -> Vec<String> {
+    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    let mut out = vec![];
+    for r in c
+        .query(
+            "SELECT gseq, partition, pseq, kind, subject_id, org_id, body::text, leaf_hash,
+                    prev_hash, hash FROM governance_events ORDER BY gseq",
+            &[],
+        )
+        .unwrap()
+    {
+        out.push(format!(
+            "event {} {} {} {} {} {:?} {} {} {} {}",
+            r.get::<_, i64>(0),
+            r.get::<_, String>(1),
+            r.get::<_, i64>(2),
+            r.get::<_, String>(3),
+            r.get::<_, String>(4),
+            r.get::<_, Option<String>>(5),
+            r.get::<_, String>(6),
+            r.get::<_, String>(7),
+            r.get::<_, String>(8),
+            r.get::<_, String>(9),
+        ));
+    }
+    for r in c
+        .query(
+            "SELECT partition, level, idx, hash FROM governance_tree_nodes ORDER BY 1, 2, 3",
+            &[],
+        )
+        .unwrap()
+    {
+        out.push(format!(
+            "node {} {} {} {}",
+            r.get::<_, String>(0),
+            r.get::<_, i32>(1),
+            r.get::<_, i64>(2),
+            r.get::<_, String>(3)
+        ));
+    }
+    let h = c
+        .query_one("SELECT gseq, hash FROM governance_head WHERE id", &[])
+        .unwrap();
+    out.push(format!(
+        "head {} {}",
+        h.get::<_, i64>(0),
+        h.get::<_, String>(1)
+    ));
+    for r in c
+        .query(
+            "SELECT gseq, digest, anchor FROM governance_anchor_genesis ORDER BY gseq",
+            &[],
+        )
+        .unwrap()
+    {
+        out.push(format!("genesis {}", r.get::<_, i64>(0)));
+    }
+    // Each partition's root at its full size, recomputed from the nodes.
+    let parts: Vec<String> = c
+        .query(
+            "SELECT DISTINCT partition FROM governance_events ORDER BY 1",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    for p in parts {
+        let n = encompute_control::govlog::partition_size(&mut c, &p).unwrap();
+        let root = encompute_control::govlog::partition_root(&mut c, &p, n).unwrap();
+        out.push(format!(
+            "root {p} {n} {}",
+            encompute_trust::govlog::hash_hex(&root)
+        ));
+    }
+    out
+}
+
+pub fn assert_same_rows(what: &str, a: &[String], b: &[String]) {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "{what}: {} rows against {}",
+        a.len(),
+        b.len()
+    );
+    for (x, y) in a.iter().zip(b) {
+        assert_eq!(x, y, "{what}");
+    }
 }
 
 pub struct Env0 {
@@ -139,7 +655,23 @@ impl encompute_control::transport::MessageTransport for SharedTransport {
 }
 
 impl Env0 {
+    /// [`Self::start`], panicking with the reason when the control plane
+    /// refuses to start.
+    pub fn started(&self) -> T {
+        self.start()
+            .unwrap_or_else(|e| panic!("the control plane failed to start: {e}"))
+    }
+
     pub fn start(&self) -> encompute_ir::Result<T> {
+        self.start_with(Box::new(DirAnchor::new(self.anchor_dir.clone())?))
+    }
+
+    /// [`Self::start`] with another anchor store (over the same directory,
+    /// say, failing on demand).
+    pub fn start_with(
+        &self,
+        store: Box<dyn encompute_control::anchor::AnchorStore>,
+    ) -> encompute_ir::Result<T> {
         let db = Db::connect(&self.url)?;
         db.migrate()?;
         let signer = ServiceSigner::from_seed("control-plane", &self.seed)?;
@@ -155,7 +687,7 @@ impl Env0 {
                 Some(zeroize::Zeroizing::new(SECRET.into())),
             ),
             signer,
-            Box::new(DirAnchor::new(self.anchor_dir.clone())?),
+            store,
             Some(Box::new(SharedTransport(transport.clone()))),
             5,
         )?;
@@ -183,7 +715,7 @@ pub fn setup() -> Option<T> {
         oidc: vec![],
         env: Env::Development,
     };
-    Some(env0.start().unwrap())
+    Some(env0.started())
 }
 
 /// Who calls.
@@ -200,6 +732,13 @@ pub fn token(subject: &str) -> String {
 }
 
 impl T {
+    /// [`Self::restart`], panicking with the reason when the control plane
+    /// refuses to start again.
+    pub fn restarted(self) -> T {
+        self.restart()
+            .unwrap_or_else(|e| panic!("the control plane failed to restart: {e}"))
+    }
+
     pub fn restart(self) -> encompute_ir::Result<T> {
         let env0 = self.env0;
         drop(self.control);
@@ -293,6 +832,24 @@ pub fn user(t: &T, admin: &As, org: &str, subject: &str, roles: &[&str]) -> As {
         Some(json!({"issuer": DEV_ISSUER, "subject": subject, "roles": roles})),
     );
     As::User(subject.into())
+}
+
+/// Gives `subject`'s user `role` in `org` directly in the database: a role
+/// combination from before auditor separation (D9), which the API now
+/// refuses to grant in organizations taking part in governed projects.
+pub fn legacy_role(t: &T, subject: &str, org: &str, role: &str) {
+    let n = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "INSERT INTO memberships (principal_id, organization_id, role)
+             SELECT id, $2, $3 FROM users WHERE subject = $1",
+            &[&subject, &org, &role],
+        )
+        .unwrap();
+    assert_eq!(n, 1, "no user {subject}");
 }
 
 pub fn world() -> Option<World> {
@@ -425,6 +982,7 @@ pub fn reserve(event: &str, sigma2: u64) -> Value {
         sigma2: 4 * sigma2,
         vector_len: 1,
         rng: encompute_privacy::CSPRNG.into(),
+        scope: None,
     })
     .unwrap()
 }
@@ -715,4 +1273,27 @@ pub fn body_of(reply: &str) -> Value {
         .split_once("\r\n\r\n")
         .and_then(|(_, b)| serde_json::from_str(b).ok())
         .unwrap_or(Value::Null)
+}
+
+/// The registered policy (and release class) a governed dataset version of
+/// `org` carries: readers benefits and tax, for benefits eligibility,
+/// boolean-only. Governed sources need one.
+#[allow(dead_code)]
+pub fn registered(org: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ir_policy": {"owners": [org], "readers": ["benefits-agency", "tax-agency"],
+                      "purposes": ["benefits-eligibility"], "release": "allowed_parties",
+                      "derive": {}},
+        "release_class": "boolean-only"
+    })
+}
+
+/// Probing limits a boolean-only authorization carries.
+#[allow(dead_code)]
+pub fn probing_limits() -> encompute_trust::authz::AuthorizationLimits {
+    encompute_trust::authz::AuthorizationLimits {
+        max_executions: Some(1000),
+        max_releases: Some(1000),
+        ..Default::default()
+    }
 }

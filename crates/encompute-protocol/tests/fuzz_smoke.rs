@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 fn header(kind: Kind) -> Header {
     Header {
+        governance_id: None,
         kind,
         scheme: "CKKS".into(),
         backend: "mock".into(),

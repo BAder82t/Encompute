@@ -382,7 +382,10 @@ fn every_grant_can_be_withdrawn_through_the_api() {
     assert_eq!(v["state"], "failed", "{v}");
     let (s, _) = t.call(&b_dev2, "GET", &format!("/v1/assets/{d}"), None);
     assert_eq!(s, 404);
-    assert!(t.control.anchor.snapshot().ended_jobs.contains(&job));
+    assert!(t
+        .control
+        .anchored(encompute_control::govlog::NegSet::EndedJobs, &job)
+        .unwrap());
     // Remove a project member: it no longer sees the project.
     let (s, _) = t.call(
         &w.c_admin,
@@ -525,10 +528,11 @@ fn a_platform_automation_account_can_be_disabled() {
     assert_eq!(st, 401);
     assert!(t
         .control
-        .anchor
-        .snapshot()
-        .disabled_services
-        .contains("platform-bot"));
+        .anchored(
+            encompute_control::govlog::NegSet::DisabledServices,
+            "platform-bot"
+        )
+        .unwrap());
 }
 
 /// Submits a job over `sources` by modelco's developer, for `plan` and

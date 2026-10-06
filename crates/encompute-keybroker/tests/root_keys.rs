@@ -16,8 +16,9 @@ use encompute_attestation::mock::{MockHardware, MockProvider};
 use encompute_attestation::{AttestationPolicy, Attester, TeeKind, Verifier, WorkloadSession};
 use encompute_ir::Code;
 use encompute_keybroker::{
-    BrokerMode, DevelopmentRootKey, KeyBroker, KeyMaterial, OpenBaoTransit, RootKeyProvider,
-    RootWrappedKekStore, SecretStore,
+    BrokerMode, DevelopmentRootKey, GenerationMark, KeyBroker, KeyMaterial, LocalKekStore, Mark,
+    OpenBaoKvMark, OpenBaoTransit, RootKeyProvider, RootWrappedKekStore, SecretStore,
+    MARK_UNAVAILABLE,
 };
 use encompute_verification::EvaluatorSigner;
 use zeroize::Zeroizing;
@@ -389,6 +390,101 @@ fn openbao_failures_never_fall_back() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The generation mark in OpenBao KV-v2: every save advances it with
+/// compare-and-set, an older authentic state file is refused, a second
+/// writer loses the compare-and-set, and the address rules are the Transit
+/// provider's.
+#[test]
+fn openbao_kv_generation_mark_refuses_rollback() {
+    let Some(bao) = bao() else { return };
+    // A KV-v2 mount of its own (a dev server also has one at `secret/`).
+    bao.admin(
+        "POST",
+        "sys/mounts/encompute-kv",
+        serde_json::json!({"type": "kv", "options": {"version": "2"}}),
+    );
+    // A broker ID of its own per run: the mark outlives the test.
+    let id = bao.new_key("kv-broker");
+    let mark = || -> Box<dyn GenerationMark> {
+        Box::new(
+            OpenBaoKvMark::new(
+                &bao.addr,
+                "encompute-kv",
+                &id,
+                Zeroizing::new(bao.token.clone()),
+            )
+            .unwrap(),
+        )
+    };
+    let dir = tmp("bao-kv");
+    let state = dir.join("broker.json");
+    let store = || -> Box<dyn SecretStore> { Box::new(LocalKekStore::from_key([4; 32])) };
+    // First start: no mark yet, created from the state.
+    assert_eq!(mark().read().unwrap().mark, None);
+    let mut b = KeyBroker::new(&id, BrokerMode::Production, verifier(), store())
+        .unwrap()
+        .with_generation_mark(mark())
+        .unwrap();
+    b.add_secret("patients", Some(KeyMaterial::from_bytes(KEY).unwrap()), {
+        let mut p = AttestationPolicy::new(&"a".repeat(64), None);
+        p.allowed_tee = vec![TeeKind::AmdSevSnp];
+        p.allowed_images = vec![format!("sha256:{}", "4".repeat(64))];
+        p
+    })
+    .unwrap();
+    b.save(&state).unwrap();
+    let older = dir.join("older.json");
+    std::fs::copy(&state, &older).unwrap();
+    b.revoke("patients", None).unwrap();
+    b.save(&state).unwrap();
+    let read = mark().read().unwrap();
+    assert_eq!(read.mark.as_ref().unwrap().generation, 2);
+    assert_eq!(read.mark.as_ref().unwrap().broker_id, id);
+    assert!(read.cas >= 2);
+    // The latest state opens; the older one is refused.
+    KeyBroker::load_with_mark(&state, verifier(), store(), mark()).unwrap();
+    std::fs::copy(&state, dir.join("latest.json")).unwrap();
+    std::fs::copy(&older, &state).unwrap();
+    let e = KeyBroker::load_with_mark(&state, verifier(), store(), mark())
+        .err()
+        .unwrap();
+    assert_eq!(e.code, Code::GovernanceBrokerStateRollback, "{e}");
+    assert!(e.message.contains("older"), "{e}");
+    // Two copies of the latest state: the second writer loses.
+    std::fs::copy(dir.join("latest.json"), &state).unwrap();
+    let one = KeyBroker::load_with_mark(&state, verifier(), store(), mark()).unwrap();
+    let two = KeyBroker::load_with_mark(&state, verifier(), store(), mark()).unwrap();
+    one.save(&state).unwrap();
+    let e = two.save(&dir.join("two.json")).unwrap_err();
+    assert_eq!(e.code, Code::GovernanceBrokerStateRollback, "{e}");
+    assert!(e.message.contains("someone else"), "{e}");
+    // A wrong token cannot read the mark: the broker does not open.
+    let e = KeyBroker::load_with_mark(
+        &state,
+        verifier(),
+        store(),
+        Box::new(
+            OpenBaoKvMark::new(
+                &bao.addr,
+                "encompute-kv",
+                &id,
+                Zeroizing::new("wrong".into()),
+            )
+            .unwrap(),
+        ),
+    )
+    .err()
+    .unwrap();
+    assert!(e.message.starts_with(MARK_UNAVAILABLE), "{e}");
+    // The Transit provider's address rules.
+    let tok = || Zeroizing::new("t".to_owned());
+    assert!(OpenBaoKvMark::new("http://bao.internal:8200", "kv", "b", tok()).is_err());
+    assert!(OpenBaoKvMark::new("http://127.0.0.1.evil.example:8200", "kv", "b", tok()).is_err());
+    assert!(OpenBaoKvMark::new("https://bao.internal:8200", "../kv", "b", tok()).is_err());
+    assert!(OpenBaoKvMark::new("https://bao.internal:8200", "kv", "b", tok()).is_ok());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A fake OpenBao on loopback: reads each request whole, then answers a
 /// POST with `post` and a GET with a redirect to `to`.
 fn redirecting_bao(post: &'static str, to: std::net::SocketAddr) -> std::net::SocketAddr {
@@ -466,6 +562,26 @@ fn openbao_redirects_are_refused_and_the_token_stays_home() {
         thief_addr,
     ));
     let e = t.rotate().unwrap_err();
+    assert!(e.message.contains("302"), "{e}");
+
+    // The KV-v2 generation mark: its read (GET) and advance (POST) are
+    // redirected; both fail closed.
+    let m = OpenBaoKvMark::new(
+        &format!("http://{}", redirecting_bao("redirect", thief_addr)),
+        "secret",
+        "hospital",
+        Zeroizing::new("s.SUPER-SECRET-TOKEN".into()),
+    )
+    .unwrap();
+    let e = m.read().unwrap_err();
+    assert_eq!(e.code, Code::GovernanceBrokerStateRollback);
+    assert!(e.message.contains("302"), "{e}");
+    let mark = Mark {
+        broker_id: "hospital".into(),
+        generation: 1,
+        state_mac: "ab".into(),
+    };
+    let e = m.advance(&mark, 0).unwrap_err();
     assert!(e.message.contains("302"), "{e}");
 
     // Nothing ever connected to the redirect target.

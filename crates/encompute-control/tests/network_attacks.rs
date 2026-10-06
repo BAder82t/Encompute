@@ -94,7 +94,7 @@ fn invalid_authentication_is_refused_over_the_wire() {
         }],
         env: Env::Development,
     };
-    let t = env0.start().unwrap();
+    let t = env0.started();
     t.control.bootstrap(issuer, "alice", None).unwrap();
     let c = Client::new(live(&t.control, Limits::default()));
     let exp = now() + 600;
@@ -411,7 +411,7 @@ fn signed_requests_are_fresh_single_use_and_bound() {
     refused(get(&h), 401, SERVICE_AUTH, "recipient edited after signing");
 
     // A restart does not forget spent nonces.
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     let c = Client::new(live(&t.control, Limits::default()));
     let v = refused(
         c.raw("GET", "/v1/whoami", &fresh, b""),

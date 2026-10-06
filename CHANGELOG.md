@@ -1,6 +1,517 @@
 # Changelog
 
-## Unreleased
+> **Breaking change for production deployments:** with
+> `ENCOMPUTE_ENV=production` the control plane now refuses a database
+> connection that is not `sslmode=verify-full`. See "BREAKING (production
+> mode)" in the second Unreleased section below before upgrading.
+
+## Unreleased (public-sector governance, not in 0.3)
+
+Work toward confidential cross-agency computation
+([docs/public-sector.md](docs/public-sector.md)). None of it is part of
+0.3.
+
+- A job submission that leaves the job `authorized` (it was not placed on an
+  evaluator) now says why in the control plane's log: `schedule_no_candidate`
+  (no ready evaluator fits the job: the backend, the profile and the count of
+  ready evaluators are logged) and `schedule_failed` (the scheduling step
+  returned an error). The API answers as before: the job is returned in the
+  state it is in. Before, both outcomes were silent.
+- **Concurrent job starts are no longer refused because of an anchor
+  race (bug fix).** A start decides under row locks and commits, then
+  anchors the result. When another control plane stored the state anchor
+  first, the update was attempted four times without a pause and, if it
+  lost them all, the call returned ENC2202 ("the state anchor changed
+  concurrently") instead of the decision it had committed, for example the
+  refusal on the population cap (ENC2201). That was fail-closed (the cap
+  was never exceeded) but a spurious refusal of an ordinary concurrent
+  start: 5 of 40 runs of a four-start test across two control planes. The
+  anchor conflict is now a typed condition (never confused with the
+  rollback refusals that share ENC2202, which are never retried) and is
+  retried at most three times in all, one bound that also covers a mirror
+  segment written concurrently, each time from the stored anchor read and
+  verified again; a refusal that another control plane's checkpoint
+  already anchored needs no second store. Nothing is reserved or audited
+  again: the cap, enforced by the row locks before any anchoring, is
+  unchanged, and after three lost attempts ENC2202 is returned as before.
+  New metrics `encompute_anchor_cas_retry_total` and
+  `encompute_anchor_cas_retry_exhausted_total` and log lines
+  `anchor_cas_retry` and `anchor_cas_exhausted`. INV-252.
+- **Governance log mirror: compaction and batched recovery.** The mirror
+  in the anchor store can be compacted into an archive the state anchor's
+  seal commits to (`encompute-control compact-governance-mirror`,
+  `verify-governance-archive`, `recover --archive-dir`; anchor version 3,
+  written by the first compaction only, a few hundred bytes, constant), with
+  a dry run, a retention window, a commit point at the anchor's
+  compare-and-set and crash-safe pruning. The database's log is not
+  compacted. Recovery's import writes 1,000 events per statement in one
+  transaction (approximately 6x on the 120k-event fixture in this
+  environment, not a guaranteed benchmark: replaying 107,600 events took
+  about 1,011 s before and about 160 s after, on a heavily loaded
+  machine). A compaction is always run by the operator: nothing
+  schedules or triggers one. The archive's manifest records the retention
+  policy used and the compaction's time for the audit trail; it is not
+  part of what the seal commits to, and verifying an archive or recovering
+  never reads it (manifests written without it verify unchanged). Deleting
+  the sealed segments from OpenBao KV destroys the key's metadata (no
+  version or listing left) and finishes a soft-deleted segment; it is
+  tested against a real OpenBao development server, not raft storage.
+  INV-251.
+- **Restoring an older database backup is refused until `recover` runs
+  (operator-visible change).** The state anchor now holds the audit
+  chain's head with every checkpoint of the governance log (a deny call
+  returns only after it; the background pass runs every two seconds). After
+  this change, restoring ANY database backup older than the last anchored
+  checkpoint (in practice older than a couple of seconds or the last deny
+  event) refuses to start with `AUDIT STATE ROLLBACK` until
+  `encompute-control recover --operator NAME` is run, which records the
+  rewind in the audit chain (`audit.gap.recorded`). Before, a restore
+  within the old window of 100 audit events started silently with audit
+  events missing. Procedure: restore, start (refused), recover, start. The
+  audit chain has no mirror, so the audit events written after the backup
+  are lost: recover records that, it cannot restore them. docs/deployment.md.
+- **Evaluator uploads need a one-time upload grant bound to the client.**
+  With a control plane, a program or key upload took the job's grant,
+  which names no client or key, is visible to the whole submitting
+  organization, and was never spent. The control plane now issues an upload
+  grant (`POST /v1/jobs/{id}/upload-grants`) only to the principal that
+  submitted the job, signed over the evaluator, the program ID, the key ID
+  and a random grant ID. The evaluator spends it atomically: one upload per
+  grant, a replay is refused with ENC2608, a failed upload spends nothing,
+  and it accepts no grant issued before it started (spent grants are kept
+  in memory, one node). **Migration:** a job grant no longer opens an
+  upload; it is refused with a message naming the upload grant. The CLI
+  and both SDKs ask for one grant per upload; a client of an earlier build
+  must be upgraded together with its evaluator and control plane. The key
+  upload of a co-tenant that knows a victim's key tag no longer blocks the
+  victim's own: the shim keeps each set under its own tag. INV-248, INV-171
+  and INV-202 (extended).
+- **Assurance, attacks and examples (phase 9).** The attack suite
+  `scripts/governance-attacks.sh` runs 27 attacks on the governance
+  surface (forged or edited authorizations, expired or revoked ones, wrong
+  purpose, program or source, over-release, early, forged or replayed
+  tickets, scope-pin conflicts, residency and operator violations, auditor
+  separation, a service account approving, lineage consent, a rolled-back
+  database or broker state, skipped or replayed log numbers, edited
+  bundles) and checks each is refused with its ENC code and leaves its
+  trail. A refused release-ticket request by a job's scheduled evaluator is
+  now audited (`release_ticket.denied`). Three assurance checks
+  (`governance_authorization_property`, `governance_release_class_order`,
+  `governance_placement_property`) judge shared functions against
+  independent models; INV-240 (authorization limits bound repeated
+  queries; per-subject limits are not enforced) and INV-242 (the minimize
+  objective) are new, end-to-end evidence is added for INV-222, INV-228 and
+  INV-231, and INV-224, 225, 237, 238 and 239 stay reserved for record
+  linkage. Example C, a bounded signal released to one agency (single
+  source, no linkage), joins example B in `examples/run-all.sh`;
+  `scripts/release-check.sh` requires both and runs the attack suite.
+  The threat model, known limitations and support matrix cover the
+  collusion, central-DP, linkage and decryption-key limits.
+- **Cross-agency report, explain and evidence bundle (phase 8).**
+  `TrustGraph::governance_report`: governance rows computed from signed
+  evidence against the caller's pins (a missing anchor, missing evidence
+  or an unverifiable proof is UNCHECKED or NOT EVIDENCED, never a pass;
+  authorizations judged at the grant's signed time; a revocation head
+  covers only up to its own date). `GET /v1/jobs/{id}/governance-bundle`
+  (`view=shared|org`: the same bytes for every member, no other
+  organization's private metadata, capped at 5,000 log events, rate
+  limited). `encompute governance export | verify | report | countersign`
+  with a pins file and one table of exit codes (0 satisfied or accepted, 1
+  not satisfied, 2 malformed or refused, 3 unchecked or unpinned);
+  `encompute explain --governance JOB | --bundle FILE`. ENC2727 to
+  ENC2730; INV-243, INV-244. Standard jobs, `trust report` and `explain`
+  are unchanged. No migration.
+- **Governed projects (phase 1):** governance keys, purposes, owner-signed
+  authorizations with four-eyes approval, immutable dataset versions,
+  strict validity windows and non-retroactive revocation; migration 0005;
+  ENC2701 to ENC2712; INV-218, INV-219, INV-220, INV-222, INV-228,
+  INV-231.
+- **Residency and operators (phase 6).** Placement constraints decide
+  where governed work runs, and who may run the machines. The project's
+  constraints (`GET` and `POST /v1/projects/{id}/placement`: any member's
+  security admin tightens at once, loosening needs every member) and each
+  owner's own (`limits.placement` of its signed authorization) combine so
+  that adding a source only narrows what is admitted; prohibited locations
+  win. Locations come from a versioned table
+  (`encompute_verification::placement::locations`), never from whoever
+  declares them. Evaluators have an operator (the organization of their
+  service account; organizations may now hold evaluator accounts of their
+  own, which run only governed jobs that admit them) and a location with an
+  evidence level: self-declared (never accepted in production),
+  operator-declared (`POST /v1/evaluators/{id}/location-declarations` by a
+  security admin of the operator) or attested (the key broker takes the
+  Confidential Space zone from the token and judges it at every key
+  release, replacing the old refusal of any declared placement). The
+  planner records the admissible evaluators in the plan, refuses a plan
+  nothing admits, and keeps the evaluator's operator apart from source
+  owners and decryptors; submission, scheduling, start and release tickets
+  check again, and an evaluator that moved fails the job. `jobs run
+  --placement --evaluator-pins` lets a client refuse an evaluator outside
+  its own rules; `Objective::Minimize` (`plan --prefer minimize`) prefers
+  the plan that releases least. Another tenant's evaluator is admitted only
+  where its organization takes part in the project or a constraint names it;
+  an owner may pin the project's constraint digest in its authorization. Migrations 0017 and 0018; ENC2723 to
+  ENC2726; INV-233 and INV-234. Standard projects are unchanged.
+- **Two-part key release (phase 2).** A governed key broker releases a key
+  only with an owner-signed authorization installed at the broker and a
+  single-use, job-bound release ticket signed by the pinned control-plane
+  key (300 seconds at most, 60 seconds of clock skew counted toward
+  denial). The ticket's signature is checked before any of its fields is
+  used, and the release is counted and persisted before the key is
+  granted. New broker routes `/v1/release/governed`, `/v1/authorizations`
+  and `/v1/authorizations/revoke`; grant header version 3 (version 2
+  grants are unchanged); a `KeyRelease` receipt that never contains a
+  key. Once a governance key is pinned, the plain release path refuses
+  every key; releasing without a ticket needs a development broker with
+  `ENCOMPUTE_ENV=development`. Declared placement was refused until
+  attested placement existed (see residency, below).
+- **Broker state rollback guard.** A governed broker records its state
+  generation and MAC in the organization's KMS (OpenBao or Vault KV-v2,
+  compare-and-set) and refuses an older, forked or unchained state
+  (ENC2713). Crash recovery accepts only the write that was in flight.
+  A governed production broker needs a mark; an unreachable mark grants
+  nothing. Standard brokers without a mark are unchanged.
+- **Sovereign custody.** Governed projects are always sovereign: each
+  source's key must be held by a broker its own organization registered
+  (`POST` and `GET /v1/organizations/{id}/key-brokers`), and platform
+  brokers are refused (ENC2715). Release tickets from
+  `POST /v1/jobs/{id}/release-ticket`, for the job's scheduled evaluator
+  only, audited.
+- **Per-asset broker binding.** Training specs can bind each key to its
+  owner's broker (`asset_brokers`, `broker_organizations`), and a workload
+  accepts a key's grant only from that broker; the governance binding
+  carries the map, and planning binds each source's owner broker into the
+  PlanId. Specs without the map keep their IDs and the one-broker rule.
+- **The control plane can only deny.** Revoked authorizations and expired
+  assets are anchored before brokers are told (`authorization.revoked`,
+  `asset.expired`, deny-only). A missing row now counts as undone for
+  every anchored revocation, disable, ended job and expiry: start is
+  refused until recovery acknowledges the loss, and the ID stays blocked.
+  Governance tables refuse DELETE. Migration 0006; ENC2713 to ENC2715.
+- **Governed jobs (phase 3).** A job in a governed project names its
+  purpose (`purpose_id`) and each output's release (`outputs`), and is
+  submitted only under an active authorization signed by every source's
+  owner, its own sources included, covering its program, policies,
+  linkage and recipients. The governance binding is built at submission
+  and carried in the job's spec; the job is scheduled with a version 2
+  grant capped at the end of every authorization, purpose and source
+  window; validity is checked again at scheduling and start (a failing
+  job is anchored as ended); revoking an authorization fails the jobs
+  under it that have not started; completion needs a version 4 receipt
+  naming the job's own grant. A job that started inside its window may
+  complete after it, and its trust report judges validity at its start.
+  Dataset versions may carry `delete_after`, which may be brought forward
+  but never extended. An expired source now gets ENC2705 at ticket issue.
+  A release ticket names only the job's own authorization for its source,
+  checked as at start; in a governed project a source is visible only to
+  its owner, the recipients an active authorization names, and the
+  submitters of jobs under one. Migration 0007.
+- **Per-job four eyes (phase 3).** A governed job under an authorization
+  that asks for per-job four-eyes approval is no longer refused (ENC2707):
+  it runs under that authorization, even when a broader one would also
+  cover the source, and waits for approval. Each such owner organization
+  approves through `POST /v1/jobs/{id}/approve` under its approval rule
+  for the project (at least two distinct people; by default a data owner
+  and a security admin), with people homed there; the job's submitter,
+  service accounts, auditors and people homed elsewhere never count. An
+  approval is a statement over the job, its governed spec and its
+  authorization set, stored append-only; approving revalidates the job (a
+  job past its window or under a revoked authorization fails), and
+  scheduling and start require every owner's quorum. Governed projects
+  ignore the free-form `require_job_approval` policy field; standard
+  projects are unchanged. One quorum check serves authorizations and jobs.
+  Approvals count at scheduling and start only while the approver is
+  still an active user of the organization with the recorded role: a job
+  not yet scheduled waits for approval again, a scheduled one fails at
+  start. Approval rules may not require `auditor` or unknown roles.
+  Migration 0008; INV-228 extended.
+- **Auditors and views (phase 3).** Auditors are read-only: every
+  mutating route that touches a governed project refuses anyone holding
+  `auditor` in an organization taking part in it, whatever else they
+  hold, and anyone acting for one of its auditor organizations (a test
+  enumerates the router's routes). An organization joins a governed
+  project as a member or, invited with `participation: auditor`, as an
+  auditor organization: it reads the project's shared records and never
+  owns a source, submits, receives a release, approves or registers a key
+  broker there, and takes part in no governed project as a member. In an
+  organization taking part in a governed project an auditor holds no
+  other role: granting one is refused, and an organization with such a
+  combination neither creates nor joins a governed project until it is
+  removed (new ENC2716 "auditor separation"). Bootstrap admins keep
+  admin, operator and auditor: the platform organization never takes part
+  in a project. `GET /v1/security/legacy-service-admins` now lists
+  `auditor_combinations` for later removal. Standard organizations keep
+  their role combinations. Migration 0009.
+- **Cross-organization views of governed projects.** One static table
+  (`views.rs`) decides what each organization sees; everyone who does not
+  own a record gets the same bytes. Authorizations are readable by every
+  organization taking part, with approvers as per-project pseudonyms
+  (HMAC under a key derived from the control plane's signing key, so a
+  known principal ID cannot be confirmed) and without the signed copy; jobs are visible to every organization taking
+  part, with actors as `organization/kind` and without the grant, the
+  evaluator URL or its receipt key; the scheduled evaluator sees a
+  governed job's grant only. New `GET /v1/audit?project=`: the project's
+  events as everyone taking part sees them. An organization's own trail
+  now labels another organization's people who acted on it. The
+  governance binding's broker map (`asset_brokers`) is keyed by asset
+  version ID instead of the owner's key reference, so grants and tickets
+  name no KMS key; a governed broker checks the version its key is bound
+  to. Bindings without the map keep their GovernanceIds.
+- **Release classes and forms (phase 3).** Release classes are ordered
+  as the owners decided: boolean-only, aggregate-only and
+  dp-aggregate-only are within authorized-agency-only, dp-aggregate-only
+  within aggregate-only, and never and derived-artifact-only only within
+  themselves. A governed job's output class must be within a class the
+  purpose allows and within every source authorization's ceiling (no
+  longer an exact match), and must admit a form the compiler proves the
+  output takes (a boolean, a bounded category its sources declared, an
+  aggregate, a DP aggregate, a derived artifact); otherwise ENC2709. The
+  key broker uses the same function. Asset policies gain optional release
+  forms (`release R forms [boolean]`), joined by intersection; a released
+  output that cannot be proven to take an allowed form does not compile
+  (new ENC1907). Policies without forms keep their PolicyIds. A dataset
+  version may carry its owner's registered policy (`ir_policy`) and
+  `release_class`, frozen with the version (migration 0010): a governed
+  job's program must declare a policy at least as strict for it, and
+  nothing is released or authorized beyond its class. Every governed
+  source version must carry both. Probing controls: an authorization
+  whose ceiling admits boolean-only releases needs `max_executions` and
+  `max_releases`, and a job releases at most `max_outputs_per_job`
+  boolean-only outputs per source (one when absent; control plane and
+  broker share the check). An output released as `never` names no
+  recipient.
+- **Derived results and exports (phase 3).** Once a governed job
+  succeeded, a person of a recipient organization of an output records
+  the result as a derived asset (`POST /v1/jobs/{id}/derived-assets`): a
+  dataset version its organization holds as custodian, whose parents are
+  the job's exact source versions, whose release class is within the
+  output's, every parent's and every authorization's, and whose onward
+  policy is never wider than the parents' registered policies joined
+  (ENC2709). Its key is at the custodian's own broker, and the custodian
+  signs a release record of it with its governance key
+  (`SignedReleaseRecord`: output commitment, class, parents,
+  authorizations, onward policy, recipients with their export keys).
+  Revoking a source marks every derived result downstream
+  `source_revoked_at` (set once), fails their jobs that have not started,
+  and lists them in its answer with `"erased": false`: revocation blocks
+  new use and is not retroactive. Every governed use, derivation, ticket
+  and export walks the ancestors themselves (ENC2706, ENC2705), so a
+  restored database that lost the mark changes nothing. The custodian
+  asks for an export (`POST /v1/assets/{id}/exports`): a single-use
+  `Export` ticket for one recipient, refused after any authorization in
+  the lineage ends (ENC2705), when the recipient is not named by every
+  such authorization and by the record, or the class is wider than any
+  ceiling (ENC2709), or an owner's `max_releases` is used up (ENC2714);
+  one export row per ticket (UNIQUE, append-only). The custodian's broker
+  redeems it at `POST /v1/export/governed` with the same ticket checks as
+  a key release (signature first, window, single use), only for a key
+  bound to that result (`encompute keys bind-version --derived`), under
+  the custodian's record verified under its pinned governance key, sealed
+  to the export key the record names; decryption tickets are refused.
+  A job reading a derived result needs an authorization from its
+  custodian and from every owner of the data it derives from (ENC2701),
+  and executions and exports count against every authorization up the
+  lineage (ENC2714). A derived result is visible only to its custodian,
+  the recipients its record names, the owners of its data and the
+  project's auditors. The custodian's broker enforces lineage consent
+  itself: the release record names every lineage owner and its governance
+  key, and a key release or export needs an installed authorization of
+  each, counted locally. Because the custodian runs that broker, it takes
+  two facts from the control plane, verified under the pinned
+  control-plane key: a lineage owner's key is pinned only from the
+  control plane's signed attestation of it (`GET
+  /v1/organizations/{id}/governance-key-attestation`; `encompute keys
+  governance-key pin-lineage --for ORG --attestation FILE` or `--url`),
+  replaced only by a later attestation and unpinned by a revoked one
+  (ENC2708); and a derived key is bound only to a release record the
+  control plane co-signed at registration (`release_cosignature`;
+  `bind-version --derived RECORD --cosignature FILE`), so a record leaving
+  a lineage owner out is never bound (ENC2704). An original owner's
+  revoked authorization is forwarded, once anchored, as deny-only
+  `authorization.revoked` to every custodian broker holding a result
+  derived from a job under it. The custodian remains trusted for derived
+  data it holds: these checks stop a compromised control plane or a
+  careless custodian, and only both compromised together could fake a
+  lineage owner's consent. Decided: an export defaults to the result's own
+  class, a derived result keeps its parents' owners, and a result may be
+  recorded after its window while its export is blocked. Standard
+  projects are unchanged. Migration 0011.
+- **Derived results after a key rotation.** The custodian's members
+  re-fetch the control plane's co-signature of a derived result's record
+  (`GET /v1/assets/{id}/release-cosignature`; anyone else gets not found).
+  When a lineage owner rotates its governance key, a result bound under
+  the old key ID is no longer released or exported (ENC2708) until a
+  security admin of the custodian has the co-signature re-issued with
+  every lineage owner's active key ID (`POST
+  /v1/assets/{id}/release-cosignature`: the record, version, key and
+  broker unchanged, a later issue time; audited for the custodian and
+  every lineage owner; ENC2708 when an owner has no active key) and the
+  custodian's broker re-binds the key (`encompute keys rebind-lineage
+  ASSET --cosignature FILE`). The broker accepts the re-issue only signed
+  by its pinned control plane, for the binding in force, changing nothing
+  but the lineage owners' key IDs, each the key it pinned from the
+  control plane's attestation, and newer than the co-signature it holds
+  (ENC2704 otherwise). Only the custodian's security admins and data
+  owners read the co-signature, and none is re-issued for an expired or
+  source-expired result (ENC2705). Migration 0012.
+- **Fresh lineage attestations.** A custodian's broker relies on a lineage
+  owner's pinned key only while the control plane's attestation of it is
+  younger than a maximum age (24 hours by default, `keys serve
+  --lineage-attestation-max-age SECS`, at most 30 days; every governed
+  broker has one): older, nothing derived from that owner's data is
+  released or exported until the key is attested again (ENC2708,
+  "re-attest").
+- **The control-plane key is pinned in broker state.** The first
+  configuration with a control-plane key (`--control-key` or
+  `ENCOMPUTE_CONTROL_PUBLIC_KEY`) pins it in the broker's MAC-protected
+  state; every later command or `keys serve` must name the same key
+  (ENC2605 otherwise), revocation messages included. Replacing it needs
+  `--replace-control-key` with another key, recorded in the broker's
+  state (`control_key_history`) and printed as an audit line
+  (`AUDIT key_broker.control_key.replaced`).
+- **Retention (phase 3).** A dataset version may carry `retention_until`
+  (until when its owner keeps it; fixed, never after `delete_after`) and
+  `evidence_retention_until` (until when its evidence is kept; only ever
+  extended), besides `delete_after` (fixed at registration, only ever
+  brought forward). The owner's security admins and data owners change
+  them through `POST /v1/assets/{id}/retention`, audited; pushing a
+  deletion date back, bringing it before `retention_until`, or shortening
+  evidence retention is refused (409), and the database refuses it too.
+  Once `delete_after` passes, the background task expires the version:
+  it is marked expired, every derived result downstream is marked
+  `source_expired_at` (set once), their jobs that have not started fail,
+  the expiry is anchored, and only then is the key broker told
+  (`asset.expired`). A job that started before the deletion date may
+  finish, but nothing derived from an expired version is used, derived
+  from or exported again (ENC2705); every check walks the ancestors, whose
+  expiry the anchor holds, and a restored database that undid an expiry
+  does not start. Receipts, audit events, anchors and release records stay
+  verifiable after the data is deleted, and the trust report notes the
+  expiry without failing. Deleting the data itself is the owner's
+  storage's job. Migration 0012.
+- **Project audit with proofs and checkpoint witnessing.** A governed
+  project's log is readable by its members and auditors:
+  `GET /v1/projects/{id}/audit` returns the project's own events, each with
+  an inclusion proof against the control plane's latest signed checkpoint,
+  in bounded pages, and `GET /v1/projects/{id}/checkpoints/latest?since=`
+  the checkpoint with a signed consistency proof from the size the caller
+  last saw. Each member organization countersigns checkpoints
+  (`POST /v1/projects/{id}/checkpoints/{size}/witnesses`, a human security
+  admin, under the organization's active governance key, for a member at
+  that size; ENC2718 for another size or root). A checkpoint every member
+  signed is labelled `witnessed`, any other `unwitnessed`; the label never
+  blocks a job. A member joining a governed project is now an event of its
+  log (`membership.added`), so the members at any size come from the log.
+  `encompute governance witness` signs only a checkpoint that extends the
+  last one that member witnessed and otherwise writes an equivocation
+  proof and exits 1; `encompute governance check-equivocation` verifies
+  two signed checkpoints or a rollback proof, and `encompute governance
+  verify-audit` recomputes the whole check (every proof, the members, the
+  witnesses under pinned keys) without trusting the control plane's label.
+  ENC2718; INV-247.
+- **Owner revocation heads.** Each organization signs, with its governance
+  key, the root over every revocation it made in a governed project (its
+  authorizations and their signed revocations, its assets revoked or
+  expired where the project used them, the purposes it retired, the keys it
+  revoked), so an evidence bundle cannot omit one. `GET
+  /v1/projects/{id}/revocation-heads/{org}/draft` states the sorted leaves,
+  the root and the next number; `encompute governance sign --kind
+  revocation-head` recomputes the root from the leaves before signing
+  (`--verify-draft` prints what would be signed); `POST
+  /v1/projects/{id}/revocation-heads` accepts a head only from a security
+  admin, under the organization's active key, one past the previous head
+  (never in the future or before it) and with exactly the control plane's
+  own fold of the log (ENC2717). A governed authorization revocation or
+  purpose retirement may carry its head and is then recorded with it or
+  not at all; without one the revocation takes effect at once and the
+  owner owes the next head (derived from the log: the revocations after
+  its latest head). The trust crate gains
+  `RevocationHead::covers`, `latest_at_or_after` and a verdict (covered,
+  omitted revocation, head too old or missing: unchecked, never a pass,
+  head under a revoked key, bad signature). `verify-audit` checks each
+  organization's head when pins are given, and now exits 3 without
+  `--pins` unless `--allow-unpinned` is passed. Standard projects are
+  unchanged. ENC2717; INV-247. Heads are judged through the proven log
+  (the latest recorded head must be supplied, dated at or after the
+  decision time, not recorded after its key's revocation), a stale or
+  older-key head is UNCHECKED, two roots for one number are provable owner
+  equivocation, `verify-audit` exits 3 on any UNCHECKED organization
+  unless `--allow-unchecked`, and `sign --expect-leaves` checks the draft
+  against the owner's own records.
+- **Governance event log and a constant-size state anchor (phase 4).**
+  Every security-negative transition (an asset revoked or expired, a
+  service account or user disabled, a job cancelled or failed, an approval
+  withdrawn, a membership or role removed, an owner authorization revoked,
+  a purpose retired, a governance key revoked, a ledger frozen) and every
+  privacy ledger checkpoint is an event of one hash-chained, Merkle-tree
+  governance log in the database (migration 0013), written in the same
+  transaction. The state anchor (version 2) holds only the audit root and
+  the log's size and head: its size no longer grows with assets,
+  revocations or spends, and the `anchor_size_warning` is now a tripwire.
+  A ledger's floor is the latest `privacy.ledger_checkpoint` event of its
+  asset (its asset, entry count and root, in the platform partition),
+  read through an index: a spend appends it and checkpoints the log before
+  it is acknowledged (concurrent spends share a checkpoint), and a ledger
+  restored behind its floor is refused and frozen as before. Every start
+  recomputes the log and refuses a database that does not hold the
+  anchored head (GOVERNANCE LOG STATE ROLLBACK, ENC2202); the anchor store
+  mirrors the log so recovery can rebuild an older database's missing
+  events. A version-1 anchor (0.3.0) migrates once, at the first start,
+  into genesis events (its sets and its ledger checkpoints); there is no
+  downgrade. Sequential spend latency rises by about 25 ms on a local
+  PostgreSQL and a directory anchor (two durable writes instead of one),
+  and is unchanged with eight concurrent spenders. INV-160, INV-192,
+  INV-193 and INV-226 evidence extended. A spend is also refused before it commits when the log no longer holds the anchored head, spends are limited to 1,200 a minute per actor and asset, and a reservation must charge at least a zCDP cost of 1e-9.
+- **DP scopes, populations and aggregate mode (phase 5).** Differential
+  privacy in a governed project is charged to a **scope**, a share of the
+  **population** of the source's dataset series, never to a per-version
+  ledger that a new version would reset. A population (one organization's
+  series, every version, one privacy unit) carries a hard cap that no
+  scope, project or version raises; a scope serves one project, purpose
+  and optionally program. One security admin of the owner proposes a scope
+  and a different one approves it (four eyes; never an auditor or a
+  service account), and its allocation is an event of the project's log.
+  A release is reserved in the scope and the population and must fit in
+  both: the population is authoritative, and scopes may add up to more
+  than it. A project with no scope cannot spend and inherits nothing
+  (ENC2719); an owner's authorization may pin the scope
+  (`privacy_scope_id`). A governed job whose program releases a
+  differential-privacy aggregate is checked at scheduling and start, and
+  reserves its own release, computed by the control plane from its program,
+  in each source's scope when it starts, before any noise exists: an
+  exhausted scope or population fails it (ENC2201), a coordinator's report
+  of the same release is the same entry and an under-declared one is
+  refused (ENC2721). Scopes and populations are ledgers like an asset's:
+  checkpointed in the governance log before a call returns, refused and
+  frozen when restored behind it. Ledger genesis version 2 (version 1 is
+  unchanged), `scope` in `PrivacyEvent`, `rho_cap`. Aggregations may
+  declare `max_sources_per_unit` (multiplied into the sensitivity; every
+  participant when scoped and undeclared) and a `layout` of strata whose
+  digest every contribution must name (ENC2722); an aggregate always
+  states that it links no records. `encompute privacy population`,
+  `privacy scope` and `aggregate --scoping --job` do the same with file
+  ledgers. New routes under `/v1/privacy/populations` and
+  `/v1/privacy/scopes`; migrations 0014 to 0016; ENC2719 to ENC2722;
+  INV-230, INV-241. Standard projects and assets whose series has no
+  population are unchanged, but creating a population refuses
+  reservations against the per-asset ledgers of that series. Reviewed:
+  a party derives its layout digest from its own labels (`join
+  --labels`); a governed program declaring fewer sources per unit than
+  participants needs every owner's signed `limits.max_sources_per_unit`;
+  populations are proposed and approved by two people for a registered
+  series and may be superseded for new scopes; a governed job whose
+  reserved release has no reported commit does not succeed; a start whose
+  anchoring failed is retried and swept; estimates and `privacy explain
+  --scoped` show every participant for scoped aggregates, with a warning
+  where the default is 1.
+- **Assurance:** INV-232 (release tickets), INV-235 (sovereign custody),
+  INV-236 (the control plane can only deny; broker state cannot be
+  rolled back), INV-223 (auditors), INV-229 (cross-organization
+  views), INV-221 (over-release), INV-227 (release lineage, control-plane
+  part), INV-245 (derived results), INV-246 (retention), INV-230
+  (privacy scopes and populations) and INV-241 (aggregate mode); 167
+  invariants.
+## Unreleased (production mode: native TLS and the reference topology)
 
 ### Third-party notices: two ported files were missing from THIRD_PARTY_NOTICES.md
 
@@ -46,7 +557,9 @@ names the variable to set.
   `sslmode`, `sslrootcert`, `sslcert` and `sslkey` (rustls; no OpenSSL). The
   key broker's OpenBao/Vault client takes a private CA (`BAO_CACERT`, or
   `VAULT_CACERT`) and a client certificate (`BAO_CLIENT_CERT` with
-  `BAO_CLIENT_KEY`); an unreadable or empty CA file is an error. Database
+  `BAO_CLIENT_KEY`); an unreadable or empty CA file is an error. Every
+  OpenBao call the key broker makes shares that client: the Transit root key
+  and the generation mark in the KV-v2 engine alike. Database
   errors now carry their cause (unknown issuer, expired certificate, name
   mismatch).
 - **Reference production topology:** the `pg-tunnel` and `bao-tunnel` stunnel

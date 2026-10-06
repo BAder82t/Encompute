@@ -111,6 +111,26 @@ pub fn cdp_eps(rho: f64, delta: f64) -> f64 {
     epsmax
 }
 
+/// The largest zCDP cost `rho` a `budget` affords: the most that composes
+/// to at most `budget.epsilon` at `budget.delta` (rounded down, never up,
+/// so a cap stated in rho is never looser than the budget). A population's
+/// and a scope's cap is stated in epsilon and enforced as the rho it
+/// converts to, because rho composes by addition across every scope.
+pub fn rho_cap(budget: &PrivacyBudget) -> Result<f64> {
+    budget.validate()?;
+    let (mut lo, mut hi) = (0.0f64, budget.epsilon);
+    // epsilon(rho) >= rho, so `epsilon` itself is an upper bound.
+    for _ in 0..64 {
+        let mid = (lo + hi) / 2.0;
+        if mid > 0.0 && Zcdp.epsilon(mid, budget.delta) <= budget.epsilon {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
+}
+
 /// The zCDP cost of one discrete Gaussian release: `Delta^2 / (2 sigma^2)`,
 /// rounded up.
 pub fn gaussian_rho(sensitivity: u64, sigma2: u64) -> Result<f64> {

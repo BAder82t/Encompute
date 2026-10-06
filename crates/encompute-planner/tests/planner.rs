@@ -88,6 +88,7 @@ fn ctx(semantics: &str, profile: Profile) -> PlanningContext {
             verified_execution: true,
         },
         infrastructure: Infrastructure {
+            evaluators: vec![],
             tees: vec![],
             key_broker: true,
             host_cloud: true,
@@ -103,6 +104,8 @@ fn ctx(semantics: &str, profile: Profile) -> PlanningContext {
             bgv_ms: None,
         },
         training: None,
+        custody: Vec::new(),
+        placement: None,
     }
 }
 

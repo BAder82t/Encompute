@@ -187,6 +187,11 @@ fn check_floor(
         ));
     }
     if floor.production {
+        if ctx.placement.as_ref().is_some_and(|pc| !pc.production) {
+            p.push(
+                "the plan's placement accepts a self-declared location (not in production)".into(),
+            );
+        }
         if ctx.preferences.allow_development {
             p.push("the plan accepts development attestation (not in production)".into());
         }
@@ -228,7 +233,11 @@ fn check_floor(
 /// A floor of requirements, derived here with the validator's own rules
 /// (not the planner's `derive`), so a bug that drops a requirement from
 /// both the planner and `derive` is still caught.
-fn floor_requirements(program: &Program, profile: Profile) -> Result<BTreeSet<TrustRequirement>> {
+fn floor_requirements(
+    program: &Program,
+    profile: Profile,
+    placement: bool,
+) -> Result<BTreeSet<TrustRequirement>> {
     let mut r = BTreeSet::from([TrustRequirement::SignedEvidence]);
     let c = program.confidentiality();
     let report = analyze(program)?;
@@ -255,6 +264,11 @@ fn floor_requirements(program: &Program, profile: Profile) -> Result<BTreeSet<Tr
                 });
             }
         }
+    }
+    // The validator's own rule for governed placement: both requirements.
+    if placement {
+        r.insert(TrustRequirement::Placement);
+        r.insert(TrustRequirement::OperatorSeparation);
     }
     let boundaries = report
         .as_ref()
@@ -321,6 +335,84 @@ fn usable(offer: &TeeOffer, ctx: &PlanningContext) -> bool {
         && ctx.infrastructure.tees.contains(offer)
 }
 
+/// Residency and operators: the plan's constraints are well formed and read
+/// against the current locations table; its recorded admissible evaluators
+/// are exactly what the context admits; and no step runs where placement
+/// cannot be judged (a TEE offer carries no attested location).
+fn check_placement(plan: &ConfidentialExecutionPlan, p: &mut Vec<String>) {
+    let ctx = &plan.context;
+    let Some(pc) = &ctx.placement else {
+        if plan.placement.is_some() {
+            p.push("the plan records a placement but its context has none".into());
+        }
+        if !ctx.infrastructure.evaluators.is_empty() {
+            p.push("the plan lists evaluator offers without a placement context".into());
+        }
+        return;
+    };
+    if pc.locations_digest != crate::placement::locations_digest() {
+        p.push("the plan was made with another version of the locations table: plan again".into());
+    }
+    for s in &pc.constraints {
+        if let Err(e) = s.constraints.check() {
+            p.push(format!("a placement constraint is invalid: {}", e.message));
+        }
+        if !matches!(s.origin, Origin::Project(_)) {
+            p.push(
+                "a plan carries only the project's placement: an owner's own constraints are \
+                 applied where the job is bound"
+                    .into(),
+            );
+        }
+    }
+    if let Some(c) = crate::placement::coordinator_conflict(ctx) {
+        p.push(c);
+    }
+    // The roles are the plan's own claim, but a source's owner is known
+    // from its custody: dropping it from the roles would hide an operator
+    // that owns a source.
+    for k in &ctx.custody {
+        if !pc.roles.source_owners.contains(&k.organization) {
+            p.push(format!(
+                "{} owns a source ({}) but is missing from the plan's source owners",
+                k.organization, k.asset
+            ));
+        }
+    }
+    for s in &plan.steps {
+        if matches!(s.placement, Placement::Party(_)) && s.kind == StepKind::Evaluate {
+            p.push(format!(
+                "{}: a governed job runs on an evaluator, not at a party",
+                s.id
+            ));
+        }
+        if matches!(s.placement, Placement::Tee(_)) {
+            p.push(format!(
+                "{}: a TEE offer carries no attested location, so it cannot satisfy placement",
+                s.id
+            ));
+        }
+        if s.placement == Placement::UntrustedHost {
+            for m in &s.mechanisms {
+                if let Mechanism::Fhe { backend, .. } = m {
+                    let a =
+                        crate::placement::admission(ctx, Some(backend), &[], &Default::default());
+                    if a.admitted.is_empty() {
+                        p.push(format!(
+                            "{}: no evaluator is admissible for {backend}",
+                            s.id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let want = crate::placement::plan_placement(ctx, &plan.steps);
+    if plan.placement != want {
+        p.push("the plan's admissible evaluators are not what its constraints admit".into());
+    }
+}
+
 fn check(program: &Program, plan: &ConfidentialExecutionPlan, p: &mut Vec<String>) -> Result<()> {
     let ctx = &plan.context;
     let c = program.confidentiality();
@@ -335,9 +427,30 @@ fn check(program: &Program, plan: &ConfidentialExecutionPlan, p: &mut Vec<String
     {
         p.push("the plan is for another policy".into());
     }
+    // Sovereign custody: each entry names a source the program reads, once,
+    // with its owner and broker.
+    let mut custodied = BTreeSet::new();
+    for k in &ctx.custody {
+        if k.asset.is_empty() || k.organization.is_empty() || k.broker.is_empty() {
+            p.push("a source's key custody names no asset, organization or broker".into());
+        }
+        if !custodied.insert(&k.asset) {
+            p.push(format!(
+                "{}: its key custody is declared more than once",
+                k.asset
+            ));
+        }
+        if !c.is_some_and(|c| c.inputs.values().any(|a| a == &k.asset)) {
+            p.push(format!(
+                "{}: key custody for an asset the program does not read",
+                k.asset
+            ));
+        }
+    }
+    check_placement(plan, p);
     // No weakening: never below the validator's own floor, and exactly
     // the requirements the program and context imply.
-    for r in floor_requirements(program, ctx.profile)? {
+    for r in floor_requirements(program, ctx.profile, ctx.placement.is_some())? {
         if !plan.requirements.contains(&r) {
             p.push(format!("requirement missing: {r:?}"));
         }
@@ -613,6 +726,25 @@ fn check(program: &Program, plan: &ConfidentialExecutionPlan, p: &mut Vec<String
             }
             TrustRequirement::SignedEvidence => {
                 plan.selected_mechanisms.contains(&Mechanism::SignedReceipts)
+            }
+            // Both are judged by `check_placement` against the recomputed
+            // admissible set; here they hold only with a placement context
+            // and its record.
+            TrustRequirement::Placement | TrustRequirement::OperatorSeparation => {
+                ctx.placement.is_some() && plan.placement.is_some()
+            }
+            TrustRequirement::KeyCustody {
+                asset,
+                organization,
+                broker,
+            } => {
+                plan.selected_mechanisms.contains(&Mechanism::OwnerAuthorization)
+                    && ctx.infrastructure.key_broker
+                    && ctx.custody.contains(&SourceCustody {
+                        asset: asset.clone(),
+                        organization: organization.clone(),
+                        broker: broker.clone(),
+                    })
             }
         };
         if !ok {

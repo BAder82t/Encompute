@@ -109,7 +109,7 @@ fn legacy_security_admin_service_accounts_are_reported_until_removed() {
 
     let b_bot = legacy_account(&t, &b_admin, "modelco", "b-legacy-bot", 81);
     legacy_account(&t, &a_admin, "hospital-a", "a-legacy-bot", 82);
-    let t = t.restart().unwrap();
+    let t = t.restarted();
 
     // Startup: one audit event per affected organization, in its own trail.
     let ev = legacy_events(&t, &b_auditor);
@@ -211,7 +211,7 @@ fn legacy_security_admin_service_accounts_are_reported_until_removed() {
         "encompute_legacy_service_admins{label=\"all\"} 1"
     );
     // Its other role stays; the next start audits only hospital-a again.
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     assert_eq!(
         legacy_events(&t, &b_auditor).len(),
         2,
@@ -225,7 +225,7 @@ fn legacy_security_admin_service_accounts_are_reported_until_removed() {
         Some(json!({"principal": "a-legacy-bot", "role": "security_admin"})),
     );
     assert_eq!(t.ok(&platform, "GET", ROUTE, None)["count"], 0);
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     assert_eq!(
         legacy_events(&t, &a_auditor).len(),
         3,

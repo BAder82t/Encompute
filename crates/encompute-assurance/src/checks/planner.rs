@@ -202,6 +202,7 @@ pub fn scenario(seed: u64) -> Option<Scenario> {
             verified_execution: r.coin(),
         },
         infrastructure: Infrastructure {
+            evaluators: vec![],
             tees,
             key_broker: r.coin(),
             host_cloud: r.coin(),
@@ -230,6 +231,8 @@ pub fn scenario(seed: u64) -> Option<Scenario> {
             bgv_ms: None,
         },
         training,
+        custody: Vec::new(),
+        placement: None,
     };
     if semantics == "exact" {
         // Calibrated exact-backend estimates, derived without further draws
@@ -417,6 +420,7 @@ fn ctx() -> PlanningContext {
             verified_execution: true,
         },
         infrastructure: Infrastructure {
+            evaluators: vec![],
             tees: vec![tee_pool()[0].clone()],
             key_broker: true,
             host_cloud: true,
@@ -432,6 +436,8 @@ fn ctx() -> PlanningContext {
             bgv_ms: None,
         },
         training: None,
+        custody: Vec::new(),
+        placement: None,
     }
 }
 

@@ -1,0 +1,93 @@
+{
+  "broker_id": "hospital",
+  "mode": "production",
+  "store": "local-kek",
+  "kek_id": "03f56c0b16a9a317288a42e579078166",
+  "secrets": {
+    "patients": {
+      "asset_id": "patients",
+      "key_version": 2,
+      "release_policy": {
+        "version": 1,
+        "execution_spec_id": "1111111111111111111111111111111111111111111111111111111111111111",
+        "policy_id": "2222222222222222222222222222222222222222222222222222222222222222",
+        "artifact_digest": null,
+        "allowed_tee": [
+          "amd_sev_snp"
+        ],
+        "allowed_images": [
+          "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+        ],
+        "debug": "forbidden",
+        "minimum_tcb": "supported",
+        "require_gpu_attestation": false,
+        "allow_development": false,
+        "max_evidence_age_secs": 600
+      },
+      "versions": {
+        "1": {
+          "key": {
+            "form": "destroyed"
+          },
+          "revoked": true
+        },
+        "2": {
+          "key": {
+            "form": "wrapped",
+            "store": "local-kek",
+            "kek_id": "03f56c0b16a9a317288a42e579078166",
+            "nonce": "23e459fe2c5b9dc312819dd4",
+            "ciphertext": "4e5268957a4ba155dd97152a3f63684431808f174b163673a806e5b9a1c5ea5c155e5872010eb91fdc044318901162e7"
+          },
+          "revoked": false
+        }
+      },
+      "organization": "hospital"
+    },
+    "weights": {
+      "asset_id": "weights",
+      "key_version": 1,
+      "release_policy": {
+        "version": 1,
+        "execution_spec_id": "1111111111111111111111111111111111111111111111111111111111111111",
+        "policy_id": "2222222222222222222222222222222222222222222222222222222222222222",
+        "artifact_digest": null,
+        "allowed_tee": [
+          "amd_sev_snp"
+        ],
+        "allowed_images": [
+          "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+        ],
+        "debug": "forbidden",
+        "minimum_tcb": "supported",
+        "require_gpu_attestation": false,
+        "allow_development": false,
+        "max_evidence_age_secs": 600
+      },
+      "versions": {
+        "1": {
+          "key": {
+            "form": "wrapped",
+            "store": "local-kek",
+            "kek_id": "03f56c0b16a9a317288a42e579078166",
+            "nonce": "cfc7681945e11ca4848a0776",
+            "ciphertext": "172016498de5b444ef2f672ca46161a60d002a0945f5eeef02b3abe070551cb6aef098d6e529e766cf4dd8ecaa7ee479"
+          },
+          "revoked": false
+        }
+      },
+      "organization": "hospital"
+    }
+  },
+  "challenges": [],
+  "organization": "hospital",
+  "grant_signing_key": {
+    "form": "wrapped",
+    "store": "local-kek",
+    "kek_id": "03f56c0b16a9a317288a42e579078166",
+    "nonce": "ba1b0828c7ad6960db1504ef",
+    "ciphertext": "fa94a364796d0f5d8c32a1e37d8e32b7e03ebdd0063f088c2917dea7fafea5899b3e563977a45a5f5b58a952ae3fcb5d"
+  },
+  "generation": 1,
+  "mac": "d17ff0764bede4825b3dbace4a9e8709e2583553968d077cc0c8c836510e2d6f"
+}

@@ -95,6 +95,21 @@ fn dp_rdp_accountant_properties() {
 }
 
 #[test]
+fn governance_authorization_property() {
+    check("governance_authorization_property");
+}
+
+#[test]
+fn governance_release_class_order() {
+    check("governance_release_class_order");
+}
+
+#[test]
+fn governance_placement_property() {
+    check("governance_placement_property");
+}
+
+#[test]
 fn every_check_has_a_test_here() {
     let me = include_str!("assurance.rs");
     for c in CHECKS {

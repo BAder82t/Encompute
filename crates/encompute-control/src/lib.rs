@@ -11,23 +11,32 @@
 //! a separate service with its own identity.
 
 pub mod anchor;
+mod anchor_migration;
 pub mod api;
+pub mod archive;
 pub mod audit;
 pub mod authn;
 pub mod authz;
+pub mod compact;
 pub mod config;
 pub mod control;
 pub mod db;
+pub mod govlog;
 pub mod log;
 pub mod metrics;
+pub mod mirror;
 pub mod model;
 mod ops;
 pub mod pgtls;
 pub mod transport;
+pub mod views;
 
+#[doc(hidden)]
+pub use anchor_migration::set_migration_test_hook;
 pub use control::{Control, Ctx};
+pub use ops::placement;
 pub use ops::{
     asset_json, check_reservation, estimated_ms, job_profile, keybroker_lock, least_sensitivity,
-    legacy_service_admins, shared_asset_json, GATE_MS, HEARTBEAT_TIMEOUT_SECS,
-    LEGACY_SERVICE_ADMINS_REFUSED_FROM,
+    legacy_service_admins, onward_policy_id, shared_asset_json, GovernedStage, GATE_MS,
+    HEARTBEAT_TIMEOUT_SECS, LEGACY_SERVICE_ADMINS_REFUSED_FROM, MIN_RESERVATION_RHO,
 };

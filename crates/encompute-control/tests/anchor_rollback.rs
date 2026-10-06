@@ -22,7 +22,11 @@ fn spend(t: &T, who: &As, d: &str, ev: &str, sigma2: u64) -> (u16, Value) {
 }
 
 fn anchored_seq(t: &T, d: &str) -> u64 {
-    t.control.anchor.snapshot().ledgers[d].seq
+    t.control
+        .ledger_floor(d)
+        .unwrap()
+        .expect("a ledger checkpoint")
+        .seq
 }
 
 fn rollbacks_counted(t: &T, what: &str) -> bool {
@@ -139,16 +143,19 @@ fn a_frozen_ledger_stays_frozen_whatever_the_database_says() {
     drop(t.control);
     let backup = format!("{}_frbk", url.rsplit('/').next().unwrap());
     backup_database(&url, &backup);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     assert_eq!(spend(&t, &a_owner, &d, "after-backup", 200).0, 200);
     let env0 = t.env0;
     drop(t.control);
     restore_database(&backup, &url);
     assert!(env0.start().is_err(), "the rollback is refused first");
     run_recovery(&env0);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     assert_eq!(spend(&t, &a_owner, &d, "frozen-try", 200).0, 409);
-    assert!(t.control.anchor.snapshot().frozen.contains(&d));
+    assert!(t
+        .control
+        .anchored(encompute_control::govlog::NegSet::FrozenLedgers, &d)
+        .unwrap());
 
     // (A) The database attacker clears the flag while the service runs.
     let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
@@ -167,7 +174,7 @@ fn a_frozen_ledger_stays_frozen_whatever_the_database_says() {
         notes.iter().any(|n| n.contains(&d) && n.contains("frozen")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     let v = t.ok(&a_auditor, "GET", &format!("/v1/privacy/{d}"), None);
     assert!(v["frozen"].is_string(), "{v}");
     assert_eq!(spend(&t, &a_owner, &d, "after-refreeze", 200).0, 409);
@@ -176,7 +183,7 @@ fn a_frozen_ledger_stays_frozen_whatever_the_database_says() {
     // again; the operator follows the printed instruction and recovers.
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     assert!(env0.start().is_err(), "the second restore is refused");
     let notes = run_recovery(&env0);
     assert!(
@@ -296,7 +303,7 @@ fn restore_and_recovery_keep_disables_and_cancellations() {
     drop(t.control);
     let backup = format!("{}_sabk", url.rsplit('/').next().unwrap());
     backup_database(&url, &backup);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     // A key compromise and a mistaken job: disable, disable, cancel.
     t.ok(
         &platform,
@@ -311,13 +318,12 @@ fn restore_and_recovery_keep_disables_and_cancellations() {
         None,
     );
     t.ok(&b_dev, "POST", &format!("/v1/jobs/{job}/cancel"), None);
-    let a = t.control.anchor.snapshot();
-    assert!(a.disabled_services.contains("secagg-9"));
-    assert!(a.disabled_users.contains(&a_dev_id));
-    assert!(a.ended_jobs.contains(&job));
+    assert!(anchored(&t, NegSet::DisabledServices, "secagg-9"));
+    assert!(anchored(&t, NegSet::DisabledUsers, &a_dev_id));
+    assert!(anchored(&t, NegSet::EndedJobs, &job));
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     let e = env0
         .start()
         .err()
@@ -333,7 +339,7 @@ fn restore_and_recovery_keep_disables_and_cancellations() {
             "{what}: {notes:?}"
         );
     }
-    let t = env0.start().unwrap();
+    let t = env0.started();
     let mut c = t.control.db.conn().unwrap();
     let status: String = c
         .query_one(
@@ -354,7 +360,7 @@ fn restore_and_recovery_keep_disables_and_cancellations() {
     let (s, _) = t.call(&a_dev, "GET", "/v1/whoami", None);
     assert_eq!(s, 401, "the disabled user stays out");
     // A second restart is clean.
-    t.restart().unwrap();
+    t.restarted();
 }
 
 /// Review finding CP-S-9 (ENC-SF-2026-084): a key broker learns of a revocation only once
@@ -383,31 +389,44 @@ fn broker_revocation_is_delivered_only_once_anchored() {
         300,
     )
     .unwrap();
-    {
-        let mut c = w.t.control.db.conn().unwrap();
-        c.execute(
-            "UPDATE assets SET status = 'revoked' WHERE id = $1",
-            &[&w.model_b],
-        )
+    w.t.control
+        .db
+        .tx(|c| {
+            c.execute(
+                "UPDATE assets SET status = 'revoked' WHERE id = $1",
+                &[&w.model_b],
+            )
+            .unwrap();
+            encompute_control::govlog::append_asset_event(
+                c,
+                encompute_control::govlog::kind::ASSET_REVOKED,
+                &w.model_b,
+                "modelco",
+            )?;
+            c.execute(
+                "INSERT INTO outbox (message_id, recipient, url, envelope) VALUES ($1, $2, $3, $4)",
+                &[
+                    &m.message_id,
+                    &"keybroker-modelco",
+                    &"http://kb.internal:8760",
+                    &serde_json::to_value(&m).unwrap(),
+                ],
+            )
+            .unwrap();
+            Ok(())
+        })
         .unwrap();
-        c.execute(
-            "INSERT INTO outbox (message_id, recipient, url, envelope) VALUES ($1, $2, $3, $4)",
-            &[
-                &m.message_id,
-                &"keybroker-modelco",
-                &"http://kb.internal:8760",
-                &serde_json::to_value(&m).unwrap(),
-            ],
-        )
-        .unwrap();
-    }
     w.t.control.deliver_outbox().unwrap();
     assert!(
         w.t.transport.drain().is_empty(),
         "sent before it was anchored"
     );
     w.t.control.tick();
-    assert!(w.t.control.anchor.snapshot().revoked.contains(&w.model_b));
+    assert!(w
+        .t
+        .control
+        .anchored(encompute_control::govlog::NegSet::RevokedAssets, &w.model_b)
+        .unwrap());
     let sent = w.t.transport.drain();
     assert!(
         sent.iter()
@@ -476,7 +495,7 @@ fn restore_and_recovery_keep_withdrawn_approvals() {
     drop(t.control);
     let backup = format!("{}_apbk", url.rsplit('/').next().unwrap());
     backup_database(&url, &backup);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     // hospital-a withdraws its approval; then modelco removes hospital-a
     // from the project, ending modelco's grant of its model to it.
     t.ok(
@@ -491,20 +510,20 @@ fn restore_and_recovery_keep_withdrawn_approvals() {
         &format!("/v1/projects/{project}/members/remove"),
         Some(json!({"organization": "hospital-a"})),
     );
-    let a = t.control.anchor.snapshot();
+    let withdrawn = log_set(&t, NegSet::WithdrawnGrants);
     assert!(
-        a.withdrawn_grants.contains(&first),
-        "{:?}",
-        a.withdrawn_grants
+        anchored(&t, NegSet::WithdrawnGrants, &first),
+        "{withdrawn:?}"
     );
     assert!(
-        a.withdrawn_grants.iter().any(|g| g.starts_with("apg_")),
-        "the ended grants: {:?}",
-        a.withdrawn_grants
+        withdrawn
+            .iter()
+            .any(|g| g.starts_with("apg_") && anchored(&t, NegSet::WithdrawnGrants, g)),
+        "the ended grants: {withdrawn:?}"
     );
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     let e = env0
         .start()
         .err()
@@ -517,7 +536,7 @@ fn restore_and_recovery_keep_withdrawn_approvals() {
             .any(|n| n.contains(&first) && n.contains("withdrawal re-applied")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     // Neither side's sharing came back (nor hospital-a's membership: see
     // `restore_and_recovery_keep_a_left_project_left`).
     let (s, _) = t.call(&b_dev, "GET", &format!("/v1/assets/{dataset_a}"), None);
@@ -537,7 +556,7 @@ fn restore_and_recovery_keep_withdrawn_approvals() {
     let again = approval_id(&t, &dataset_a);
     assert_ne!(again, first);
     t.ok(&b_dev, "GET", &format!("/v1/assets/{dataset_a}"), None);
-    t.restart().unwrap();
+    t.restarted();
 }
 
 /// Review finding rc.4 F4 residual (ENC-SF-2026-091): leaving a project is anchored. An
@@ -622,7 +641,7 @@ fn restore_and_recovery_keep_a_left_project_left() {
     drop(t.control);
     let backup = format!("{}_pmbk", url.rsplit('/').next().unwrap());
     backup_database(&url, &backup);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     // hospital-a leaves.
     let v = t.ok(
         &a_admin,
@@ -631,16 +650,15 @@ fn restore_and_recovery_keep_a_left_project_left() {
         Some(json!({"organization": "hospital-a"})),
     );
     assert_eq!(v["failed_jobs"], json!([job]), "{v}");
-    let a = t.control.anchor.snapshot();
     assert!(
-        a.removed_memberships.contains(&first),
+        anchored(&t, NegSet::RemovedMemberships, &first),
         "{:?}",
-        a.removed_memberships
+        log_set(&t, NegSet::RemovedMemberships)
     );
-    assert!(a.ended_jobs.contains(&job));
+    assert!(anchored(&t, NegSet::EndedJobs, &job));
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     // (The failed job is found first; the membership on its own below.)
     let e = env0
         .start()
@@ -654,7 +672,7 @@ fn restore_and_recovery_keep_a_left_project_left() {
             .any(|n| n.contains(&first) && n.contains("removal re-applied")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     assert_eq!(membership(&t), None);
     // No project details, plans or job submissions for hospital-a.
     let (s, _) = t.call(&a_admin, "GET", &format!("/v1/projects/{project}"), None);
@@ -707,14 +725,14 @@ fn restore_and_recovery_keep_a_left_project_left() {
     }
     let again = membership(&t).expect("hospital-a joined again");
     assert_ne!(again, first);
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     t.ok(&a_admin, "GET", &format!("/v1/projects/{project}"), None);
     // The membership alone (no grant or job ended with it) is refused too.
     let env0 = t.env0;
     drop(t.control);
     let backup2 = format!("{backup}2");
     backup_database(&url, &backup2);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     t.ok(
         &b_admin,
         "POST",
@@ -723,7 +741,7 @@ fn restore_and_recovery_keep_a_left_project_left() {
     );
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup2, &url);
+    restore_keeping_log(&env0, &backup2);
     let e = env0
         .start()
         .err()
@@ -737,10 +755,10 @@ fn restore_and_recovery_keep_a_left_project_left() {
             .any(|n| n.contains(&again) && n.contains("removal re-applied")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     let (s, _) = t.call(&a_admin, "GET", &format!("/v1/projects/{project}"), None);
     assert_eq!(s, 404);
-    t.restart().unwrap();
+    t.restarted();
 }
 
 /// Review finding rc.4 (ENC-SF-2026-093): removing a principal's role is
@@ -796,7 +814,7 @@ fn restore_and_recovery_keep_a_removed_role_removed() {
     drop(t.control);
     let backup = format!("{}_rlbk", url.rsplit('/').next().unwrap());
     backup_database(&url, &backup);
-    let t = env0.start().unwrap();
+    let t = env0.started();
     // The role is removed, and anchored before the answer.
     let v = t.ok(
         &a_admin,
@@ -806,14 +824,16 @@ fn restore_and_recovery_keep_a_removed_role_removed() {
     );
     assert_eq!(v["removed"], json!(["ml_developer"]), "{v}");
     assert!(
-        t.control.anchor.snapshot().removed_roles.contains(&first),
+        t.control
+            .anchored(encompute_control::govlog::NegSet::RemovedRoles, &first)
+            .unwrap(),
         "the removal was acknowledged before it was anchored"
     );
     let (s, _) = create(&t, "after-removal");
     assert_eq!(s, 403);
     let env0 = t.env0;
     drop(t.control);
-    restore_database(&backup, &url);
+    restore_keeping_log(&env0, &backup);
     let e = env0
         .start()
         .err()
@@ -827,7 +847,7 @@ fn restore_and_recovery_keep_a_removed_role_removed() {
             .any(|n| n.contains(&first) && n.contains("removal re-applied")),
         "{notes:?}"
     );
-    let t = env0.start().unwrap();
+    let t = env0.started();
     assert_eq!(role_id(&t), None);
     let reapplied: i64 = t
         .control
@@ -863,10 +883,10 @@ fn restore_and_recovery_keep_a_removed_role_removed() {
         .unwrap();
     let again = role_id(&t).expect("granted again");
     assert_ne!(again, first);
-    let t = t.restart().unwrap();
+    let t = t.restarted();
     let (s, v) = create(&t, "granted-again");
     assert_eq!(s, 201, "{v}");
-    t.restart().unwrap();
+    t.restarted();
 }
 
 /// Approvals, project memberships and organization roles made before
@@ -896,7 +916,7 @@ fn approvals_from_before_version_4_get_stable_ids() {
                       VALUES ('a', 'p', 'x', 'o', '2026-09-01T00:00:00Z');"
             ))
             .unwrap();
-        assert_eq!(db.migrate().unwrap(), 4);
+        assert_eq!(db.migrate().unwrap(), 18);
         let r = db
             .conn()
             .unwrap()
@@ -952,7 +972,7 @@ fn a_schema_2_backup_migrated_twice_gets_the_same_ids() {
                              ('b', 'p', 'y', 'usr_2', '2026-09-02T00:00:00Z');",
             )
             .unwrap();
-        assert_eq!(db.migrate().unwrap(), 4);
+        assert_eq!(db.migrate().unwrap(), 18);
         let mut out = Vec::new();
         for q in [
             "SELECT approval_id FROM asset_approvals ORDER BY asset_id",

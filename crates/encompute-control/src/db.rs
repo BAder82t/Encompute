@@ -31,6 +31,76 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
         "approval_identity",
         include_str!("../migrations/0004_approval_identity.sql"),
     ),
+    (
+        5,
+        "public_sector_governance",
+        include_str!("../migrations/0005_public_sector_governance.sql"),
+    ),
+    (
+        6,
+        "sovereign_custody",
+        include_str!("../migrations/0006_sovereign_custody.sql"),
+    ),
+    (
+        7,
+        "governed_jobs",
+        include_str!("../migrations/0007_governed_jobs.sql"),
+    ),
+    (
+        8,
+        "job_human_approvals",
+        include_str!("../migrations/0008_job_human_approvals.sql"),
+    ),
+    (
+        9,
+        "auditor_participation",
+        include_str!("../migrations/0009_auditor_participation.sql"),
+    ),
+    (
+        10,
+        "release_classes",
+        include_str!("../migrations/0010_release_classes.sql"),
+    ),
+    (
+        11,
+        "derived_assets",
+        include_str!("../migrations/0011_derived_assets.sql"),
+    ),
+    (
+        12,
+        "retention",
+        include_str!("../migrations/0012_retention.sql"),
+    ),
+    (
+        13,
+        "governance_log",
+        include_str!("../migrations/0013_governance_log.sql"),
+    ),
+    (
+        14,
+        "privacy_populations",
+        include_str!("../migrations/0014_privacy_populations.sql"),
+    ),
+    (
+        15,
+        "privacy_scopes",
+        include_str!("../migrations/0015_privacy_scopes.sql"),
+    ),
+    (
+        16,
+        "job_privacy",
+        include_str!("../migrations/0016_job_privacy.sql"),
+    ),
+    (
+        17,
+        "evaluator_placement",
+        include_str!("../migrations/0017_evaluator_placement.sql"),
+    ),
+    (
+        18,
+        "project_placement",
+        include_str!("../migrations/0018_project_placement.sql"),
+    ),
 ];
 
 /// Serializes migrations across control-plane replicas.

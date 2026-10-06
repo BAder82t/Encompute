@@ -94,6 +94,8 @@ fn spec() -> TrainingSpec {
             })
             .collect(),
         key_brokers: [("modelco".to_string(), h('5'))].into(),
+        asset_brokers: BTreeMap::new(),
+        broker_organizations: BTreeMap::new(),
         coordinator_key: hex(&SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes()),
         initial_adapter_digest: h('0'),
     }
@@ -301,6 +303,9 @@ fn dir(name: &str) -> PathBuf {
 
 fn release_round(d: &std::path::Path, round: u64) {
     let rs = ReleaseSpec {
+        sources_per_unit: 1,
+        layout_id: None,
+        job_id: None,
         round_id: format!("{round:064x}"),
         output: "update".into(),
         policy_id: Some(h('c')),
@@ -329,6 +334,7 @@ fn release_round(d: &std::path::Path, round: u64) {
                     epsilon: 3.0,
                     delta: 1e-6,
                 },
+                scoped: None,
             })
             .collect(),
     };
@@ -1160,4 +1166,303 @@ fn a_worker_trains_only_from_the_previous_recorded_adapter() {
     let forged = rec(1, "run", &SigningKey::from_bytes(&[4; 32]));
     assert!(check_input_adapter(&s, "run", 2, "adapter-1", &h('b'), Some(&forged)).is_err());
     assert!(check_input_adapter(&s, "run", 99, "adapter-98", &h('b'), Some(&r1)).is_err());
+}
+
+/// `spec` with a per-asset broker binding: every key its workers acquire
+/// bound to its owner's broker, where the owner runs one (`brokers`: broker
+/// ID -> (grant key, owner)), else to the model owner's (`modelco`).
+fn bound(mut s: TrainingSpec, brokers: &[(&str, char, &str)]) -> TrainingSpec {
+    for (id, key, owner) in brokers {
+        s.key_brokers.insert(id.to_string(), h(*key));
+        s.broker_organizations
+            .insert(id.to_string(), owner.to_string());
+    }
+    s.broker_organizations
+        .insert("modelco".into(), "modelco".into());
+    let run: BTreeMap<String, String> = s
+        .broker_organizations
+        .iter()
+        .map(|(b, o)| (o.clone(), b.clone()))
+        .collect();
+    s.asset_brokers = s
+        .key_ids()
+        .unwrap()
+        .into_iter()
+        .map(|(k, owner)| {
+            let b = run.get(&owner).cloned().unwrap_or("modelco".into());
+            (k, b)
+        })
+        .collect();
+    s
+}
+
+/// Hospital A's keys at its own broker; hospital B's and the model owner's
+/// at ModelCo's.
+fn two_broker_spec() -> TrainingSpec {
+    bound(spec(), &[("hospital-a-broker", '6', "hospital-a")])
+}
+
+/// Specs without a per-asset broker binding keep their IDs and bytes: the
+/// field is not serialized when empty (the rc.4 spec ID).
+#[test]
+fn spec_ids_unchanged_without_asset_brokers() {
+    let s = spec();
+    assert!(s.asset_brokers.is_empty() && s.broker_organizations.is_empty());
+    let text = serde_json::to_string(&s).unwrap();
+    assert!(!text.contains("asset_brokers"), "{text}");
+    assert!(!text.contains("broker_organizations"), "{text}");
+    // The contract fixture (written by rc.4, before the fields existed)
+    // parses to its recorded ID.
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let rc4: TrainingSpec =
+        serde_json::from_str(&std::fs::read_to_string(fixtures.join("spec.json")).unwrap())
+            .unwrap();
+    assert!(rc4.asset_brokers.is_empty());
+    assert_eq!(
+        rc4.id().unwrap(),
+        "351196f745e54546a5e1be9bad52f88d6e36bda0f2c36526d573b2553fb03723",
+        "a spec without asset_brokers keeps its rc.4 ID"
+    );
+    let back: TrainingSpec = serde_json::from_str(&text).unwrap();
+    assert_eq!(back.id().unwrap(), s.id().unwrap());
+    // The binding and the brokers' owners are part of the ID.
+    let one = bound(spec(), &[]);
+    one.validate().unwrap();
+    let two = two_broker_spec();
+    two.validate().unwrap();
+    assert_ne!(one.id().unwrap(), s.id().unwrap());
+    assert_ne!(one.id().unwrap(), two.id().unwrap());
+    // Owners without a binding are refused: they mean nothing alone.
+    let mut t = spec();
+    t.broker_organizations
+        .insert("modelco".into(), "modelco".into());
+    assert!(t.validate().is_err());
+}
+
+/// The workers' key IDs are defined once, by the spec: a participant's job
+/// acquires exactly `participant_keys`, all among `key_ids`, in the names
+/// its brokers already hold.
+#[test]
+fn worker_key_ids_match_spec_key_ids() {
+    let s = spec();
+    let ids = s.key_ids().unwrap();
+    let a = s.participant_keys("hospital-a").unwrap();
+    assert_eq!(a.model, "base-model.hospital-a");
+    assert_eq!(a.dataset, "dataset-patients-a");
+    assert_eq!(a.adapters, "adapters.hospital-a");
+    assert_eq!(a.contribution, "contribution-hospital-a");
+    let mut want: BTreeMap<String, String> = [
+        ("base-model", "modelco"),
+        ("checkpoints", "modelco"),
+        ("adapters", "modelco"),
+    ]
+    .iter()
+    .map(|(k, o)| (k.to_string(), o.to_string()))
+    .collect();
+    for p in ["hospital-a", "hospital-b"] {
+        let k = s.participant_keys(p).unwrap();
+        for (key, owner) in [
+            (&k.model, "modelco"),
+            (&k.adapters, "modelco"),
+            (&k.dataset, p),
+            (&k.contribution, p),
+        ] {
+            assert_eq!(ids.get(key).map(String::as_str), Some(owner), "{key}");
+            want.insert(key.clone(), owner.to_string());
+        }
+    }
+    assert_eq!(ids, want);
+    assert!(s.participant_keys("modelco").is_err());
+}
+
+/// Several brokers are allowed only with a binding of exactly the keys the
+/// spec's workers acquire, the derived per-participant keys included.
+#[test]
+fn asset_brokers_must_cover_derived_contribution_keys() {
+    two_broker_spec().validate().unwrap();
+    for missing in two_broker_spec().key_ids().unwrap().keys() {
+        let mut t = two_broker_spec();
+        t.asset_brokers.remove(missing);
+        let e = t.validate().unwrap_err();
+        assert_eq!(e.code, Code::TrainingSpec);
+        assert!(
+            e.message.contains(missing.as_str()),
+            "{missing}: {}",
+            e.message
+        );
+    }
+    // A key no worker acquires is refused too: the binding is exact.
+    let mut t = two_broker_spec();
+    t.asset_brokers
+        .insert("contribution-hospital-c".into(), "modelco".into());
+    let e = t.validate().unwrap_err();
+    assert!(
+        e.message.contains("contribution-hospital-c"),
+        "{}",
+        e.message
+    );
+}
+
+/// Without any binding, the rc.4 rule stands; with one, every broker is
+/// used, and each has a declared owner among the parties.
+#[test]
+fn asset_brokers_must_cover_every_key() {
+    let mut t = two_broker_spec();
+    t.asset_brokers.clear();
+    t.broker_organizations.clear();
+    let e = t.validate().unwrap_err();
+    assert!(
+        e.message.contains("exactly one key broker"),
+        "{}",
+        e.message
+    );
+    // A broker nothing is bound to is not trusted for anything: refused.
+    let mut t = two_broker_spec();
+    t.key_brokers.insert("idle-broker".into(), h('7'));
+    t.broker_organizations
+        .insert("idle-broker".into(), "hospital-b".into());
+    let e = t.validate().unwrap_err();
+    assert!(e.message.contains("idle-broker"), "{}", e.message);
+    // Every broker's owner is declared, and is a party of the spec.
+    let mut t = two_broker_spec();
+    t.broker_organizations.remove("hospital-a-broker");
+    let e = t.validate().unwrap_err();
+    assert!(e.message.contains("hospital-a-broker"), "{}", e.message);
+    let mut t = two_broker_spec();
+    t.broker_organizations
+        .insert("hospital-a-broker".into(), "outsider".into());
+    let e = t.validate().unwrap_err();
+    assert!(e.message.contains("outsider"), "{}", e.message);
+    // One broker (the model owner's) holding every key is fine.
+    bound(spec(), &[]).validate().unwrap();
+}
+
+/// A participant's keys go to its own broker when it runs one (else to the
+/// model owner's), never to another participant's; the model owner's keys
+/// go to the model owner's broker.
+#[test]
+fn contribution_key_bound_to_another_parties_broker_refused() {
+    let three = || {
+        bound(
+            spec(),
+            &[
+                ("hospital-a-broker", '6', "hospital-a"),
+                ("hospital-b-broker", '8', "hospital-b"),
+            ],
+        )
+    };
+    three().validate().unwrap();
+    let refused = |key: &str, broker: &str| {
+        let mut t = three();
+        t.asset_brokers.insert(key.into(), broker.into());
+        let e = t.validate().unwrap_err();
+        assert_eq!(e.code, Code::TrainingSpec);
+        assert!(e.message.contains(key), "{key}: {}", e.message);
+    };
+    // Hospital B's contribution key at hospital A's broker: the rc.4 grant
+    // confusion.
+    refused("contribution-hospital-b", "hospital-a-broker");
+    refused("dataset-patients-b", "hospital-a-broker");
+    // At the model owner's, although hospital B runs its own broker.
+    refused("contribution-hospital-b", "modelco");
+    // The model owner's keys at a participant's broker.
+    refused("base-model.hospital-a", "hospital-a-broker");
+    refused("adapters.hospital-a", "hospital-a-broker");
+    refused("checkpoints", "hospital-b-broker");
+}
+
+/// A key bound to two brokers is refused where it could arise: a spec's
+/// JSON naming the key twice (a map keeps one silently otherwise), and
+/// two brokers sharing a grant-signing key (their grants could not be told
+/// apart).
+#[test]
+fn one_key_two_brokers_refused() {
+    let s = two_broker_spec();
+    let text = serde_json::to_string(&s).unwrap();
+    let dup = text.replace(
+        "\"contribution-hospital-b\":\"modelco\"",
+        "\"contribution-hospital-b\":\"modelco\",\"contribution-hospital-a\":\"modelco\"",
+    );
+    assert_ne!(dup, text);
+    let e = serde_json::from_str::<TrainingSpec>(&dup).unwrap_err();
+    assert!(e.to_string().contains("contribution-hospital-a"), "{e}");
+    // The same for the brokers' keys.
+    let dup = text.replace(
+        "\"hospital-a-broker\":\"6666",
+        "\"modelco\":\"7777777777777777777777777777777777777777777777777777777777777777\",\"hospital-a-broker\":\"6666",
+    );
+    assert_ne!(dup, text);
+    assert!(serde_json::from_str::<TrainingSpec>(&dup).is_err());
+    let mut t = two_broker_spec();
+    t.key_brokers.insert("hospital-a-broker".into(), h('5'));
+    let e = t.validate().unwrap_err();
+    assert!(e.message.contains("grant-signing key"), "{}", e.message);
+}
+
+/// Every broker a binding names needs its grant-signing key in the spec:
+/// otherwise nothing pins who may sign its grants.
+#[test]
+fn unpinned_broker_in_asset_brokers_refused() {
+    let mut t = two_broker_spec();
+    t.asset_brokers
+        .insert("contribution-hospital-b".into(), "hospital-b-broker".into());
+    let e = t.validate().unwrap_err();
+    assert_eq!(e.code, Code::TrainingSpec);
+    assert!(e.message.contains("hospital-b-broker"), "{}", e.message);
+    assert!(e.message.contains("grant-signing key"), "{}", e.message);
+}
+
+/// A spec's broker binding cannot be edited without notice. Swapping two
+/// brokers' grant-signing keys leaves a spec that validates, but it is
+/// another spec: its ID, which the workers' attested identity and every
+/// key's release policy bind, changes, so evidence for the original is
+/// refused at the brokers and the workers pin the original keys. Swapping
+/// the brokers' owners, or renaming which broker holds a key, no longer
+/// validates (a key is at its owner's broker).
+#[test]
+fn editing_the_broker_binding_cannot_swap_brokers_unnoticed() {
+    let three = || {
+        bound(
+            spec(),
+            &[
+                ("hospital-a-broker", '6', "hospital-a"),
+                ("hospital-b-broker", '8', "hospital-b"),
+            ],
+        )
+    };
+    let original = three();
+    original.validate().unwrap();
+    // The grant-signing keys swapped between the two hospitals' brokers.
+    let mut swapped = three();
+    swapped
+        .key_brokers
+        .insert("hospital-a-broker".into(), h('8'));
+    swapped
+        .key_brokers
+        .insert("hospital-b-broker".into(), h('6'));
+    swapped.validate().unwrap();
+    assert_ne!(swapped.id().unwrap(), original.id().unwrap());
+    // The owners swapped: hospital A's keys are no longer at its broker.
+    let mut owners = three();
+    owners
+        .broker_organizations
+        .insert("hospital-a-broker".into(), "hospital-b".into());
+    owners
+        .broker_organizations
+        .insert("hospital-b-broker".into(), "hospital-a".into());
+    assert_eq!(owners.validate().unwrap_err().code, Code::TrainingSpec);
+    // Every key of hospital A moved to hospital B's broker, and back.
+    let mut moved = three();
+    for (key, broker) in moved.asset_brokers.iter_mut() {
+        if key.ends_with("-a") || key.ends_with(".hospital-a") {
+            *broker = "hospital-b-broker".into();
+        }
+    }
+    assert_eq!(moved.validate().unwrap_err().code, Code::TrainingSpec);
+    // A binding with the broker map dropped is the single-broker spec again:
+    // two brokers without a binding are refused.
+    let mut dropped = three();
+    dropped.asset_brokers.clear();
+    dropped.broker_organizations.clear();
+    assert_eq!(dropped.validate().unwrap_err().code, Code::TrainingSpec);
 }

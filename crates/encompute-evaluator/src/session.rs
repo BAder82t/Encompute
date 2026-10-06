@@ -56,6 +56,7 @@ pub fn execution_spec(ids: &Ids, compiled: &CompiledProgram, kind: BackendKind) 
     let (plan_kind, plan_version) = compiled.plan_format();
     let (backend, backend_version) = kind.label();
     ExecutionSpec {
+        governance_id: None,
         version: SPEC_VERSION,
         program_id: ids.program_id.clone(),
         plan_id: sha256_hex(compiled.plan_json().as_bytes()),
@@ -582,6 +583,7 @@ impl EvaluatorSession {
     fn expect(&self, kind: Kind, program_id: Option<&'static str>) -> Expect<'_> {
         let (backend, backend_version) = self.kind.label();
         Expect {
+            governance_id: None,
             kind,
             scheme: self.compiled.scheme(),
             backend,
@@ -759,6 +761,7 @@ impl EvaluatorSession {
         };
         let (backend, backend_version) = self.kind.label();
         let header = Header {
+            governance_id: None,
             kind: Kind::Outputs,
             scheme: self.compiled.scheme().into(),
             backend: backend.into(),

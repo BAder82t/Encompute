@@ -19,7 +19,7 @@ use encompute_training::{SignedAdapterRecord, SignedWorkerEvidence, TrainingSpec
 use encompute_verification::canonical::canonical_json;
 use encompute_verification::SignedExecutionReceipt;
 
-use crate::authz::{SignedAuthorization, SignedRevocation};
+use crate::authz::{SignedAuthorization, SignedAuthorizationV2, SignedRevocation};
 use crate::tagged_hex;
 
 pub const GRAPH_VERSION: u32 = 1;
@@ -87,6 +87,9 @@ pub enum Evidence {
     /// Canonical `.eir` text (its SHA-256 is the program ID).
     Program(String),
     Authorization(SignedAuthorization),
+    /// An owner's authorization in a governed project, signed with its
+    /// governance key.
+    AuthorizationV2(Box<SignedAuthorizationV2>),
     Revocation(SignedRevocation),
     AggregationSpec(Box<AggregationSpec>),
     AggregationReceipt(Box<AggregationReceipt>),

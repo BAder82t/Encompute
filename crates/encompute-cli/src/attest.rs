@@ -14,9 +14,11 @@ use encompute_runtime::attestation::{
     TcbStatus, TeeKind, VerifiedWorkload, Verifier, WorkloadSession,
 };
 use encompute_runtime::keybroker::{
-    acquire_keys, BrokerClient, BrokerMode, DevelopmentFileStore, KeyBroker, KeyMaterial,
-    LocalKekStore, SecretStore,
+    acquire_keys, BrokerClient, BrokerMode, DevelopmentFileMark, DevelopmentFileStore,
+    ExpectedState, GenerationMark, GovernanceConfig, KeyBroker, KeyMaterial, LocalKekStore,
+    OpenBaoKvMark, SecretStore,
 };
+use encompute_runtime::trust::authz::{SignedAuthorizationV2, SignedRevocationV2};
 use encompute_runtime::verification::{hex, EvaluatorSigner};
 use encompute_runtime::{BackendKind, Model};
 
@@ -413,6 +415,26 @@ pub struct BrokerFile {
     /// Where the root-wrapped KEK is kept (not secret).
     #[arg(long, default_value = "kek.wrapped.json")]
     pub wrapped_kek: PathBuf,
+    /// Where the state's generation mark is kept, so that an older copy of
+    /// the state file is refused: `openbao` (a KV-v2 engine, --kv-mount;
+    /// BAO_ADDR and the token as for the root key) or `file:PATH`
+    /// (development only). A governed production broker needs one; once a
+    /// state is saved under a mark, every command on it needs the mark.
+    #[arg(long)]
+    pub generation_mark: Option<String>,
+    /// The KV-v2 mount holding the generation mark (with
+    /// `--generation-mark openbao`).
+    #[arg(long)]
+    pub kv_mount: Option<String>,
+    /// When the generation mark is first created from the state file: the
+    /// generation the file must have (otherwise the first start trusts the
+    /// file as found). Not used once the mark exists.
+    #[arg(long)]
+    pub expect_generation: Option<u64>,
+    /// With --expect-generation: the state MAC (hex, as in the state file)
+    /// the file must have.
+    #[arg(long, requires = "expect_generation")]
+    pub expect_state_mac: Option<String>,
 }
 
 impl BrokerFile {
@@ -450,6 +472,42 @@ impl BrokerFile {
             provider,
             org,
         )?))
+    }
+
+    /// The generation mark of broker `broker_id`, if configured.
+    fn mark(&self, broker_id: &str) -> Result<Option<Box<dyn GenerationMark>>> {
+        let usage = || {
+            Error::new(
+                Code::KeyRelease,
+                "--generation-mark openbao (with --kv-mount MOUNT) or file:PATH",
+            )
+        };
+        let Some(spec) = &self.generation_mark else {
+            if self.kv_mount.is_some() || self.expect_generation.is_some() {
+                return Err(usage());
+            }
+            return Ok(None);
+        };
+        Ok(Some(match (spec.as_str(), spec.split_once(':')) {
+            ("openbao", _) => {
+                let mount = self.kv_mount.as_deref().ok_or_else(usage)?;
+                Box::new(OpenBaoKvMark::from_env(mount, broker_id)?)
+            }
+            (_, Some(("file", path))) if !path.is_empty() && self.kv_mount.is_none() => {
+                eprintln!("DEVELOPMENT ONLY: a generation mark in a local file protects little");
+                Box::new(DevelopmentFileMark::new(Path::new(path), broker_id))
+            }
+            _ => return Err(usage()),
+        }))
+    }
+
+    /// What the operator expects of the state when its mark is first
+    /// created.
+    fn expected(&self) -> Option<ExpectedState> {
+        self.expect_generation.map(|generation| ExpectedState {
+            generation,
+            state_mac: self.expect_state_mac.clone(),
+        })
     }
 
     fn store(&self) -> Result<Box<dyn SecretStore>> {
@@ -513,7 +571,10 @@ pub enum BrokerCmd {
         #[command(flatten)]
         file: BrokerFile,
     },
-    /// Revoke a key version (default: the current one).
+    /// Revoke a key version (default: the current one). Also replaces the
+    /// KEK, so an older copy of the state file no longer yields the revoked
+    /// key under the KEK that is current afterwards (a copy of the old KEK
+    /// itself does: see `rotate-root --retire-old-versions`).
     Revoke {
         #[arg(long)]
         asset: String,
@@ -540,6 +601,12 @@ pub enum BrokerCmd {
         /// `encompute login` as the organization's security admin).
         #[arg(long)]
         report: bool,
+        /// Then retire every older root key version for good, so a wrapped
+        /// KEK from an older backup can never be opened again. Irreversible
+        /// and shared by every KEK wrapped under this root key: first
+        /// rotate-root for every other broker of the organization.
+        #[arg(long)]
+        retire_old_versions: bool,
     },
     /// Authenticate a broker state file written by an earlier Encompute
     /// (before states were authenticated under the KEK). Prints what the
@@ -553,21 +620,228 @@ pub enum BrokerCmd {
         #[command(flatten)]
         file: BrokerFile,
     },
+    /// Governed projects: pin the owner organization's governance key at
+    /// this broker. From then on only authorizations it signed are
+    /// installed, and every key is released only in a governed release.
+    GovernanceKey {
+        #[command(subcommand)]
+        cmd: GovernanceKeyCmd,
+    },
+    /// Governed projects: bind an asset's key to one registered source
+    /// version (its version ID, 64 hex characters). Set once; a bound key
+    /// is released only with its owner's authorization and a release
+    /// ticket.
+    BindVersion {
+        asset: String,
+        version_id: String,
+        /// The version is a derived result this organization holds as
+        /// custodian: the organization's signed release record of it (JSON),
+        /// which binds the key to the result and its lineage owners.
+        #[arg(long, value_name = "RELEASE_RECORD", requires = "cosignature")]
+        derived: Option<PathBuf>,
+        /// With --derived: the control plane's co-signature of the record
+        /// (`release_cosignature`, returned when the result was recorded).
+        #[arg(long, value_name = "COSIGNATURE", requires = "derived")]
+        cosignature: Option<PathBuf>,
+        #[command(flatten)]
+        control: ControlKeyArg,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+    /// Governed projects: after a lineage owner rotated its governance key,
+    /// re-bind a derived result's key to the owners' current keys, under
+    /// the control plane's re-issued co-signature (from POST
+    /// /v1/assets/{id}/release-cosignature). Only the lineage owners' key
+    /// IDs change, each to the key pinned here from the control plane's
+    /// attestation (pin-lineage first).
+    RebindLineage {
+        asset: String,
+        /// The re-issued co-signature (JSON: `release_cosignature`).
+        #[arg(long, value_name = "COSIGNATURE")]
+        cosignature: PathBuf,
+        #[command(flatten)]
+        control: ControlKeyArg,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+    /// Governed projects: install or revoke the owner's authorizations at
+    /// this broker.
+    Authorization {
+        #[command(subcommand)]
+        cmd: AuthorizationCmd,
+    },
     /// Serve challenges, attestation and key release over HTTP. With
     /// ENCOMPUTE_CONTROL_PUBLIC_KEY and ENCOMPUTE_SERVICE_ID set, also accept
     /// revocations from that control plane, for the one organization this
     /// broker serves (--organization).
+    /// A governed production broker (governance key pinned) needs a
+    /// generation mark (--generation-mark openbao --kv-mount MOUNT): it
+    /// refuses to start without one.
     Serve {
         #[arg(long, default_value = "127.0.0.1:8760")]
         listen: String,
         /// Requests allowed per source address per minute.
         #[arg(long, default_value_t = encompute_runtime::keybroker::REQUESTS_PER_MINUTE)]
         requests_per_minute: u32,
+        /// The control plane's public key (64 hex characters): governed
+        /// releases need a release ticket it signed. Defaults to
+        /// ENCOMPUTE_CONTROL_PUBLIC_KEY.
+        #[arg(long)]
+        control_key: Option<String>,
+        /// Development only (a development broker with
+        /// ENCOMPUTE_ENV=development): release governed keys without a
+        /// release ticket. The owner's authorization is still required.
+        #[arg(long)]
+        no_require_ticket: bool,
+        /// Replace the control-plane key pinned in the broker's state with
+        /// --control-key (only after the control plane's key really
+        /// changed). Printed as an audit line.
+        #[arg(long, requires = "control_key")]
+        replace_control_key: bool,
+        /// How old, in seconds, a lineage owner's key attestation may be
+        /// when a release or export of a derived result relies on it;
+        /// older, re-attest it (pin-lineage) first. 24 hours by default,
+        /// at most 7 days (604800).
+        #[arg(long, default_value_t = encompute_runtime::keybroker::DEFAULT_LINEAGE_ATTESTATION_MAX_AGE_SECS)]
+        lineage_attestation_max_age: u64,
         #[command(flatten)]
         trust: TrustArgs,
         #[command(flatten)]
         file: BrokerFile,
     },
+}
+
+/// The control plane's public key, which statements it signed (key
+/// attestations, co-signatures) are verified under.
+#[derive(Args)]
+pub struct ControlKeyArg {
+    /// The control plane's public key (64 hex characters). Defaults to
+    /// ENCOMPUTE_CONTROL_PUBLIC_KEY. The first use pins it in the broker's
+    /// state; later uses must name the same key.
+    #[arg(long = "control-key")]
+    control_key: Option<String>,
+    /// Replace the control-plane key pinned in the broker's state with
+    /// this one (only after the control plane's key really changed). The
+    /// replacement is printed as an audit line.
+    #[arg(long)]
+    replace_control_key: bool,
+}
+
+/// Replaces `b`'s pinned control-plane key with `key` (the owner's
+/// explicit act), printing the audit line that records it.
+fn replace_control_key(b: &mut KeyBroker, key: &str) -> Result<()> {
+    let previous = b.replace_control_key(key)?;
+    eprintln!(
+        "AUDIT key_broker.control_key.replaced broker={} organization={} previous={} new={key} at={}",
+        b.id(),
+        b.organization().unwrap_or("-"),
+        previous.as_deref().unwrap_or("-"),
+        encompute_verification::service::now()
+    );
+    Ok(())
+}
+
+impl ControlKeyArg {
+    /// `b`, accepting statements signed by the control plane's key: the
+    /// key pinned in its state (pinned now if none is), or, with
+    /// --replace-control-key, this one replacing it.
+    fn configure(&self, mut b: KeyBroker) -> Result<KeyBroker> {
+        let key = self
+            .control_key
+            .clone()
+            .or_else(|| std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY").ok())
+            .ok_or_else(|| {
+                Error::new(
+                    Code::GovernanceKeyRevoked,
+                    "the control plane's public key is needed to verify what it signed: \
+                     --control-key, or ENCOMPUTE_CONTROL_PUBLIC_KEY",
+                )
+            })?;
+        if self.replace_control_key {
+            replace_control_key(&mut b, &key)?;
+        }
+        b.with_governance(GovernanceConfig::new(&key))
+    }
+}
+
+#[derive(Subcommand)]
+pub enum GovernanceKeyCmd {
+    /// Pin the organization's governance public key (set once).
+    Pin {
+        /// The governance public key (64 hex characters, as `encompute
+        /// governance keygen` prints it).
+        #[arg(long)]
+        key: String,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+    /// Pin the governance key of another organization whose data this
+    /// organization's derived results come from, from the control plane's
+    /// signed attestation of it (--attestation FILE, or fetched with --url):
+    /// its authorizations of their use are then installed and required
+    /// here. A later attestation of another key replaces the pin (a
+    /// rotation); an attestation that the key was revoked unpins it.
+    PinLineage {
+        /// The other organization.
+        #[arg(long = "for", id = "lineage_owner", value_name = "ORG")]
+        organization: String,
+        /// The control plane's attestation (JSON, from GET
+        /// /v1/organizations/{org}/governance-key-attestation).
+        #[arg(long, conflicts_with = "url", required_unless_present = "url")]
+        attestation: Option<PathBuf>,
+        /// Fetch the attestation from this control plane (logged in, or
+        /// ENCOMPUTE_TOKEN).
+        #[arg(long)]
+        url: Option<String>,
+        /// With --url: the key to attest (its key ID; default the active
+        /// key). Name the pinned key to learn whether it was revoked.
+        #[arg(long, requires = "url")]
+        key_id: Option<String>,
+        #[command(flatten)]
+        control: ControlKeyArg,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthorizationCmd {
+    /// Install an owner-signed authorization (from `encompute governance
+    /// sign`). It is verified under the pinned governance key. With --url,
+    /// installed at that running broker; otherwise in the state file.
+    Install {
+        document: PathBuf,
+        /// A running broker's URL.
+        #[arg(long)]
+        url: Option<String>,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+    /// Revoke an authorization at this broker. By ID, offline in the state
+    /// file (the owner's own act: it takes effect at once, with or without
+    /// the control plane); or an owner-signed revocation (--revocation),
+    /// in the state file or at a running broker (--url).
+    Revoke {
+        /// The authorization ID (64 hex characters).
+        id: Option<String>,
+        /// Why (printed, for the operator's records).
+        #[arg(long)]
+        reason: Option<String>,
+        /// An owner-signed revocation (from `encompute governance sign
+        /// --kind revocation`).
+        #[arg(long)]
+        revocation: Option<PathBuf>,
+        /// A running broker's URL (with --revocation).
+        #[arg(long)]
+        url: Option<String>,
+        #[command(flatten)]
+        file: BrokerFile,
+    },
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(p: &Path, what: &str) -> Result<T> {
+    serde_json::from_slice(&read(p)?)
+        .map_err(|e| Error::new(Code::BadInput, format!("{}: not {what}: {e}", p.display())))
 }
 
 fn open_broker(file: &BrokerFile, trust: Option<&TrustArgs>) -> Result<KeyBroker> {
@@ -591,7 +865,16 @@ fn open_broker(file: &BrokerFile, trust: Option<&TrustArgs>) -> Result<KeyBroker
         }
         None => Verifier::new(),
     };
-    KeyBroker::load(&file.broker, verifier, file.store()?)
+    match file.mark(&state.broker_id)? {
+        Some(m) => KeyBroker::load_with_mark_expecting(
+            &file.broker,
+            verifier,
+            file.store()?,
+            m,
+            file.expected().as_ref(),
+        ),
+        None => KeyBroker::load(&file.broker, verifier, file.store()?),
+    }
 }
 
 pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
@@ -615,7 +898,11 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                 } else {
                     BrokerMode::Production
                 };
-                KeyBroker::new(&id, mode, Verifier::new(), file.store()?)?
+                let b = KeyBroker::new(&id, mode, Verifier::new(), file.store()?)?;
+                match file.mark(&id)? {
+                    Some(m) => b.with_generation_mark_expecting(m, file.expected().as_ref())?,
+                    None => b,
+                }
             };
             if let Some(org) = &file.organization {
                 b.set_organization(org)?;
@@ -719,9 +1006,23 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             file,
         } => {
             let mut b = open_broker(&file, None)?;
+            let kek = b.state().kek_id.clone();
             let v = b.revoke(&asset, version)?;
             b.save(&file.broker)?;
             println!("{asset}: key version {v} revoked");
+            if b.state().kek_id != kek {
+                println!(
+                    "KEK replaced ({} -> {}): an older state file no longer yields the revoked key \
+                     under the current KEK",
+                    kek.as_deref().unwrap_or("?"),
+                    b.state().kek_id.as_deref().unwrap_or("?")
+                );
+            } else {
+                println!(
+                    "NOT SHREDDED: this store has no KEK it can replace; an older state file \
+                     still holds the key"
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
         BrokerCmd::Rewrap { new_kek, file } => {
@@ -735,7 +1036,11 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        BrokerCmd::RotateRoot { file, report } => {
+        BrokerCmd::RotateRoot {
+            file,
+            report,
+            retire_old_versions,
+        } => {
             let mut s = file.root()?.ok_or_else(|| {
                 Error::new(
                     Code::KeyRelease,
@@ -754,6 +1059,13 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
                     serde_json::to_value(&r).expect("serializable"),
                 )?;
                 println!("recorded in the control plane's audit trail");
+            }
+            if retire_old_versions {
+                let v = s.retire_older_root_versions()?;
+                println!(
+                    "root key versions older than {v} retired: a wrapped KEK from an older backup \
+                     can no longer be opened"
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -781,17 +1093,239 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        BrokerCmd::GovernanceKey {
+            cmd: GovernanceKeyCmd::Pin { key, file },
+        } => {
+            let mut b = open_broker(&file, None)?;
+            if let Some(org) = &file.organization {
+                b.set_organization(org)?;
+            }
+            b.pin_governance_key(&key)?;
+            b.save(&file.broker)?;
+            println!(
+                "governance key {} of {} pinned: only authorizations it signed are installed, \
+                 and keys are released only in governed releases",
+                encompute_runtime::trust::authz::governance_key_id(&key),
+                b.organization().unwrap_or("?")
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::GovernanceKey {
+            cmd:
+                GovernanceKeyCmd::PinLineage {
+                    organization,
+                    attestation,
+                    url,
+                    key_id,
+                    control,
+                    file,
+                },
+        } => {
+            let a: encompute_runtime::trust::authz::SignedGovernanceKeyAttestation =
+                match (attestation, url) {
+                    (Some(path), _) => read_json(&path, "a governance key attestation")?,
+                    (None, Some(url)) => {
+                        let c = crate::control::ControlClient::from_env(Some(&url))?;
+                        let mut path =
+                            format!("/v1/organizations/{organization}/governance-key-attestation");
+                        if let Some(k) = &key_id {
+                            path.push_str(&format!("?key_id={k}"));
+                        }
+                        serde_json::from_value(c.get(&path)?).map_err(|e| {
+                            Error::new(
+                                Code::BadInput,
+                                format!("the control plane's attestation: {e}"),
+                            )
+                        })?
+                    }
+                    (None, None) => unreachable!("clap requires --attestation or --url"),
+                };
+            let mut b = control.configure(open_broker(&file, None)?)?;
+            let pinned = b.pin_lineage_governance_key(&organization, &a)?;
+            b.save(&file.broker)?;
+            if pinned {
+                println!(
+                    "governance key {} of {organization} pinned (attested at {}): its \
+                     authorizations of results derived from its data are installed and \
+                     required here",
+                    a.body.key_id, a.body.issued_at
+                );
+            } else {
+                println!(
+                    "governance key {} of {organization} was revoked: it is no longer pinned, and \
+                     nothing it signed is used here",
+                    a.body.key_id
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::BindVersion {
+            asset,
+            version_id,
+            derived,
+            cosignature,
+            control,
+            file,
+        } => {
+            let mut b = open_broker(&file, None)?;
+            if let (Some(path), Some(cosigned)) = (derived, cosignature) {
+                let record: encompute_runtime::trust::authz::SignedReleaseRecord =
+                    read_json(&path, "a signed release record")?;
+                let cosignature: encompute_runtime::trust::authz::SignedDerivedReleaseCosignature =
+                    read_json(&cosigned, "the control plane's co-signature")?;
+                if record.body.derived_version_id != version_id {
+                    return Err(Error::new(
+                        Code::GovernanceAssetVersionMismatch,
+                        "the release record is for another version",
+                    ));
+                }
+                b = control.configure(b)?;
+                b.bind_derived_version(&asset, &record, &cosignature)?;
+                b.save(&file.broker)?;
+                println!("{asset}: bound to derived result {version_id} (co-signed by the control plane)");
+            } else {
+                b.bind_version(&asset, &version_id)?;
+                b.save(&file.broker)?;
+                println!("{asset}: bound to source version {version_id}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::RebindLineage {
+            asset,
+            cosignature,
+            control,
+            file,
+        } => {
+            let c: encompute_runtime::trust::authz::SignedDerivedReleaseCosignature =
+                read_json(&cosignature, "the control plane's co-signature")?;
+            let mut b = control.configure(open_broker(&file, None)?)?;
+            let changed = b.rebind_derived_lineage(&asset, &c)?;
+            b.save(&file.broker)?;
+            println!(
+                "{asset}: {} (co-signed by the control plane at {})",
+                if changed {
+                    "re-bound to its lineage owners' current governance keys"
+                } else {
+                    "already bound to its lineage owners' current governance keys"
+                },
+                c.body.issued_at
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::Authorization {
+            cmd:
+                AuthorizationCmd::Install {
+                    document,
+                    url,
+                    file,
+                },
+        } => {
+            let a: SignedAuthorizationV2 = read_json(&document, "a signed authorization")?;
+            let id = match url {
+                Some(u) => BrokerClient::new(&u).install_authorization(&a)?,
+                None => {
+                    let mut b = open_broker(&file, None)?;
+                    let id = b.install_authorization(&a)?;
+                    b.save(&file.broker)?;
+                    id
+                }
+            };
+            println!(
+                "authorization {id} installed: {} in project {}, valid [{}, {})",
+                a.body.party, a.body.project, a.body.valid_from, a.body.valid_until
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        BrokerCmd::Authorization {
+            cmd:
+                AuthorizationCmd::Revoke {
+                    id,
+                    reason,
+                    revocation,
+                    url,
+                    file,
+                },
+        } => {
+            let id = match (revocation, id, url) {
+                (Some(p), None, url) => {
+                    let r: SignedRevocationV2 = read_json(&p, "a signed revocation")?;
+                    match url {
+                        Some(u) => BrokerClient::new(&u).revoke_authorization(&r)?,
+                        None => {
+                            let mut b = open_broker(&file, None)?;
+                            b.revoke_authorization_signed(&r)?;
+                            b.save(&file.broker)?;
+                        }
+                    }
+                    r.body.authorization
+                }
+                (None, Some(id), None) => {
+                    let mut b = open_broker(&file, None)?;
+                    b.revoke_authorization_local(&id, None)?;
+                    b.save(&file.broker)?;
+                    id
+                }
+                _ => {
+                    return Err(Error::new(
+                        Code::BadInput,
+                        "revoke an authorization by ID (in the state file), or pass \
+                         --revocation FILE (optionally with --url)",
+                    ))
+                }
+            };
+            println!(
+                "authorization {id} revoked at this broker{}",
+                reason.map(|r| format!(": {r}")).unwrap_or_default()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         BrokerCmd::Serve {
             listen,
             requests_per_minute,
+            control_key,
+            no_require_ticket,
+            replace_control_key: replace,
+            lineage_attestation_max_age,
             trust,
             file,
         } => {
             let mut b = open_broker(&file, Some(&trust))?;
+            let control_key =
+                control_key.or_else(|| std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY").ok());
+            if let (true, Some(k)) = (replace, &control_key) {
+                replace_control_key(&mut b, k)?;
+            }
+            b = match control_key {
+                Some(k) => b.with_governance(GovernanceConfig {
+                    require_ticket: !no_require_ticket,
+                    lineage_attestation_max_age_secs: lineage_attestation_max_age,
+                    ..GovernanceConfig::new(&k)
+                })?,
+                None if no_require_ticket => {
+                    return Err(Error::new(
+                        Code::InsecureConfiguration,
+                        "--no-require-ticket needs the control plane's key (--control-key)",
+                    ))
+                }
+                None => b,
+            };
+            // A governed production broker needs a generation mark.
+            b.check_generation_mark()?;
             // Keeps a grant-signing key created for an older state file.
             b.save(&file.broker)?;
             let control = match std::env::var("ENCOMPUTE_CONTROL_PUBLIC_KEY") {
                 Ok(key) => {
+                    // Revocations are accepted only from the pinned control
+                    // plane.
+                    if b.pinned_control_key().is_some_and(|k| k != key) {
+                        return Err(Error::new(
+                            Code::InsecureConfiguration,
+                            "ENCOMPUTE_CONTROL_PUBLIC_KEY is not the control-plane key pinned in \
+                             the broker's state: pass it with --control-key \
+                             --replace-control-key if the control plane's key really changed",
+                        ));
+                    }
+                    b.pin_control_key(&key)?;
                     // A broker serves one organization; revocations name it.
                     let org = file.organization.as_deref().ok_or_else(|| {
                         Error::new(
@@ -877,6 +1411,15 @@ fn print_state(b: &KeyBroker) {
         s.organization.as_deref().unwrap_or("(none)")
     );
     println!("{:<14}{}", "Grant key", b.grant_public_key());
+    if let Some(k) = &s.governance_key {
+        println!("{:<14}{} (governed)", "Governance", k.key_id());
+        println!(
+            "{:<14}{} installed, {} revoked",
+            "Authorizations",
+            s.authorizations.len(),
+            s.revoked_authorizations.len()
+        );
+    }
     for (asset, k) in &s.secrets {
         let p = &k.release_policy;
         let revoked: Vec<String> = k
@@ -887,6 +1430,12 @@ fn print_state(b: &KeyBroker) {
             .collect();
         section(&format!("Asset {asset}"));
         println!("  {:<18}{}", "Current version", k.key_version);
+        if let Some(v) = &k.asset_version_id {
+            println!("  {:<18}{v}", "Source version");
+        }
+        if k.expired {
+            println!("  {:<18}EXPIRED", "Retention");
+        }
         println!(
             "  {:<18}{}",
             "Revoked versions",

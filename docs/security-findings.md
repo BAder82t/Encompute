@@ -250,31 +250,161 @@ confirmed on 2026-09-29.
 | ENC-SF-2026-093 | Removing a role (`memberships/remove`) was not anchored: a database restore gave the principal the role back (rc.4) | Medium | encompute-control (`anchor.rs`, `control.rs`, `ops/tenancy.rs`, migration 0004) | fixed | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `caaf754` | `crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_removed_role_removed`, `crates/encompute-control/tests/anchor_rollback.rs::approvals_from_before_version_4_get_stable_ids` | INV-178 (extended) | api.md, deployment.md, threat-model.md, KNOWN_LIMITATIONS.md |
 | ENC-SF-2026-094 | Source-asset lists were trusted for jobs whose program binds no registered asset (the ENC-SF-2026-089 residual): an omitted or extra asset became the job's lineage, revocation scope and trust report | Medium | encompute-control (`ops/jobs.rs`) | fixed | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `1a3d68d` | `crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_assets_its_program_binds_even_its_own`, `crates/encompute-control/tests/collaboration.rs::the_derived_sources_drive_revocation_and_the_trust_report` | INV-194 (extended) | api.md, KNOWN_LIMITATIONS.md, CHANGELOG.md |
 
+### Closed on the governance branch (unreleased)
+
+Items that were listed as open and are closed by the governance event log
+(not in a released version: they ship with the release that includes the
+governance branch). Each has a test that fails against the code before.
+
+- **The state anchor grew without bound, and was rewritten whole**
+  (ENC-SF-2026-083, the open part). Version 1 held the sets of ended jobs,
+  withdrawn approvals, removed memberships and removed roles (OpenBao
+  refused an entry above 1 MiB, roughly 25,000 to 30,000 ended jobs). The
+  version-2 anchor is a constant few hundred bytes: it holds the governance
+  event log's size and head (a hash-chained, append-only log with
+  per-partition signed Merkle checkpoints), mirrored into the anchor store
+  before each anchor compare-and-set; a version-1 anchor migrates once.
+  Measured with 120,100 events: 410 bytes at the start, 417 at the end
+  (`crates/encompute-control/tests/governance_scale.rs::load_10k_events`
+  on every run, `load_100k_events_heavy` by hand). The per-spend cost of
+  re-verifying the whole ledger remains (KNOWN_LIMITATIONS.md). INV-226.
+- **The audit chain had an unanchored tail.** A checkpoint of the
+  governance log now anchors the audit head in the same compare-and-set,
+  synchronously for each security deny event and every two seconds in the
+  background, so a deny call no longer returns with its own audit event
+  or earlier ones unanchored (`0e5bd16`,
+  `crates/encompute-control/tests/audit_tail.rs::a_deny_call_anchors_the_audit_events_before_it`;
+  it failed on the previous code with the anchor's audit head at 0).
+  Ordinary audit events still wait for the next checkpoint (two seconds at
+  most), and the audit chain has no mirror: a truncated chain is detected,
+  not restored (KNOWN_LIMITATIONS.md). INV-162, INV-226 (`030b5cb`).
+- **The governance log's mirror grew without bound, and recovery from it
+  was slow** (ENC-SF-2026-083, the open part). Closed: the mirror can be
+  compacted into an archive the state anchor's seal commits to
+  (`compact-governance-mirror`; anchor version 3, constant size), and
+  recovery's import is batched. Not closed, stated plainly: the
+  **database's** log and its start check still grow (a compaction of the
+  mirror does not touch them, on purpose: they are what detects a
+  rollback). Tests that fail against the code before (naive variants built
+  from these sources fail them): `crates/encompute-control/tests/mirror_compaction.rs`
+  (`compaction_seals_archives_prunes_and_the_service_restarts` fails if the
+  seal is not committed before pruning, `a_crash_before_the_commit_point_changes_nothing`
+  fails if pruning comes before the commit point, `a_tampered_archive_is_refused`
+  fails without the manifest digest and segment hash checks,
+  `a_truncated_or_replayed_tail_is_refused` fails without the gap check or
+  if a rebuild starts at event 1, `the_writer_starts_over_after_the_seal`
+  fails if a wiped mirror is rewritten from event 1,
+  `deny_state_survives_compaction_and_recovery` fails if a compaction also
+  deletes database events) and
+  `crates/encompute-control/tests/mirror_import.rs` (a non-atomic or
+  incomplete batched import fails the equivalence and kill tests).
+  Measured on the 120,100-event fixture: the anchor 417 -> 592 bytes
+  (the seal; constant however many events it covers), the mirror 241 ->
+  25 segments and 26.5 MB -> 2.7 MB (23.8 MB archived), the database's log
+  tables unchanged at 126.4 MB, the mirror check 1.00 s -> 0.09 s, the
+  start 15.7 s -> 11.2 s (a loaded machine: the start is dominated by
+  recomputing the database's log), recovery of 107,600 events about 1,011 s ->
+  about 160 s, approximately 6x on the 120k-event fixture in this
+  environment and not a guaranteed benchmark, on a heavily loaded machine
+  (`load_100k_events_heavy`). INV-226, INV-251.
+
+Two residuals of the rc.3 round are fixed on the governance branch. They
+ship with the release that merges it.
+
+- **Evaluator upload grants were reusable and not bound to a client**
+  (ENC-SF-2026-064, residual; `cb6a764`). A program or key upload took the
+  job's grant, which names no client or key, is visible to the whole
+  submitting organization, and was never spent. An upload now needs an
+  upload grant that the control plane issues only to the principal that
+  submitted the job, signed over the evaluator, the program ID, the key ID
+  and a random grant ID; the evaluator spends it atomically (one upload per
+  grant, a replay is ENC2608) and a job grant opens no upload. Spent grants
+  are kept in memory, one node: a restart forgets them, so the evaluator
+  accepts no grant issued before it started (limit: it assumes the control
+  plane's clock is not ahead of the evaluator's by more than the time
+  between a grant's use and the restart). Tests:
+  `crates/encompute-evaluator/tests/uploads.rs::an_upload_grant_admits_exactly_one_upload`,
+  `concurrent_uploads_with_one_grant_succeed_once`,
+  `an_upload_grant_binds_the_keys_it_names`,
+  `a_restarted_evaluator_accepts_no_earlier_grant`;
+  `crates/encompute-control/tests/upload_grants.rs`; INV-248, INV-202
+  (extended).
+- **A co-tenant could block a victim's key upload** (ENC-SF-2026-035,
+  residual; `77d010f`). A client that knew the victim's key tag could
+  upload its own keys under it first, and the victim's upload was then
+  refused (409) until the entry was evicted. The shim now keeps each
+  uploaded set under the key tag and the SHA-256 of its key material, so
+  the two never meet. Test:
+  `crates/encompute-openfhe-client/tests/key_tags.rs::another_clients_keys_under_the_victims_tag_are_never_used`;
+  INV-171 (extended).
+- **Concurrent starts were refused with a spurious ENC2202** (a
+  correctness finding, not an exposure: fail-closed). A governed job's
+  start decides under row locks and commits, then anchors its result. When
+  another control plane stored the state anchor first, the update was
+  attempted four times without a pause; a start that lost them all returned
+  ENC2202 ("the state anchor changed concurrently") in place of the
+  decision it had committed (typically the refusal on the population cap,
+  ENC2201, with the job failed). The privacy cap was never exceeded: it is
+  enforced by the row locks before any anchoring, and the committed
+  refusal is kept and anchored by the next checkpoint. Measured on the
+  unmodified tree: 5 failures in 40 runs of
+  `concurrent_starts_never_exceed_the_population`, every one the deny
+  checkpoint of a refused start (`tx_anchored`, `checkpoint_log`, four
+  attempts lost). Now the conflict is a typed condition, never confused
+  with the rollback refusals that share ENC2202 (those are never retried),
+  and is attempted at most three times in all, each from the stored anchor
+  read and verified again (one bound, also covering a mirror segment
+  written concurrently); a deny another control plane's checkpoint
+  already anchored (the anchor has reached the log's head and the audit
+  chain's head as they were right after the commit, and the database's own
+  chains hold the anchored head and root) needs no second store, so a start
+  does not chase a log other writers keep extending; the retries and the exhausted case are counted
+  and logged. Tests:
+  `crates/encompute-control/tests/privacy_scopes.rs::a_refusal_a_busy_rival_anchors_is_not_starved_by_the_rival`
+  (fails against the old retry: ENC2202),
+  `an_anchor_that_never_settles_refuses_after_the_bound_and_leaves_the_refusal_to_anchor`,
+  `many_concurrent_starts_across_two_control_planes_reserve_exactly_what_fits`,
+  `crates/encompute-control/src/anchor.rs::a_rollback_refusal_or_any_other_failure_is_never_retried`;
+  INV-252.
+
 ### Open (accepted / needs design)
 
 Known issues from the release-candidate rounds that are not fixed yet.
 Each needs a design decision, or is accepted for now with the mitigation
 stated.
 
-- **Several key brokers in one training job need a per-asset binding.**
-  A workload trusts each broker its spec names for every asset, so a second
-  broker could grant a key for the first one's assets. Specs are limited to
-  exactly one broker (`TrainingSpec::validate`, tested by
-  `crates/encompute-training/tests/training.rs::a_spec_binds_its_key_brokers`,
-  closing the gap in ENC-SF-2026-036); an asset-to-broker map is the
-  design for multi-owner custody.
-- **An older key broker state file resurrects revoked keys.**
-  `lifecycle_restoring_an_older_state_file_resurrects_a_revoked_key`
-  documents it. Since ENC-SF-2026-043 the state file is authenticated
-  under a key derived from the KEK, so an edited file does not open; but
-  an older copy that was genuinely authenticated still opens, and
-  restoring it by hand brings the revoked keys back. `restore.sh` keeps a
-  newer broker state. Detecting the rollback needs the state's
-  generation anchored outside the file (in the KMS or the control plane).
-- **Revocation does not crypto-shred.** A revocation rewrites the current
-  state file only; an old state file plus the unchanged KEK still yields
-  the revoked keys. A per-asset KEK, or KEK rotation on revoke, would fix
-  it.
+- **Closed on the governance branch (unreleased): per-asset key broker
+  binding.** A training spec may bind each key to its owner's broker
+  (`asset_brokers`, with `broker_organizations`); a workload accepts a
+  key's grant only from the broker bound to it, and a governed broker
+  refuses a key its governance binding gives to another broker (`c7ac996`,
+  `40284e9`, `crates/encompute-training/tests/training.rs::contribution_key_bound_to_another_parties_broker_refused`,
+  `crates/encompute-keybroker/tests/grant_pinning.rs::a_grant_for_an_asset_from_another_owners_broker_is_refused`,
+  `crates/encompute-keybroker/tests/sovereign.rs::governed_broker_refuses_asset_bound_to_another_broker`;
+  INV-235). A spec without the map still names exactly one broker, and its
+  ID is unchanged. The adversarial cases added later are in `8092c0f`.
+  Older readers refuse a spec that has the map (unknown field): no
+  migration is needed, and nothing reads it wrongly.
+- **Closed on the governance branch (unreleased): an older broker state
+  file no longer resurrects revoked keys under a generation mark.** The
+  state's generation and MAC are recorded in the organization's KMS with
+  compare-and-set before a change is acknowledged or a key granted, and a
+  state older than the mark, forked, or not chained to it is refused
+  (`472a4eb`, `crates/encompute-keybroker/tests/generation.rs::broker_state_rollback_refused_by_kms_generation`,
+  INV-236). Without a mark (development, or a non-governed broker) the
+  rollback of a state restored with its own KEK is still not detected: a
+  governed production broker refuses to run without one.
+- **Closed on the governance branch (unreleased): revocation crypto-shreds
+  the revoked key against an older state file.** A revocation also
+  replaces the KEK, in the same change as the revocation and the same
+  generation-mark advance (`0d4b013`,
+  `crates/encompute-keybroker/tests/crypto_shred.rs::revoking_shreds_the_old_state_for_the_current_kek`,
+  `crates/encompute-keybroker/tests/lifecycle.rs::lifecycle_restoring_an_older_state_file_cannot_release_a_revoked_key`;
+  INV-250). It does not cover a copy of the old KEK: a KEK file in a
+  backup, or an old wrapped KEK while its root key version is not retired
+  (`encompute keys rotate-root --retire-old-versions`), still opens an
+  older state file, and a store with no KEK it can replace (development
+  plaintext) shreds nothing. See [deployment.md](deployment.md#revoking-a-key-and-recovering-a-broker).
 - **An anchor restored from the same backup forgets later spend.** When
   the database and the anchor are restored together, privacy spend rolls
   back to the backup. Keep the anchor outside the backup set, in the
@@ -286,8 +416,6 @@ stated.
   process.
 - **torch and transformers CVEs** are `not_affected` exceptions in the
   vulnerability policy until 2026-12-31.
-- **The audit chain has an unanchored tail:** events after the last
-  anchor can be truncated without detection.
 - **A DP plan with no budgeted asset produces no privacy receipt**, so an
   aggregation receipt has nothing to bind.
 - **Identity providers are not bound per organization**
@@ -303,27 +431,8 @@ stated.
   declares.
 - **One control-plane process per anchor** (ENC-SF-2026-083, partly
   fixed). A lost compare-and-set now reloads and re-applies, but running
-  several replicas against one anchor is not supported; the anchor's sets
-  of ended jobs, withdrawn approvals, removed project memberships and
-  removed roles grow without bound, and the whole anchor is rewritten on each update.
-  OpenBao's KV store refuses an entry above its raft `max_entry_size`
-  (1 MiB by default, roughly 25,000 to 30,000 ended jobs); past it anchor
-  writes fail and the control plane fails closed (spends, cancellations
-  and revocation acknowledgements stop). Mitigation for now: the
-  `encompute_anchor_bytes` gauge and a warning above 512 KiB, and raising
-  `max_entry_size`. The cost of keeping the anchor grows with the
-  deployment's age as well: each privacy spend re-loads and re-verifies
-  the whole ledger when it anchors it (on top of the verification inside
-  the spend's transaction), and every security-negative operation rescans
-  all the anchored-state tables. Both fail closed. A hash-chained
-  governance event log replaces these sets, and both costs, before general
-  availability.
-- **Evaluator upload grants are reusable until they expire**
-  (ENC-SF-2026-064, partly fixed), and are not bound to a client.
-- **A co-tenant can block a victim's key upload** (ENC-SF-2026-035,
-  residual). A client that knows the victim's key tag can upload its own
-  keys under it first; the victim's upload is then refused (409) until
-  the entry is evicted. The victim's result is never wrong.
+  several replicas against one anchor is not supported. The anchor's
+  growth and rewrite cost are closed (see below).
 - **The plan validator's exact-equality check still uses the planner's
   `derive`** (ENC-SF-2026-077, partly fixed). The validator's independent
   floor covers the core requirements only.

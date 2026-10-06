@@ -30,11 +30,13 @@ mod util;
 
 pub use binding::{AttestationChallenge, WorkloadBinding, BINDING_VERSION};
 pub use grant::{
-    seal_grant, EncryptedKeyGrant, GrantHeader, GrantSigner, WorkloadSession, GRANT_VERSION,
+    seal_grant, seal_grant_to, EncryptedKeyGrant, ExportRecipient, GrantGovernanceHeader,
+    GrantHeader, GrantSigner, KeyReleaseReceipt, WorkloadSession, GRANT_VERSION,
+    GRANT_VERSION_GOVERNED, RELEASE_RECEIPT_VERSION,
 };
 pub use policy::{
     public_denial, AttestationPolicy, DebugPolicy, Security, TcbStatus, TeeKind, VerifiedGpu,
-    VerifiedWorkload, POLICY_VERSION,
+    VerifiedWorkload, WorkloadLocation, POLICY_VERSION,
 };
 pub use provider::{
     check_freshness, AttestationEvidence, AttestationProvider, Attester, DynProvider, Verifier,

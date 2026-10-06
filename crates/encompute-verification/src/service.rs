@@ -31,10 +31,16 @@ pub const SERVICE_REQUEST: &str = "encompute.service-request.v1";
 pub const SERVICE_MESSAGE: &str = "encompute.service-message.v1";
 /// Domain of job grants (control plane → evaluator).
 pub const JOB_GRANT: &str = "encompute.job-grant.v1";
+/// Domain of evaluator upload grants (control plane → client → evaluator).
+pub const UPLOAD_GRANT: &str = "encompute.upload-grant.v1";
 /// Domain of signed audit checkpoints.
 pub const AUDIT_CHECKPOINT: &str = "encompute.audit-checkpoint.v1";
-/// Domain of the control plane's state anchor (privacy and audit roots).
+/// Domain of the control plane's state anchor, version 1 (privacy and
+/// audit roots and the sets of security-negative IDs).
 pub const STATE_ANCHOR: &str = "encompute.state-anchor.v1";
+/// Domain of the control plane's state anchor, version 2 (privacy and
+/// audit roots and the governance event log's anchored head).
+pub const STATE_ANCHOR_V2: &str = "encompute.state-anchor.v2";
 
 /// Requests older or newer than this are refused.
 pub const MAX_CLOCK_SKEW_SECS: u64 = 300;
@@ -362,11 +368,19 @@ pub struct JobGrant {
     pub expires_at: u64,
     pub issuer: String,
     pub issuer_public_key: String,
+    /// Version 2 (governed projects only): the plan hash, purpose,
+    /// governance binding, authorization set and strict `not_after`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance: Option<crate::governance::GrantGovernance>,
     #[serde(default)]
     pub signature: String,
 }
 
 pub const JOB_GRANT_VERSION: u32 = 1;
+/// The version of a governed project's grant ([`JobGrant::governance`]).
+pub const JOB_GRANT_V2: u32 = 2;
+/// Domain of a job grant's digest, bound by version 4 receipts.
+pub const JOB_GRANT_DIGEST: &str = "encompute.job-grant-digest.v1";
 /// A grant is usable for this long after scheduling.
 pub const JOB_GRANT_TTL_SECS: u64 = 3600;
 /// The HTTP header carrying a grant (hex of its JSON).
@@ -390,8 +404,15 @@ impl JobGrant {
         program_id: &str,
         now: u64,
     ) -> Result<()> {
-        if self.version != JOB_GRANT_VERSION {
-            return Err(auth(format!("job grant version {}", self.version)));
+        match (self.version, &self.governance) {
+            (JOB_GRANT_VERSION, None) | (JOB_GRANT_V2, Some(_)) => {}
+            (JOB_GRANT_VERSION, Some(_)) => {
+                return Err(auth("a version 1 job grant carries no governance"))
+            }
+            (JOB_GRANT_V2, None) => {
+                return Err(auth("a version 2 job grant carries its governance"))
+            }
+            (v, _) => return Err(auth(format!("job grant version {v}"))),
         }
         if self.issuer_public_key != control_key {
             return Err(auth(
@@ -411,7 +432,33 @@ impl JobGrant {
         if now > self.expires_at {
             return Err(auth("the job grant expired"));
         }
+        if let Some(g) = &self.governance {
+            g.check(&self.project)?;
+            // Strict: the grant never outlives its authorizations, and is
+            // dead at `not_after` (no clock margin).
+            if self.expires_at > g.not_after {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationExpired,
+                    "the job grant outlives its authorizations",
+                ));
+            }
+            if now >= g.not_after {
+                return Err(Error::new(
+                    Code::GovernanceAuthorizationExpired,
+                    "the job grant's authorizations have expired",
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Lowercase hex digest of the whole signed grant (what a version 4
+    /// receipt binds).
+    pub fn digest(&self) -> String {
+        hex(&tagged(
+            JOB_GRANT_DIGEST,
+            &canonical_json(self).expect("strings and integers only"),
+        ))
     }
 
     pub fn to_header(&self) -> String {
@@ -421,6 +468,149 @@ impl JobGrant {
     pub fn from_header(h: &str) -> Result<Self> {
         let b = unhex(h.trim()).ok_or_else(|| auth("malformed job grant header"))?;
         serde_json::from_slice(&b).map_err(|e| auth(format!("malformed job grant: {e}")))
+    }
+}
+
+/// What an upload grant admits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadKind {
+    /// One program (by its ID, known before it is compiled).
+    Program,
+    /// One set of evaluation keys (by the SHA-256 of the key material,
+    /// which contains the key tag).
+    Keys,
+}
+
+impl UploadKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UploadKind::Program => "program",
+            UploadKind::Keys => "keys",
+        }
+    }
+}
+
+/// An upload grant: the control plane's signed authorization for one client
+/// to upload one program, or one set of evaluation keys, to one evaluator
+/// for one job. Unlike a job grant (a bearer that anyone who can read the
+/// job holds), it names the client the control plane authenticated when it
+/// issued it, the object it admits (the program ID, or the key ID, the
+/// SHA-256 of the key material, which carries the key tag), the evaluator,
+/// a random `grant_id` and an expiry. The evaluator spends it atomically:
+/// exactly one upload succeeds with a grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadGrant {
+    pub version: u32,
+    /// 128 random bits, hex: the nonce the evaluator spends.
+    pub grant_id: String,
+    pub kind: UploadKind,
+    pub organization: String,
+    pub project: String,
+    pub job_id: String,
+    /// The principal the control plane authenticated when it issued the
+    /// grant: the job's initiator, never another member of the project.
+    pub client: String,
+    pub evaluator: String,
+    pub program_id: String,
+    /// Keys only: the key ID the upload must carry. Empty for a program.
+    pub key_id: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub issuer: String,
+    pub issuer_public_key: String,
+    #[serde(default)]
+    pub signature: String,
+}
+
+pub const UPLOAD_GRANT_VERSION: u32 = 1;
+/// An upload grant is usable for this long, and never beyond its job
+/// grant's expiry.
+pub const UPLOAD_GRANT_TTL_SECS: u64 = 3600;
+/// The HTTP header carrying an upload grant (hex of its JSON).
+pub const H_UPLOAD_GRANT: &str = "Encompute-Upload-Grant";
+
+impl UploadGrant {
+    /// The signed part (everything but the signature).
+    pub fn unsigned(&self) -> UploadGrant {
+        UploadGrant {
+            signature: String::new(),
+            ..self.clone()
+        }
+    }
+
+    /// Checks the grant was signed by `control_key` (pinned), admits
+    /// `kind` of `program_id` (and, for keys, `key_id`) on `evaluator`, was
+    /// not issued in the future (beyond the clock skew) and has not
+    /// expired. It does not spend the grant.
+    pub fn verify(
+        &self,
+        control_key: &str,
+        evaluator: &str,
+        kind: UploadKind,
+        program_id: &str,
+        key_id: Option<&str>,
+        now: u64,
+    ) -> Result<()> {
+        if self.version != UPLOAD_GRANT_VERSION {
+            return Err(auth(format!("upload grant version {}", self.version)));
+        }
+        if self.issuer_public_key != control_key {
+            return Err(auth(
+                "the upload grant was not issued by the pinned control plane",
+            ));
+        }
+        verify_signed(control_key, UPLOAD_GRANT, &self.unsigned(), &self.signature)?;
+        if self.grant_id.len() != 32
+            || !self
+                .grant_id
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            return Err(auth("the upload grant's ID is not 128 bits of hex"));
+        }
+        if self.evaluator != evaluator {
+            return Err(auth(format!(
+                "the upload grant is for evaluator {}",
+                self.evaluator
+            )));
+        }
+        if self.kind != kind {
+            return Err(auth(format!(
+                "the upload grant admits a {} upload, not a {} upload",
+                self.kind.as_str(),
+                kind.as_str()
+            )));
+        }
+        if self.program_id != program_id {
+            return Err(auth("the upload grant is for another program"));
+        }
+        match (kind, key_id) {
+            (UploadKind::Program, _) => {
+                if !self.key_id.is_empty() {
+                    return Err(auth("a program upload grant names no key"));
+                }
+            }
+            (UploadKind::Keys, Some(k)) if self.key_id == k => {}
+            (UploadKind::Keys, _) => return Err(auth("the upload grant is for other keys")),
+        }
+        if self.issued_at > now.saturating_add(MAX_CLOCK_SKEW_SECS) {
+            return Err(auth("the upload grant was issued in the future"));
+        }
+        if now > self.expires_at {
+            return Err(auth("the upload grant expired"));
+        }
+        Ok(())
+    }
+
+    pub fn to_header(&self) -> String {
+        hex(&serde_json::to_vec(self).expect("serializable"))
+    }
+
+    pub fn from_header(h: &str) -> Result<Self> {
+        let b = unhex(h.trim()).ok_or_else(|| auth("malformed upload grant header"))?;
+        serde_json::from_slice(&b).map_err(|e| auth(format!("malformed upload grant: {e}")))
     }
 }
 
@@ -732,6 +922,180 @@ mod tests {
         assert!(check_service_id("Evaluator 1").is_err());
     }
 
+    fn upload_grant(control: &ServiceSigner, kind: UploadKind) -> UploadGrant {
+        let mut g = UploadGrant {
+            version: UPLOAD_GRANT_VERSION,
+            grant_id: "ab".repeat(16),
+            kind,
+            organization: "modelco".into(),
+            project: "prj_1".into(),
+            job_id: "job_1".into(),
+            client: "usr_1".into(),
+            evaluator: "evaluator-1".into(),
+            program_id: "p".repeat(64),
+            key_id: if kind == UploadKind::Keys {
+                "k".repeat(64)
+            } else {
+                String::new()
+            },
+            issued_at: 1000,
+            expires_at: 2000,
+            issuer: "control-plane".into(),
+            issuer_public_key: control.public_key_hex(),
+            signature: String::new(),
+        };
+        g.signature = control.sign(UPLOAD_GRANT, &g.unsigned()).unwrap();
+        g
+    }
+
+    #[test]
+    fn upload_grants_bind_object_evaluator_nonce_and_expiry() {
+        let control = ServiceSigner::from_seed("control-plane", &[5; 32]).unwrap();
+        let pk = control.public_key_hex();
+        let p = "p".repeat(64);
+        let k = "k".repeat(64);
+        let keys = upload_grant(&control, UploadKind::Keys);
+        let program = upload_grant(&control, UploadKind::Program);
+        let check = |g: &UploadGrant, ev: &str, kind, pid: &str, key: Option<&str>, at| {
+            g.verify(&pk, ev, kind, pid, key, at)
+        };
+        check(&keys, "evaluator-1", UploadKind::Keys, &p, Some(&k), 1500).unwrap();
+        check(&program, "evaluator-1", UploadKind::Program, &p, None, 1500).unwrap();
+        assert_eq!(UploadGrant::from_header(&keys.to_header()).unwrap(), keys);
+        let refused = |r: Result<()>| assert_eq!(r.unwrap_err().code, Code::ServiceAuthentication);
+        let q = "q".repeat(64);
+        let j = "j".repeat(64);
+        // Another evaluator, kind, program, key or time.
+        refused(check(
+            &keys,
+            "evaluator-2",
+            UploadKind::Keys,
+            &p,
+            Some(&k),
+            1500,
+        ));
+        refused(check(
+            &keys,
+            "evaluator-1",
+            UploadKind::Program,
+            &p,
+            None,
+            1500,
+        ));
+        refused(check(
+            &program,
+            "evaluator-1",
+            UploadKind::Keys,
+            &p,
+            Some(&k),
+            1500,
+        ));
+        refused(check(
+            &keys,
+            "evaluator-1",
+            UploadKind::Keys,
+            &q,
+            Some(&k),
+            1500,
+        ));
+        refused(check(
+            &keys,
+            "evaluator-1",
+            UploadKind::Keys,
+            &p,
+            Some(&j),
+            1500,
+        ));
+        refused(check(
+            &keys,
+            "evaluator-1",
+            UploadKind::Keys,
+            &p,
+            None,
+            1500,
+        ));
+        refused(check(
+            &keys,
+            "evaluator-1",
+            UploadKind::Keys,
+            &p,
+            Some(&k),
+            2001,
+        ));
+        refused(check(
+            &keys,
+            "evaluator-1",
+            UploadKind::Keys,
+            &p,
+            Some(&k),
+            100,
+        ));
+        // A job grant is not an upload grant: it does not even parse as one.
+        let job = JobGrant {
+            version: JOB_GRANT_VERSION,
+            job_id: "job_1".into(),
+            organization: "modelco".into(),
+            project: "prj_1".into(),
+            plan_id: "pln_1".into(),
+            spec_id: "s".repeat(64),
+            program_id: p.clone(),
+            evaluator: "evaluator-1".into(),
+            backend: "mock".into(),
+            profile: "p".into(),
+            issued_at: 1000,
+            expires_at: 2000,
+            issuer: "control-plane".into(),
+            issuer_public_key: pk.clone(),
+            governance: None,
+            signature: String::new(),
+        };
+        assert!(UploadGrant::from_header(&job.to_header()).is_err());
+        // Every field is signed: client, nonce, expiry, organization, job.
+        let edits: [fn(&mut UploadGrant); 5] = [
+            |g| g.client = "usr_2".into(),
+            |g| g.grant_id = "cd".repeat(16),
+            |g| g.expires_at = 9999,
+            |g| g.organization = "other".into(),
+            |g| g.job_id = "job_2".into(),
+        ];
+        for edit in edits {
+            let mut e = keys.clone();
+            edit(&mut e);
+            refused(check(
+                &e,
+                "evaluator-1",
+                UploadKind::Keys,
+                &p,
+                Some(&k),
+                1500,
+            ));
+        }
+        // Re-signed by another key but claiming the pinned one.
+        let other = ServiceSigner::from_seed("control-plane", &[6; 32]).unwrap();
+        let mut f = keys.clone();
+        f.signature = other.sign(UPLOAD_GRANT, &f.unsigned()).unwrap();
+        refused(check(
+            &f,
+            "evaluator-1",
+            UploadKind::Keys,
+            &p,
+            Some(&k),
+            1500,
+        ));
+        // A malformed nonce, even correctly signed.
+        let mut m = keys.clone();
+        m.grant_id = "zz".into();
+        m.signature = control.sign(UPLOAD_GRANT, &m.unsigned()).unwrap();
+        refused(check(
+            &m,
+            "evaluator-1",
+            UploadKind::Keys,
+            &p,
+            Some(&k),
+            1500,
+        ));
+    }
+
     #[test]
     fn job_grants_bind_issuer_evaluator_program_and_expiry() {
         let control = ServiceSigner::from_seed("control-plane", &[5; 32]).unwrap();
@@ -750,6 +1114,7 @@ mod tests {
             expires_at: 2000,
             issuer: "control-plane".into(),
             issuer_public_key: control.public_key_hex(),
+            governance: None,
             signature: String::new(),
         };
         g.signature = control.sign(JOB_GRANT, &g.unsigned()).unwrap();

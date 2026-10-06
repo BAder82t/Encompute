@@ -66,6 +66,8 @@ pub fn planning_context(
         preferences,
         facts: planning_facts(program)?,
         training,
+        custody: Vec::new(),
+        placement: None,
     })
 }
 

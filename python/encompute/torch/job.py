@@ -56,18 +56,20 @@ def _port() -> int:
 
 def prepare(project, *, model, data, privacy="strong-patient", config=None, image: str,
             broker_id: str, kek: str, workdir: str, round: int = 1,
-            locations: Optional[Dict[str, str]] = None, say=print) -> Dict[str, Any]:
+            locations: Optional[Dict[str, str]] = None, say=print,
+            asset_brokers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Prepares a confidential training job for ``image`` (the approved
     worker image digest). ``locations`` maps where the job reads and writes
     (``model``, ``adapter``, ``datasets`` prefix, ``output`` prefix);
-    by default, paths under ``workdir``."""
+    by default, paths under ``workdir``. ``asset_brokers`` binds each key
+    to its broker in the training spec (see ``finetune``)."""
     W = Path(workdir)
     W.mkdir(parents=True, exist_ok=True)
     cli = ft._cli()
     cfg = config or lora.LoRAConfig()
     target = {"image": image, "tee": "intel_tdx", "broker_id": broker_id, "kek": str(kek)}
     st = ft._setup(project, model, data, privacy, "required", cfg, None, False, W, cli, say,
-                   target=target)
+                   target=target, asset_brokers=asset_brokers)
     spec = json.loads(st["spec"])
     mc = W / st["model_owner"]
     loc = dict(model=str(mc / f"{st['model_id']}.enc"), adapter=str(mc / "adapter-0.enc"),

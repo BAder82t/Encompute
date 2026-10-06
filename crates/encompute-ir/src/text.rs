@@ -62,6 +62,10 @@ impl fmt::Display for Program {
                     list(&mut pol.purposes.iter().cloned()),
                     pol.release
                 )?;
+                if let Some(forms) = &pol.forms {
+                    let v: Vec<String> = forms.iter().map(ToString::to_string).collect();
+                    write!(f, " forms [{}]", v.join(", "))?;
+                }
                 if !pol.derive.is_empty() {
                     let d: Vec<String> = pol
                         .derive
@@ -147,6 +151,19 @@ impl fmt::Display for Program {
                 if let Some(level) = &dp.preset {
                     write!(f, " preset \"{level}\"")?;
                 }
+            }
+            if let Some(m) = a.max_sources_per_unit {
+                write!(f, " max_sources_per_unit {m}")?;
+            }
+            if let Some(l) = &a.layout {
+                write!(f, " layout [")?;
+                for (i, x) in l.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"{x}\"")?;
+                }
+                write!(f, "]")?;
             }
             writeln!(f)?;
         }
@@ -307,6 +324,21 @@ pub fn parse(src: &str) -> Result<Program> {
             } else {
                 None
             };
+            c.skip_ws();
+            let max_sources_per_unit = if c.rest.starts_with("max_sources_per_unit") {
+                c.keyword("max_sources_per_unit")?;
+                c.skip_ws();
+                Some(u32::try_from(c.usize()?).map_err(|_| err(n, "max_sources_per_unit"))?)
+            } else {
+                None
+            };
+            c.skip_ws();
+            let layout = if c.rest.starts_with("layout") {
+                c.keyword("layout")?;
+                Some(c.strings()?)
+            } else {
+                None
+            };
             c.end()?;
             b.aggregate(crate::confidentiality::AggregationRule {
                 output,
@@ -314,6 +346,8 @@ pub fn parse(src: &str) -> Result<Program> {
                 minimum,
                 colluding,
                 dp,
+                max_sources_per_unit,
+                layout,
                 codec: crate::confidentiality::FixedPointCodec {
                     clip_min: clip[0],
                     clip_max: clip[1],
@@ -449,9 +483,13 @@ fn at(line: usize, e: Error) -> Error {
     Error::new(e.code, format!("line {line}: {}", e.message))
 }
 
-/// `asset "id" KIND owners [..] readers [..] purposes [..] release R [derive [KIND R, ..]]`
+/// `asset "id" KIND owners [..] readers [..] purposes [..] release R [forms [FORM, ..]]
+/// [derive [KIND R, ..]] [privacy ..]`, where a FORM is `boolean`,
+/// `bounded_category MAX`, `aggregate`, `dp_aggregate` or `derived_artifact`.
 fn parse_asset(c: &mut Cursor<'_>) -> Result<crate::confidentiality::AssetDecl> {
-    use crate::confidentiality::{AssetDecl, AssetKind, AssetPolicy, PartyId, Release};
+    use crate::confidentiality::{
+        AssetDecl, AssetKind, AssetPolicy, PartyId, Release, ReleaseForm,
+    };
     c.keyword("asset")?;
     let id = c.string()?;
     let kind = AssetKind::parse(&c.word()?).ok_or_else(|| err(c.line, "unknown asset kind"))?;
@@ -469,6 +507,36 @@ fn parse_asset(c: &mut Cursor<'_>) -> Result<crate::confidentiality::AssetDecl> 
     let purposes = c.strings()?.into_iter().collect();
     c.keyword("release")?;
     let release = Release::parse(&c.word()?).ok_or_else(|| err(c.line, "unknown release"))?;
+    c.skip_ws();
+    let forms = if c.rest.starts_with("forms") {
+        c.keyword("forms")?;
+        c.punct('[')?;
+        c.skip_ws();
+        let mut forms = std::collections::BTreeSet::new();
+        while !c.rest.starts_with(']') {
+            let name = c.word()?;
+            let form = if name == "bounded_category" {
+                c.skip_ws();
+                let max = c.u64()?;
+                ReleaseForm::BoundedCategory { max }
+            } else {
+                ReleaseForm::parse(&name)
+                    .ok_or_else(|| err(c.line, format!("unknown release form {name:?}")))?
+            };
+            if !forms.insert(form) {
+                return Err(err(c.line, format!("release form {form} named twice")));
+            }
+            c.skip_ws();
+            if c.rest.starts_with(',') {
+                c.punct(',')?;
+                c.skip_ws();
+            }
+        }
+        c.punct(']')?;
+        Some(forms)
+    } else {
+        None
+    };
     let mut derive = std::collections::BTreeMap::new();
     c.skip_ws();
     if c.rest.starts_with("derive") {
@@ -524,6 +592,7 @@ fn parse_asset(c: &mut Cursor<'_>) -> Result<crate::confidentiality::AssetDecl> 
             release,
             derive,
             privacy,
+            forms,
         },
     })
 }
@@ -655,6 +724,14 @@ impl<'a> Cursor<'a> {
         match digits.parse() {
             Ok(n) => Ok(n),
             Err(_) => self.fail("a size"),
+        }
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        let digits = self.take_while(|c| c.is_ascii_digit());
+        match digits.parse() {
+            Ok(n) => Ok(n),
+            Err(_) => self.fail("an unsigned integer"),
         }
     }
 

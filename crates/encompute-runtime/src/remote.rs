@@ -1,11 +1,13 @@
 //! HTTP client for a remote `encompute-evaluator`.
 
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 
 use encompute_ir::{Code, Error, Program, Result};
 use encompute_verification::{
-    EvaluatorIdentity, ExecutionProof, SignedExecutionReceipt, VerificationState,
+    EvaluatorIdentity, ExecutionProof, SignedExecutionReceipt, UploadGrant, UploadKind,
+    VerificationState,
 };
 use serde_json::Value;
 
@@ -28,11 +30,22 @@ pub struct RemoteRun {
     pub response: Vec<u8>,
 }
 
+/// Where a client gets the upload grants an evaluator managed by a control
+/// plane asks for: the control plane, as the job's initiator.
+pub trait UploadGrantSource: Send + Sync {
+    /// A grant for one upload to the job's evaluator: the job's program, or
+    /// (`key_id`) one set of evaluation keys.
+    fn upload_grant(&self, kind: UploadKind, key_id: Option<&str>) -> Result<UploadGrant>;
+}
+
 pub struct Remote {
     base: String,
     agent: ureq::Agent,
     /// A control plane's job grant, sent with the job (hex of its JSON).
     grant: Option<String>,
+    /// Where upload grants come from: an evaluator managed by a control
+    /// plane takes a program or keys only with one, and one upload each.
+    uploads: Option<Arc<dyn UploadGrantSource>>,
 }
 
 /// What one remote execution cost.
@@ -92,7 +105,23 @@ impl Remote {
             base: base.trim_end_matches('/').to_owned(),
             agent,
             grant: None,
+            uploads: None,
         }
+    }
+
+    /// Asks `source` (the control plane) for an upload grant before each
+    /// program and key upload.
+    pub fn with_upload_grants(mut self, source: Arc<dyn UploadGrantSource>) -> Self {
+        self.uploads = Some(source);
+        self
+    }
+
+    /// The header of a fresh upload grant, or none without a source.
+    fn upload_header(&self, kind: UploadKind, key_id: Option<&str>) -> Result<Option<String>> {
+        self.uploads
+            .as_ref()
+            .map(|s| s.upload_grant(kind, key_id).map(|g| g.to_header()))
+            .transpose()
     }
 
     /// Sends `grant` with the job: evaluators managed by a control plane run
@@ -111,22 +140,28 @@ impl Remote {
         format!("{}{path}", self.base)
     }
 
-    /// A GET carrying the grant, if any: an evaluator managed by a control
-    /// plane lists a program and answers key lookups only for a holder of
-    /// a grant for it.
-    fn get(&self, path: &str) -> ureq::Request {
+    /// A GET, carrying an upload grant if there is one: an evaluator managed
+    /// by a control plane lists a program and answers key lookups only for
+    /// a holder of an upload grant for it.
+    fn get(&self, path: &str, upload: Option<&str>) -> ureq::Request {
         let r = self.agent.get(&self.url(path));
-        match &self.grant {
-            Some(g) => r.set(encompute_verification::service::H_JOB_GRANT, g),
+        match upload {
+            Some(g) => r.set(encompute_verification::service::H_UPLOAD_GRANT, g),
             None => r,
         }
     }
 
-    pub fn info(&self) -> Result<Value> {
-        self.get("/v1/info")
+    /// `/v1/info`, as seen by a holder of `upload` (a control-plane
+    /// evaluator lists only the program such a grant names).
+    fn info_with(&self, upload: Option<&str>) -> Result<Value> {
+        self.get("/v1/info", upload)
             .call()
             .map_err(remote_err)
             .and_then(read_json)
+    }
+
+    pub fn info(&self) -> Result<Value> {
+        self.info_with(None)
     }
 
     /// The identity the evaluator claims (from `/v1/info`). Trust it only by
@@ -139,29 +174,36 @@ impl Remote {
         EvaluatorIdentity::from_public_key_hex(key)
     }
 
-    /// Uploads carry the grant too: an evaluator managed by a control
-    /// plane accepts programs and keys only with one.
-    fn post(&self, path: &str, body: &[u8]) -> Result<Value> {
+    /// An upload carries its upload grant: an evaluator managed by a control
+    /// plane accepts programs and keys only with one, once.
+    fn post(&self, path: &str, body: &[u8], upload: Option<&str>) -> Result<Value> {
         let mut r = self
             .agent
             .post(&self.url(path))
             .set("Content-Type", "application/octet-stream");
-        if let Some(g) = &self.grant {
-            r = r.set(encompute_verification::service::H_JOB_GRANT, g);
+        if let Some(g) = upload {
+            r = r.set(encompute_verification::service::H_UPLOAD_GRANT, g);
         }
         r.send_bytes(body).map_err(remote_err).and_then(read_json)
     }
 
     /// Upload the program if the evaluator does not have it.
     pub fn ensure_program(&self, program: &Program, program_id: &str) -> Result<()> {
-        let info = self.info()?;
+        // One grant: it lets the evaluator list the program, and admits one
+        // upload of it.
+        let grant = self.upload_header(UploadKind::Program, None)?;
+        let info = self.info_with(grant.as_deref())?;
         let loaded = info["programs"]
             .as_array()
             .is_some_and(|ps| ps.iter().any(|p| p["program_id"] == program_id));
         if loaded {
             return Ok(());
         }
-        let got = self.post("/v1/programs", program.to_string().as_bytes())?;
+        let got = self.post(
+            "/v1/programs",
+            program.to_string().as_bytes(),
+            grant.as_deref(),
+        )?;
         if got["program_id"] != program_id {
             return Err(Error::new(
                 Code::WrongProgram,
@@ -179,8 +221,12 @@ impl Remote {
         key_id: &str,
         keys: Option<&[u8]>,
     ) -> Result<usize> {
+        let grant = self.upload_header(UploadKind::Keys, Some(key_id))?;
         match self
-            .get(&format!("/v1/programs/{program_id}/keys/{key_id}"))
+            .get(
+                &format!("/v1/programs/{program_id}/keys/{key_id}"),
+                grant.as_deref(),
+            )
             .call()
         {
             Ok(_) => return Ok(0),
@@ -193,7 +239,11 @@ impl Remote {
                 "the evaluator lacks this client's evaluation keys; provide eval.keys",
             )
         })?;
-        let got = self.post(&format!("/v1/programs/{program_id}/keys"), keys)?;
+        let got = self.post(
+            &format!("/v1/programs/{program_id}/keys"),
+            keys,
+            grant.as_deref(),
+        )?;
         if got["key_id"] != key_id {
             return Err(Error::new(
                 Code::WrongKey,

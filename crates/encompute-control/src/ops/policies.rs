@@ -11,7 +11,7 @@ use encompute_verification::service::sha256_hex;
 use crate::audit::{self, Outcome};
 use crate::authn::PrincipalKind;
 use crate::authz::{
-    conflict, forbidden, not_found, project_role_orgs, project_row, project_visible,
+    conflict, deny_auditor, forbidden, not_found, project_role_orgs, project_row, project_visible,
 };
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
@@ -28,8 +28,9 @@ impl Control {
             ));
         }
         let digest = sha256_hex(&canonical_json(&document)?);
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let p = project_visible(t, &ctx.principal, project)?;
+            deny_auditor(&ctx.principal, &p)?;
             let orgs = project_role_orgs(&ctx.principal, &p, &[Role::SecurityAdmin]);
             let org = orgs.first().cloned().ok_or_else(|| forbidden("proposing a policy needs security_admin in a project member organization"))?;
             let id = new_id("pol");
@@ -51,7 +52,7 @@ impl Control {
     }
 
     pub fn approve_policy(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.db.tx(|t| {
+        self.tx_anchored(|t| {
             let r = t
                 .query_opt(
                     "SELECT organization_id, project_id, status, created_by, digest FROM policies WHERE id = $1 FOR UPDATE",
@@ -67,6 +68,7 @@ impl Control {
             if !ctx.principal.member_of(&org) && !p.members.iter().any(|o| ctx.principal.member_of(o)) {
                 return Err(not_found("policy", id));
             }
+            deny_auditor(&ctx.principal, &p)?;
             if !ctx.principal.has_role(&p.organization, Role::SecurityAdmin) {
                 return Err(forbidden(format!(
                     "approving a policy needs security_admin in the project's owner, {}",
