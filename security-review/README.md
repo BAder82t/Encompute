@@ -53,8 +53,8 @@ Other references:
   [0026](../docs/adr/0026-placement-and-operators.md) (placement and
   operators) and
   [0027](../docs/adr/0027-governance-report-and-bundle.md) (governance
-  report and evidence bundle) are designs for after 0.3.0 and outside
-  this review's scope.
+  report and evidence bundle) are in the 0.4.0 release candidate, not in
+  0.3.0, and outside this review's scope.
   Some decision records describe an earlier state; where they disagree
   with the code, the code and the threat model are authoritative.
 - Vulnerability intake: [SECURITY.md](../SECURITY.md).
@@ -141,8 +141,8 @@ referenced test no longer exists. The matrix and the known gaps are in
 | Exact optimization, backend selection, key cache | INV-166 to INV-171 |
 | Release-candidate hardening: malformed input, network attacks, restarts, backups, key lifecycle, security fixes, migration, differential gate, optimizer tests | INV-172 to INV-191 |
 | Fixes for the independent review of 0.3.0-rc.3: state anchor, sharing and grant withdrawal, broker state and grants, evaluator keys and uploads, BGV noise and output ranges, DP release and sensitivity, training workload inputs, trust report and plan floor, supply chain | INV-192 to INV-217 |
-| Public-sector governance, phase 1: governed projects and owner-signed authorizations (**not part of 0.3**) | INV-218, INV-219, INV-220, INV-222, INV-228, INV-231 |
-| Public-sector governance, phase 2: release tickets, sovereign custody, the control plane can only deny, broker state rollback (**not part of 0.3**) | INV-232, INV-235, INV-236 |
+| Public-sector governance, phase 1: governed projects and owner-signed authorizations (**0.4.0-rc.1, not part of 0.3**) | INV-218, INV-219, INV-220, INV-222, INV-228, INV-231 |
+| Public-sector governance, phase 2: release tickets, sovereign custody, the control plane can only deny, broker state rollback (**0.4.0-rc.1, not part of 0.3**) | INV-232, INV-235, INV-236 |
 
 Run the report:
 

@@ -1,12 +1,12 @@
 # Confidential cross-agency computation
 
-> **Status: in development after 0.3.0; not released.** Nothing on this
-> page is part of Encompute 0.3. It describes what is being designed and
-> built, so that institutions, reviewers and design partners can comment on
-> it. Features, names and formats may change before they ship. Where this
-> page says Encompute "refuses" or "checks" something, it describes the
-> design or unreleased code, not released behaviour. What is built so far
-> is listed under "Development status" below.
+> **Status: available in the 0.4.0 release-candidate line (`0.4.0-rc.1`).
+> This is pre-release functionality undergoing release validation and
+> external security review; it is not yet claimed production-ready.** It is
+> not part of the stable 0.3 release. Features, names and formats may still
+> change before 0.4.0. Parts of this page describe designs that are not
+> built; what is in the release candidate is listed under "Status in
+> 0.4.0-rc.1" below.
 
 Encompute lets public institutions compute across organizational
 boundaries without centralizing sensitive data. Each institution retains
@@ -207,9 +207,9 @@ Encompute will not be:
 - a full data catalog;
 - a user interface for every workflow.
 
-## Development status
+## Status in 0.4.0-rc.1
 
-Built on the development branch, not released:
+Included in the 0.4.0 release candidate (pre-release, not production-ready):
 
 - **Phase 1, governed projects and owner-signed authorizations.**
   Governance keys, purposes, owner authorizations with four-eyes

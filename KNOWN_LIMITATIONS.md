@@ -486,11 +486,11 @@ Related: [support matrix](docs/support-matrix.md),
   program's semantics and applies its own floor of core requirements, but
   its exact-equality check still uses the planner's own derivation.
 
-## Public-sector governance (not part of 0.3)
+## Public-sector governance (0.4.0-rc.1, release candidate; not part of 0.3)
 
-Governed projects are being built after 0.3 (see
-[docs/public-sector.md](docs/public-sector.md)). What exists so far has
-these limits:
+Governed projects are in the 0.4.0 release candidate, which is not
+production-ready and has had no independent security review (see
+[docs/public-sector.md](docs/public-sector.md)). They have these limits:
 
 - **`source_revoked_at` is not erasure.** Revoking a source marks the
   derived results downstream and blocks their new use, derivation and

@@ -2,8 +2,9 @@
 
 What is done and what is next.
 
-- **Planned after 0.3.0, at the design stage**: [confidential cross-agency
-  computation](../public-sector.md).
+- **In the 0.4.0 release candidate (pre-release)**: [confidential cross-agency
+  computation](../public-sector.md), governed projects, sovereign key custody,
+  governed release and the governance log.
 - **Succinct proofs**: a zkVM proof of the same relation, starting with
   a cost benchmark of one BGV ciphertext multiplication.
 - ✓ Patient-level DP-SGD (per-patient clipping, Poisson sampling, Rényi DP
