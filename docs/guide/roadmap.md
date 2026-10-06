@@ -28,3 +28,7 @@ What is done and what is next.
 - → Multi-machine orchestration.
 - → A message-broker adapter, if needed; then Kubernetes.
 - → Commercial UI.
+- → Planned: Private Agent Gateway (Agent Compiler). Lets AI systems request governed
+  computations over protected values and receive explicitly authorized outputs,
+  without automatically receiving the underlying protected data. Not started;
+  not part of any release.
