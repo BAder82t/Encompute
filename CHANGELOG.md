@@ -513,6 +513,19 @@ Work toward confidential cross-agency computation
   invariants.
 ## Unreleased (production mode: native TLS and the reference topology)
 
+### Third-party notices: two ported files were missing from THIRD_PARTY_NOTICES.md
+
+`crates/encompute-privacy/src/sampler.rs` and `accountant.rs` are Rust ports of
+`discretegauss.py` and `cdp2adp.py` from
+github.com/IBM/discrete-gaussian-differential-privacy (Apache License 2.0), and
+are compiled into every build that has differential privacy. The notices file
+listed only crates.io crates, so it had no entry for them (and `accountant.rs`
+did not name its upstream or license). `THIRD_PARTY_NOTICES.md` now has a
+section on code derived from third-party sources, with both files, their
+upstream and what was changed; both source headers name the upstream and the
+license; and `scripts/third_party_notices.py --check` fails if any of that is
+removed. This affects the notices shipped with 0.3.0 and its release artifacts.
+
 ### BREAKING (production mode): the database connection must be `sslmode=verify-full`
 
 With `ENCOMPUTE_ENV=production` the control plane now refuses to start unless

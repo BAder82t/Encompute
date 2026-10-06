@@ -3,7 +3,9 @@
 //! sensitivity `Delta` costs `rho = Delta^2 / (2 sigma^2)` (Canonne, Kamath
 //! and Steinke 2020, Theorem 14); costs compose by addition; and the
 //! composed `rho` converts to `(epsilon, delta)` with CKS Corollary 13
-//! (`cdp_delta`/`cdp_eps`, ported from their reference `cdp2adp.py`).
+//! (`cdp_delta`/`cdp_eps`, ported from their reference `cdp2adp.py`:
+//! github.com/IBM/discrete-gaussian-differential-privacy, Apache-2.0, see
+//! THIRD_PARTY_NOTICES.md).
 //!
 //! Every party must reach the same decision, so the arithmetic is the
 //! pure-Rust `libm` (identical bits on every platform, unlike the system
