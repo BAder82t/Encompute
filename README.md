@@ -1,19 +1,56 @@
 # Encompute
 
-Encompute lets you compute on data that stays encrypted, and lets several
-organizations work together without showing each other their data.
+**Encompute is a compiler and trust runtime for confidential AI and
+cross-organization computation.**
 
-You write ordinary Python and mark which values are secret. Encompute
-encrypts them, runs the program on a machine that never holds the key, and
-checks the answer against plain Python.
+Organizations can compute, train and collaborate over sensitive data without
+centralizing the underlying records or surrendering control of their keys.
+Encompute combines confidential computation with purpose-bound authorization,
+privacy controls, governed release, lineage and auditable evidence.
+
+The execution layer can use fully homomorphic encryption (FHE), secure
+aggregation, differential privacy and attested confidential computing,
+depending on the workload. The security boundary is not the application or the
+AI model: authorization and release decisions are enforced by Encompute and by
+organization-controlled key brokers.
+
+> **Release status:** `v0.3.0` is the current stable release. `main` contains
+> substantial unreleased governance and security work intended for the next
+> release line. That work is not part of a stable release and should not be
+> described as production-ready.
+
+You write ordinary Python and mark which values are secret. Encompute encrypts
+them, runs the program on a machine that never holds the key, and checks the
+answer against plain Python.
 
 ## Who it is for
 
-- **Developers** who need to compute on data they must not see.
-- **Security and compliance leads** who need to know what is protected,
-  against whom, and what evidence is left.
-- **Institutions** that want several parties to train or analyze together
-  under rules each party can check.
+- **AI and application teams** that need useful answers from sensitive data
+  without exposing the underlying records to every component in the workflow.
+- **Security, privacy and compliance teams** that need enforceable controls
+  over purpose, authorization, key release, privacy loss and result release.
+- **Organizations collaborating across trust boundaries** that need to compute
+  or train together while retaining ownership, key custody and independent
+  authorization.
+- **Regulated and sovereign environments** that require auditable evidence of
+  what was authorized, computed and released.
+
+## What makes Encompute different
+
+Most privacy-preserving computation libraries answer one question: how do I
+compute on encrypted data? Encompute also answers:
+
+- Who authorized this computation?
+- For what purpose?
+- Over which exact assets and versions?
+- Which organization controls each key?
+- What information may be released?
+- What privacy budget was consumed?
+- What evidence remains afterward?
+
+The cryptographic backend is one part of the system. Encompute's trust runtime
+connects policy, authorization, confidential execution, controlled release,
+lineage and evidence.
 
 ## What it guarantees, and what it does not
 
@@ -126,9 +163,21 @@ has a table by goal. All topics are in the [guide](docs/guide/README.md):
 
 ## Status and support
 
-Release 0.3.0. What is supported, what is a subset, and what is
-experimental, research only or unsupported is in the
-[support matrix](docs/support-matrix.md), with a short
+**Stable:** `v0.3.0`. It includes the confidential-computation
+compiler and runtime, OpenFHE-backed encrypted execution, secure aggregation,
+differential privacy, trust and evidence machinery, confidential fine-tuning,
+and the documented 0.3 support surface.
+
+**Development (`main`):** additionally contains unreleased work for governed
+cross-organization computation: purpose-bound authorization,
+organization-controlled governance keys, revocation, multi-owner key custody,
+governance lineage and event logging, privacy-budget governance, and hardened
+production deployment infrastructure. Development-branch functionality is not
+part of `v0.3.0` and should not be treated as a stable or production-ready
+release.
+
+What is supported, what is a subset, and what is experimental, research only
+or unsupported is in the [support matrix](docs/support-matrix.md), with a short
 [summary](docs/guide/status-summary.md). Also: [known limitations](KNOWN_LIMITATIONS.md),
 [release notes](docs/release-notes-0.3.0.md), [changelog](CHANGELOG.md),
 [threat model](docs/threat-model.md), [security findings](docs/security-findings.md),
