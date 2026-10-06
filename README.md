@@ -40,7 +40,7 @@ revealing what each needs to keep private: confidentiality policies are
 enforced by attested key release, secure aggregation and differential
 privacy, and every step leaves verifiable evidence.
 
-**Status: release 0.3.0. The independent review of 0.3.0-rc.3 has
+**Status: release 0.3.1 (patch; see [release notes](docs/release-notes-0.3.1.md)). The independent review of 0.3.0-rc.3 has
 reported; its findings and their fixes, some partial, are in
 [docs/security-findings.md](docs/security-findings.md)** (last release:
 v0.2.0). What you can rely on is in the

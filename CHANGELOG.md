@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.1 (patch release, supply-chain and notices only)
+
+No change to behaviour, API, formats, migrations or build features. 0.3.0 is
+not modified; its artifacts keep their digests.
+
+- **Container base images.** The control, services, evaluator and
+  confidential-space images move to a newer pinned `debian:bookworm-slim`
+  and upgrade `perl-base` and `libpcre2-8-0`; the training image moves to
+  `python:3.11.17-slim-bookworm`. The 0.3.0 images carry the older Debian
+  packages (`perl-base` 5.36.0-7+deb12u3: 3 critical and 4 high findings with
+  fixes available; `libpcre2-8-0` 10.42-1+deb12u1: 1 high), which the release
+  scan reports as 28 blocking findings. Rescan of the control and services
+  images: 0 blocking.
+- **Five security-policy exceptions deleted** because the new bases make them
+  stale (tzdata, libssl3, openssl).
+- **Third-party notices.** Two source files are ports of IBM's
+  discrete-gaussian differential privacy code (Apache-2.0):
+  `crates/encompute-privacy/src/sampler.rs` and `accountant.rs`. Their notice
+  and the upstream and license in each file header were missing from 0.3.0;
+  they are added, and `scripts/third_party_notices.py --check` now fails if
+  they go missing again. Comment text only; no code changed.
+
 ## 0.3.0 — 2026-10-02
 
 The first stable 0.3 release. Its content is that of 0.3.0-rc.4 (see that

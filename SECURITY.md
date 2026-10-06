@@ -4,7 +4,7 @@
 
 | Release | Status | Security fixes |
 |---|---|---|
-| 0.3.x | current stable release. The independent review of 0.3.0-rc.3 reported findings that are fixed in 0.3.0, several only partly; the fixes themselves have not been independently reviewed. The review package is in [security-review/](security-review/) | yes |
+| 0.3.x | current stable release (latest: 0.3.1, which refreshes the container base images; 0.3.0 images carry known base-package findings, see the 0.3.1 notes). The independent review of 0.3.0-rc.3 reported findings that are fixed in 0.3.0, several only partly; the fixes themselves have not been independently reviewed. The review package is in [security-review/](security-review/) | yes |
 | 0.3.0 release candidates (`0.3.0-rc.N`) | historical; superseded by 0.3.0 | no: upgrade to 0.3.0 |
 | `main` | development | yes |
 | 0.2.x | superseded | no: upgrade to 0.3 |
