@@ -310,6 +310,9 @@ fn repeated_erase_in_the_window_does_not_defeat_the_cap() {
 #[test]
 fn genesis_rewritten_in_the_window_is_not_acknowledged() {
     let Some(w) = world() else { return };
+    // The attacker's rewrite matches every ledger without entries: give the
+    // fixture's own ledger one, so only the new one is rewritten.
+    assert_eq!(spend(&w.t, &w.a_owner, &w.dataset_a, "s-0", 18).0, 200);
     let body = json!({"organization": "hospital-a", "kind": "dataset", "name": "patients-2027", "digest": "c".repeat(64), "privacy_budget": budget(3.0)});
     let sql = "UPDATE privacy_ledgers SET genesis = jsonb_set(genesis, '{budget,epsilon}', '\"30.0\"'::jsonb) WHERE created_at > now() - interval '1 minute' AND asset_id NOT IN (SELECT asset_id FROM privacy_entries)";
     let (s, v) = in_window(&w.t.env0.url, "privacy_ledgers", sql, || {

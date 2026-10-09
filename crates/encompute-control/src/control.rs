@@ -8,7 +8,7 @@ use std::time::Duration;
 use postgres::GenericClient;
 
 use encompute_ir::{Code, Error, Result};
-use encompute_privacy::{Entry, Genesis, LedgerView};
+use encompute_privacy::{Checkpoint, Entry, Genesis, LedgerView};
 use encompute_verification::ServiceSigner;
 
 use crate::anchor::{open_store, Anchor, AnchorStore};
@@ -889,6 +889,10 @@ impl Control {
     /// checkpoint: one that does not (rolled back, reset or rewritten while
     /// the service runs) is refused and never anchored, so the anchor only
     /// moves forward along the same chain.
+    ///
+    /// This follows the database head and so cannot tell that an entry a
+    /// call committed was erased since: a call that acknowledges anything
+    /// anchors with [`Control::anchor_committed`] instead.
     pub fn anchor_ledger(&self, asset: &str) -> Result<()> {
         self.anchor
             .try_update(&self.signer, |a| {
@@ -920,6 +924,76 @@ impl Control {
                 Ok(true)
             })
             .map(|_| ())
+    }
+
+    /// Anchors what a call just committed, and fails unless the database
+    /// still holds exactly that. `committed` is the checkpoint the call
+    /// computed inside its own transaction (the entry it appended, the
+    /// entry a duplicate answer returns, or the genesis of a new ledger).
+    ///
+    /// Under the anchor's lock the ledger is read again: it must extend
+    /// `committed` (the hash at that position is the committed one) and the
+    /// anchored checkpoint. One that does not was changed between the commit
+    /// and now (an entry erased, a genesis rewritten): the rollback alarm is
+    /// raised and the call is refused, so the caller never acknowledges
+    /// state the ledger no longer holds. What is recorded is `committed`,
+    /// never whatever the database shows now, so a change after this write is
+    /// refused at the next spend and at start-up.
+    ///
+    /// A refused `creation` whose ledger row exists but differs still anchors
+    /// the genesis the call committed (when nothing is anchored yet), so the
+    /// rewritten ledger the attacker left behind can never be spent on.
+    pub fn anchor_committed(
+        &self,
+        asset: &str,
+        committed: &Checkpoint,
+        creation: bool,
+    ) -> Result<()> {
+        let mut refused = None;
+        self.anchor.try_update(&self.signer, |a| {
+            refused = None;
+            let view = {
+                let mut c = self.db.conn()?;
+                load_ledger(&mut *c, asset)?
+            }
+            .ok_or_else(|| {
+                runtime_rollback(
+                    "PRIVACY",
+                    format!("the privacy ledger of {asset} is missing"),
+                )
+            })?;
+            view.verify()?;
+            if let Err(e) = view.extends(committed) {
+                self.rollback_alarm("privacy", asset);
+                refused = Some(runtime_rollback(
+                    "PRIVACY",
+                    format!(
+                        "the privacy ledger of {asset} no longer holds what was committed: {}",
+                        e.message
+                    ),
+                ));
+                if creation && !a.ledgers.contains_key(asset) {
+                    a.ledgers.insert(asset.to_owned(), committed.clone());
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            if let Some(anchored) = a.ledgers.get(asset) {
+                view.extends(anchored).map_err(|e| {
+                    self.rollback_alarm("privacy", asset);
+                    runtime_rollback(
+                        "PRIVACY",
+                        format!("the privacy ledger of {asset}: {}", e.message),
+                    )
+                })?;
+                if anchored.seq >= committed.seq {
+                    return Ok(false);
+                }
+            }
+            a.ledgers.insert(asset.to_owned(), committed.clone());
+            Ok(true)
+        })?;
+        refused.map_or(Ok(()), Err)
     }
 
     /// Anchors the security-negative state the database holds and the

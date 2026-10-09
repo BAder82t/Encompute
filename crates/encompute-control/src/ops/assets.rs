@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use serde_json::{json, Value};
 
 use encompute_ir::{Code, Error, Result};
-use encompute_privacy::{Genesis, PrivacyEvent};
+use encompute_privacy::{Genesis, LedgerView, PrivacyEvent};
 use encompute_verification::canonical::canonical_json;
 use encompute_verification::service::sha256_hex;
 
@@ -277,12 +277,15 @@ impl Control {
                     ctx.draft("privacy.ledger.created", "asset", &id, Outcome::Succeeded)
                         .org(&r.organization),
                 )?;
-                ledger = Some(genesis);
+                // What the transaction committed, to be anchored exactly:
+                // the checkpoint of an empty ledger is the hash of the whole
+                // genesis, budget included.
+                ledger = Some(LedgerView { genesis, entries: vec![] }.checkpoint()?);
             }
             Ok((json!({"id": id, "organization": r.organization, "lineage_root": lineage_root}), ledger))
         })?;
-        if out.1.is_some() {
-            self.anchor_ledger(&id)?;
+        if let Some(genesis) = &out.1 {
+            self.anchor_committed(&id, genesis, true)?;
         }
         Ok(out.0)
     }
@@ -874,10 +877,12 @@ impl Control {
             Ok((json!({"seq": entry.seq, "hash": entry.hash, "duplicate": false}), org, next.checkpoint()?))
         });
         match res {
-            Ok((v, _org, _cp)) => {
-                // Anchored before acknowledging (a retry re-anchors); the
-                // anchor refuses a ledger that does not extend it.
-                self.anchor_ledger(asset)?;
+            Ok((v, _org, committed)) => {
+                // Anchored before acknowledging (a retry re-anchors): the
+                // ledger must still hold the entry this call committed (or
+                // returned as a duplicate), and the anchor records that
+                // entry, not whatever the database shows now.
+                self.anchor_committed(asset, &committed, false)?;
                 Ok(v)
             }
             Err(e) => {
