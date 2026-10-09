@@ -395,10 +395,28 @@ rollback.
 | Edit records so a job looks trusted | Trust reports are rebuilt from signed evidence and trusted keys on every request (`ops/jobs.rs`) | INV-165 |
 | Restore an older database to undo privacy spending or audit events | Startup compares the database with the signed anchor and refuses a rollback until an operator freezes the affected ledgers (`crates/encompute-control/src/control.rs`, `anchor.rs`) | INV-159, INV-160 |
 | Roll a ledger or the audit chain back while the service runs, so that the fork is later anchored | The anchor only records a ledger checkpoint or audit root that extends the anchored one. A spend on a ledger that no longer extends the anchor is refused at once (ENC2202, PRIVACY STATE ROLLBACK), and an audit checkpoint over a chain that does not extend the anchored root is refused (AUDIT STATE ROLLBACK); both raise `encompute_state_rollback_total` (`ops/assets.rs` `privacy_spend`, `control.rs` `checkpoint_audit`, `anchor.rs`) | INV-160, INV-162; `online_ledger_rollback_is_refused_and_never_anchored`, `online_audit_rollback_is_never_reanchored` |
+| Erase a spend, or rewrite a new ledger's genesis, between the call's commit and its anchoring, so that the call is acknowledged and the state is forgotten (0.3.0 and the 0.3 candidates did not prevent this; fixed in 0.3.1, ENC-SF-2026-326, ENC-SF-2026-329) | The call takes the checkpoint of what it committed (the entry it appended, the entry a duplicate answer returns, or the hash of the new ledger's whole genesis, budget included). Under the anchor's lock the ledger must still extend that checkpoint, or the call fails with ENC2202 and is not acknowledged; what the anchor records is that checkpoint, not whatever the database shows. A client may see ENC2202 for a spend whose entry was erased, and retrying is correct. A creation whose genesis was rewritten also anchors the genesis it committed, so the rewritten ledger cannot be spent on (`control.rs` `anchor_committed`, `ops/assets.rs` `privacy_spend`) | INV-160; `spend_erased_in_the_window_is_not_acknowledged`, `duplicate_answer_erased_in_the_window_is_not_acknowledged`, `repeated_erase_in_the_window_does_not_defeat_the_cap`, `genesis_rewritten_in_the_window_is_not_acknowledged` |
 | Unfreeze a frozen ledger, by a database update or by restoring a backup and running recovery again | Frozen ledgers are recorded in the anchor. A spend on one is refused (ENC2201) whatever the database says; startup refuses a database in which it is unfrozen (FREEZE STATE ROLLBACK); recovery freezes it again (`ops/assets.rs`, `control.rs`) | `a_frozen_ledger_stays_frozen_whatever_the_database_says` |
 | Restore a database to undo a revocation, a disabled service account or user, a cancelled or failed job, a withdrawn asset approval, an organization leaving a project, or a removed role | These transitions are anchored before they are acknowledged. Startup refuses a database that undoes one (REVOCATION, SERVICE ACCOUNT, USER, JOB, APPROVAL, MEMBERSHIP or ROLE STATE ROLLBACK); recovery re-applies them (`anchor.rs`, `control.rs`). A role granted again after its removal is a new membership, never the anchored one | INV-178; `restore_and_recovery_keep_disables_and_cancellations`, `restore_and_recovery_keep_withdrawn_approvals`, `restore_and_recovery_keep_a_left_project_left`, `restore_and_recovery_keep_a_removed_role_removed` |
 | Make a key broker destroy a key for a revocation that a restore then forgets | A key broker receives an asset's revocation only after the anchor records it (`ops/jobs.rs` `deliver_outbox`) | `broker_revocation_is_delivered_only_once_anchored` |
 | Edit, delete or reorder audit events up to the last anchored checkpoint | Hash chain, signed checkpoints, anchored root (`audit.rs`) | INV-162 |
+
+**Remaining limits:**
+
+- **An erase after the anchor holds the entry** is detected at the next
+  spend and at start (fails closed: the service refuses the ledger until an
+  operator recovers). It denies service; it does not forget spending.
+- **The anchor restored together with the database** forgets the spending
+  since the backup (see the anchor assumption above).
+- **Before 0.3.1** a database writer who changed the ledger in that window
+  between a call's commit and its anchoring left the call acknowledged and
+  the change unnoticed, in a deployment whose anchor the writer could not
+  reach. Whether it was used against a deployment cannot be told from the
+  audit trail alone, which still records the spend.
+- A creation whose genesis is rewritten in that window leaves the asset
+  registered with a ledger the anchor refuses: no spend is accepted on it,
+  and start-up refuses the database until an operator's recovery freezes it.
+  Its name is taken, so the asset is registered again under another name.
 
 **Out of scope:**
 

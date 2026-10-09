@@ -1,9 +1,52 @@
 # Changelog
 
-## 0.3.1 (patch release, supply-chain and notices only)
+## 0.3.1 (security patch release)
 
-No change to behaviour, API, formats, migrations or build features. 0.3.0 is
-not modified; its artifacts keep their digests.
+0.3.0 is not modified; its artifacts keep their digests. This release fixes
+two privacy-accounting findings in `encompute-control` and carries the
+supply-chain and notice changes below. No API, wire format, migration or
+build feature changes.
+
+### Security fixes
+
+- **A privacy spend could be forgotten (ENC-SF-2026-326, High).** 0.3.0
+  documented that committed spending is anchored before it is acknowledged.
+  It was not bound to the entry the spend committed: after the commit the
+  control plane re-read the ledger and anchored whatever the database then
+  held. A database writer (threat model section 4.6: it can read and write
+  PostgreSQL and restore backups, but cannot write the state anchor) who
+  erased the new entry in that interval left the spend acknowledged, nothing
+  anchored and no alarm raised; repeated, the budget cap could be exceeded
+  without bound. A retried event answered as a duplicate had the same gap.
+- **A rewritten genesis was anchored (ENC-SF-2026-329, High).** The same
+  interval during the registration of an asset with a privacy budget: a
+  genesis changed after the commit (for example a larger budget) was
+  anchored and the creation acknowledged.
+- **Who is affected.** Deployments of 0.3.0 that use privacy budgets and
+  face the database attacker above. The 0.3 release candidates were not
+  tested and may be affected too. The audit trail still records the
+  spends, so a spend with no matching ledger entry in an affected database
+  can be found by comparing the two.
+- **The fix.** A spend, a duplicate answer and a registration are
+  acknowledged only when the anchor holds exactly what the call committed
+  (the appended entry, the returned entry, or the whole genesis, budget
+  included). A ledger changed in between is refused with ENC2202 and the
+  rollback alarm, and nothing is acknowledged. What is recorded is the
+  committed checkpoint, not the database head, so a change after the write
+  is refused at the next spend and at start.
+- **What a deployer must do.** Upgrade to 0.3.1. There is no migration and
+  no configuration change. A client can now see `500 ENC2202` for a spend
+  whose entry was erased in that interval; the spend was not acknowledged and
+  retrying the same event is correct. An asset registered while its genesis
+  was being rewritten stays registered with a ledger no spend is accepted
+  on (register it again under another name; start-up asks for recovery).
+- **What remains.** The anchor restored together with the database still
+  forgets spending since the backup, so keep the anchor outside the backup
+  set. An erase after the anchor holds the entry is detected at the next
+  spend and at start; it denies service and does not forget spending.
+  Details: threat model section 4.6 and `KNOWN_LIMITATIONS.md`.
+
+### Supply chain and notices
 
 - **Container base images.** The control, services, evaluator and
   confidential-space images move to a newer pinned `debian:bookworm-slim`

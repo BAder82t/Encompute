@@ -288,6 +288,14 @@ alarm: a `state_rollback_detected` log line and the
 `encompute_state_rollback_total` metric. A ledger frozen in the anchor is
 refused for spending whatever the database says (ENC2201).
 
+From 0.3.1 a spend (and the creation of an asset with a privacy budget) is
+acknowledged only when the anchor holds exactly the entry, or genesis, that
+call committed. A ledger changed between the commit and the anchoring is
+refused with ENC2202 and the same alarm; the client sees an error, not an
+acknowledgement, and retrying the same event is correct. Earlier 0.3
+versions re-read whatever the database then showed and could acknowledge
+a spend the ledger no longer held.
+
 At every start, the database must extend the anchor. If it does not, the
 control plane refuses to start:
 

@@ -100,7 +100,7 @@ own, serving only that organization's assets.
 
 | | |
 |---|---|
-| `POST /v1/assets` | `{organization, kind, name, digest, size_bytes?, media_type?, storage_uri?, policy?, parents?, key_ref?, privacy_budget?}`. Metadata only |
+| `POST /v1/assets` | `{organization, kind, name, digest, size_bytes?, media_type?, storage_uri?, policy?, parents?, key_ref?, privacy_budget?}`. Metadata only. With a `privacy_budget` the ledger's genesis is anchored before the reply; a genesis changed in between is refused with ENC2202 |
 | `GET /v1/assets`, `GET /v1/assets/{id}` | owned, or approved for a project the caller takes part in. The owner's members see every field (and, on `GET /v1/assets/{id}`, its `approvals`). Other organizations see only `id`, `organization`, `kind`, `name`, `digest`, `status`, `lineage_root`, `parents` and `policy` reduced to `require_job_approval` (when the owner set it): never `key_ref`, `storage_uri`, `size_bytes`, `media_type` or the rest of the policy |
 | `POST /v1/assets/{id}/approvals` | owners. `{project, purpose}`. Covers the organizations that are active project members now (returned as `members`); an organization that joins later needs a new approval. Approving again after a withdrawal makes a new approval (a new ID), never the withdrawn one |
 | `POST /v1/assets/{id}/approvals/withdraw` | owners. `{project, purpose}`. Other members no longer see or use the asset for that purpose; their jobs using it there that have not started fail (returned as `failed_jobs`). The withdrawal is anchored before the reply: a restored database that still holds the approval is refused at startup (APPROVAL STATE ROLLBACK) until `encompute-control recover` withdraws it again |
@@ -141,7 +141,7 @@ broker of the platform or of the asset's organization (409 otherwise). `privacy_
 |---|---|
 | `GET /v1/privacy/{asset}` | the owner's data owners, auditors, organization admins and security admins. Budget, spent epsilon and delta, entries, root, frozen |
 | `GET /v1/privacy/{asset}/ledger` | auditors and data owners. The full hash-chained ledger |
-| `POST /v1/privacy/{asset}/events` | the owner's data owners and operators, and SecAgg services the owner authorized for this asset. A privacy event (reserve or commit): race-safe, idempotent, anchored before the reply. Refused: a reservation whose declared sensitivity is below what its own noise implies for the ledger's unit, or, in production, not drawn with `csprng` (ENC2204); a ledger that no longer extends the state anchor (ENC2202 PRIVACY STATE ROLLBACK); a ledger frozen in the anchor, whatever the database says (ENC2201) |
+| `POST /v1/privacy/{asset}/events` | the owner's data owners and operators, and SecAgg services the owner authorized for this asset. A privacy event (reserve or commit): race-safe, idempotent, anchored before the reply, and acknowledged only when the anchor holds the entry this call committed (or returned as a duplicate); a ledger changed in between is refused with ENC2202 and nothing is acknowledged, so the client retries. Refused: a reservation whose declared sensitivity is below what its own noise implies for the ledger's unit, or, in production, not drawn with `csprng` (ENC2204); a ledger that no longer extends the state anchor (ENC2202 PRIVACY STATE ROLLBACK); a ledger frozen in the anchor, whatever the database says (ENC2201) |
 | `POST /v1/privacy/{asset}/spenders` | the owner's data owners and organization admins. `{service}`: authorizes an active SecAgg service to record privacy events for this asset |
 
 ### Security

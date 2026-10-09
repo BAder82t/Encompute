@@ -1,11 +1,25 @@
 # Encompute 0.3.1: release notes
 
-A patch release for the stable 0.3 line. It changes container base images,
-security-policy exceptions and third-party notices. It changes no behaviour,
-API, format, migration or build feature. 0.3.0 is not modified: its tag,
-artifacts and digests stay as published.
+A security patch release for the stable 0.3 line. It fixes two privacy
+accounting findings in the control plane (ENC-SF-2026-326 and
+ENC-SF-2026-329), and changes container base images, security-policy
+exceptions and third-party notices. It changes no API, format, migration or
+build feature. 0.3.0 is not modified: its tag, artifacts and digests stay as
+published.
 
-## Why
+## Security fix
+
+0.3.0 documented that committed privacy spending is anchored before it is
+acknowledged. A database writer who erased a spend, or rewrote a new
+ledger's genesis, between the call's commit and its anchoring left the call
+acknowledged and the change unnoticed. 0.3.1 acknowledges a spend or a
+registration only when the anchor holds exactly what the call committed.
+Upgrade; there is no migration. A client may see `500 ENC2202` for a spend
+whose entry was erased in that interval, and retrying the same event is
+correct. See the [changelog](../CHANGELOG.md) and
+[security findings](security-findings.md).
+
+## Why (supply chain and notices)
 
 - **Published 0.3.0 images carry fixable base-package findings.** Scanning the
   five images in the 0.3.0 release (evaluator, control, services,
@@ -28,6 +42,8 @@ artifacts and digests stay as published.
   removal once the bases were refreshed).
 - Notice and header text for the two ported files, and a checker that fails
   if they go missing.
+- Anchoring of privacy spends and ledger registrations bound to the entry or
+  genesis the call committed (`encompute-control`).
 - Version 0.3.1 and lockfiles.
 
 ## Verifying

@@ -250,6 +250,64 @@ confirmed on 2026-09-29.
 | ENC-SF-2026-093 | Removing a role (`memberships/remove`) was not anchored: a database restore gave the principal the role back (rc.4) | Medium | encompute-control (`anchor.rs`, `control.rs`, `ops/tenancy.rs`, migration 0004) | fixed | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `caaf754` | `crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_removed_role_removed`, `crates/encompute-control/tests/anchor_rollback.rs::approvals_from_before_version_4_get_stable_ids` | INV-178 (extended) | api.md, deployment.md, threat-model.md, KNOWN_LIMITATIONS.md |
 | ENC-SF-2026-094 | Source-asset lists were trusted for jobs whose program binds no registered asset (the ENC-SF-2026-089 residual): an omitted or extra asset became the job's lineage, revocation scope and trust report | Medium | encompute-control (`ops/jobs.rs`) | fixed | @BAder82t | 2026-09-29 | 2026-09-29 | 2026-12-28 | `1a3d68d` | `crates/encompute-control/tests/collaboration.rs::a_job_lists_exactly_the_assets_its_program_binds_even_its_own`, `crates/encompute-control/tests/collaboration.rs::the_derived_sources_drive_revocation_and_the_trust_report` | INV-194 (extended) | api.md, KNOWN_LIMITATIONS.md, CHANGELOG.md |
 
+## Found after 0.3.0 (fixed in 0.3.1)
+
+The same two findings are fixed on the development line under the same IDs
+(ENC-SF-2026-326 and ENC-SF-2026-329); this section describes them as they
+apply to 0.3. Both were confirmed on 2026-10-09 by an executed test against
+0.3.0 (`03a33942`) and the 0.3.1 preparation branch: the 0.3.0 release
+candidates were not tested.
+
+| ID | Title | Severity | Component | Status | Owner | Reported | Confirmed | Target | Fix | Test | Invariant | Docs |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ENC-SF-2026-326 | A privacy spend erased between its commit and its anchoring was acknowledged and forgotten: present in 0.3.0; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`) | fixed | @BAder82t | 2026-10-09 | 2026-10-09 | 0.3.1 | `e81865c` | `crates/encompute-control/tests/anchor_window.rs::spend_erased_in_the_window_is_not_acknowledged`, `crates/encompute-control/tests/anchor_window.rs::duplicate_answer_erased_in_the_window_is_not_acknowledged`, `crates/encompute-control/tests/anchor_window.rs::repeated_erase_in_the_window_does_not_defeat_the_cap` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, api.md, CHANGELOG.md |
+| ENC-SF-2026-329 | A privacy ledger's genesis (its budget) rewritten between the asset's creation and its anchoring was anchored and acknowledged: present in 0.3.0; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`) | fixed | @BAder82t | 2026-10-09 | 2026-10-09 | 0.3.1 | `e81865c` | `crates/encompute-control/tests/anchor_window.rs::genesis_rewritten_in_the_window_is_not_acknowledged` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, api.md, CHANGELOG.md |
+
+### ENC-SF-2026-326: a forgotten privacy spend
+
+- Severity: High. Asset: privacy spending. Adversary: the database
+  attacker of the threat model (section 4.6), who reads and writes the
+  database while the service runs and cannot write the state anchor. It
+  breaks no assumption of the model; 0.3.0 documented the protection.
+- Component and files: `encompute-control`, `ops/assets.rs` `privacy_spend`
+  and `control.rs` `anchor_ledger`.
+- Impact: the attacker, with a database lock timed to the moment a spend
+  commits, removes the new entry before the control plane anchors it. The
+  spend is acknowledged, nothing is anchored and no alarm is raised.
+  Repeated, the budget cap can be exceeded without bound: in the executed
+  test every one of 21 spends against a cap of 6 was acknowledged and the
+  full cap was still available afterwards. The audit trail still records the
+  spends. A retried event answered as a duplicate had the same gap.
+- Fix: the spend anchors the checkpoint it committed, not the database head,
+  and fails (ENC2202, with the rollback alarm) unless the ledger still holds
+  it. A spend whose entry was erased is not acknowledged.
+- Test: `anchor_window.rs::spend_erased_in_the_window_is_not_acknowledged`,
+  `duplicate_answer_erased_in_the_window_is_not_acknowledged` and
+  `repeated_erase_in_the_window_does_not_defeat_the_cap`, which fail before
+  the fix.
+- Invariant: INV-160 (extended).
+- Docs changed: threat-model.md, KNOWN_LIMITATIONS.md, deployment.md,
+  api.md, CHANGELOG.md.
+
+### ENC-SF-2026-329: a rewritten genesis was anchored
+
+- Severity: High. Same asset and adversary as above.
+- Component and files: `encompute-control`, `ops/assets.rs` (asset
+  registration) and `control.rs`.
+- Impact: a genesis (the budget) rewritten after the registration commits
+  and before it is anchored was anchored and the creation acknowledged, so
+  the ledger accounted for a larger budget than its owner declared. The
+  checkpoint of an empty ledger is the hash of the whole genesis, budget
+  included, so it binds what was committed.
+- Fix: the registration anchors the genesis checkpoint it committed and
+  fails (ENC2202) unless the ledger still extends it; the rewritten ledger
+  left behind is anchored at the committed genesis, so no spend is accepted
+  on it.
+- Test: `anchor_window.rs::genesis_rewritten_in_the_window_is_not_acknowledged`,
+  which fails before the fix.
+- Invariant: INV-160 (extended).
+- Docs changed: as above.
+
 ### Open (accepted / needs design)
 
 Known issues from the release-candidate rounds that are not fixed yet.

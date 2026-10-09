@@ -180,6 +180,18 @@ Related: [support matrix](docs/support-matrix.md),
   cancellation, withdrawal or removal rescans all the anchored-state
   tables. Both fail closed. A hash-chained governance event log will
   replace these sets, and these costs, before general availability.
+- **Privacy spending before 0.3.1 was not bound to the anchor.** In 0.3.0
+  and the 0.3 release candidates, a database writer (the model of threat
+  model section 4.6, in a deployment whose anchor it cannot write) who
+  erased a spend between its commit and its anchoring left the spend
+  acknowledged and forgotten, and one who rewrote a new ledger's genesis in
+  that window had the rewrite anchored. These versions claimed that
+  committed spending is never forgotten; it was not. 0.3.1 acknowledges a
+  spend or a creation only when the anchor holds exactly what it committed
+  (ENC-SF-2026-326, ENC-SF-2026-329). Upgrade; there is no migration. A
+  ledger changed after the anchor holds its entry is refused at the next
+  spend and at start (a denial of service, not forgotten spending). A client
+  may see ENC2202 for a spend whose entry was erased; retrying is correct.
 - **An anchor restored from the same backup forgets later spend.** When
   the database and the anchor are restored together, privacy spend rolls
   back to the backup. Keep the anchor outside the backup set, in the
