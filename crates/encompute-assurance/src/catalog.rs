@@ -646,11 +646,17 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/state.rs::privacy_spending_is_race_safe_and_idempotent"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
-    inv!("INV-160", "deployment", "Restoring an older database, or rolling a privacy ledger back while the service runs, cannot silently roll back authoritative privacy or audit state: the anchor records a ledger checkpoint only if it extends the anchored one, a spend on a ledger that no longer extends the anchor is refused at run time, and startup is refused until an operator's explicit recovery freezes the rolled-back ledgers (treated as exhausted) (ENC-SF-2026-033).", [
+    inv!("INV-160", "deployment", "Restoring an older database, or rolling a privacy ledger back while the service runs, cannot silently roll back authoritative privacy or audit state: the anchor records a ledger checkpoint only if it extends the anchored one, a spend on a ledger that no longer extends the anchor is refused at run time, and startup is refused until an operator's explicit recovery freezes the rolled-back ledgers (treated as exhausted). A spend (a duplicate answer included) or a ledger creation is acknowledged only when the anchor holds exactly the entry or genesis the call committed: a ledger changed between the commit and the anchoring is refused (ENC2202) and never acknowledged (ENC-SF-2026-033, ENC-SF-2026-326, ENC-SF-2026-329).", [
         (Positive, "test:crates/encompute-control/tests/state.rs::restart_keeps_spending_and_restoring_an_older_backup_is_refused"),
         (Negative, "test:crates/encompute-control/tests/state.rs::truncated_audit_and_tampered_or_missing_anchor_are_refused"),
         (Adversarial, "test:crates/encompute-control/tests/state.rs::audit_chain_is_tamper_evident_and_anchored"),
         (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::online_ledger_rollback_is_refused_and_never_anchored"),
+        (Positive, "test:crates/encompute-control/tests/anchor_window.rs::honest_concurrent_spends_are_all_acknowledged_and_consistent"),
+        (Positive, "test:crates/encompute-control/tests/anchor_window.rs::honest_retry_is_acknowledged_as_a_duplicate"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window.rs::spend_erased_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window.rs::duplicate_answer_erased_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window.rs::repeated_erase_in_the_window_does_not_defeat_the_cap"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window.rs::genesis_rewritten_in_the_window_is_not_acknowledged"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
     inv!("INV-161", "deployment", "A revoked asset cannot start a new authorized job or receive a new key release: jobs not yet running fail, new submissions are refused (also when racing the revocation), and the key broker destroys the key.", [
