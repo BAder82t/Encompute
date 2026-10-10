@@ -121,6 +121,10 @@ PY
   else bad "Python lock" "see above"; fi
 fi
 
+# No unresolved merge-conflict marker in any tracked file (one sat in a doc for days).
+if out="$(scripts/check-conflict-markers.sh 2>&1)"; then row "Conflict markers" "PASS (none in tracked files)"
+else bad "Conflict markers" "$out"; fi
+
 # C++ toolchain: recorded, not pinned (docs/release-process.md).
 cxx="$( (c++ --version 2>/dev/null || true) | head -n 1)"
 cm="$( (cmake --version 2>/dev/null || true) | head -n 1)"

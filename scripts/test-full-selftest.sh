@@ -314,6 +314,50 @@ json_is "the dirty end is recorded" git_clean_end false
 git -C "$R" checkout -q -- tracked.txt
 
 
+# BEGIN conflict-markers
+# An unresolved merge-conflict marker in a tracked file (one sat in
+# docs/public-sector.md) must fail scripts/check-conflict-markers.sh. The marker
+# text is built with printf so this file holds no line that starts with one.
+if out="$(bash scripts/check-conflict-markers.sh 2>&1)"; then
+  echo "PASS  no tracked file holds an unresolved merge-conflict marker"
+else echo "FAIL  the repository holds a merge-conflict marker: $out"; fails=$((fails + 1)); fi
+cm_repo() {  # cm_repo DIR LINE: a throwaway repository holding the checker and one file with LINE
+  local d="$1"; rm -rf "$d"; mkdir -p "$d/scripts"
+  cp scripts/check-conflict-markers.sh "$d/scripts/"
+  printf 'intro\n%s\nbody\n' "$2" > "$d/doc.md"
+  ( cd "$d" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -q -m t )
+}
+lt="$(printf '<%.0s' 1 2 3 4 5 6 7)"; gt="$(printf '>%.0s' 1 2 3 4 5 6 7)"; eq="$(printf '=%.0s' 1 2 3 4 5 6 7)"
+cm_repo "$W/cm1" "$lt HEAD"
+if out="$(bash "$W/cm1/scripts/check-conflict-markers.sh" 2>&1)"; then
+  echo "FAIL  a file with an opening conflict marker passed the marker check"; fails=$((fails + 1))
+elif grep -q "doc.md:2:" <<<"$out" && grep -q "CONFLICT MARKERS FOUND" <<<"$out"; then
+  echo "PASS  an opening conflict marker fails the marker check and names the file and line"
+else echo "FAIL  the marker check failed without naming the file: $out"; fails=$((fails + 1)); fi
+cm_repo "$W/cm2" "$gt origin/main"
+if bash "$W/cm2/scripts/check-conflict-markers.sh" >/dev/null 2>&1; then
+  echo "FAIL  a file with a closing conflict marker passed the marker check"; fails=$((fails + 1))
+else echo "PASS  a closing conflict marker fails the marker check"; fi
+cm_repo "$W/cm3" "$eq"
+if bash "$W/cm3/scripts/check-conflict-markers.sh" >/dev/null 2>&1; then
+  echo "PASS  a heading underline of equals signs is not a conflict marker"
+else echo "FAIL  the marker check rejected a heading underline"; fails=$((fails + 1)); fi
+cm_repo "$W/cm4" "$(printf '<%.0s' 1 2 3 4 5 6) HEAD"
+if bash "$W/cm4/scripts/check-conflict-markers.sh" >/dev/null 2>&1; then
+  echo "PASS  six angle brackets are not a conflict marker"
+else echo "FAIL  the marker check rejected six angle brackets"; fails=$((fails + 1)); fi
+cm_repo "$W/cm5" "$lt HEAD"
+printf '# a documented example\ndoc.md\n' > "$W/cm5/scripts/conflict-markers.allow"
+if out="$(bash "$W/cm5/scripts/check-conflict-markers.sh" 2>&1)"; then
+  echo "PASS  an allowlisted file with a conflict marker is not reported"
+else echo "FAIL  the marker check ignored the allowlist: $out"; fails=$((fails + 1)); fi
+cm_repo "$W/cm6" "$lt HEAD"
+printf '# some other file\nother.md\n' > "$W/cm6/scripts/conflict-markers.allow"
+if bash "$W/cm6/scripts/check-conflict-markers.sh" >/dev/null 2>&1; then
+  echo "FAIL  an allowlist naming a different file hid a conflict marker"; fails=$((fails + 1))
+else echo "PASS  an allowlist naming a different file still reports the marker"; fi
+# END conflict-markers
+
 echo
 if [ $fails -eq 0 ]; then echo "SELFTEST PASSED"; else echo "SELFTEST FAILED: $fails case(s)"; fi
 exit $((fails > 0))
