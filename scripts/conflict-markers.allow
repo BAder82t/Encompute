@@ -1,0 +1,3 @@
+# Paths scripts/check-conflict-markers.sh does not scan, one per line.
+# List a file only if it documents or tests conflict markers on purpose, and
+# say why in a comment above the entry. Nothing is listed today.
