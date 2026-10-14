@@ -29,7 +29,7 @@ use crate::authn::PrincipalKind;
 use crate::authz::{
     asset_visible, conflict, forbidden, not_found, project_role_orgs, project_visible, require,
 };
-use crate::control::{Control, Ctx};
+use crate::control::{Control, Ctx, Negatives};
 use crate::db::db_err;
 use crate::log::LogLine;
 use crate::model::{
@@ -946,12 +946,18 @@ impl Control {
                         .org(&j.organization)
                         .project(&j.project),
                 )?;
-                Ok(json!({"id": id, "state": "cancelled"}))
+                Ok((
+                    json!({"id": id, "state": "cancelled"}),
+                    Negatives {
+                        ended_jobs: vec![id.to_owned()],
+                        ..Negatives::default()
+                    },
+                ))
             })
-            .and_then(|v| {
-                // Anchored before acknowledging: a restored database cannot
-                // bring the job back.
-                self.sync_anchor()?;
+            .and_then(|(v, neg)| {
+                // Anchored before acknowledging, from what this call wrote:
+                // a restored database cannot bring the job back.
+                self.anchor_negatives(&neg)?;
                 Ok(v)
             })
     }
@@ -1653,10 +1659,15 @@ impl Control {
                 d = d.r#ref("benchmark_profile", p.clone());
             }
             audit::append(t, d)?;
-            Ok(json!({"id": r.id, "status": status, "control_public_key": self.signer.public_key_hex()}))
+            let neg = Negatives {
+                ended_jobs: lost.iter().map(|(job, _)| job.clone()).collect(),
+                ..Negatives::default()
+            };
+            Ok((json!({"id": r.id, "status": status, "control_public_key": self.signer.public_key_hex()}), neg))
         })?;
-        self.sync_anchor()?;
-        Ok(out)
+        // The jobs it failed are anchored before it is acknowledged.
+        self.anchor_negatives(&out.1)?;
+        Ok(out.0)
     }
 
     /// Heartbeat / status: the evaluator itself (ready, busy, draining,

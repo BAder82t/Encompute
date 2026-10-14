@@ -7,7 +7,7 @@ use encompute_verification::service::check_service_id;
 
 use crate::audit::{self, Outcome};
 use crate::authz::{conflict, forbidden, not_found, project_row, project_visible, require};
-use crate::control::{Control, Ctx};
+use crate::control::{Control, Ctx, Negatives};
 use crate::db::db_err;
 use crate::model::{
     bad, check_name, check_slug, new_id, AddProjectMember, CreateOrganization, CreateProject,
@@ -364,12 +364,18 @@ impl Control {
                 )
                 .org(org),
             )?;
-            Ok(json!({"id": id, "status": "disabled"}))
+            Ok((
+                json!({"id": id, "status": "disabled"}),
+                Negatives {
+                    disabled_services: vec![id.to_owned()],
+                    ..Negatives::default()
+                },
+            ))
         })?;
-        // Anchored before acknowledging: a restored database cannot bring
-        // the account back.
-        self.sync_anchor()?;
-        Ok(out)
+        // Anchored before acknowledging, from what this call wrote: a
+        // restored database cannot bring the account back.
+        self.anchor_negatives(&out.1)?;
+        Ok(out.0)
     }
 
     /// Disables a user of the organization: every request it makes is
@@ -397,10 +403,16 @@ impl Control {
                 ctx.draft("user.disabled", "user", id, Outcome::Succeeded)
                     .org(org),
             )?;
-            Ok(json!({"id": id, "status": "disabled"}))
+            Ok((
+                json!({"id": id, "status": "disabled"}),
+                Negatives {
+                    disabled_users: vec![id.to_owned()],
+                    ..Negatives::default()
+                },
+            ))
         })?;
-        self.sync_anchor()?;
-        Ok(out)
+        self.anchor_negatives(&out.1)?;
+        Ok(out.0)
     }
 
     /// Removes a principal's role (or all its roles) in the organization,
@@ -454,12 +466,19 @@ impl Control {
                 .r#ref("roles", roles.join("+"))
                 .r#ref("memberships", ids.join("+")),
             )?;
-            Ok(json!({"principal": r.principal, "organization": org, "removed": roles}))
+            let neg = Negatives {
+                removed_roles: removed.iter().map(|(_, id)| id.clone()).collect(),
+                ..Negatives::default()
+            };
+            Ok((
+                json!({"principal": r.principal, "organization": org, "removed": roles}),
+                neg,
+            ))
         })?;
-        // Anchored before acknowledging: a restored database cannot give
-        // the role back.
-        self.sync_anchor()?;
-        Ok(out)
+        // Anchored before acknowledging, from what this call wrote: a
+        // restored database cannot give the role back.
+        self.anchor_negatives(&out.1)?;
+        Ok(out.0)
     }
 
     /// Service accounts that still hold security_admin: granted before
@@ -795,7 +814,7 @@ impl Control {
             // Its grants in the project end, and so do the approvals of its
             // own assets there: recorded as withdrawn (and anchored), so a
             // restored database cannot share them again.
-            crate::ops::withdraw_grants(
+            let (_, withdrawn) = crate::ops::withdraw_grants(
                 t,
                 ctx.actor(),
                 "project_id = $1 AND asset_id IN (SELECT id FROM assets WHERE organization_id = $2)",
@@ -829,9 +848,15 @@ impl Control {
                     .org(&r.organization)
                     .project(project),
             )?;
-            Ok(json!({"project": project, "member": r.organization, "removed": true, "failed_jobs": failed}))
+            let neg = Negatives {
+                removed_memberships: vec![removed],
+                withdrawn_grants: withdrawn,
+                ended_jobs: failed.clone(),
+                ..Negatives::default()
+            };
+            Ok((json!({"project": project, "member": r.organization, "removed": true, "failed_jobs": failed}), neg))
         })?;
-        self.sync_anchor()?;
-        Ok(out)
+        self.anchor_negatives(&out.1)?;
+        Ok(out.0)
     }
 }

@@ -14,7 +14,7 @@ use crate::audit::{self, Outcome};
 use crate::authz::{
     asset_row, asset_visible, conflict, forbidden, not_found, project_visible, require, AssetRow,
 };
-use crate::control::{load_ledger, runtime_rollback, Control, Ctx};
+use crate::control::{load_ledger, runtime_rollback, Control, Ctx, Negatives};
 use crate::db::db_err;
 use crate::model::{
     bad, check_digest, check_name, check_storage_uri, new_id, ApproveAsset, AssetKind, KeyRef,
@@ -39,14 +39,15 @@ fn owner_roles(kind: &str) -> &'static [Role] {
 /// organizations) `grants` selects, both over `params`, and records each
 /// one's ID as withdrawn: the state anchor keeps them withdrawn, so a
 /// restored database that still holds one is refused. Returns how many
-/// approvals were deleted.
+/// approvals were deleted, and the IDs recorded (approvals and grants), for
+/// the caller to anchor.
 pub(crate) fn withdraw_grants(
     t: &mut postgres::Transaction<'_>,
     actor: &str,
     approvals: &str,
     grants: &str,
     params: &[&(dyn postgres::types::ToSql + Sync)],
-) -> Result<u64> {
+) -> Result<(u64, Vec<String>)> {
     // The grants first: those of the deleted approvals would otherwise go
     // by the cascade, unrecorded.
     let g = t
@@ -100,7 +101,12 @@ pub(crate) fn withdraw_grants(
         )
         .map_err(db_err)?;
     }
-    Ok(a.len() as u64)
+    let ids = g
+        .iter()
+        .chain(a.iter())
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    Ok((a.len() as u64, ids))
 }
 
 /// An asset as its owner's members see it.
@@ -412,7 +418,7 @@ impl Control {
             // Serializes with submissions (they hold the asset row shared).
             t.execute("SELECT 1 FROM assets WHERE id = $1 FOR UPDATE", &[&id])
                 .map_err(db_err)?;
-            let n = withdraw_grants(
+            let (n, withdrawn) = withdraw_grants(
                 t,
                 ctx.actor(),
                 "asset_id = $1 AND project_id = $2 AND purpose = $3",
@@ -440,10 +446,16 @@ impl Control {
                     .project(&r.project)
                     .r#ref("purpose", r.purpose.clone()),
             )?;
-            Ok(json!({"asset": id, "project": r.project, "purpose": r.purpose, "withdrawn": true, "failed_jobs": failed}))
+            let neg = Negatives {
+                withdrawn_grants: withdrawn,
+                ended_jobs: failed.clone(),
+                ..Negatives::default()
+            };
+            Ok((json!({"asset": id, "project": r.project, "purpose": r.purpose, "withdrawn": true, "failed_jobs": failed}), neg))
         })?;
-        self.sync_anchor()?;
-        Ok(out)
+        // Anchored before acknowledging, from what this transaction wrote.
+        self.anchor_negatives(&out.1)?;
+        Ok(out.0)
     }
 
     /// Fails the jobs `sql` selects (and locks) with `params`: not yet
@@ -496,16 +508,26 @@ impl Control {
             let mut roles = owner_roles(&a.kind).to_vec();
             roles.push(Role::SecurityAdmin);
             require(&ctx.principal, &a.organization, &roles, "revoking an asset")?;
+            let mut neg = Negatives {
+                revoked: vec![id.to_owned()],
+                ..Negatives::default()
+            };
             if a.status == "revoked" {
-                return Ok(json!({"id": id, "status": "revoked", "already": true}));
+                return Ok((json!({"id": id, "status": "revoked", "already": true}), neg));
             }
             let failed = self.revoke_in(t, ctx.actor(), &ctx.request_id, &a, None)?;
-            Ok(json!({"id": id, "status": "revoked", "failed_jobs": failed}))
+            neg.ended_jobs = failed.clone();
+            Ok((
+                json!({"id": id, "status": "revoked", "failed_jobs": failed}),
+                neg,
+            ))
         })?;
         // Anchored before acknowledging (a retry, "already", re-anchors),
-        // with the jobs it failed; the broker's revocation message is sent
-        // only once the revocation is anchored (see `deliver_outbox`).
-        self.sync_anchor()?;
+        // with the jobs it failed, from what this transaction wrote or read
+        // as revoked; the broker's revocation message is sent only once the
+        // revocation is anchored (see `deliver_outbox`).
+        self.anchor_negatives(&r.1)?;
+        let r = r.0;
         self.metrics
             .inc("encompute_key_release_denied_total", "revoked");
         let _ = self.deliver_outbox();

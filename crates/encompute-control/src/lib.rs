@@ -24,7 +24,7 @@ pub mod model;
 mod ops;
 pub mod transport;
 
-pub use control::{Control, Ctx};
+pub use control::{Control, Ctx, Negatives};
 pub use ops::{
     asset_json, check_reservation, estimated_ms, job_profile, keybroker_lock, least_sensitivity,
     legacy_service_admins, shared_asset_json, GATE_MS, HEARTBEAT_TIMEOUT_SECS,

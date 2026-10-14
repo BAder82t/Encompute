@@ -21,13 +21,14 @@ use common::*;
 use serde_json::{json, Value};
 
 /// Runs `acting` (the service call) while a database-owner session waits for
-/// the call's write to `table`, queues ACCESS EXCLUSIVE behind it (granted
-/// the instant the call commits, before the service's post-commit read),
+/// the call's write to the first of `tables`, queues ACCESS EXCLUSIVE on all
+/// of them behind it (granted the instant the call commits, before any
+/// post-commit read of them by the service),
 /// runs `attack_sql` (with triggers and constraints off, as the owner can),
 /// and only then lets the service's read proceed.
 fn in_window<R: Send>(
     url: &str,
-    table: &str,
+    tables: &[&str],
     attack_sql: &str,
     acting: impl FnOnce() -> R + Send,
 ) -> R {
@@ -48,7 +49,7 @@ fn in_window<R: Send>(
                     .query_one(
                         "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
                          WHERE c.relname=$1 AND l.mode='RowExclusiveLock' AND l.granted AND l.pid<>$2",
-                        &[&table, &me],
+                        &[&tables[0], &me],
                     )
                     .unwrap()
                     .get(0);
@@ -58,7 +59,7 @@ fn in_window<R: Send>(
                 std::thread::sleep(Duration::from_millis(5));
             }
             let mut tx = a.transaction().unwrap();
-            tx.batch_execute(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))
+            tx.batch_execute(&format!("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE", tables.join(", ")))
                 .unwrap();
             std::thread::sleep(Duration::from_millis(500));
             tx.batch_execute(&format!(
@@ -113,18 +114,25 @@ fn revocation_undone_in_the_window_is_not_acknowledged() {
     let m = w.model_b.clone();
     let url = w.t.env0.url.clone();
     let undo = format!("UPDATE assets SET status='active', revoked_at=NULL WHERE id='{m}'");
-    let (s, v) = in_window(&url, "assets", &undo, || {
+    let (s, v) = in_window(&url, &["assets"], &undo, || {
         w.t.call(&w.b_owner, "POST", &format!("/v1/assets/{m}/revoke"), None)
     });
-    assert!(refused(s, &v, "REVOCATION"), "acknowledged then forgotten: {s} {v}");
+    assert!(
+        refused(s, &v, "REVOCATION"),
+        "acknowledged then forgotten: {s} {v}"
+    );
     assert!(rollbacks_counted(&w.t));
     assert!(
         w.t.control.anchor.snapshot().revoked.contains(&m),
         "the anchor must hold the revocation the call committed"
     );
-    assert_eq!(scalar(&url, &format!("SELECT status FROM assets WHERE id='{m}'")), "active");
+    assert_eq!(
+        scalar(&url, &format!("SELECT status FROM assets WHERE id='{m}'")),
+        "active"
+    );
     // The retry lands, and the honest state starts.
-    let (s, v) = w.t.call(&w.b_owner, "POST", &format!("/v1/assets/{m}/revoke"), None);
+    let (s, v) =
+        w.t.call(&w.b_owner, "POST", &format!("/v1/assets/{m}/revoke"), None);
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["status"], "revoked");
     w.t.restart().expect("the honest database starts");
@@ -144,12 +152,15 @@ fn failed_job_of_a_revocation_undone_in_the_window_is_not_acknowledged() {
         "UPDATE assets SET status='active', revoked_at=NULL WHERE id='{m}';
          UPDATE jobs SET state='queued', error=NULL WHERE id='{job}'"
     );
-    let (s, v) = in_window(&url, "assets", &undo, || {
+    let (s, v) = in_window(&url, &["assets"], &undo, || {
         w.t.call(&w.b_owner, "POST", &format!("/v1/assets/{m}/revoke"), None)
     });
     assert!(refused(s, &v, "REVOCATION"), "{s} {v}");
     let a = w.t.control.anchor.snapshot();
-    assert!(a.revoked.contains(&m) && a.ended_jobs.contains(&job), "{a:?}");
+    assert!(
+        a.revoked.contains(&m) && a.ended_jobs.contains(&job),
+        "{a:?}"
+    );
 }
 
 /// (3) an approval withdrawn, then restored in the window.
@@ -176,14 +187,23 @@ fn withdrawn_approval_restored_in_the_window_is_not_acknowledged() {
          INSERT INTO asset_approvals SELECT * FROM atk_ap;
          INSERT INTO asset_approval_members SELECT * FROM atk_apm"
     );
-    let (s, v) = in_window(&url, "withdrawn_grants", &undo, || {
-        w.t.call(
-            &w.a_owner,
-            "POST",
-            &format!("/v1/assets/{d}/approvals/withdraw"),
-            Some(json!({"project": p, "purpose": "medical-training"})),
-        )
-    });
+    let (s, v) = in_window(
+        &url,
+        &[
+            "withdrawn_grants",
+            "asset_approvals",
+            "asset_approval_members",
+        ],
+        &undo,
+        || {
+            w.t.call(
+                &w.a_owner,
+                "POST",
+                &format!("/v1/assets/{d}/approvals/withdraw"),
+                Some(json!({"project": p, "purpose": "medical-training"})),
+            )
+        },
+    );
     assert!(refused(s, &v, "APPROVAL"), "{s} {v}");
     assert!(!w.t.control.anchor.snapshot().withdrawn_grants.is_empty());
 }
@@ -203,7 +223,7 @@ fn service_disable_undone_in_the_window_is_not_acknowledged() {
     );
     let url = w.t.env0.url.clone();
     let undo = "UPDATE service_accounts SET status='active' WHERE id='secagg-9'";
-    let (s, v) = in_window(&url, "service_accounts", undo, || {
+    let (s, v) = in_window(&url, &["service_accounts"], undo, || {
         w.t.call(
             &w.platform,
             "POST",
@@ -212,7 +232,13 @@ fn service_disable_undone_in_the_window_is_not_acknowledged() {
         )
     });
     assert!(refused(s, &v, "SERVICE ACCOUNT"), "{s} {v}");
-    assert!(w.t.control.anchor.snapshot().disabled_services.contains("secagg-9"));
+    assert!(w
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .disabled_services
+        .contains("secagg-9"));
 }
 
 /// (5) a user disabled, then enabled again in the window.
@@ -223,7 +249,7 @@ fn user_disable_undone_in_the_window_is_not_acknowledged() {
     let id = who["id"].as_str().unwrap().to_owned();
     let url = w.t.env0.url.clone();
     let undo = format!("UPDATE users SET status='active' WHERE id='{id}'");
-    let (s, v) = in_window(&url, "users", &undo, || {
+    let (s, v) = in_window(&url, &["users"], &undo, || {
         w.t.call(
             &w.a_admin,
             "POST",
@@ -245,7 +271,7 @@ fn cancelled_job_revived_in_the_window_is_not_acknowledged() {
     let job = j["id"].as_str().unwrap().to_owned();
     let url = w.t.env0.url.clone();
     let undo = format!("UPDATE jobs SET state='queued', error=NULL WHERE id='{job}'");
-    let (s, v) = in_window(&url, "jobs", &undo, || {
+    let (s, v) = in_window(&url, &["jobs"], &undo, || {
         w.t.call(&w.b_dev, "POST", &format!("/v1/jobs/{job}/cancel"), None)
     });
     assert!(refused(s, &v, "JOB"), "{s} {v}");
@@ -256,7 +282,13 @@ fn cancelled_job_revived_in_the_window_is_not_acknowledged() {
 #[test]
 fn role_removal_undone_in_the_window_is_not_acknowledged() {
     let Some(w) = world() else { return };
-    let multi = user(&w.t, &w.a_admin, "hospital-a", "a-multi", &["ml_developer", "auditor"]);
+    let multi = user(
+        &w.t,
+        &w.a_admin,
+        "hospital-a",
+        "a-multi",
+        &["ml_developer", "auditor"],
+    );
     let principal = w.t.ok(&multi, "GET", "/v1/whoami", None)["id"]
         .as_str()
         .unwrap()
@@ -273,7 +305,7 @@ fn role_removal_undone_in_the_window_is_not_acknowledged() {
     let undo = format!(
         "DELETE FROM removed_roles WHERE id='{role}'; INSERT INTO memberships SELECT * FROM atk_roles"
     );
-    let (s, v) = in_window(&url, "removed_roles", &undo, || {
+    let (s, v) = in_window(&url, &["removed_roles", "memberships"], &undo, || {
         w.t.call(
             &w.a_admin,
             "POST",
@@ -302,14 +334,25 @@ fn project_leave_undone_in_the_window_is_not_acknowledged() {
     let undo = format!(
         "DELETE FROM removed_memberships WHERE id='{mid}'; INSERT INTO project_members SELECT * FROM atk_pm"
     );
-    let (s, v) = in_window(&url, "removed_memberships", &undo, || {
-        w.t.call(
-            &w.a_admin,
-            "POST",
-            &format!("/v1/projects/{p}/members/remove"),
-            Some(json!({"organization": "hospital-a"})),
-        )
-    });
+    let (s, v) = in_window(
+        &url,
+        &["removed_memberships", "project_members"],
+        &undo,
+        || {
+            w.t.call(
+                &w.a_admin,
+                "POST",
+                &format!("/v1/projects/{p}/members/remove"),
+                Some(json!({"organization": "hospital-a"})),
+            )
+        },
+    );
     assert!(refused(s, &v, "MEMBERSHIP"), "{s} {v}");
-    assert!(w.t.control.anchor.snapshot().removed_memberships.contains(&mid));
+    assert!(w
+        .t
+        .control
+        .anchor
+        .snapshot()
+        .removed_memberships
+        .contains(&mid));
 }

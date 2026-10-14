@@ -79,6 +79,31 @@ pub fn runtime_rollback(what: &str, detail: impl std::fmt::Display) -> Error {
     )
 }
 
+/// The security-negative transitions one call committed (see
+/// [`Control::anchor_negatives`]): the IDs its own transaction wrote.
+#[derive(Debug, Default, Clone)]
+pub struct Negatives {
+    pub revoked: Vec<String>,
+    pub disabled_services: Vec<String>,
+    pub disabled_users: Vec<String>,
+    pub ended_jobs: Vec<String>,
+    pub withdrawn_grants: Vec<String>,
+    pub removed_memberships: Vec<String>,
+    pub removed_roles: Vec<String>,
+}
+
+impl Negatives {
+    pub fn is_empty(&self) -> bool {
+        self.revoked.is_empty()
+            && self.disabled_services.is_empty()
+            && self.disabled_users.is_empty()
+            && self.ended_jobs.is_empty()
+            && self.withdrawn_grants.is_empty()
+            && self.removed_memberships.is_empty()
+            && self.removed_roles.is_empty()
+    }
+}
+
 /// The control plane's signing key: from the configured secret file; in
 /// development, created next to a directory anchor on first start.
 pub fn load_signer(cfg: &Config) -> Result<ServiceSigner> {
@@ -430,110 +455,7 @@ impl Control {
                 }
             }
         }
-        // A revoked asset must still be revoked (an absent one cannot be
-        // used either: asset IDs are never reissued).
-        for asset in &a.revoked {
-            if let Some(status) = revoked_status(&mut *c, asset)? {
-                if status != "revoked" {
-                    return Err(rollback(
-                        "REVOCATION",
-                        format!("asset {asset} was revoked, but the database shows it {status}"),
-                    ));
-                }
-            }
-        }
-        // Disabled principals stay disabled; cancelled and failed jobs stay
-        // ended (absent ones cannot act or run: IDs are never reissued).
-        let undone = |c: &mut crate::db::Conn,
-                      sql: &str,
-                      ids: &std::collections::BTreeSet<String>|
-         -> Result<Vec<(String, String)>> {
-            if ids.is_empty() {
-                return Ok(vec![]);
-            }
-            let ids: Vec<&String> = ids.iter().collect();
-            Ok(c.query(sql, &[&ids])
-                .map_err(db_err)?
-                .iter()
-                .map(|r| (r.get(0), r.get(1)))
-                .collect())
-        };
-        for (what, sql, ids) in [
-            (
-                "SERVICE ACCOUNT",
-                "SELECT id, status FROM service_accounts WHERE id = ANY($1) AND status <> 'disabled' ORDER BY id",
-                &a.disabled_services,
-            ),
-            (
-                "USER",
-                "SELECT id, status FROM users WHERE id = ANY($1) AND status <> 'disabled' ORDER BY id",
-                &a.disabled_users,
-            ),
-            (
-                "JOB",
-                "SELECT id, state FROM jobs WHERE id = ANY($1) AND state NOT IN ('failed', 'cancelled') ORDER BY id",
-                &a.ended_jobs,
-            ),
-        ] {
-            if let Some((id, status)) = undone(&mut c, sql, ids)?.into_iter().next() {
-                let was = if what == "JOB" { "cancelled or failed" } else { "disabled" };
-                return Err(rollback(
-                    what,
-                    format!("{} {id} was {was}, but the database shows it {status}", what.to_lowercase()),
-                ));
-            }
-        }
-        // A withdrawn approval (or ended grant) stays withdrawn: its ID is
-        // never reused, so a database holding it again was restored.
-        if let Some((id, asset)) = undone(
-            &mut c,
-            "SELECT approval_id, asset_id FROM asset_approvals WHERE approval_id = ANY($1)
-             UNION ALL
-             SELECT grant_id, asset_id FROM asset_approval_members WHERE grant_id = ANY($1)
-             ORDER BY 1",
-            &a.withdrawn_grants,
-        )?
-        .into_iter()
-        .next()
-        {
-            return Err(rollback(
-                "APPROVAL",
-                format!("approval {id} of asset {asset} was withdrawn, but the database holds it"),
-            ));
-        }
-        // A removed project membership stays removed, likewise: the
-        // organization would see the project, submit jobs in it and be
-        // covered by approvals given to its members again.
-        if let Some((id, who)) = undone(
-            &mut c,
-            "SELECT membership_id, organization_id || ' in project ' || project_id FROM project_members
-              WHERE membership_id = ANY($1) ORDER BY 1",
-            &a.removed_memberships,
-        )?
-        .into_iter()
-        .next()
-        {
-            return Err(rollback(
-                "MEMBERSHIP",
-                format!("membership {id} ({who}) was removed, but the database holds it"),
-            ));
-        }
-        // A removed organization role stays removed, likewise: the
-        // principal would act with it again.
-        if let Some((id, who)) = undone(
-            &mut c,
-            "SELECT membership_id, role || ' of ' || principal_id || ' in ' || organization_id FROM memberships
-              WHERE membership_id = ANY($1) ORDER BY 1",
-            &a.removed_roles,
-        )?
-        .into_iter()
-        .next()
-        {
-            return Err(rollback(
-                "ROLE",
-                format!("role {id} ({who}) was removed, but the database holds it"),
-            ));
-        }
+        check_negatives(&mut c, &a, &rollback)?;
         Ok(())
     }
 
@@ -996,6 +918,62 @@ impl Control {
         refused.map_or(Ok(()), Err)
     }
 
+    /// Anchors the security-negative transitions a call just committed, and
+    /// fails unless the database still holds them. `n` is what the call
+    /// itself wrote in its own transaction (the asset it revoked, the
+    /// account it disabled, the jobs it failed, the grants it withdrew, the
+    /// memberships and roles it removed), never a re-read of whatever the
+    /// database shows now: a database writer who undoes the transition
+    /// between the commit and this call would otherwise leave nothing to
+    /// anchor and the call acknowledged.
+    ///
+    /// The anchor records `n` first (it only ever adds), so a restart refuses
+    /// a database that undoes it. Then the database is checked as at
+    /// start-up, restricted to `n`: one that undoes it raises the rollback
+    /// alarm and the call is refused (ENC2202), so the caller never
+    /// acknowledges a transition the database no longer holds. Retrying is
+    /// correct: the transition is committed again.
+    pub fn anchor_negatives(&self, n: &Negatives) -> Result<()> {
+        if n.is_empty() {
+            return Ok(());
+        }
+        self.anchor.try_update(&self.signer, |a| {
+            let mut changed = false;
+            for (set, ids) in [
+                (&mut a.revoked, &n.revoked),
+                (&mut a.disabled_services, &n.disabled_services),
+                (&mut a.disabled_users, &n.disabled_users),
+                (&mut a.ended_jobs, &n.ended_jobs),
+                (&mut a.withdrawn_grants, &n.withdrawn_grants),
+                (&mut a.removed_memberships, &n.removed_memberships),
+                (&mut a.removed_roles, &n.removed_roles),
+            ] {
+                for id in ids {
+                    changed |= set.insert(id.clone());
+                }
+            }
+            Ok(changed)
+        })?;
+        let mut probe = crate::anchor::StateAnchor::empty(&self.signer);
+        probe.revoked = n.revoked.iter().cloned().collect();
+        probe.disabled_services = n.disabled_services.iter().cloned().collect();
+        probe.disabled_users = n.disabled_users.iter().cloned().collect();
+        probe.ended_jobs = n.ended_jobs.iter().cloned().collect();
+        probe.withdrawn_grants = n.withdrawn_grants.iter().cloned().collect();
+        probe.removed_memberships = n.removed_memberships.iter().cloned().collect();
+        probe.removed_roles = n.removed_roles.iter().cloned().collect();
+        let mut c = self.db.conn()?;
+        check_negatives(&mut c, &probe, &|what, detail| {
+            self.rollback_alarm("security-negative", what);
+            runtime_rollback(
+                what,
+                format!(
+                    "{detail}; the call is not acknowledged and the anchor holds the transition"
+                ),
+            )
+        })
+    }
+
     /// Anchors the security-negative state the database holds and the
     /// anchor does not yet: revoked assets, disabled service accounts and
     /// users, cancelled and failed jobs, withdrawn asset approvals, removed
@@ -1234,6 +1212,124 @@ fn recreate_frozen_ledger(
     )
     .map_err(db_err)?;
     Ok(Some(genesis))
+}
+
+/// Fails with `fail(what, detail)` when the database undoes a security-negative
+/// transition `a` records: a revoked asset that is not revoked, a disabled
+/// service account or user that is not disabled, a cancelled or failed job
+/// that is not ended, a withdrawn approval, a removed project membership or a
+/// removed role that the database holds again. Run at start-up over the whole
+/// anchor, and by [`Control::anchor_negatives`] over what a call committed.
+fn check_negatives(
+    c: &mut crate::db::Conn,
+    a: &crate::anchor::StateAnchor,
+    fail: &dyn Fn(&str, String) -> Error,
+) -> Result<()> {
+    // A revoked asset must still be revoked (an absent one cannot be
+    // used either: asset IDs are never reissued).
+    for asset in &a.revoked {
+        if let Some(status) = revoked_status(&mut **c, asset)? {
+            if status != "revoked" {
+                return Err(fail(
+                    "REVOCATION",
+                    format!("asset {asset} was revoked, but the database shows it {status}"),
+                ));
+            }
+        }
+    }
+    // Disabled principals stay disabled; cancelled and failed jobs stay
+    // ended (absent ones cannot act or run: IDs are never reissued).
+    let undone = |c: &mut crate::db::Conn,
+                  sql: &str,
+                  ids: &std::collections::BTreeSet<String>|
+     -> Result<Vec<(String, String)>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let ids: Vec<&String> = ids.iter().collect();
+        Ok(c.query(sql, &[&ids])
+            .map_err(db_err)?
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect())
+    };
+    for (what, sql, ids) in [
+            (
+                "SERVICE ACCOUNT",
+                "SELECT id, status FROM service_accounts WHERE id = ANY($1) AND status <> 'disabled' ORDER BY id",
+                &a.disabled_services,
+            ),
+            (
+                "USER",
+                "SELECT id, status FROM users WHERE id = ANY($1) AND status <> 'disabled' ORDER BY id",
+                &a.disabled_users,
+            ),
+            (
+                "JOB",
+                "SELECT id, state FROM jobs WHERE id = ANY($1) AND state NOT IN ('failed', 'cancelled') ORDER BY id",
+                &a.ended_jobs,
+            ),
+        ] {
+            if let Some((id, status)) = undone(c, sql, ids)?.into_iter().next() {
+                let was = if what == "JOB" { "cancelled or failed" } else { "disabled" };
+                return Err(fail(
+                    what,
+                    format!("{} {id} was {was}, but the database shows it {status}", what.to_lowercase()),
+                ));
+            }
+        }
+    // A withdrawn approval (or ended grant) stays withdrawn: its ID is
+    // never reused, so a database holding it again was restored.
+    if let Some((id, asset)) = undone(
+        c,
+        "SELECT approval_id, asset_id FROM asset_approvals WHERE approval_id = ANY($1)
+             UNION ALL
+             SELECT grant_id, asset_id FROM asset_approval_members WHERE grant_id = ANY($1)
+             ORDER BY 1",
+        &a.withdrawn_grants,
+    )?
+    .into_iter()
+    .next()
+    {
+        return Err(fail(
+            "APPROVAL",
+            format!("approval {id} of asset {asset} was withdrawn, but the database holds it"),
+        ));
+    }
+    // A removed project membership stays removed, likewise: the
+    // organization would see the project, submit jobs in it and be
+    // covered by approvals given to its members again.
+    if let Some((id, who)) = undone(
+        c,
+        "SELECT membership_id, organization_id || ' in project ' || project_id FROM project_members
+              WHERE membership_id = ANY($1) ORDER BY 1",
+        &a.removed_memberships,
+    )?
+    .into_iter()
+    .next()
+    {
+        return Err(fail(
+            "MEMBERSHIP",
+            format!("membership {id} ({who}) was removed, but the database holds it"),
+        ));
+    }
+    // A removed organization role stays removed, likewise: the
+    // principal would act with it again.
+    if let Some((id, who)) = undone(
+            c,
+            "SELECT membership_id, role || ' of ' || principal_id || ' in ' || organization_id FROM memberships
+              WHERE membership_id = ANY($1) ORDER BY 1",
+            &a.removed_roles,
+        )?
+        .into_iter()
+        .next()
+        {
+            return Err(fail(
+                "ROLE",
+                format!("role {id} ({who}) was removed, but the database holds it"),
+            ));
+        }
+    Ok(())
 }
 
 /// An asset's status, or `None` if the database does not hold it.
