@@ -884,7 +884,8 @@ impl Control {
                     format!("the privacy ledger of {asset} is missing"),
                 )
             })?;
-            view.verify()?;
+            view.verify()
+                .inspect_err(|_| self.rollback_alarm("privacy", asset))?;
             if let Err(e) = view.extends(committed) {
                 self.rollback_alarm("privacy", asset);
                 refused = Some(runtime_rollback(
