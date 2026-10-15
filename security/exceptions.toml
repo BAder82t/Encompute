@@ -846,4 +846,6 @@ compensating_controls = [
 ]
 tracking = "https://github.com/advisories/GHSA-6w46-j5rx-g56g"
 added = 2026-09-27
+approved_by = "BAder82t"  # reviewed again with the 0.3.1 candidate (no shipped image installs pytest)
+approved_on = "2026-10-15"
 expires = 2026-12-31
