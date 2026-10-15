@@ -365,3 +365,16 @@ Related: [support matrix](docs/support-matrix.md),
   advance. See "Upgrading from 0.3.0-rc.3 or earlier" in
   [docs/deployment.md](docs/deployment.md).
 - **Python 3.11 or later** is required. CI tests 3.11 and 3.12.
+- **Revocations, disables, cancellations, withdrawals and removals were not
+  bound to the anchor before 0.3.1 either (ENC-SF-2026-411).** In 0.3.0, a
+  database writer who undid one between the call's commit and its anchoring
+  left it acknowledged and never anchored, so a restart could not notice
+  it. 0.3.1 anchors the IDs the call itself wrote and fails the call
+  (ENC2202) when the database no longer holds them. After the anchor holds
+  a transition, a database writer who reverts it while the service runs is
+  refused at start-up, not at once, and the key broker's revocation message
+  is a database row.
+- **A ledger that was never anchored accepts a rewritten genesis (ENC-SF-2026-412,
+  open).** If a crash or an anchor outage falls between a registration's
+  commit and its anchoring, the registration is not acknowledged but the
+  ledger exists with nothing to hold its genesis to.

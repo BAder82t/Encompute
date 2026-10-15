@@ -398,6 +398,7 @@ rollback.
 | Erase a spend, or rewrite a new ledger's genesis, between the call's commit and its anchoring, so that the call is acknowledged and the state is forgotten (0.3.0 and the 0.3 candidates did not prevent this; fixed in 0.3.1, ENC-SF-2026-326, ENC-SF-2026-329) | The call takes the checkpoint of what it committed (the entry it appended, the entry a duplicate answer returns, or the hash of the new ledger's whole genesis, budget included). Under the anchor's lock the ledger must still extend that checkpoint, or the call fails with ENC2202 and is not acknowledged; what the anchor records is that checkpoint, not whatever the database shows. A client may see ENC2202 for a spend whose entry was erased, and retrying is correct. A creation whose genesis was rewritten also anchors the genesis it committed, so the rewritten ledger cannot be spent on (`control.rs` `anchor_committed`, `ops/assets.rs` `privacy_spend`) | INV-160; `spend_erased_in_the_window_is_not_acknowledged`, `duplicate_answer_erased_in_the_window_is_not_acknowledged`, `repeated_erase_in_the_window_does_not_defeat_the_cap`, `genesis_rewritten_in_the_window_is_not_acknowledged` |
 | Unfreeze a frozen ledger, by a database update or by restoring a backup and running recovery again | Frozen ledgers are recorded in the anchor. A spend on one is refused (ENC2201) whatever the database says; startup refuses a database in which it is unfrozen (FREEZE STATE ROLLBACK); recovery freezes it again (`ops/assets.rs`, `control.rs`) | `a_frozen_ledger_stays_frozen_whatever_the_database_says` |
 | Restore a database to undo a revocation, a disabled service account or user, a cancelled or failed job, a withdrawn asset approval, an organization leaving a project, or a removed role | These transitions are anchored before they are acknowledged. Startup refuses a database that undoes one (REVOCATION, SERVICE ACCOUNT, USER, JOB, APPROVAL, MEMBERSHIP or ROLE STATE ROLLBACK); recovery re-applies them (`anchor.rs`, `control.rs`). A role granted again after its removal is a new membership, never the anchored one | INV-178; `restore_and_recovery_keep_disables_and_cancellations`, `restore_and_recovery_keep_withdrawn_approvals`, `restore_and_recovery_keep_a_left_project_left`, `restore_and_recovery_keep_a_removed_role_removed` |
+| Undo a revocation, disable, cancellation, withdrawal, project leave or role removal between the call's commit and its anchoring, so the call is acknowledged and the transition forgotten (0.3.0 and earlier 0.3.1 builds did not prevent this; fixed in 0.3.1, ENC-SF-2026-411) | The call anchors the IDs its own transaction wrote, then checks the database as at start-up over them; a transition the database no longer holds fails the call with ENC2202 and the alarm, and the anchor keeps it (`control.rs` `anchor_negatives`, one call per path in `ops/assets.rs`, `ops/tenancy.rs`, `ops/jobs.rs`) | INV-178; `crates/encompute-control/tests/anchor_negatives.rs` |
 | Make a key broker destroy a key for a revocation that a restore then forgets | A key broker receives an asset's revocation only after the anchor records it (`ops/jobs.rs` `deliver_outbox`) | `broker_revocation_is_delivered_only_once_anchored` |
 | Edit, delete or reorder audit events up to the last anchored checkpoint | Hash chain, signed checkpoints, anchored root (`audit.rs`) | INV-162 |
 
@@ -413,6 +414,16 @@ rollback.
   the change unnoticed, in a deployment whose anchor the writer could not
   reach. Whether it was used against a deployment cannot be told from the
   audit trail alone, which still records the spend.
+- **A ledger committed but never anchored** (a crash or an anchor outage
+  between the registration's commit and its anchoring; the call is not
+  acknowledged) has no anchored genesis, so a genesis a database writer
+  rewrites before the first spend is accepted and anchored there
+  (ENC-SF-2026-412, open). Check the budget of an asset whose registration
+  failed.
+- **A transition reverted after the anchor holds it** (a revocation, disable
+  and so on) is refused at start-up and recovery, not while the service
+  runs: these decisions are read from the database. The key broker's
+  revocation message is a database row a writer can delete.
 - A creation whose genesis is rewritten in that window leaves the asset
   registered with a ledger the anchor refuses: no spend is accepted on it,
   and start-up refuses the database until an operator's recovery freezes it.

@@ -657,6 +657,13 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/anchor_window.rs::duplicate_answer_erased_in_the_window_is_not_acknowledged"),
         (Adversarial, "test:crates/encompute-control/tests/anchor_window.rs::repeated_erase_in_the_window_does_not_defeat_the_cap"),
         (Adversarial, "test:crates/encompute-control/tests/anchor_window.rs::genesis_rewritten_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window_adversarial.rs::w01_first_spend_erased_in_the_window"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window_adversarial.rs::w02_spend_replaced_by_a_forged_valid_entry"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window_adversarial.rs::w03_duplicate_answer_replaced_by_a_forged_entry"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window_adversarial.rs::w05_genesis_rewritten_in_the_window_of_the_first_spend"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window_adversarial.rs::w06_two_concurrent_spends_one_erased"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window_adversarial.rs::w11_background_tick_racing_the_window"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_window_adversarial.rs::w13_entry_and_audit_trace_erased_in_the_window"),
         (EndToEnd, "script:scripts/enterprise-e2e.sh"),
     ]),
     inv!("INV-161", "deployment", "A revoked asset cannot start a new authorized job or receive a new key release: jobs not yet running fail, new submissions are refused (also when racing the revocation), and the key broker destroys the key.", [
@@ -808,7 +815,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (EndToEnd, "test:crates/encompute-control/tests/restart.rs::killed_control_plane_process_recovers_every_time"),
         (EndToEnd, "test:crates/encompute-control/tests/restart.rs::http_server_survives_database_connection_loss"),
     ]),
-    inv!("INV-178", "deployment", "Security-negative transitions survive a database rollback: asset revocations, frozen ledgers, disabled service accounts and users, cancelled and failed jobs, withdrawn asset approvals (including the grants an organization loses by leaving a project), removed project memberships and organization roles removed from a principal are recorded in the signed state anchor before they are acknowledged, so restoring an older database is refused at startup and recovery re-applies them (an organization that left a project neither sees it, plans or submits jobs in it, nor is covered by later approvals; a principal whose role was removed cannot act with it); an approval given, a project joined, or a role granted again after a withdrawal is a new one, never the anchored one, and rows from before schema version 4 get the same IDs on every migration; an anchor update that loses a compare-and-set race reloads and re-applies, anchors written before these sets existed still verify, backups capture the anchor before the database, and a restore keeps a newer key broker state (ENC-SF-2026-039, ENC-SF-2026-083, ENC-SF-2026-091, ENC-SF-2026-093).", [
+    inv!("INV-178", "deployment", "Security-negative transitions survive a database rollback, and are acknowledged only when the anchor holds what the call itself committed (a transition undone between the commit and the anchoring is refused with ENC2202, never acknowledged): asset revocations, frozen ledgers, disabled service accounts and users, cancelled and failed jobs, withdrawn asset approvals (including the grants an organization loses by leaving a project), removed project memberships and organization roles removed from a principal are recorded in the signed state anchor before they are acknowledged, so restoring an older database is refused at startup and recovery re-applies them (an organization that left a project neither sees it, plans or submits jobs in it, nor is covered by later approvals; a principal whose role was removed cannot act with it); an approval given, a project joined, or a role granted again after a withdrawal is a new one, never the anchored one, and rows from before schema version 4 get the same IDs on every migration; the IDs anchored are those the call's own transaction wrote, never a re-read of the database (ENC-SF-2026-411); an anchor update that loses a compare-and-set race reloads and re-applies, anchors written before these sets existed still verify, backups capture the anchor before the database, and a restore keeps a newer key broker state (ENC-SF-2026-039, ENC-SF-2026-083, ENC-SF-2026-091, ENC-SF-2026-093, ENC-SF-2026-411).", [
         (Positive, "test:crates/encompute-control/tests/jobs.rs::revocation_stops_future_use"),
         (Negative, "test:crates/encompute-keybroker/tests/lifecycle.rs::lifecycle_revocation_survives_rollback_after_kek_rotation_and_root_retirement"),
         (Positive, "test:crates/encompute-control/src/anchor.rs::a_lost_compare_and_set_reloads_and_reapplies"),
@@ -819,6 +826,14 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_left_project_left"),
         (Adversarial, "test:crates/encompute-control/tests/anchor_rollback.rs::restore_and_recovery_keep_a_removed_role_removed"),
         (Positive, "test:crates/encompute-control/tests/anchor_rollback.rs::approvals_from_before_version_4_get_stable_ids"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_negatives.rs::revocation_undone_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_negatives.rs::failed_job_of_a_revocation_undone_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_negatives.rs::withdrawn_approval_restored_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_negatives.rs::service_disable_undone_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_negatives.rs::user_disable_undone_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_negatives.rs::cancelled_job_revived_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_negatives.rs::role_removal_undone_in_the_window_is_not_acknowledged"),
+        (Adversarial, "test:crates/encompute-control/tests/anchor_negatives.rs::project_leave_undone_in_the_window_is_not_acknowledged"),
         (EndToEnd, "script:scripts/release/backup-drill.sh"),
     ]),
     inv!("INV-179", "secagg", "A restarted SecAgg coordinator never re-runs a round or releases a round's aggregate twice, and each release is charged once.", [

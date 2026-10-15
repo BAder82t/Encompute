@@ -14,7 +14,11 @@ acknowledged. A database writer who erased a spend, or rewrote a new
 ledger's genesis, between the call's commit and its anchoring left the call
 acknowledged and the change unnoticed. 0.3.1 acknowledges a spend or a
 registration only when the anchor holds exactly what the call committed.
-Upgrade; there is no migration. A client may see `500 ENC2202` for a spend
+The same gap existed for revocations, disables, cancellations, approval
+withdrawals, project leaves and role removals (ENC-SF-2026-411); they are now
+acknowledged only when the anchor holds what the call wrote. One residual is
+open: a ledger never anchored because of a failure during registration
+(ENC-SF-2026-412). Upgrade; there is no migration. A client may see `500 ENC2202` for a spend
 whose entry was erased in that interval, and retrying the same event is
 correct. See the [changelog](../CHANGELOG.md) and
 [security findings](security-findings.md).

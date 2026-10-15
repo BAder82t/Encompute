@@ -262,6 +262,8 @@ candidates were not tested.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | ENC-SF-2026-326 | A privacy spend erased between its commit and its anchoring was acknowledged and forgotten: present in 0.3.0; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`) | fixed | @BAder82t | 2026-10-09 | 2026-10-09 | 0.3.1 | `e81865c` | `crates/encompute-control/tests/anchor_window.rs::spend_erased_in_the_window_is_not_acknowledged`, `crates/encompute-control/tests/anchor_window.rs::duplicate_answer_erased_in_the_window_is_not_acknowledged`, `crates/encompute-control/tests/anchor_window.rs::repeated_erase_in_the_window_does_not_defeat_the_cap` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, api.md, CHANGELOG.md |
 | ENC-SF-2026-329 | A privacy ledger's genesis (its budget) rewritten between the asset's creation and its anchoring was anchored and acknowledged: present in 0.3.0; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`) | fixed | @BAder82t | 2026-10-09 | 2026-10-09 | 0.3.1 | `e81865c` | `crates/encompute-control/tests/anchor_window.rs::genesis_rewritten_in_the_window_is_not_acknowledged` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, api.md, CHANGELOG.md |
+| ENC-SF-2026-411 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal undone between its commit and its anchoring was acknowledged and never anchored (the `sync_anchor` class): present in 0.3.0 and 0.3.1 before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`, `ops/tenancy.rs`, `ops/jobs.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | see CHANGELOG | `crates/encompute-control/tests/anchor_negatives.rs` (eight tests, one per path) | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, CHANGELOG.md |
+| ENC-SF-2026-412 | A ledger committed but never anchored (a crash or an anchor outage between the registration's commit and its anchoring; the call was not acknowledged) has no anchored genesis: a database writer who rewrites it is accepted at the first spend: present in 0.3.0 and 0.3.1 | Medium | encompute-control (`control.rs`, `ops/assets.rs`) | open (accepted) | @BAder82t | 2026-10-15 | 2026-10-15 | none | none | `crates/encompute-control/tests/anchor_window_adversarial.rs::w15_residual_unanchored_ledger_genesis_rewritten_across_a_crash` (pins the open behaviour) | INV-160 (limit) | threat-model.md §4.6, KNOWN_LIMITATIONS.md |
 
 ### ENC-SF-2026-326: a forgotten privacy spend
 
@@ -307,6 +309,52 @@ candidates were not tested.
   which fails before the fix.
 - Invariant: INV-160 (extended).
 - Docs changed: as above.
+
+### ENC-SF-2026-411: security-negative transitions acknowledged without being anchored
+
+- Severity: High. Asset: revocation, disable, cancellation, withdrawal and
+  removal decisions (jobs, key release and roles depend on them).
+  Adversary: the database attacker of the threat model (section 4.6).
+- Component and files: `encompute-control`: `control.rs` `sync_anchor`
+  (re-reads the database), and its callers `revoke_asset`,
+  `withdraw_asset_approval`, `disable_service_account`, `disable_user`,
+  `remove_membership`, project leave, `cancel_job` and evaluator
+  registration (jobs it fails).
+- Impact: these calls committed the transition and then anchored whatever
+  the database showed. A writer who undid the transition in between (a lock
+  queued behind the call's write is granted at its commit) left nothing to
+  anchor: the client was told the asset was revoked, the account disabled,
+  and so on, the database held the old state, the anchor never recorded it,
+  and a restart could not notice it. Eight paths reproduced on 0.3.0 and
+  release/0.3, each acknowledged with 200. Anchoring only protects restarts
+  and restores for these transitions (see the limits in the threat model):
+  the finding is that the acknowledgement was false.
+- Affected: 0.3.0 and the 0.3.1 line before this fix. The 0.3 release
+  candidates were not tested.
+- Fix: each call anchors the IDs its own transaction wrote
+  (`Control::anchor_negatives`): the anchor records them, then the database
+  is checked as at start-up, restricted to them; a transition the database
+  no longer holds raises the rollback alarm and fails the call (ENC2202,
+  not acknowledged; retrying commits it again).
+- Tests: `anchor_negatives.rs`, all eight fail before the fix.
+- What stays open: after the anchor holds a transition, the database
+  reverting it while the service runs is refused at start-up and recovery,
+  not at once (existing limit); a key broker's revocation message is a
+  database row a writer can delete.
+
+### ENC-SF-2026-412: a ledger that was never anchored
+
+- Severity: Medium. Adversary: as above, plus a failure it cannot cause (a
+  crash or an anchor-store outage between the registration's commit and its
+  anchoring).
+- Impact: the registration was not acknowledged, but the asset exists and
+  its ledger has no anchored checkpoint. A genesis rewritten before the
+  first spend is accepted and anchored: in the executed test 40 spends
+  against a cap of about 6. Nothing acknowledged is forgotten.
+- Status: open, accepted. The honest genesis exists nowhere outside the
+  database, so 0.3.1 cannot tell it. Operators who see a failed
+  registration or an anchor outage should check the new ledger's budget
+  before using the asset.
 
 ### Open (accepted / needs design)
 

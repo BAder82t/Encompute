@@ -22,6 +22,20 @@ build feature changes.
   interval during the registration of an asset with a privacy budget: a
   genesis changed after the commit (for example a larger budget) was
   anchored and the creation acknowledged.
+- **Revocations, disables, cancellations, withdrawals and removals were
+  acknowledged without being anchored (ENC-SF-2026-411, High).** The same
+  interval for the security-negative transitions: asset revocation, approval
+  withdrawal, disabling a service account or user, cancelling a job, an
+  organization leaving a project, removing a role (and the jobs those fail,
+  and an evaluator's registration). They anchored what the database showed
+  after the commit, so one undone in between was acknowledged, never
+  anchored, and not noticed by a restart. Each now anchors the IDs its own
+  transaction wrote and fails with ENC2202 (retry is correct) when the
+  database no longer holds them. Affects 0.3.0. The anchor-verification
+  alarm now also fires when a spend's ledger fails verification.
+- **Open (ENC-SF-2026-412, Medium).** A ledger committed but never anchored
+  (a crash or an anchor outage during registration, never acknowledged) has
+  its genesis accepted as the database shows it at the first spend.
 - **Who is affected.** Deployments of 0.3.0 that use privacy budgets and
   face the database attacker above. The 0.3 release candidates were not
   tested and may be affected too. The audit trail still records the
