@@ -427,10 +427,12 @@ candidates were not tested.
   the next check waits ten times as long (at most 2 s), so the enforcement
   never takes more than a tenth of the service's time; that wait is then
   the window.
-- Window that remains: within the supported anchor size, none between
-  requests: every request is checked before it runs, and a revert is found
-  by the next request or tick, which refuses it. A request already past its
-  check when the writer reverts can finish (milliseconds). An anchor beyond
+- Window that remains: within the supported anchor size, every request is
+  checked before it runs, and a revert is found by the next request or
+  tick, which refuses it. A request already past its check when the writer
+  reverts can finish; how long it can be held after its check is not
+  bounded here, because a writer that holds table locks controls it, so no
+  duration is claimed. An anchor beyond
   the supported size has the wait above. A restored anchor together with the
   database, and a writer who is also the anchor's custodian, are out of
   scope (threat model).

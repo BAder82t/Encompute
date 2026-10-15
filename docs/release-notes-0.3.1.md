@@ -23,7 +23,11 @@ registration, or a database writer, could produce one), and a transition the
 anchor held, reverted while the service ran, permitted the operation it
 denied until the next restart (ENC-SF-2026-413). Upgrade; there is no
 migration, with one operator step if `encompute_unanchored_ledgers` is not 0
-after the upgrade (see [deployment.md](deployment.md)). A client may see `500 ENC2202` for a spend
+after the upgrade (see
+[Upgrading from 0.3.0 to 0.3.1](deployment.md#upgrading-from-030-to-031-security-upgrade):
+back up the database and the anchor first, review every ledger's genesis
+before `anchor-ledgers`, and do not downgrade by swapping the 0.3.0 binary
+back in). A client may see `500 ENC2202` for a spend
 whose entry was erased in that interval, and retrying the same event is
 correct. See the [changelog](../CHANGELOG.md) and
 [security findings](security-findings.md).
