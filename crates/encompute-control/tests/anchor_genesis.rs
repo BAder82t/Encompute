@@ -332,11 +332,11 @@ fn g5_the_operator_anchors_an_unanchored_ledger_deliberately_and_audibly() {
     // Named wrongly: refused, nothing anchored.
     assert!(t
         .control
-        .anchor_unanchored("operator-1", Some(&[dataset_a.clone()]))
+        .anchor_unanchored("operator-1", Some(std::slice::from_ref(&dataset_a)))
         .is_err());
     let notes = t
         .control
-        .anchor_unanchored("operator-1", Some(&[id.clone()]))
+        .anchor_unanchored("operator-1", Some(std::slice::from_ref(&id)))
         .unwrap();
     assert_eq!(notes.len(), 1);
     assert!(notes[0].contains("epsilon 3 "), "{notes:?}");

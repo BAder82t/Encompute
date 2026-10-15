@@ -445,3 +445,46 @@ fn live_0_the_background_tick_alone_latches_without_any_request() {
     let (s, v) = cl.call(&w.a_dev, "GET", "/v1/whoami", None);
     assert!(state_refused(s, &v), "{s} {v}");
 }
+
+/// Cost of one enforcement check against an anchor holding `N` IDs of each of
+/// the seven kinds (run by hand: `N=100000 cargo test --test anchor_live
+/// live_cost -- --ignored --nocapture`). Prints the mean and worst of 50.
+#[test]
+#[ignore]
+fn live_cost_measurement() {
+    let Some(w) = world() else { return };
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    w.t.control
+        .anchor
+        .update(&w.t.control.signer, |a| {
+            for i in 0..n {
+                a.revoked.insert(format!("ast_fake{i:08}"));
+                a.disabled_services.insert(format!("svc_fake{i:08}"));
+                a.disabled_users.insert(format!("usr_fake{i:08}"));
+                a.ended_jobs.insert(format!("job_fake{i:08}"));
+                a.withdrawn_grants.insert(format!("apr_fake{i:08}"));
+                a.removed_memberships.insert(format!("mem_fake{i:08}"));
+                a.removed_roles.insert(format!("rol_fake{i:08}"));
+            }
+        })
+        .unwrap();
+    let mut worst = std::time::Duration::ZERO;
+    let mut total = std::time::Duration::ZERO;
+    for _ in 0..50 {
+        let t0 = std::time::Instant::now();
+        w.t.control.enforce(true).unwrap();
+        let d = t0.elapsed();
+        worst = worst.max(d);
+        total += d;
+    }
+    eprintln!(
+        "COST N={n} per kind ({} ids): mean {:?}, worst {:?}; anchor {} bytes",
+        7 * n,
+        total / 50,
+        worst,
+        w.t.control.anchor.bytes()
+    );
+}
