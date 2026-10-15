@@ -340,7 +340,11 @@ Related: [support matrix](docs/support-matrix.md),
   the exact advisory, package and installed version, each with the
   analysis that the code is unreachable, the controls that keep it so, an
   upstream tracking link and an expiry (`security/exceptions.toml`). They
-  expire on 2026-12-31, which forces the upgrade planned for 0.4.
+  expire on 2026-12-31, which forces the upgrade planned for 0.4. For the
+  Transformers regular-expression CVE (CVE-2025-3263) Encompute's loaders
+  refuse a model `config.json` with a `configuration_files` list or over
+  1 MiB; the library itself is not fixed, so other code that loads an
+  untrusted `config.json` with it is not covered.
 - **The plan validator is only partly independent.** It recomputes the
   program's semantics and applies its own floor of core requirements, but
   its exact-equality check still uses the planner's own derivation.

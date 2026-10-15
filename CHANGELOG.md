@@ -115,6 +115,22 @@ build feature changes.
   independently authenticate every newly introduced database authority.
   Details: threat model section 4.6 and `KNOWN_LIMITATIONS.md`.
 
+### Model configuration hardening
+
+- **A model's `config.json` is bounded and checked as text.** Importing a
+  model (and the training spec and the worker that rebuild it) now refuses a
+  `config.json` that has a `configuration_files` key at any depth, is over
+  1 MiB, is not valid JSON or is not UTF-8 (ENC2504). Transformers 4.46
+  matches each entry of that list with a regular expression whose cost grows
+  with the square of an entry's length (CVE-2025-3263: about 30 s for 280 KB
+  here); the import now fails before any Transformers function runs. The
+  import reads `config.json` once and refuses the model if the file's digest
+  is not that of the checked bytes, and the importing side re-verifies the
+  package's `config.json` against its digest before each `from_pretrained`.
+  This guards Encompute's own loaders; the installed Transformers is not
+  upgraded and the exception for the advisory stays (see
+  `security/exceptions.toml`).
+
 ### Supply chain and notices
 
 - **Container base images.** The control, services, evaluator and

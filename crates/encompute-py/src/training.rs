@@ -436,13 +436,12 @@ pub fn hf_check_tokenizer_config(config_json: &str) -> PyResult<()> {
     training::hf::check_tokenizer_config(&v).map_err(err)
 }
 
-/// Refuses a `config.json` naming custom code or an unsupported
-/// architecture; returns its model type.
+/// Refuses a `config.json` naming custom code, a `configuration_files`
+/// list or an unsupported architecture, or over the size cap or not valid
+/// JSON; returns its model type.
 #[pyfunction]
 pub fn hf_check_config(config_json: &str) -> PyResult<String> {
-    let v: serde_json::Value = serde_json::from_str(config_json)
-        .map_err(|e| err(Error::new(Code::ModelPackage, format!("config.json: {e}"))))?;
-    training::hf::check_config(&v).map_err(err)
+    training::hf::check_config_text(config_json).map_err(err)
 }
 
 /// Keys by asset, and the attestation record.

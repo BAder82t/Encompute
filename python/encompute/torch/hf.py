@@ -61,6 +61,8 @@ HEADS = {"bert": ("classifier",), "roberta": ("classifier",),
          "distilbert": ("classifier", "pre_classifier")}
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
                    "added_tokens.json", "vocab.txt", "vocab.json", "merges.txt")
+# The most bytes a config.json may have (the native check holds the same cap).
+MAX_CONFIG_BYTES = 1 << 20
 # Repository files that are metadata only: never copied into a package.
 METADATA = ("README.md", ".gitattributes", "LICENSE", "LICENSE.txt", "LICENSE.md")
 
@@ -144,6 +146,8 @@ class ModelPackage:
 
     def tokenizer(self) -> Tokenizer:
         from transformers import AutoTokenizer
+        # The tokenizer loader may read config.json (to find the tokenizer class).
+        _verify_package_config(self.path, self.manifest)
         tok = AutoTokenizer.from_pretrained(str(self.path), local_files_only=True,
                                             trust_remote_code=False)
         return Tokenizer(tok, self.manifest["tokenizer_digest"])
@@ -210,19 +214,29 @@ def import_model(source: str, *, revision: Optional[str] = None, task: str = TAS
         repo_id = source
         revision = commit
     paths = {f: _regular(work, f, root) for f in files}
-    config = json.loads(_read(paths["config.json"]))
-    model_type = _native_call(_native.hf_check_config, json.dumps(config))
+    # The configuration is read once, from the file itself, and checked as text before any
+    # parser sees it (its size, a `configuration_files` list, custom code, the model type). The
+    # package binds the digest of exactly these bytes: a file that changes after this read
+    # fails the digest comparison below instead of reaching a loader unchecked.
+    config_bytes = _read_config(paths["config.json"])
+    model_type = _native_call(_native.hf_check_config, _utf8(config_bytes))
+    checked = {"config.json": hashlib.sha256(config_bytes).hexdigest()}
     if "tokenizer_config.json" in files:
         # Review finding TR-4 (ENC-SF-2026-073): known settings of a native tokenizer only.
-        _native_call(_native.hf_check_tokenizer_config,
-                     _read(paths["tokenizer_config.json"]).decode())
+        tc = _read(paths["tokenizer_config.json"])
+        _native_call(_native.hf_check_tokenizer_config, tc.decode())
+        checked["tokenizer_config.json"] = hashlib.sha256(tc).hexdigest()
     if "model.safetensors.index.json" in files:
         # An index lists shard files by name; a loader opens whatever it
         # names, so it may name only this package's safetensors files.
-        _native_call(_native.hf_check_index,
-                     _read(paths["model.safetensors.index.json"]).decode(), json.dumps(files))
+        ix = _read(paths["model.safetensors.index.json"])
+        _native_call(_native.hf_check_index, ix.decode(), json.dumps(files))
+        checked["model.safetensors.index.json"] = hashlib.sha256(ix).hexdigest()
     entries = [{"path": f, "sha256": _sha256(paths[f]), "size": paths[f].lstat().st_size}
                for f in files]
+    for f, digest in checked.items():
+        if next(e["sha256"] for e in entries if e["path"] == f) != digest:
+            raise _refuse(f"{f} changed while it was being imported")
     if src.is_dir():
         content = hashlib.sha256("".join(f"{e['path']}\0{e['sha256']}\n" for e in entries)
                                  .encode()).hexdigest()
@@ -263,6 +277,36 @@ def _regular(work: Path, name: str, root: Optional[Path]) -> Path:
     return target
 
 
+def _read_config(path: Path) -> bytes:
+    """A ``config.json``'s bytes, refused over the size cap before they are all read
+    (the cap is :data:`encompute_training::hf::MAX_CONFIG_BYTES`; the native check enforces it
+    again on the text)."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(MAX_CONFIG_BYTES + 1)
+    if len(data) > MAX_CONFIG_BYTES:
+        raise _refuse(f"config.json is over {MAX_CONFIG_BYTES} bytes: a package's model "
+                      "configuration is small; refused before it is parsed")
+    return data
+
+
+def _utf8(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _refuse("config.json is not UTF-8 text") from None
+
+
+def _verify_package_config(path: Path, manifest: dict) -> None:
+    """Before a loader opens a package: its ``config.json`` is the checked one (the bytes the
+    manifest binds by digest), still within the cap and still accepted by the native check.
+    A file replaced after the import is refused here, not parsed."""
+    data = _read_config(path / "config.json")
+    if hashlib.sha256(data).hexdigest() != manifest["config_digest"]:
+        raise _refuse("config.json is not the package's: it changed after the import")
+    _native_call(_native.hf_check_config, _utf8(data))
+
+
 def _read(path: Path) -> bytes:
     """Reads a file without following a symbolic link (the path was
     checked, and a link swapped in since is refused)."""
@@ -280,8 +324,10 @@ def from_config(config: str, num_labels: int, task: str = TASK) -> torch.nn.Modu
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING
     if task != TASK:
         raise _refuse(f"task {task!r} is not supported yet")
+    # The text the spec binds, checked as text (size, `configuration_files`, custom code) before
+    # it is parsed; the parsed dict is passed on, no file is opened.
+    model_type = _native_call(_native.hf_check_config, config)
     c = json.loads(config)
-    model_type = _native_call(_native.hf_check_config, json.dumps(c))
     conf = CONFIG_MAPPING[model_type].from_dict(c, num_labels=int(num_labels))
     return AutoModelForSequenceClassification.from_config(conf, attn_implementation="eager")
 
@@ -305,6 +351,9 @@ def huggingface(source: str, *, revision: Optional[str] = None, task: str = TASK
     pkg = import_model(source, revision=revision, task=task, num_labels=num_labels, token=token,
                        trust_remote_code=trust_remote_code)
     torch.manual_seed(seed)
+    # from_pretrained reads the package's config.json (and so would follow a
+    # `configuration_files` list): it is verified as the checked file right before.
+    _verify_package_config(pkg.path, pkg.manifest)
     model = AutoModelForSequenceClassification.from_pretrained(
         str(pkg.path), local_files_only=True, use_safetensors=True, trust_remote_code=False,
         num_labels=num_labels, attn_implementation="eager")
