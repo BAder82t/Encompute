@@ -6,6 +6,11 @@
 #   scripts/release/repro-check.sh                 # CLI, no OpenFHE (fast)
 #   scripts/release/repro-check.sh --openfhe       # the three release binaries, with OpenFHE
 #   scripts/release/repro-check.sh --packages "encompute-cli encompute-control"
+#   scripts/release/repro-check.sh --digests FILE  # also write "sha256  binary" lines when every binary matched
+#
+# The release workflow keeps that file with the gate's reports and the
+# release job compares it with the binaries it signs
+# (scripts/release/compare-shipped-digests.sh).
 #
 # Exit status: 0 when every binary is byte-identical, 1 otherwise. A
 # difference is reported with the first differing sections where the
@@ -16,6 +21,7 @@ cd "$ROOT"
 PACKAGES="encompute-cli"
 FEATURES=""
 KEEP=""
+DIGESTS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --openfhe) PACKAGES="encompute-cli encompute-evaluator encompute-control"
@@ -23,7 +29,8 @@ while [ $# -gt 0 ]; do
     --packages) PACKAGES="$2"; shift ;;
     --features) FEATURES="$2"; shift ;;
     --keep) KEEP=1 ;;
-    *) echo "usage: $0 [--openfhe] [--packages \"a b\"] [--features f] [--keep]" >&2; exit 2 ;;
+    --digests) DIGESTS="${2:?--digests FILE}"; shift ;;
+    *) echo "usage: $0 [--openfhe] [--packages \"a b\"] [--features f] [--keep] [--digests FILE]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -59,14 +66,21 @@ for p in json.load(sys.stdin)["packages"]:
                 print(t["name"])' "$PACKAGES"
 }
 
+if ! blist="$(bins)"; then echo "REPRO CHECK FAILED: could not list the binaries of: $PACKAGES"; exit 1; fi
+if [ -z "$blist" ]; then echo "REPRO CHECK FAILED: no binaries to compare for: $PACKAGES"; exit 1; fi
+
 status=0
+compared=0
+rows=""
 printf '\n%-28s %-66s %s\n' "binary" "sha256 (build 1)" "result"
-for b in $(bins); do
+while IFS= read -r b; do
+  compared=$((compared + 1))
   a="$W/build-1/target/release/$b"; c="$W/build-2/target/release/$b"
   [ -f "$a" ] && [ -f "$c" ] || { printf '%-28s %-66s %s\n' "$b" "-" "MISSING"; status=1; continue; }
   ha="$(shasum -a 256 "$a" | cut -d' ' -f1)"; hc="$(shasum -a 256 "$c" | cut -d' ' -f1)"
   if [ "$ha" = "$hc" ]; then
     printf '%-28s %-66s %s\n' "$b" "$ha" "IDENTICAL"
+    rows="$rows$ha  $b"$'\n'
   else
     printf '%-28s %-66s %s\n' "$b" "$ha" "DIFFERENT (build 2: $hc)"
     status=1
@@ -86,8 +100,14 @@ for b in $(bins); do
       [ "$n" = "0" ] || echo "    $n strings still name $p"
     done
   fi
-done
+done <<<"$blist"
 echo
+[ "$compared" -gt 0 ] || { echo "REPRO CHECK FAILED: no binary was compared"; exit 1; }
+if [ $status -eq 0 ] && [ -n "$DIGESTS" ]; then
+  mkdir -p "$(dirname "$DIGESTS")"
+  printf '%s' "$rows" > "$DIGESTS"
+  [ "$(wc -l < "$DIGESTS" | tr -d ' ')" = "$compared" ] || { echo "REPRO CHECK FAILED: $DIGESTS does not hold $compared digests"; exit 1; }
+fi
 [ $status -eq 0 ] && echo "REPRO CHECK PASSED: $PACKAGES byte-identical across two clean builds" ||
   echo "REPRO CHECK FAILED: see docs/release-process.md (Reproducibility)"
 exit $status

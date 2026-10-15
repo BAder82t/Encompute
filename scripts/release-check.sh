@@ -301,9 +301,12 @@ else
 fi
 check "security scans" env IMAGES="${IMAGES:-}" REQUIRE_IMAGES="${REQUIRE_IMAGES:-}" scripts/release/scan.sh
 check "build pins" scripts/release/check-pins.sh
+check "shipped digests check" scripts/release/test-compare-shipped-digests.sh
 if [ "$REPRO" = 1 ]; then
-  if [ "$OPENFHE" = 1 ]; then check "reproducibility" scripts/release/repro-check.sh --openfhe
-  else check "reproducibility" scripts/release/repro-check.sh; fi
+  # The digests of the matching builds are kept with the gate's reports: the
+  # release job refuses to sign Linux binaries whose digests differ.
+  if [ "$OPENFHE" = 1 ]; then check "reproducibility" scripts/release/repro-check.sh --openfhe --digests target/release-scan/repro-digests.txt
+  else check "reproducibility" scripts/release/repro-check.sh --digests target/release-scan/repro-digests.txt; fi
 fi
 
 # --- Research and live checks (never shipped, or needing a cloud) -------------------
