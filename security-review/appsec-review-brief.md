@@ -289,8 +289,12 @@ Facts:
   tag. OpenFHE is cloned by tag and checked against a pinned commit
   (`scripts/install-openfhe.sh`). The training image installs hash-locked
   Python packages (`--require-hashes`).
-- Compose sets no `read_only`, `cap_drop`, `no-new-privileges` or resource
-  limits.
+- Compose sets `no-new-privileges` and `cap_drop: [ALL]` on the control
+  plane, evaluator, key broker and SecAgg services (added by the Compose
+  hardening commits; earlier text said it set neither). PostgreSQL and
+  OpenBao do not set them (OpenBao adds `IPC_LOCK`). It sets no `read_only`
+  and no resource limits. The two Confidential Space images
+  (`deploy/confidential-space*/`) are not covered by the Compose settings.
 - `init.sh` creates secrets in a 0700 directory but sets each file to
   mode 0644; the comment in `compose.yaml` says 0600.
 - The OpenBao development root token is written to `.env` and passed in

@@ -385,6 +385,14 @@ Related: [support matrix](docs/support-matrix.md),
   message is a database row; the latch is a denial of service a writer can
   trigger. The anchor restored together with the database and
   compromised custody of the anchor or signing key remain out of scope.
+  Each state-changing operation also re-reads the caller's account, roles,
+  project membership, assets and approvals inside its own transaction after
+  locking the rows (a lock wait past 5 s fails the request). That narrows
+  the gap between the live check and the effect; it does not close or bound
+  it, and its resistance to a writer with direct database access has not
+  been independently established. Authority recreated under a new ID is not
+  detected (unchanged).
+- **Release boundary.** 0.3.1 strengthens externally anchored privacy accounting, revocation and denial operations against identified database rollback attacks. It does not provide comprehensive protection against every form of database-administrator compromise or independently authenticate every newly introduced authority record.
 - **A ledger the anchor holds no genesis for refuses spends (ENC-SF-2026-412,
   fixed in 0.3.1).** If a crash or an anchor outage falls between a
   registration's commit and its anchoring (or a database writer inserts a

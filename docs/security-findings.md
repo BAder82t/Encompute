@@ -264,7 +264,7 @@ candidates were not tested.
 | ENC-SF-2026-329 | A privacy ledger's genesis (its budget) rewritten between the asset's creation and its anchoring was anchored and acknowledged: present in 0.3.0; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`) | fixed | @BAder82t | 2026-10-09 | 2026-10-09 | 0.3.1 | `e81865c` | `crates/encompute-control/tests/anchor_window.rs::genesis_rewritten_in_the_window_is_not_acknowledged` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, api.md, CHANGELOG.md |
 | ENC-SF-2026-411 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal undone between its commit and its anchoring was acknowledged and never anchored (the `sync_anchor` class): present in 0.3.0 and 0.3.1 before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`, `ops/tenancy.rs`, `ops/jobs.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | see CHANGELOG | `crates/encompute-control/tests/anchor_negatives.rs` (eight tests, one per path) | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, CHANGELOG.md |
 | ENC-SF-2026-412 | A ledger the state anchor holds no genesis checkpoint for (a creation whose anchoring failed, or a ledger row a database writer inserted or re-inserted) accepted any genesis at its first spend: the cap was whatever the database held. Re-rated from Medium to High: a writer can force the state with no crash and no outage (delete the ledger row in the creation window, insert its own). Present in 0.3.0 and the 0.3.1 line before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`, `main.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | `13a4a8c` | `crates/encompute-control/tests/anchor_genesis.rs` (`g1` to `g7`), `crates/encompute-control/tests/anchor_window_adversarial.rs::w15_unanchored_ledger_genesis_rewritten_across_a_crash_refuses_spends` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, CHANGELOG.md |
-| ENC-SF-2026-413 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal the anchor already held, reverted in the database while the service ran, permitted the operation it denied (a job on a revoked asset, a disabled user or service account acting, a cancelled job started, a removed role or membership exercised) for as long as the service ran: the anchor was compared with the database at start-up and recovery only. Present in 0.3.0 and the 0.3.1 line before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `api.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | `04cfae5` | `crates/encompute-control/tests/anchor_live.rs` (`live_0` to `live_8`, over real HTTP), `crates/encompute-control/tests/anchor_enforce_nothrottle.rs` (no skip after a lock or anchor wait; a check that cannot complete fails the request), `crates/encompute-control/tests/anchor_failclosed.rs` | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, errors.md, CHANGELOG.md |
+| ENC-SF-2026-413 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal the anchor already held, reverted in the database while the service ran, permitted the operation it denied (a job on a revoked asset, a disabled user or service account acting, a cancelled job started, a removed role or membership exercised) for as long as the service ran: the anchor was compared with the database at start-up and recovery only. Present in 0.3.0 and the 0.3.1 line before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `api.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | `04cfae5` | `crates/encompute-control/tests/anchor_live.rs` (`live_0` to `live_8`, over real HTTP), `crates/encompute-control/tests/anchor_enforce_nothrottle.rs` (no skip after a lock or anchor wait; a check that cannot complete fails the request), `crates/encompute-control/tests/anchor_failclosed.rs`, `crates/encompute-control/tests/txn_revalidation.rs` | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, errors.md, CHANGELOG.md |
 
 ### ENC-SF-2026-326: a forgotten privacy spend
 
@@ -435,7 +435,7 @@ candidates were not tested.
   when the writer reverts can finish; how long it can be held after its
   check is not bounded here, because a writer that holds table locks
   controls it, so no duration is claimed (see the check-to-use gap in the
-  upgrade notes). A restored anchor together with the database, and a
+  upgrade notes, and B2 hardening below, which narrows it). A restored anchor together with the database, and a
   writer who is also the anchor's custodian, are out of scope (threat
   model).
 - B1 (found in review of the first fix, fixed before 0.3.1): the first
@@ -451,6 +451,25 @@ candidates were not tested.
   complete in that time fails the request (ENC1701, 500; a database that
   does not answer is not proof of a rollback, so it does not latch) and
   never counts as a pass.
+- B2 hardening (transactional revalidation, 0.3.1): implemented. Each
+  state-changing operation now re-reads, inside the transaction that takes
+  effect and after the row locks it needs, the caller's account status and
+  roles, the project membership, the source assets and the approvals
+  covering them (`ops::revalidate`), in one lock order (account, roles,
+  project members, assets, approvals, then the job rows), at READ COMMITTED,
+  with a 5 s `lock_timeout` that fails the request. Covered: job submission,
+  authenticated user or service account, approval use, role-based actions,
+  project membership actions, job cancel and the evaluator's start. The key
+  broker release only records the broker's report and the outbox delivery
+  reads the anchor, so neither acts on a database row state and neither
+  changed. Status: implemented; the original check-to-use scenario was NOT
+  EXECUTED; resistance of the design to a database writer with direct access
+  is NOT INDEPENDENTLY ESTABLISHED. It narrows the gap between the live check
+  and the effect; it does not close or bound it. B3 (authority recreated
+  under a new ID) is unchanged. Tests:
+  `crates/encompute-control/tests/txn_revalidation.rs` (per class, refusal
+  with the state already revoked, valid authority, lock timeout, concurrent
+  revoke, role removal and disable with submit and cancel).
 - Tests (B1): `anchor_enforce_nothrottle.rs`: a table lock held 400 ms on
   `assets` and on `users`, then the revocation / disable restored at once,
   is refused and latched; the same with the anchor's lock held 400 ms; a

@@ -63,10 +63,16 @@ correct. See the [changelog](../CHANGELOG.md) and
 - The database is checked against the anchored revocations, disables,
   cancellations, withdrawals and removals before every request and on every
   tick; a mismatch latches the control plane (ENC2202, `/ready` 503).
+- State-changing operations re-read the caller's account, roles, project
+  membership, assets and approvals inside their own transaction after
+  locking the rows; a lock wait past 5 s fails the request. This narrows the
+  gap between the live check and the effect; it does not close or bound it.
 - Not eliminated: the anchor restored together with the database, and
   compromised anchor or signing-key custody, remain out of scope; a request
   already past its check can finish; see `KNOWN_LIMITATIONS.md`.
 - Version 0.3.1 and lockfiles.
+
+Release boundary: 0.3.1 strengthens externally anchored privacy accounting, revocation and denial operations against identified database rollback attacks. It does not provide comprehensive protection against every form of database-administrator compromise or independently authenticate every newly introduced authority record.
 
 ## Verifying
 

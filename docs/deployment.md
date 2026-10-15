@@ -426,7 +426,19 @@ guarantee, and it is not absent. How long a request can be held in it is
 controlled by whoever holds locks on the database tables, so no duration
 should be assumed.
 
-<<B1-B2-WORDING>>
+Two measures bear on this interval. The live check before each request is
+never skipped or throttled, and it fails the request when it cannot finish
+within 5 seconds. Each state-changing operation also re-reads, inside its own
+database transaction and after taking the row locks it needs, the authority
+it relies on: the caller's account is not disabled, the roles it was
+authenticated with are still held, its organization is still an active
+project member, and the source assets and the approvals covering them are
+locked before a job is created (the evaluator's start locks the job's assets
+before the job). A lock wait longer than 5 seconds fails the request. This
+narrows the gap between the live check and the effect. It does not close the
+gap, and it does not bound how long a request can be held before its
+transaction takes its locks. Resistance of this design to a writer with direct
+database access has not been independently established.
 
 ## Upgrading from 0.3.0-rc.3 or earlier
 

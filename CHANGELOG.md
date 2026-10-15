@@ -72,6 +72,14 @@ build feature changes.
   anchor or the signing key, remain out of scope; the key broker's
   revocation message is a database row; a writer can trigger the latch (a
   denial of service). See `KNOWN_LIMITATIONS.md`.
+- **Authorization is re-read inside the transaction that takes effect
+  (hardening).** Job submission, every operation of an authenticated user or
+  service account, approval use, role and project-membership actions, job
+  cancel and the evaluator's start lock the rows they rely on (account,
+  roles, project members, assets, approvals) and re-read them inside their
+  own transaction, in one lock order at READ COMMITTED, with a 5 s lock
+  timeout that fails the request. It narrows the gap between the live check
+  and the effect; it does not close or bound it.
 - **Who is affected.** Deployments of 0.3.0 that use privacy budgets and
   face the database attacker above. The 0.3 release candidates were not
   tested and may be affected too. The audit trail still records the
