@@ -33,9 +33,40 @@ build feature changes.
   transaction wrote and fails with ENC2202 (retry is correct) when the
   database no longer holds them. Affects 0.3.0. The anchor-verification
   alarm now also fires when a spend's ledger fails verification.
-- **Open (ENC-SF-2026-412, Medium).** A ledger committed but never anchored
-  (a crash or an anchor outage during registration, never acknowledged) has
-  its genesis accepted as the database shows it at the first spend.
+- **A ledger the anchor never recorded accepted any genesis (ENC-SF-2026-412,
+  High; first rated Medium).** A spend on a ledger the anchor held no
+  checkpoint for was checked against whatever genesis the database held and
+  anchored it: 40 of 40 spends acknowledged against an honest cap of a
+  handful. The state is reachable by a crash or an anchor outage during
+  registration, and also by a database writer with no failure at all (delete
+  the ledger row in the creation window, insert its own; or insert a ledger
+  for an asset registered without a budget). Now a spend on such a ledger is
+  refused (ENC2202, "is not anchored"), start-up and the background tick
+  report it (`encompute_unanchored_ledgers`, a log line) without refusing to
+  start, a creation whose anchoring failed is anchored again by the process
+  that committed it, and otherwise an operator runs
+  `encompute-control anchor-ledgers --operator NAME (--asset ID ... | --all)`
+  after checking the genesis against the owner's records (audited as
+  `privacy.ledger.genesis_anchored`). Ledgers that already have an anchored
+  checkpoint are unaffected. That step trusts the database for those
+  ledgers.
+- **A transition the anchor held, reverted while the service ran, permitted
+  the operation it denied (ENC-SF-2026-413, High).** A restored revocation,
+  disabled user or service account, cancelled job, withdrawn approval,
+  removed role or left project was refused at start-up only: until the next
+  restart a job ran on the revoked asset, the disabled principal
+  authenticated, the cancelled job started (all eight executed over HTTP).
+  Now the database is checked against every anchored transition before each
+  request and on each background tick; a mismatch raises the rollback alarm
+  and latches the control plane (ENC2202 on every request, `/ready` 503)
+  until it is restarted on a restored database. Cost: about 1 ms per request
+  at 700 anchored IDs, 3 ms at 7,000, 21 ms at 70,000.
+- **What 0.3.1 still does not do.** It does not eliminate rollback risk. A
+  request already past its check when a writer reverts can finish; the anchor
+  restored together with the database, and compromised custody of the
+  anchor or the signing key, remain out of scope; the key broker's
+  revocation message is a database row; a writer can trigger the latch (a
+  denial of service). See `KNOWN_LIMITATIONS.md`.
 - **Who is affected.** Deployments of 0.3.0 that use privacy budgets and
   face the database attacker above. The 0.3 release candidates were not
   tested and may be affected too. The audit trail still records the

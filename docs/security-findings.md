@@ -263,7 +263,8 @@ candidates were not tested.
 | ENC-SF-2026-326 | A privacy spend erased between its commit and its anchoring was acknowledged and forgotten: present in 0.3.0; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`) | fixed | @BAder82t | 2026-10-09 | 2026-10-09 | 0.3.1 | `e81865c` | `crates/encompute-control/tests/anchor_window.rs::spend_erased_in_the_window_is_not_acknowledged`, `crates/encompute-control/tests/anchor_window.rs::duplicate_answer_erased_in_the_window_is_not_acknowledged`, `crates/encompute-control/tests/anchor_window.rs::repeated_erase_in_the_window_does_not_defeat_the_cap` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, api.md, CHANGELOG.md |
 | ENC-SF-2026-329 | A privacy ledger's genesis (its budget) rewritten between the asset's creation and its anchoring was anchored and acknowledged: present in 0.3.0; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`) | fixed | @BAder82t | 2026-10-09 | 2026-10-09 | 0.3.1 | `e81865c` | `crates/encompute-control/tests/anchor_window.rs::genesis_rewritten_in_the_window_is_not_acknowledged` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, api.md, CHANGELOG.md |
 | ENC-SF-2026-411 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal undone between its commit and its anchoring was acknowledged and never anchored (the `sync_anchor` class): present in 0.3.0 and 0.3.1 before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`, `ops/tenancy.rs`, `ops/jobs.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | see CHANGELOG | `crates/encompute-control/tests/anchor_negatives.rs` (eight tests, one per path) | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, CHANGELOG.md |
-| ENC-SF-2026-412 | A ledger committed but never anchored (a crash or an anchor outage between the registration's commit and its anchoring; the call was not acknowledged) has no anchored genesis: a database writer who rewrites it is accepted at the first spend: present in 0.3.0 and 0.3.1 | Medium | encompute-control (`control.rs`, `ops/assets.rs`) | open (accepted) | @BAder82t | 2026-10-15 | 2026-10-15 | none | none | `crates/encompute-control/tests/anchor_window_adversarial.rs::w15_residual_unanchored_ledger_genesis_rewritten_across_a_crash` (pins the open behaviour) | INV-160 (limit) | threat-model.md §4.6, KNOWN_LIMITATIONS.md |
+| ENC-SF-2026-412 | A ledger the state anchor holds no genesis checkpoint for (a creation whose anchoring failed, or a ledger row a database writer inserted or re-inserted) accepted any genesis at its first spend: the cap was whatever the database held. Re-rated from Medium to High: a writer can force the state with no crash and no outage (delete the ledger row in the creation window, insert its own). Present in 0.3.0 and the 0.3.1 line before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`, `main.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | `13a4a8c` | `crates/encompute-control/tests/anchor_genesis.rs` (`g1` to `g7`), `crates/encompute-control/tests/anchor_window_adversarial.rs::w15_unanchored_ledger_genesis_rewritten_across_a_crash_refuses_spends` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, CHANGELOG.md |
+| ENC-SF-2026-413 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal the anchor already held, reverted in the database while the service ran, permitted the operation it denied (a job on a revoked asset, a disabled user or service account acting, a cancelled job started, a removed role or membership exercised) for as long as the service ran: the anchor was compared with the database at start-up and recovery only. Present in 0.3.0 and the 0.3.1 line before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `api.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | `04cfae5` | `crates/encompute-control/tests/anchor_live.rs` (`live_0` to `live_8`, over real HTTP), `crates/encompute-control/tests/anchor_failclosed.rs` | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, errors.md, CHANGELOG.md |
 
 ### ENC-SF-2026-326: a forgotten privacy spend
 
@@ -337,24 +338,107 @@ candidates were not tested.
   no longer holds raises the rollback alarm and fails the call (ENC2202,
   not acknowledged; retrying commits it again).
 - Tests: `anchor_negatives.rs`, all eight fail before the fix.
-- What stays open: after the anchor holds a transition, the database
-  reverting it while the service runs is refused at start-up and recovery,
-  not at once (existing limit); a key broker's revocation message is a
-  database row a writer can delete.
+- What stays open: a key broker's revocation message is a database row a
+  writer can delete. After the anchor holds a transition, the database
+  reverting it while the service runs was refused at start-up and recovery
+  only; that is ENC-SF-2026-413 below.
 
-### ENC-SF-2026-412: a ledger that was never anchored
+### ENC-SF-2026-412: a ledger the anchor never recorded accepted any genesis
 
-- Severity: Medium. Adversary: as above, plus a failure it cannot cause (a
-  crash or an anchor-store outage between the registration's commit and its
-  anchoring).
-- Impact: the registration was not acknowledged, but the asset exists and
-  its ledger has no anchored checkpoint. A genesis rewritten before the
-  first spend is accepted and anchored: in the executed test 40 spends
-  against a cap of about 6. Nothing acknowledged is forgotten.
-- Status: open, accepted. The honest genesis exists nowhere outside the
-  database, so 0.3.1 cannot tell it. Operators who see a failed
-  registration or an anchor outage should check the new ledger's budget
-  before using the asset.
+- Severity: High (first rated Medium, as needing a failure the attacker
+  cannot cause; re-rated after the closeout showed a writer can force the
+  state). Asset: the privacy cap. Adversary: the database attacker of the
+  threat model (section 4.6): arbitrary SQL while the service runs, no
+  signing key, no anchor access.
+- Impact: `privacy_spend` checked a spend against the anchored checkpoint
+  only when the anchor held one. For a ledger the anchor had none for, the
+  genesis (the budget) was whatever the database held, and the first spend
+  anchored it. Executed through the API as a normal data owner (tests on
+  the base `b197803`): **40 of 40 spends acknowledged against an honest cap
+  of a handful** (an honest ledger refuses the sixth or so with ENC2201) in
+  each of four ways to reach the state: (1) no failure at all: in the
+  creation window the writer deletes the ledger row (the call finds it
+  missing before anchoring and is not acknowledged) and inserts a ledger row
+  of its own with a 1000-fold budget; (2) the writer inserts a ledger row
+  for an asset registered without any budget; (3) an anchor-store outage at
+  the creation, then the genesis rewritten; (4) a crash between the commit
+  and the anchoring (W15). Nothing signed by the owner binds the cap: it is
+  the registration request's `privacy_budget`, stored in the genesis row,
+  and (when anchored) the genesis hash in the anchor; the asset policy is
+  unsigned and carries no cap, and the audit event of the creation carries
+  no genesis hash.
+- Fix: a ledger spends only when the anchor holds a checkpoint for it (or
+  the anchor froze it). A spend on any other is refused (ENC2202, "is not
+  anchored", rollback alarm) before it appends anything. Start-up and the
+  background tick count such ledgers (`encompute_unanchored_ledgers`, a
+  `unanchored_ledgers` log line naming them) and do not refuse to start.
+  A creation whose anchoring failed is remembered by the process that
+  committed it (the checkpoint the call computed) and anchored again on the
+  next tick, after checking the database still holds exactly it; a genesis
+  rewritten meanwhile is refused and alarmed. After a crash the memory is
+  gone: the operator checks the genesis against the owner's records and
+  runs `encompute-control anchor-ledgers --operator NAME --asset ID` (or
+  `--all`), which audits what it anchors
+  (`privacy.ledger.genesis_anchored`, with the checkpoint root, epsilon and
+  delta) and prints it. That step trusts the database for that ledger and
+  says so.
+- Upgrade: a ledger that has any anchored checkpoint is untouched. Every
+  ledger whose creation was acknowledged has one. A never-anchored ledger
+  (an unacknowledged creation) refuses spends until the operator step above.
+- Tests: `anchor_genesis.rs` (`g1` to `g7`; `g1`, `g2`, `g3` and W15 report
+  40 of 40 before the fix), `anchor_window_adversarial.rs` W15 (flipped
+  in place). Honest liveness: `g4` (outage heals itself), `g5` (operator
+  step), `g6` (anchored ledgers unaffected), `g7` (concurrent creations and
+  spends).
+- Residuals: the operator step trusts the database for the ledgers it
+  anchors, and an operator who anchors a rewritten genesis anchors it.
+  Nothing outside the database binds the cap before the anchor holds it.
+
+### ENC-SF-2026-413: a transition the anchor holds, reverted while running
+
+- Severity: High. Asset: revocation, disable, cancellation, withdrawal and
+  removal decisions. Adversary: as above.
+- Impact: start-up and recovery were the only places the database was
+  compared with the anchored negatives. Executed over real HTTP on the base
+  (all eight): after the transition was acknowledged and anchored, a writer
+  restored the row and the protected operation **succeeded**: a job on a
+  revoked asset (201), the evaluator starting a job a revocation had failed
+  (200), a job over a dataset whose approval was withdrawn (201), a disabled
+  service account (200) and a disabled user (200) authenticating, the
+  evaluator starting a cancelled job (200), a removed role planning (201),
+  a left project's developer planning in it (201). The window did not
+  close: neither the background tick (it only adds to the anchor) nor any
+  request looked; it ended at the next restart.
+- Fix: the start-up check (`check_negatives`) runs before every request
+  (except `/live`, `/metrics` and `/v1/info`) and on every background tick
+  (`Control::enforce`): one indexed query per kind over the anchored IDs.
+  A mismatch raises the rollback alarm and latches the control plane: that
+  and every later request is refused (ENC2202, "CONTROL PLANE LATCHED"),
+  `/ready` answers 503, and only a restart clears it (the start-up check
+  then refuses a database that still undoes the anchor, until the state is
+  restored or `recover` is run). A transition whose own acknowledgement was
+  refused in its window is not latched on until its retry commits it
+  again (the client was told it failed).
+- Cost (measured, debug build, local PostgreSQL, `live_cost_measurement`):
+  per check 0.06 ms with an empty anchor, 1.2 ms with 700 anchored IDs,
+  3.3 ms with 7,000, 21 ms with 70,000, 198 ms with 700,000. An anchor of
+  7,000 IDs is about 130 KB; the supported anchor size (warned at 512 KB,
+  an OpenBao KV entry holds 1 MiB) is below 20 ms. Above 20 ms per check
+  the next check waits ten times as long (at most 2 s), so the enforcement
+  never takes more than a tenth of the service's time; that wait is then
+  the window.
+- Window that remains: within the supported anchor size, none between
+  requests: every request is checked before it runs, and a revert is found
+  by the next request or tick, which refuses it. A request already past its
+  check when the writer reverts can finish (milliseconds). An anchor beyond
+  the supported size has the wait above. A restored anchor together with the
+  database, and a writer who is also the anchor's custodian, are out of
+  scope (threat model).
+- Tests: `anchor_live.rs` (`live_1` to `live_8`: each transition, the
+  protected operation over real HTTP, refused and latched; `live_0`: the
+  background tick alone latches with no request), `anchor_negatives.rs`
+  unchanged (the retry after a refused call still lands).
+- Invariant: INV-178 (extended).
 
 ### Open (accepted / needs design)
 

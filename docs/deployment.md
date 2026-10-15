@@ -330,6 +330,36 @@ frozen, with no entries and a placeholder budget that pays for nothing
 (audited as `privacy.ledger.frozen` with `ledger=recreated_missing_row`);
 that ledger stays exhausted.
 
+**Unanchored ledgers.** A privacy ledger spends only when the anchor holds a
+checkpoint for it. If the anchor store failed during an asset registration,
+the process re-anchors the creation it committed on its next tick. After a
+crash (or if a database writer inserted a ledger row), the ledger stays
+unanchored: every spend on it is refused (ENC2202, "is not anchored"), the
+log line `unanchored_ledgers` names it at start-up and on every tick and the
+`encompute_unanchored_ledgers` gauge counts it (it should be 0). Compare each
+named ledger's genesis (`GET /v1/privacy/{asset}`) with the data owner's
+records, then:
+
+```sh
+encompute-control anchor-ledgers --operator NAME --asset ID [--asset ID ...]
+encompute-control anchor-ledgers --operator NAME --all
+```
+
+This trusts the database for those ledgers: it anchors the checkpoint the
+database holds now, prints it (budget, entry count, root) and audits it as
+`privacy.ledger.genesis_anchored`. After upgrading from 0.3.0 or an earlier
+0.3.1 build, ledgers that already have an anchored checkpoint need nothing;
+check the gauge once.
+
+**A latched control plane.** The service checks the database against every
+anchored revocation, disable, cancellation, approval withdrawal, project leave
+and role removal before each request and on each tick. If the database undoes
+one while the service runs, the control plane latches: every request
+(except `/live`, `/metrics` and `/v1/info`) fails with ENC2202 "CONTROL PLANE
+LATCHED", `/ready` answers 503 and the log line `control_plane_latched` names
+what was undone. Stop the service, restore the missing state or run
+`encompute-control recover`, and start it again.
+
 **Back up** ([backup.sh](../deploy/docker-compose/backup.sh)):
 
 - PostgreSQL;
@@ -534,6 +564,7 @@ encompute-control bootstrap --issuer ISS --subject SUB   # the first platform ad
 encompute-control serve
 encompute-control verify-state           # does the database extend the anchor?
 encompute-control recover --operator NAME
+encompute-control anchor-ledgers --operator NAME (--asset ID ... | --all)   # anchor unanchored privacy ledgers, audited
 encompute-control public-key FILE        # a service key's public key, for registration
 
 encompute login --url URL --token-file TOKEN

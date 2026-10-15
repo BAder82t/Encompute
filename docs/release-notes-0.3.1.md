@@ -16,9 +16,14 @@ acknowledged and the change unnoticed. 0.3.1 acknowledges a spend or a
 registration only when the anchor holds exactly what the call committed.
 The same gap existed for revocations, disables, cancellations, approval
 withdrawals, project leaves and role removals (ENC-SF-2026-411); they are now
-acknowledged only when the anchor holds what the call wrote. One residual is
-open: a ledger never anchored because of a failure during registration
-(ENC-SF-2026-412). Upgrade; there is no migration. A client may see `500 ENC2202` for a spend
+acknowledged only when the anchor holds what the call wrote. Two more were found while
+closing these out and are fixed: a ledger the anchor never recorded accepted
+any genesis at its first spend (ENC-SF-2026-412; a crash or outage during
+registration, or a database writer, could produce one), and a transition the
+anchor held, reverted while the service ran, permitted the operation it
+denied until the next restart (ENC-SF-2026-413). Upgrade; there is no
+migration, with one operator step if `encompute_unanchored_ledgers` is not 0
+after the upgrade (see [deployment.md](deployment.md)). A client may see `500 ENC2202` for a spend
 whose entry was erased in that interval, and retrying the same event is
 correct. See the [changelog](../CHANGELOG.md) and
 [security findings](security-findings.md).
@@ -48,6 +53,15 @@ correct. See the [changelog](../CHANGELOG.md) and
   if they go missing.
 - Anchoring of privacy spends and ledger registrations bound to the entry or
   genesis the call committed (`encompute-control`).
+- Spends are refused on a ledger the anchor holds no genesis for; the new
+  command `encompute-control anchor-ledgers` and gauge
+  `encompute_unanchored_ledgers`.
+- The database is checked against the anchored revocations, disables,
+  cancellations, withdrawals and removals before every request and on every
+  tick; a mismatch latches the control plane (ENC2202, `/ready` 503).
+- Not eliminated: the anchor restored together with the database, and
+  compromised anchor or signing-key custody, remain out of scope; a request
+  already past its check can finish; see `KNOWN_LIMITATIONS.md`.
 - Version 0.3.1 and lockfiles.
 
 ## Verifying
