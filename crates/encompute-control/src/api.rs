@@ -185,7 +185,7 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
     match (r.method.as_str(), path) {
         ("GET", "/live") => return (json_response(200, &json!({"live": true})), None),
         ("GET", "/ready") => {
-            let ready = control.db.ping();
+            let ready = control.db.ping() && control.latched().is_none();
             let s = if ready { 200 } else { 503 };
             return (json_response(s, &json!({"ready": ready})), None);
         }
@@ -239,6 +239,11 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
             error_response(&bad("a query parameter appears more than once")),
             None,
         );
+    }
+    // Continuous enforcement: a database that undoes a transition the anchor
+    // holds latches the control plane before this request can use it.
+    if let Err(e) = control.enforce(false) {
+        return (error_response(&e), None);
     }
     // Authenticate.
     let service = match ServiceHeaders::from_lookup(|h| r.header(h)) {

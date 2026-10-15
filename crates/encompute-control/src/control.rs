@@ -68,6 +68,18 @@ pub struct Control {
     /// loses it, and the operator then anchors the ledger deliberately
     /// (`anchor_unanchored`).
     pub pending_genesis: std::sync::Mutex<std::collections::BTreeMap<String, Checkpoint>>,
+    /// Set when [`Control::enforce`] found the database undoing a
+    /// transition the anchor holds: the first alarm's message. While set,
+    /// every request (but `/live`, `/metrics`, `/v1/info`) is refused
+    /// (ENC2202) and `/ready` answers 503. Cleared only by a restart (whose
+    /// start-up check refuses a database that still undoes the anchor).
+    pub latch: std::sync::Mutex<Option<String>>,
+    /// Negatives a call found undone in its own commit-to-anchor window and
+    /// refused (never acknowledged): tolerated by [`Control::enforce`] until
+    /// the retry commits them again. Process memory.
+    pub refused_negatives: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// When [`Control::enforce`] last ran, and what it cost.
+    enforced: std::sync::Mutex<(Option<std::time::Instant>, Duration)>,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -83,6 +95,14 @@ pub fn runtime_rollback(what: &str, detail: impl std::fmt::Display) -> Error {
     Error::new(
         Code::PrivacyLedger,
         format!("{what} STATE ROLLBACK: {detail}. REFUSED: the database no longer extends the state anchor; stop the service, then restore the missing entries or run `encompute-control recover` (see docs/deployment.md)"),
+    )
+}
+
+/// The error every request gets once the control plane is latched.
+pub fn latched(first: &str) -> Error {
+    Error::new(
+        Code::PrivacyLedger,
+        format!("CONTROL PLANE LATCHED after a STATE ROLLBACK was found while running: {first}. Every request is refused until the database is restored (or `encompute-control recover` is run) and the service restarted"),
     )
 }
 
@@ -213,6 +233,9 @@ impl Control {
             audit_every: audit_every.max(1),
             metrics_access: MetricsAccess::default_for(env),
             pending_genesis: Default::default(),
+            latch: Default::default(),
+            refused_negatives: Default::default(),
+            enforced: std::sync::Mutex::new((None, Duration::ZERO)),
         };
         c.ensure_self_registered()?;
         c.verify_state(existed)?;
@@ -357,6 +380,9 @@ impl Control {
             audit_every: cfg.audit_checkpoint_every.max(1),
             metrics_access: MetricsAccess::Closed,
             pending_genesis: Default::default(),
+            latch: Default::default(),
+            refused_negatives: Default::default(),
+            enforced: std::sync::Mutex::new((None, Duration::ZERO)),
         })
     }
 
@@ -465,7 +491,7 @@ impl Control {
                 }
             }
         }
-        check_negatives(&mut c, &a, &rollback)?;
+        check_negatives(&mut c, &a, &|_| false, &rollback)?;
         Ok(())
     }
 
@@ -1156,7 +1182,19 @@ impl Control {
         probe.removed_memberships = n.removed_memberships.iter().cloned().collect();
         probe.removed_roles = n.removed_roles.iter().cloned().collect();
         let mut c = self.db.conn()?;
-        check_negatives(&mut c, &probe, &|what, detail| {
+        let ids: Vec<&String> = [
+            &n.revoked,
+            &n.disabled_services,
+            &n.disabled_users,
+            &n.ended_jobs,
+            &n.withdrawn_grants,
+            &n.removed_memberships,
+            &n.removed_roles,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let r = check_negatives(&mut c, &probe, &|_| false, &|what, detail| {
             self.rollback_alarm("security-negative", what);
             runtime_rollback(
                 what,
@@ -1164,7 +1202,83 @@ impl Control {
                     "{detail}; the call is not acknowledged and the anchor holds the transition"
                 ),
             )
-        })
+        });
+        let mut tolerated = self
+            .refused_negatives
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match &r {
+            // The call was refused and told so: the retry commits the
+            // transition again, which the live enforcement waits for.
+            Err(_) => tolerated.extend(ids.into_iter().cloned()),
+            Ok(()) => {
+                for id in ids {
+                    tolerated.remove(id);
+                }
+            }
+        }
+        r
+    }
+
+    /// Continuous enforcement: the database must still extend every
+    /// security-negative transition the anchor holds, as at start-up. Run
+    /// before every request (so a restored revocation, disable, cancellation,
+    /// withdrawal or removal never permits the operation it denied) and by
+    /// the background tick. A database that undoes one raises the rollback
+    /// alarm and LATCHES the control plane: this and every later request is
+    /// refused (ENC2202) and `/ready` answers 503, until the state is
+    /// restored (or `recover` is run) and the service restarted.
+    ///
+    /// The check is one indexed query per transition kind over the anchored
+    /// IDs, cheap while the sets are small. Once a check costs more than
+    /// 20 ms the next one waits ten times as long (at most 2 s), so
+    /// enforcement never takes more than a tenth of the service's time; the
+    /// window that leaves is that wait. `force` ignores the wait (the tick).
+    pub fn enforce(&self, force: bool) -> Result<()> {
+        if let Some(m) = self.latch.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            return Err(latched(&m));
+        }
+        let (last, cost) = *self.enforced.lock().unwrap_or_else(|p| p.into_inner());
+        if !force {
+            if let Some(l) = last {
+                if cost > Duration::from_millis(20)
+                    && l.elapsed() < (cost * 10).min(Duration::from_secs(2))
+                {
+                    return Ok(());
+                }
+            }
+        }
+        let started = std::time::Instant::now();
+        let tolerated = self
+            .refused_negatives
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let r = self.anchor.with_state(|a| {
+            let mut c = self.db.conn()?;
+            check_negatives(&mut c, a, &|id| tolerated.contains(id), &runtime_rollback)
+        });
+        *self.enforced.lock().unwrap_or_else(|p| p.into_inner()) =
+            (Some(std::time::Instant::now()), started.elapsed());
+        match r {
+            Ok(()) => Ok(()),
+            Err(e) if e.code == Code::PrivacyLedger => {
+                self.rollback_alarm("live-negative", "anchor");
+                LogLine::new(&self.service_id, "control_plane_latched")
+                    .field("reason", &e.message)
+                    .emit();
+                let mut l = self.latch.lock().unwrap_or_else(|p| p.into_inner());
+                let m = l.get_or_insert_with(|| e.message.clone()).clone();
+                Err(latched(&m))
+            }
+            // A database error is not a rollback: the request fails on its own.
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The latch's message, if the control plane is latched.
+    pub fn latched(&self) -> Option<String> {
+        self.latch.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Anchors the security-negative state the database holds and the
@@ -1323,6 +1437,7 @@ impl Control {
         };
         report("health", self.expire_evaluators());
         report("schedule", self.schedule_pending());
+        report("enforce", self.enforce(true));
         report("anchor", self.anchor_pending_genesis());
         report("anchor", self.sync_anchor());
         report("outbox", self.deliver_outbox());
@@ -1421,61 +1536,59 @@ fn recreate_frozen_ledger(
 fn check_negatives(
     c: &mut crate::db::Conn,
     a: &crate::anchor::StateAnchor,
+    skip: &dyn Fn(&str) -> bool,
     fail: &dyn Fn(&str, String) -> Error,
 ) -> Result<()> {
-    // A revoked asset must still be revoked (an absent one cannot be
-    // used either: asset IDs are never reissued).
-    for asset in &a.revoked {
-        if let Some(status) = revoked_status(&mut **c, asset)? {
-            if status != "revoked" {
-                return Err(fail(
-                    "REVOCATION",
-                    format!("asset {asset} was revoked, but the database shows it {status}"),
-                ));
-            }
-        }
-    }
-    // Disabled principals stay disabled; cancelled and failed jobs stay
-    // ended (absent ones cannot act or run: IDs are never reissued).
+    // The first row of `sql` over `ids` that `skip` does not excuse (absent
+    // rows are fine: IDs are never reissued, so an absent one cannot act,
+    // run or be used).
     let undone = |c: &mut crate::db::Conn,
                   sql: &str,
                   ids: &std::collections::BTreeSet<String>|
-     -> Result<Vec<(String, String)>> {
+     -> Result<Option<(String, String)>> {
         if ids.is_empty() {
-            return Ok(vec![]);
+            return Ok(None);
         }
         let ids: Vec<&String> = ids.iter().collect();
         Ok(c.query(sql, &[&ids])
             .map_err(db_err)?
             .iter()
-            .map(|r| (r.get(0), r.get(1)))
-            .collect())
+            .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
+            .find(|(id, _)| !skip(id)))
     };
+    // A revoked asset must still be revoked. Disabled principals stay
+    // disabled; cancelled and failed jobs stay ended.
     for (what, sql, ids) in [
-            (
-                "SERVICE ACCOUNT",
-                "SELECT id, status FROM service_accounts WHERE id = ANY($1) AND status <> 'disabled' ORDER BY id",
-                &a.disabled_services,
-            ),
-            (
-                "USER",
-                "SELECT id, status FROM users WHERE id = ANY($1) AND status <> 'disabled' ORDER BY id",
-                &a.disabled_users,
-            ),
-            (
-                "JOB",
-                "SELECT id, state FROM jobs WHERE id = ANY($1) AND state NOT IN ('failed', 'cancelled') ORDER BY id",
-                &a.ended_jobs,
-            ),
-        ] {
-            if let Some((id, status)) = undone(c, sql, ids)?.into_iter().next() {
-                let was = if what == "JOB" { "cancelled or failed" } else { "disabled" };
-                return Err(fail(
-                    what,
-                    format!("{} {id} was {was}, but the database shows it {status}", what.to_lowercase()),
-                ));
-            }
+        (
+            "REVOCATION",
+            "SELECT id, status FROM assets WHERE id = ANY($1) AND status <> 'revoked' ORDER BY id",
+            &a.revoked,
+        ),
+        (
+            "SERVICE ACCOUNT",
+            "SELECT id, status FROM service_accounts WHERE id = ANY($1) AND status <> 'disabled' ORDER BY id",
+            &a.disabled_services,
+        ),
+        (
+            "USER",
+            "SELECT id, status FROM users WHERE id = ANY($1) AND status <> 'disabled' ORDER BY id",
+            &a.disabled_users,
+        ),
+        (
+            "JOB",
+            "SELECT id, state FROM jobs WHERE id = ANY($1) AND state NOT IN ('failed', 'cancelled') ORDER BY id",
+            &a.ended_jobs,
+        ),
+    ] {
+        if let Some((id, status)) = undone(c, sql, ids)? {
+            let detail = match what {
+                "REVOCATION" => format!("asset {id} was revoked, but the database shows it {status}"),
+                "JOB" => format!("job {id} was cancelled or failed, but the database shows it {status}"),
+                _ => format!("{} {id} was disabled, but the database shows it {status}", what.to_lowercase()),
+            };
+            return Err(fail(what, detail));
         }
+    }
     // A withdrawn approval (or ended grant) stays withdrawn: its ID is
     // never reused, so a database holding it again was restored.
     if let Some((id, asset)) = undone(
@@ -1485,10 +1598,7 @@ fn check_negatives(
              SELECT grant_id, asset_id FROM asset_approval_members WHERE grant_id = ANY($1)
              ORDER BY 1",
         &a.withdrawn_grants,
-    )?
-    .into_iter()
-    .next()
-    {
+    )? {
         return Err(fail(
             "APPROVAL",
             format!("approval {id} of asset {asset} was withdrawn, but the database holds it"),
@@ -1502,10 +1612,7 @@ fn check_negatives(
         "SELECT membership_id, organization_id || ' in project ' || project_id FROM project_members
               WHERE membership_id = ANY($1) ORDER BY 1",
         &a.removed_memberships,
-    )?
-    .into_iter()
-    .next()
-    {
+    )? {
         return Err(fail(
             "MEMBERSHIP",
             format!("membership {id} ({who}) was removed, but the database holds it"),
@@ -1514,19 +1621,16 @@ fn check_negatives(
     // A removed organization role stays removed, likewise: the
     // principal would act with it again.
     if let Some((id, who)) = undone(
-            c,
-            "SELECT membership_id, role || ' of ' || principal_id || ' in ' || organization_id FROM memberships
+        c,
+        "SELECT membership_id, role || ' of ' || principal_id || ' in ' || organization_id FROM memberships
               WHERE membership_id = ANY($1) ORDER BY 1",
-            &a.removed_roles,
-        )?
-        .into_iter()
-        .next()
-        {
-            return Err(fail(
-                "ROLE",
-                format!("role {id} ({who}) was removed, but the database holds it"),
-            ));
-        }
+        &a.removed_roles,
+    )? {
+        return Err(fail(
+            "ROLE",
+            format!("role {id} ({who}) was removed, but the database holds it"),
+        ));
+    }
     Ok(())
 }
 
