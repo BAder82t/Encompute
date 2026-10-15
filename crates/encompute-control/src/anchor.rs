@@ -383,6 +383,12 @@ impl Anchor {
         self.store.describe()
     }
 
+    /// Reads the anchor in place (no copy of the whole state, unlike
+    /// [`Anchor::snapshot`]).
+    pub fn with_state<R>(&self, f: impl FnOnce(&StateAnchor) -> R) -> R {
+        f(&self.state.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
     /// Applies `f` and persists the result (counter + 1, re-signed).
     pub fn update(
         &self,

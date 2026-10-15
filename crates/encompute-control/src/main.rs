@@ -5,6 +5,7 @@
 //!     encompute-control verify-state       check the database extends the state anchor
 //!     encompute-control bootstrap --issuer ISS --subject SUB [--email E]
 //!     encompute-control recover --operator NAME
+//!     encompute-control anchor-ledgers --operator NAME (--asset ID ... | --all)
 //!     encompute-control dev-token --subject SUB      (development only)
 //!     encompute-control public-key FILE              a service key file's public key
 //!
@@ -92,6 +93,30 @@ fn run(args: &[String]) -> Result<(), Error> {
             c.verify_state(true)?;
             println!("RECOVERED: frozen ledgers are treated as exhausted");
         }
+        "anchor-ledgers" => {
+            // Anchors the genesis of privacy ledgers the state anchor holds
+            // no checkpoint for (spends on them are refused until then).
+            let operator =
+                arg(args, "--operator").ok_or_else(|| Error::new(Code::BadInput, "--operator"))?;
+            let named: Vec<String> = args
+                .windows(2)
+                .filter(|w| w[0] == "--asset")
+                .map(|w| w[1].clone())
+                .collect();
+            let all = args.iter().any(|a| a == "--all");
+            if named.is_empty() == !all {
+                return Err(Error::new(
+                    Code::BadInput,
+                    "anchor-ledgers --operator NAME (--asset ID ... | --all)",
+                ));
+            }
+            let c = Control::start(&cfg)?;
+            let notes = c.anchor_unanchored(&operator, (!all).then_some(named.as_slice()))?;
+            for n in &notes {
+                println!("{n}");
+            }
+            println!("ANCHORED {} ledger(s)", notes.len());
+        }
         "serve" => {
             let c = Arc::new(Control::start(&cfg)?);
             c.run_background();
@@ -102,7 +127,7 @@ fn run(args: &[String]) -> Result<(), Error> {
             encompute_control::api::serve(c, &cfg.listen, workers)?;
         }
         _ => {
-            eprintln!("usage: encompute-control serve | migrate | verify-state | bootstrap --issuer ISS --subject SUB | recover --operator NAME | dev-token --subject SUB");
+            eprintln!("usage: encompute-control serve | migrate | verify-state | bootstrap --issuer ISS --subject SUB | recover --operator NAME | anchor-ledgers --operator NAME (--asset ID ... | --all) | dev-token --subject SUB");
             return Err(Error::new(Code::BadInput, "unknown command"));
         }
     }

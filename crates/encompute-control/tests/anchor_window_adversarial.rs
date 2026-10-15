@@ -515,18 +515,18 @@ fn w14_earlier_entry_modified_in_the_window() {
     assert_eq!(anchored_seq(&w.t, &d), 1);
 }
 
-// ---- W15 (RESIDUAL, pinned): a ledger committed but never anchored (a crash,
-// or an anchor-store outage, between the creation's commit and its anchoring;
-// the call was never acknowledged) has no anchored genesis to hold its
-// database writer to. One who rewrites the genesis while the service is down
-// (or before the first spend) has it accepted and anchored at the first spend.
-// 0.3.1 does not close this: the creation was not acknowledged, the window
-// needs a failure the attacker cannot cause, and the honest genesis exists
-// nowhere outside the database. Stated in KNOWN_LIMITATIONS.md and the threat
-// model; this test fails the day it is closed, and must then assert the
-// opposite. ----
+// ---- W15 (CLOSED in 0.3.1, ENC-SF-2026-412): a ledger committed but never
+// anchored (a crash, or an anchor-store outage, between the creation's commit
+// and its anchoring; the call was never acknowledged) has no anchored genesis.
+// One who rewrites the genesis while the service is down (or before the first
+// spend) used to have it accepted and anchored at the first spend (40 of 40
+// spends against an honest cap of a handful). Now every spend on a ledger the
+// anchor holds no checkpoint for is refused (ENC2202), the restart alarms
+// (the `encompute_unanchored_ledgers` gauge and a log line), and only an
+// operator's deliberate, audited `anchor-ledgers` makes it spendable. More
+// scenarios in anchor_genesis.rs. ----
 #[test]
-fn w15_residual_unanchored_ledger_genesis_rewritten_across_a_crash() {
+fn w15_unanchored_ledger_genesis_rewritten_across_a_crash_refuses_spends() {
     let Some(w) = world() else { return };
     let World { t, a_owner, .. } = w;
     let f = std::fs::read_dir(&t.env0.anchor_dir)
@@ -545,13 +545,26 @@ fn w15_residual_unanchored_ledger_genesis_rewritten_across_a_crash() {
     drop(t.control);
     std::fs::write(&f, &old).unwrap();
     sql(&url, &format!("UPDATE privacy_ledgers SET genesis = jsonb_set(genesis, '{{budget,epsilon}}', '\"3000.0\"'::jsonb) WHERE asset_id='{id}'"));
-    let t = env0.start().expect("starts: the ledger was never anchored");
+    let t = env0
+        .start()
+        .expect("starts: the operator is alarmed, not locked out");
     let mut n = 0;
     while n < 40 && spend(&t, &a_owner, &id, &format!("x-{n}"), 18).0 == 200 {
         n += 1;
     }
-    assert!(
-        n >= 10,
-        "closed? {n} spends acknowledged on the rewritten genesis (an honest cap is a few)"
+    assert_eq!(
+        n, 0,
+        "{n} spends acknowledged on the rewritten genesis (an honest cap is a few)"
     );
+    let (s, v) = spend(&t, &a_owner, &id, "again", 18);
+    assert!(
+        s == 500
+            && v["code"] == "ENC2202"
+            && v["message"].as_str().unwrap().contains("not anchored"),
+        "{s} {v}"
+    );
+    assert!(t
+        .control
+        .render_metrics()
+        .contains("encompute_unanchored_ledgers{label=\"all\"} 1"));
 }

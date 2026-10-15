@@ -61,6 +61,13 @@ pub struct Control {
     pub audit_every: u64,
     /// Who may read `/metrics`.
     pub metrics_access: MetricsAccess,
+    /// Ledgers this process created whose creation committed but whose
+    /// anchoring failed (an anchor-store outage): the checkpoint the call
+    /// itself computed, anchored again by the background tick. The memory is
+    /// the process's own, which a database writer cannot touch; a crash
+    /// loses it, and the operator then anchors the ledger deliberately
+    /// (`anchor_unanchored`).
+    pub pending_genesis: std::sync::Mutex<std::collections::BTreeMap<String, Checkpoint>>,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -205,6 +212,7 @@ impl Control {
             transport,
             audit_every: audit_every.max(1),
             metrics_access: MetricsAccess::default_for(env),
+            pending_genesis: Default::default(),
         };
         c.ensure_self_registered()?;
         c.verify_state(existed)?;
@@ -214,6 +222,7 @@ impl Control {
             c.anchor.update(&c.signer, |_| {})?;
         }
         c.note_anchor_size();
+        c.alarm_unanchored_ledgers("startup");
         crate::anchor::warn_if_large(&c.service_id, "startup", c.anchor.bytes());
         c.warn_legacy_service_admins()?;
         LogLine::new(&c.service_id, "started")
@@ -347,6 +356,7 @@ impl Control {
             metrics: Metrics::default(),
             audit_every: cfg.audit_checkpoint_every.max(1),
             metrics_access: MetricsAccess::Closed,
+            pending_genesis: Default::default(),
         })
     }
 
@@ -806,6 +816,188 @@ impl Control {
         Ok(notes)
     }
 
+    /// The spendable ledgers the state anchor holds no checkpoint for: a
+    /// creation whose anchoring failed, or a ledger row a database writer
+    /// inserted. Their genesis is not authenticated by anything outside the
+    /// database, so [`Control::privacy_spend`] refuses them (ENC2202) until
+    /// an operator anchors them ([`Control::anchor_unanchored`]). Ledgers
+    /// the anchor froze or the database froze never spend.
+    pub fn unanchored_ledgers(&self) -> Result<Vec<String>> {
+        let ids: Vec<String> = {
+            let mut c = self.db.conn()?;
+            c.query(
+                "SELECT asset_id FROM privacy_ledgers WHERE frozen_reason IS NULL ORDER BY asset_id",
+                &[],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
+        };
+        let pending = self
+            .pending_genesis
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok(self.anchor.with_state(|a| {
+            ids.into_iter()
+                .filter(|id| !a.ledgers.contains_key(id) && !a.frozen.contains(id))
+                .filter(|id| !pending.contains(id))
+                .collect()
+        }))
+    }
+
+    /// Sets the `encompute_unanchored_ledgers` gauge and, when there are
+    /// any, logs the alarm naming them and the operator's step. Never
+    /// refuses to start: the ledgers refuse spends.
+    pub fn alarm_unanchored_ledgers(&self, when: &str) {
+        let Ok(ids) = self.unanchored_ledgers() else {
+            return;
+        };
+        self.metrics
+            .set("encompute_unanchored_ledgers", "all", ids.len() as i64);
+        if ids.is_empty() {
+            return;
+        }
+        LogLine::new(&self.service_id, "unanchored_ledgers")
+            .field("when", when)
+            .field("count", ids.len())
+            .field("assets", ids.join(","))
+            .field(
+                "action",
+                "these privacy ledgers refuse every spend (ENC2202): their genesis was never recorded in the state anchor; check each genesis against the data owner's records, then run `encompute-control anchor-ledgers --operator NAME --asset ID` (see docs/deployment.md)",
+            )
+            .emit();
+    }
+
+    /// The deliberate, audited step that makes unanchored ledgers spendable:
+    /// anchors each one's checkpoint as the database holds it now. Trusts
+    /// the database for these ledgers (the operator vouches for the genesis,
+    /// having compared it with the owner's records): each is audited
+    /// (`privacy.ledger.genesis_anchored`, with the checkpoint root and
+    /// budget) before it is anchored, and each is reported. `assets` names
+    /// them; `None` anchors every unanchored ledger. A named ledger that is
+    /// not unanchored is refused.
+    pub fn anchor_unanchored(
+        &self,
+        operator: &str,
+        assets: Option<&[String]>,
+    ) -> Result<Vec<String>> {
+        let unanchored = self.unanchored_ledgers()?;
+        let targets: Vec<String> = match assets {
+            None => unanchored,
+            Some(named) => {
+                for a in named {
+                    if !unanchored.contains(a) {
+                        return Err(Error::new(
+                            Code::BadInput,
+                            format!("{a} is not an unanchored privacy ledger"),
+                        ));
+                    }
+                }
+                named.to_vec()
+            }
+        };
+        let mut notes = vec![];
+        for asset in targets {
+            let view = {
+                let mut c = self.db.conn()?;
+                load_ledger(&mut *c, &asset)?
+            }
+            .ok_or_else(|| Error::new(Code::NotFound, format!("privacy ledger of {asset}")))?;
+            view.verify()?;
+            let cp = view.checkpoint()?;
+            let b = &view.genesis.budget;
+            let describe = format!(
+                "epsilon {} delta {} per {:?}, {} entries, checkpoint root {}",
+                b.epsilon,
+                b.delta,
+                b.unit,
+                view.entries.len(),
+                cp.root
+            );
+            self.db.tx(|t| {
+                let org: Option<String> = t
+                    .query_opt(
+                        "SELECT organization_id FROM assets WHERE id = $1",
+                        &[&asset],
+                    )
+                    .map_err(db_err)?
+                    .map(|r| r.get(0));
+                let mut d = AuditDraft::new(
+                    operator,
+                    "recovery",
+                    "privacy.ledger.genesis_anchored",
+                    "asset",
+                    &asset,
+                    Outcome::Succeeded,
+                )
+                .r#ref("checkpoint_seq", cp.seq.to_string())
+                .r#ref("checkpoint_root", cp.root.clone())
+                .r#ref("epsilon", b.epsilon.to_string())
+                .r#ref("delta", b.delta.to_string());
+                if let Some(o) = &org {
+                    d = d.org(o);
+                }
+                audit::append(t, d).map(|_| ())
+            })?;
+            self.anchor.try_update(&self.signer, |a| {
+                if a.ledgers.contains_key(&asset) {
+                    return Ok(false);
+                }
+                a.ledgers.insert(asset.clone(), cp.clone());
+                Ok(true)
+            })?;
+            self.pending_genesis
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&asset);
+            LogLine::new(&self.service_id, "ledger_genesis_anchored")
+                .field("operator", operator)
+                .field("asset", &asset)
+                .field("ledger", &describe)
+                .emit();
+            notes.push(format!("privacy ledger {asset}: anchored ({describe})"));
+        }
+        self.alarm_unanchored_ledgers("anchor-ledgers");
+        Ok(notes)
+    }
+
+    /// Anchors again the creations whose anchoring failed (an outage) and
+    /// that this process still remembers: what was committed, verified
+    /// against the database as in [`Control::anchor_committed`].
+    pub fn anchor_pending_genesis(&self) -> Result<()> {
+        let pending: Vec<(String, Checkpoint)> = self
+            .pending_genesis
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (asset, cp) in pending {
+            let held = self.anchor.with_state(|a| a.ledgers.contains_key(&asset));
+            if !held {
+                // A failed store keeps it pending; a refusal (the database
+                // no longer holds what was committed) anchors the committed
+                // genesis and raises the alarm, as at creation.
+                match self.anchor_committed(&asset, &cp, true) {
+                    Ok(()) => {}
+                    Err(e) if e.code == Code::PrivacyLedger => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if self.anchor.with_state(|a| a.ledgers.contains_key(&asset)) {
+                self.pending_genesis
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&asset);
+            }
+        }
+        Ok(())
+    }
+
     /// Anchors the privacy ledger of `asset` as the database now holds it.
     /// Under the anchor's lock, the ledger must extend the anchored
     /// checkpoint: one that does not (rolled back, reset or rewritten while
@@ -1131,6 +1323,7 @@ impl Control {
         };
         report("health", self.expire_evaluators());
         report("schedule", self.schedule_pending());
+        report("anchor", self.anchor_pending_genesis());
         report("anchor", self.sync_anchor());
         report("outbox", self.deliver_outbox());
         report(
@@ -1142,6 +1335,10 @@ impl Control {
         );
         self.maybe_checkpoint();
         self.note_anchor_size();
+        if let Ok(ids) = self.unanchored_ledgers() {
+            self.metrics
+                .set("encompute_unanchored_ledgers", "all", ids.len() as i64);
+        }
         if let Ok(mut c) = self.db.conn() {
             if let Ok(r) = c.query_one(
                 "SELECT count(*) FROM jobs WHERE state IN ('authorized', 'queued')",

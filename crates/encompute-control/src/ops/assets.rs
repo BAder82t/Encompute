@@ -291,7 +291,19 @@ impl Control {
             Ok((json!({"id": id, "organization": r.organization, "lineage_root": lineage_root}), ledger))
         })?;
         if let Some(genesis) = &out.1 {
+            // Not acknowledged until the anchor holds the genesis: no spend
+            // is accepted on a ledger the anchor does not hold. If the
+            // anchor store fails here, this process remembers the genesis it
+            // committed and anchors it again on the next tick.
+            self.pending_genesis
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(id.clone(), genesis.clone());
             self.anchor_committed(&id, genesis, true)?;
+            self.pending_genesis
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&id);
         }
         Ok(out.0)
     }
@@ -856,6 +868,14 @@ impl Control {
                     self.rollback_alarm("privacy", asset);
                     runtime_rollback("PRIVACY", format!("the privacy ledger of {asset}: {}", e.message))
                 })?;
+            } else if !anchored.frozen.contains(asset) {
+                // A ledger the anchor never recorded: its genesis (the
+                // cap) is authenticated by nothing outside the database.
+                self.rollback_alarm("privacy-unanchored", asset);
+                return Err(Error::new(
+                    Code::PrivacyLedger,
+                    format!("PRIVACY STATE ROLLBACK: the privacy ledger of {asset} is not anchored: its genesis was never recorded in the state anchor (a creation that was not acknowledged, or a ledger row written into the database), so its budget is not authenticated. REFUSED: an operator checks the genesis against the owner's records, then runs `encompute-control anchor-ledgers --operator NAME --asset {asset}` (see docs/deployment.md)"),
+                ));
             }
             // Duplicate delivery: the same event is already recorded.
             if let Some(e) = view.entries.iter().find(|e| {

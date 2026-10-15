@@ -83,6 +83,11 @@ const HELP: &[(&str, &str, &str)] = &[
         "Database state found behind the state anchor while running (privacy, audit): refused",
     ),
     (
+        "encompute_unanchored_ledgers",
+        "gauge",
+        "Privacy ledgers the state anchor holds no genesis checkpoint for: every spend on them is refused until an operator anchors them (should be 0)",
+    ),
+    (
         "encompute_anchor_bytes",
         "gauge",
         "Serialized size of the state anchor in bytes (warned above 524288; an OpenBao KV entry is limited to 1 MiB by default)",
