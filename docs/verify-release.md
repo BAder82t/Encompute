@@ -141,6 +141,17 @@ jq -r '.components[] | select(.name=="OpenFHE") | "\(.name) \(.version) \(.prope
 The `hashes` of an SBOM's `metadata.component` is the SHA-256 of the file it
 describes.
 
+## The Linux binaries are the ones the release check reproduced
+
+Before it signs anything, the release workflow compares the SHA-256 of the
+three binaries inside `encompute-$V-linux-x86_64.tar.gz` with the digests the
+release check recorded for the binaries it built twice and found
+byte-identical (`scripts/release/compare-shipped-digests.sh`). Any mismatch,
+missing or extra binary, or empty digest stops the workflow, so a signed
+Linux tarball holds the reproduced binaries. The macOS binaries and the
+wheels are not covered by this comparison (docs/release-process.md,
+"Reproducibility").
+
 ## Reproducing a binary (optional)
 
 The Rust binaries are built reproducibly: the same commit, toolchain and

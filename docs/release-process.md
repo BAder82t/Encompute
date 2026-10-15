@@ -128,6 +128,7 @@ Copy into the release PR.
 - [ ] `scripts/release/check-pins.sh --network` passes; `scripts/release/lock-python.sh --check` passes
 - [ ] `python3 scripts/third_party_notices.py --check` passes (after `cargo fetch --locked`): `THIRD_PARTY_NOTICES.md` is current
 - [ ] `scripts/release-check.sh --repro` passes with services and `IMAGES`, no `--allow-skip`
+- [ ] the `release` workflow's step "Linux binaries are the ones the release check reproduced" is green (no signature exists without it)
 - [ ] `security/exceptions.toml` reviewed and approved; no exception expires within 30 days
 - [ ] `security/openfhe-review.toml` signed for the pinned version, within 90 days
 - [ ] CHANGELOG.md has the release section
@@ -166,8 +167,8 @@ release); `--list` prints each row's command.
 | security scans | `scripts/release/scan.sh` (below) | cargo-deny, cargo-audit, pip-audit; trivy or grype for images |
 
 Reported rows (a FAIL fails the check, a SKIP does not): fine-tuning E2E,
-examples, enterprise E2E, Compose deployment, build pins, reproducibility
-(`--repro`), TFHE-rs research, the Confidential Space image, and the live
+examples, enterprise E2E, Compose deployment, build pins, the shipped
+digests check (a selftest, below), reproducibility (`--repro`), TFHE-rs research, the Confidential Space image, and the live
 Confidential Space checks, which need a GCP project and stay manual.
 
 ## Security scans and the severity policy
@@ -376,6 +377,41 @@ arm64, Apple clang 21:
 |---|---|
 | `encompute` (no OpenFHE) | byte-identical (`d75e2434…`) |
 | `encompute-evaluator` (OpenFHE, static) | byte-identical (`5818176e…`) |
+
+### The signed Linux binaries are the reproduced ones
+
+The `binaries` job builds the Linux release binaries and packages them
+(`encompute-VERSION-linux-x86_64.tar.gz`) on its own runner. The
+`release-check` job builds them again, twice, with `repro-check.sh`, and its
+tests and scans run on its own build, so the packaged build and the
+reproduced build are different builds of the same commit. They are bound
+together by digest:
+
+- `repro-check.sh --digests FILE` writes `sha256  name` for each of the
+  three binaries (`encompute`, `encompute-evaluator`, `encompute-control`)
+  only when both of its builds were byte-identical. `release-check.sh
+  --repro` passes `target/release-scan/repro-digests.txt`, which is uploaded
+  among the gate's reports (workflow artifact `gate-reports`).
+- The `release` job downloads `gate-reports` and runs
+  `scripts/release/compare-shipped-digests.sh
+  gate/release-scan/repro-digests.txt dist/encompute-VERSION-linux-x86_64.tar.gz`
+  before the checksums, the signatures, the attestation and the draft
+  release. It computes the SHA-256 of each binary inside the tarball and
+  fails the job on a mismatch, a missing or extra binary (anything in the
+  tarball but the three binaries and the licence files), a digest recorded
+  for another name, a missing, empty or truncated digest file, a repeated
+  name, or the digest of empty input (`e3b0c442...52b855`).
+- The check relies on the build being reproducible across the two jobs (same
+  commit, runner image and pinned inputs). If the two differ, the release
+  fails closed and is investigated as a reproducibility failure.
+- `scripts/release/test-compare-shipped-digests.sh` is the selftest of the
+  comparison (a matching tarball passes; a changed byte, a missing binary,
+  an extra binary, an empty, wrong-name or truncated digest file each fail)
+  and of `--digests`; `release-check.sh` runs it as the row "shipped digests
+  check".
+- Not covered: the macOS arm64 binaries and the wheels have no gate build.
+  They are built once, by the `binaries` job, and are the workflow's output
+  at the tagged commit signed with the same identity.
 
 ### What still varies, and why
 
