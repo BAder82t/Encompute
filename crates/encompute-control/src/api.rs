@@ -242,7 +242,7 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
     }
     // Continuous enforcement: a database that undoes a transition the anchor
     // holds latches the control plane before this request can use it.
-    if let Err(e) = control.enforce(false) {
+    if let Err(e) = control.enforce() {
         return (error_response(&e), None);
     }
     // Authenticate.

@@ -264,7 +264,7 @@ candidates were not tested.
 | ENC-SF-2026-329 | A privacy ledger's genesis (its budget) rewritten between the asset's creation and its anchoring was anchored and acknowledged: present in 0.3.0; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`) | fixed | @BAder82t | 2026-10-09 | 2026-10-09 | 0.3.1 | `e81865c` | `crates/encompute-control/tests/anchor_window.rs::genesis_rewritten_in_the_window_is_not_acknowledged` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, api.md, CHANGELOG.md |
 | ENC-SF-2026-411 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal undone between its commit and its anchoring was acknowledged and never anchored (the `sync_anchor` class): present in 0.3.0 and 0.3.1 before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`, `ops/tenancy.rs`, `ops/jobs.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | see CHANGELOG | `crates/encompute-control/tests/anchor_negatives.rs` (eight tests, one per path) | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, CHANGELOG.md |
 | ENC-SF-2026-412 | A ledger the state anchor holds no genesis checkpoint for (a creation whose anchoring failed, or a ledger row a database writer inserted or re-inserted) accepted any genesis at its first spend: the cap was whatever the database held. Re-rated from Medium to High: a writer can force the state with no crash and no outage (delete the ledger row in the creation window, insert its own). Present in 0.3.0 and the 0.3.1 line before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `ops/assets.rs`, `main.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | `13a4a8c` | `crates/encompute-control/tests/anchor_genesis.rs` (`g1` to `g7`), `crates/encompute-control/tests/anchor_window_adversarial.rs::w15_unanchored_ledger_genesis_rewritten_across_a_crash_refuses_spends` | INV-160 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, CHANGELOG.md |
-| ENC-SF-2026-413 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal the anchor already held, reverted in the database while the service ran, permitted the operation it denied (a job on a revoked asset, a disabled user or service account acting, a cancelled job started, a removed role or membership exercised) for as long as the service ran: the anchor was compared with the database at start-up and recovery only. Present in 0.3.0 and the 0.3.1 line before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `api.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | `04cfae5` | `crates/encompute-control/tests/anchor_live.rs` (`live_0` to `live_8`, over real HTTP), `crates/encompute-control/tests/anchor_failclosed.rs` | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, errors.md, CHANGELOG.md |
+| ENC-SF-2026-413 | A revocation, disable, cancellation, approval withdrawal, project leave or role removal the anchor already held, reverted in the database while the service ran, permitted the operation it denied (a job on a revoked asset, a disabled user or service account acting, a cancelled job started, a removed role or membership exercised) for as long as the service ran: the anchor was compared with the database at start-up and recovery only. Present in 0.3.0 and the 0.3.1 line before this fix; fixed in 0.3.1 | High | encompute-control (`control.rs`, `api.rs`) | fixed | @BAder82t | 2026-10-15 | 2026-10-15 | 0.3.1 | `04cfae5` | `crates/encompute-control/tests/anchor_live.rs` (`live_0` to `live_8`, over real HTTP), `crates/encompute-control/tests/anchor_enforce_nothrottle.rs` (no skip after a lock or anchor wait; a check that cannot complete fails the request), `crates/encompute-control/tests/anchor_failclosed.rs` | INV-178 (extended) | threat-model.md §4.6, KNOWN_LIMITATIONS.md, deployment.md, errors.md, CHANGELOG.md |
 
 ### ENC-SF-2026-326: a forgotten privacy spend
 
@@ -419,21 +419,39 @@ candidates were not tested.
   restored or `recover` is run). A transition whose own acknowledgement was
   refused in its window is not latched on until its retry commits it
   again (the client was told it failed).
-- Cost (measured, debug build, local PostgreSQL, `live_cost_measurement`):
-  per check 0.06 ms with an empty anchor, 1.2 ms with 700 anchored IDs,
-  3.3 ms with 7,000, 21 ms with 70,000, 198 ms with 700,000. An anchor of
-  7,000 IDs is about 130 KB; the supported anchor size (warned at 512 KB,
-  an OpenBao KV entry holds 1 MiB) is below 20 ms. Above 20 ms per check
-  the next check waits ten times as long (at most 2 s), so the enforcement
-  never takes more than a tenth of the service's time; that wait is then
-  the window.
-- Window that remains: within the supported anchor size, none between
-  requests: every request is checked before it runs, and a revert is found
-  by the next request or tick, which refuses it. A request already past its
-  check when the writer reverts can finish (milliseconds). An anchor beyond
-  the supported size has the wait above. A restored anchor together with the
-  database, and a writer who is also the anchor's custodian, are out of
-  scope (threat model).
+- Cost (measured, release build, PostgreSQL in a local container,
+  `live_cost_measurement`, mean per check): 3 ms with 7 anchored IDs,
+  3.2 ms with 700, 4.9 ms with 7,000, 17.7 ms with 52,500 (an anchor of
+  998 KB, the size of an OpenBao KV entry, 1 MiB; the anchor is warned at
+  512 KB). Most of the small-anchor figure is the round trips (the check
+  runs in its own transaction with its timeouts). Every request pays this:
+  there is no throttle (B1 below), and the check holds the anchor's lock,
+  so at the largest supported anchor the requests of one service are
+  serialized through a check of about 18 ms. An anchor beyond 1 MiB cannot
+  be written to OpenBao at all.
+- Window that remains: none between requests at any anchor size: every
+  request is checked before it runs, and a revert is found by the next
+  request or tick, which refuses it. A request already past its check when
+  the writer reverts can finish (milliseconds). A restored anchor together
+  with the database, and a writer who is also the anchor's custodian, are
+  out of scope (threat model).
+- B1 (found in review of the first fix, fixed before 0.3.1): the first
+  version skipped the next checks for ten times the cost of a check that
+  took more than 20 ms (at most 2 s). The cost was measured around the
+  database and anchor waits, which a writer controls: a table lock held
+  for 200 ms made the next two seconds of requests skip the check, so a
+  restored revocation passed, the revoked principal acted and the writer
+  re-applied the revocation with no latch and no alarm; a slow anchor write
+  did the same. Now nothing skips the check: the throttle and its cost
+  bookkeeping are removed, and the check runs in its own transaction with
+  `lock_timeout` and `statement_timeout` of 5 s. A check that cannot
+  complete in that time fails the request (ENC1701, 500; a database that
+  does not answer is not proof of a rollback, so it does not latch) and
+  never counts as a pass.
+- Tests (B1): `anchor_enforce_nothrottle.rs`: a table lock held 400 ms on
+  `assets` and on `users`, then the revocation / disable restored at once,
+  is refused and latched; the same with the anchor's lock held 400 ms; a
+  lock held past the timeout fails the request without latching.
 - Tests: `anchor_live.rs` (`live_1` to `live_8`: each transition, the
   protected operation over real HTTP, refused and latched; `live_0`: the
   background tick alone latches with no request), `anchor_negatives.rs`

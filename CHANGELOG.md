@@ -59,8 +59,12 @@ build feature changes.
   Now the database is checked against every anchored transition before each
   request and on each background tick; a mismatch raises the rollback alarm
   and latches the control plane (ENC2202 on every request, `/ready` 503)
-  until it is restarted on a restored database. Cost: about 1 ms per request
-  at 700 anchored IDs, 3 ms at 7,000, 21 ms at 70,000.
+  until it is restarted on a restored database. The check is never skipped
+  or throttled (a database lock or slow anchor write a writer controls
+  cannot buy a window), runs under a 5 s lock and statement timeout, and a
+  check that cannot complete fails the request. Cost, on every request:
+  about 3 ms at 700 anchored IDs, 5 ms at 7,000, 18 ms at the 1 MiB anchor
+  limit (release build).
 - **What 0.3.1 still does not do.** It does not eliminate rollback risk. A
   request already past its check when a writer reverts can finish; the anchor
   restored together with the database, and compromised custody of the

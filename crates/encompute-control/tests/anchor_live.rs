@@ -475,7 +475,7 @@ fn live_cost_measurement() {
     let mut total = std::time::Duration::ZERO;
     for _ in 0..50 {
         let t0 = std::time::Instant::now();
-        w.t.control.enforce(true).unwrap();
+        w.t.control.enforce().unwrap();
         let d = t0.elapsed();
         worst = worst.max(d);
         total += d;
