@@ -37,6 +37,7 @@ use crate::model::{
     MessageEnvelope, RegisterEvaluator, Role, ServiceKind, SubmitJob, JOB_GRANT_TTL_SECS,
     JOB_GRANT_VERSION, PLATFORM_ORG,
 };
+use crate::ops::{revalidate, Authority};
 
 /// Evaluators silent for longer are unhealthy.
 pub const HEARTBEAT_TIMEOUT_SECS: u64 = 90;
@@ -490,6 +491,7 @@ impl Control {
         };
         let id = new_id("pln");
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal().project(&r.project))?;
             t.execute(
                 "INSERT INTO plans (id, organization_id, project_id, program_id, spec_id, program, document, created_by)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -635,6 +637,9 @@ impl Control {
     ) -> Result<(Value, bool)> {
         let denied = std::cell::RefCell::new(None);
         let out = self.db.tx(|t| {
+            // The caller's account, roles and project membership, locked and
+            // re-read in this transaction before anything is read for the job.
+            revalidate(t, &ctx.principal, &Authority::principal().project(&r.project))?;
             let project = project_visible(t, &ctx.principal, &r.project)?;
             let orgs = project_role_orgs(&ctx.principal, &project, &[Role::MlDeveloper]);
             let Some(org) = orgs.first().cloned() else {
@@ -691,11 +696,18 @@ impl Control {
                 }
             }
             let mut needs_approval = std::collections::BTreeSet::new();
-            // Lock the source assets (shared) until this transaction ends: a
-            // concurrent revocation either commits first (and is seen here)
-            // or waits, then finds this job and fails it.
-            t.execute("SELECT 1 FROM assets WHERE id = ANY($1) FOR SHARE", &[&sources])
-                .map_err(db_err)?;
+            // Lock the source assets and the approvals covering them (shared)
+            // until this transaction ends: a concurrent revocation or
+            // withdrawal either commits first (and is seen here) or waits,
+            // then finds this job and fails it.
+            revalidate(
+                t,
+                &ctx.principal,
+                &Authority::principal()
+                    .project(&r.project)
+                    .assets(&sources)
+                    .approvals(&r.project, &r.purpose, &org),
+            )?;
             for a in &sources {
                 let asset = asset_visible(t, &ctx.principal, a)?;
                 if asset.status == "revoked" {
@@ -918,6 +930,7 @@ impl Control {
     pub fn cancel_job(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         self.db
             .tx(|t| {
+                revalidate(t, &ctx.principal, &Authority::principal())?;
                 let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
                 if !ctx.principal.member_of(&j.organization) {
                     return Err(not_found("job", id));
@@ -966,6 +979,7 @@ impl Control {
     /// sets `require_job_approval`).
     pub fn approve_job(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         let out = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             job_visible(t, ctx, &j)?;
             if j.state != JobState::WaitingForApproval {
@@ -1139,6 +1153,10 @@ impl Control {
             return Err(forbidden("only the scheduled evaluator starts a job"));
         }
         let r = self.db.tx(|t| {
+            // The evaluator's account, then the job's source assets (shared),
+            // before the job row: the order a revocation takes (asset, then
+            // the jobs it fails). The status read below follows the locks.
+            revalidate(t, &ctx.principal, &Authority::principal().job_sources(id))?;
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             if j.evaluator.as_deref() != Some(ctx.actor()) {
                 return Err(not_found("job", id));
@@ -1279,6 +1297,7 @@ impl Control {
     /// binding against the job's spec and the registered evaluator key.
     pub fn complete_job(&self, ctx: &Ctx, id: &str, r: CompleteJob) -> Result<Value> {
         let res = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             if !ctx.principal.member_of(&j.organization) {
                 return Err(not_found("job", id));
@@ -1590,6 +1609,7 @@ impl Control {
             return Err(bad("memory_bytes must be positive"));
         }
         let out = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let status: String = t.query_one(
                 "INSERT INTO evaluators (id, service_account, url, receipt_key, backends, profiles, openfhe_version, capacity, status,
                                          cpu_model, logical_cores, memory_bytes, benchmark_profile, max_parallel_gates)
@@ -1673,7 +1693,10 @@ impl Control {
     /// Heartbeat / status: the evaluator itself (ready, busy, draining,
     /// unhealthy) or a platform operator (draining, ready).
     pub fn evaluator_status(&self, ctx: &Ctx, id: &str, r: EvaluatorStatus) -> Result<Value> {
-        self.db.tx(|t| self.evaluator_status_in(t, ctx, id, &r))
+        self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
+            self.evaluator_status_in(t, ctx, id, &r)
+        })
     }
 
     fn evaluator_status_in(
@@ -1863,6 +1886,7 @@ impl Control {
         // One transaction: the inbox row first (a concurrent delivery of
         // the same message waits on it, then finds it), then the effect.
         let outcome = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let fresh = t
                 .execute(
                     "INSERT INTO inbox (consumer, message_id, outcome) VALUES ($1, $2, 'null') ON CONFLICT DO NOTHING",

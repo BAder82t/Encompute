@@ -13,6 +13,7 @@ use crate::model::{
     bad, check_name, check_slug, new_id, AddProjectMember, CreateOrganization, CreateProject,
     CreateServiceAccount, CreateUser, RemoveMembership, Role, ServiceKind, PLATFORM_ORG,
 };
+use crate::ops::{revalidate, Authority};
 
 fn unique_violation(e: &postgres::Error) -> bool {
     e.code() == Some(&postgres::error::SqlState::UNIQUE_VIOLATION)
@@ -117,6 +118,7 @@ impl Control {
             return Err(conflict("the platform organization is reserved"));
         }
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             t.execute(
                 "INSERT INTO organizations (id, display_name, status, policy_namespace)
                  VALUES ($1, $2, 'active', $1)",
@@ -203,6 +205,7 @@ impl Control {
         }
         let id = new_id("usr");
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             t.execute(
                 "INSERT INTO users (id, organization_id, issuer, subject, email, status)
                  VALUES ($1, $2, $3, $4, $5, 'active')",
@@ -281,6 +284,7 @@ impl Control {
             Some(org)
         };
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             // An organization's key broker cannot take the name another
             // organization's assets give their broker (it would receive
             // their revocations). The platform's brokers serve every
@@ -340,6 +344,7 @@ impl Control {
             "disabling a service account",
         )?;
         let out = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             // Platform services are stored without an organization, the
             // platform's automation accounts with `platform`: both are the
             // platform's to disable.
@@ -389,6 +394,7 @@ impl Control {
             "disabling a user",
         )?;
         let out = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let n = t
                 .execute(
                     "UPDATE users SET status = 'disabled' WHERE id = $1 AND organization_id = $2",
@@ -430,6 +436,7 @@ impl Control {
         )?;
         check_name("principal", &r.principal)?;
         let out = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let mut removed: Vec<(String, String)> = t
                 .query(
                     "DELETE FROM memberships WHERE principal_id = $1 AND organization_id = $2
@@ -546,6 +553,7 @@ impl Control {
             return Err(bad("the new key version must be newer"));
         }
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             audit::append(
                 t,
                 ctx.draft("key.rotated", "organization", org, Outcome::Succeeded)
@@ -569,6 +577,7 @@ impl Control {
         check_name("project name", &r.name)?;
         let id = new_id("prj");
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             t.execute(
                 "INSERT INTO projects (id, organization_id, name, status) VALUES ($1, $2, $3, 'active')",
                 &[&id, &r.organization, &r.name],
@@ -665,6 +674,7 @@ impl Control {
         let answer =
             |status: &str| json!({"project": project, "member": r.organization, "status": status});
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let p = project_row(t, project)?.ok_or_else(|| not_found("project", project))?;
             let current: Option<String> = t
                 .query_opt(
@@ -778,6 +788,7 @@ impl Control {
     ) -> Result<Value> {
         check_name("organization", &r.organization)?;
         let out = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let p = project_row(t, project)?.ok_or_else(|| not_found("project", project))?;
             let own = ctx.principal.has_role(&r.organization, Role::OrganizationAdmin);
             let invited_here = p.invited.contains(&r.organization);

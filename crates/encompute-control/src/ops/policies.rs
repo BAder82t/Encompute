@@ -16,6 +16,7 @@ use crate::authz::{
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
 use crate::model::{bad, new_id, Role};
+use crate::ops::{revalidate, Authority};
 
 impl Control {
     pub fn propose_policy(&self, ctx: &Ctx, project: &str, document: Value) -> Result<Value> {
@@ -29,6 +30,7 @@ impl Control {
         }
         let digest = sha256_hex(&canonical_json(&document)?);
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal().project(project))?;
             let p = project_visible(t, &ctx.principal, project)?;
             let orgs = project_role_orgs(&ctx.principal, &p, &[Role::SecurityAdmin]);
             let org = orgs.first().cloned().ok_or_else(|| forbidden("proposing a policy needs security_admin in a project member organization"))?;
@@ -52,6 +54,14 @@ impl Control {
 
     pub fn approve_policy(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         self.db.tx(|t| {
+            // The policy's project is read first (it never changes) so its
+            // member rows are locked before the policy row.
+            let pr: String = t
+                .query_opt("SELECT project_id FROM policies WHERE id = $1", &[&id])
+                .map_err(db_err)?
+                .ok_or_else(|| not_found("policy", id))?
+                .get(0);
+            revalidate(t, &ctx.principal, &Authority::principal().project(&pr))?;
             let r = t
                 .query_opt(
                     "SELECT organization_id, project_id, status, created_by, digest FROM policies WHERE id = $1 FOR UPDATE",

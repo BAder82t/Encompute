@@ -20,6 +20,7 @@ use crate::model::{
     bad, check_digest, check_name, check_storage_uri, new_id, ApproveAsset, AssetKind, KeyRef,
     RegisterAsset, Role, ServiceKind,
 };
+use crate::ops::{revalidate, Authority};
 use crate::transport::{seal, Scope};
 
 fn owner_roles(kind: &str) -> &'static [Role] {
@@ -173,6 +174,7 @@ impl Control {
             r.policy.clone()
         };
         let out = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             // Parents must be visible and not revoked.
             let mut roots = BTreeSet::new();
             for p in &r.parents {
@@ -363,6 +365,7 @@ impl Control {
     pub fn approve_asset(&self, ctx: &Ctx, id: &str, r: ApproveAsset) -> Result<Value> {
         check_name("purpose", &r.purpose)?;
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal().project(&r.project))?;
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -422,6 +425,7 @@ impl Control {
     pub fn withdraw_asset_approval(&self, ctx: &Ctx, id: &str, r: ApproveAsset) -> Result<Value> {
         check_name("purpose", &r.purpose)?;
         let out = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -513,6 +517,7 @@ impl Control {
     /// older database cannot silently make the asset usable again.
     pub fn revoke_asset(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         let r = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -773,6 +778,7 @@ impl Control {
         service: &str,
     ) -> Result<Value> {
         self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let a = asset_row(t, asset)?.ok_or_else(|| not_found("asset", asset))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", asset));
@@ -824,6 +830,7 @@ impl Control {
     /// returns: committed spending is never forgotten.
     pub fn privacy_spend(&self, ctx: &Ctx, asset: &str, event: PrivacyEvent) -> Result<Value> {
         let res = self.db.tx(|t| {
+            revalidate(t, &ctx.principal, &Authority::principal())?;
             let row = t
                 .query_opt(
                     "SELECT organization_id, frozen_reason FROM privacy_ledgers WHERE asset_id = $1 FOR UPDATE",
