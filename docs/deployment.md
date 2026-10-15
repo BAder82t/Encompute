@@ -733,6 +733,53 @@ Every refusal is ENC2605.
   an input value and an asset key, then scans every log, the database dump,
   the audit output and the metrics for them.
 
+### Container hardening and the util-linux/libacl findings
+
+The five images (control, evaluator, services, Confidential Space, training)
+are built on Debian 12 and carry util-linux 2.38.1 and libacl1 2.3.1, for
+which Debian has no fix yet. Image scans therefore report six High findings
+in every image: CVE-2026-53613, CVE-2026-76642, CVE-2026-78408,
+CVE-2026-78409 and CVE-2026-78410 (the `mount` and `nsenter` programs) and
+CVE-2026-54369 (libacl). The release accepts them for as long as the
+distribution has no fix, on conditions that you, the operator, must keep.
+This is a conditional acceptance, not a claim that the findings cannot be
+exploited.
+
+- **What the images do.** Nothing Encompute runs calls `mount`, `umount`,
+  `nsenter`, `su` or libacl. The images ship `/etc/fstab` with no entries,
+  which is the precondition of the four `mount` findings, and the control,
+  evaluator and services images run as unprivileged users (10002, 10001,
+  10003). Exploiting any of the six first needs code execution inside a
+  container, and then either an `fstab` entry that allows a non-root user to
+  mount, or a privileged caller of `nsenter --join-cgroup` or of a libacl
+  function working on a path the attacker controls.
+- **What the Compose file sets.** The control, evaluator, key broker and
+  secagg services run with `no-new-privileges:true` and `cap_drop: [ALL]`.
+  With both, the setuid `mount`, `umount` and `su` in the image cannot raise
+  privileges and the process holds no capability. Do not remove these
+  settings, and do not add `privileged`, `cap_add` (in particular
+  `SYS_ADMIN`), `user: root`, host PID or cgroup namespaces, or a writable
+  `/etc/fstab` to these services.
+- **If you run the images another way** (`docker run`, Kubernetes, another
+  scheduler), set the same: `--security-opt no-new-privileges:true
+  --cap-drop ALL`, or in Kubernetes `allowPrivilegeEscalation: false`,
+  `capabilities.drop: [ALL]` and `runAsNonRoot: true`. This repository ships
+  no Kubernetes manifests, so these settings are yours to apply and verify.
+- **The two Confidential Space images** (confidential-space and training)
+  run as root inside the attested virtual machine and are not covered by the
+  Compose settings. Their protection is the launcher's container
+  configuration and the VM itself, not these flags. Run them only as the
+  approved image digest, with the workload launched by Confidential Space
+  and no shell or operator command executed inside the container.
+- **Do not run an operator command that touches an attacker-controlled path
+  inside an Encompute container** (`nsenter`, or `tar`, `cp` or `getfacl`
+  working on a mounted volume you do not trust).
+
+The per-finding record, with what each image contains, what exploitation
+needs and what was tested, is kept with the release evidence
+(`CVE-DISPOSITIONS-HIGH.md`). Replacing the base image once Debian ships a
+fix is the only change that removes the findings.
+
 ## Message transport
 
 Asynchronous messages (job completions, privacy events, revocations) are
