@@ -374,9 +374,10 @@ Related: [support matrix](docs/support-matrix.md),
   longer holds them) and checks the database against every anchored
   transition before each request and on each background tick, latching the
   control plane (ENC2202, `/ready` 503) on a mismatch. Limits: a request
-  already past its check when a writer reverts can finish; above about
-  10,000 IDs per kind (an anchor beyond the supported size) the check is
-  rate-limited and the wait is the window; the key broker's revocation
+  already past its check when a writer reverts can finish; the check runs
+  on every request and is never skipped (about 18 ms at the 1 MiB anchor
+  limit; a lock or slow anchor write only delays the request, and a check
+  that cannot finish within 5 s fails it); the key broker's revocation
   message is a database row; the latch is a denial of service a writer can
   trigger. The anchor restored together with the database and
   compromised custody of the anchor or signing key remain out of scope.
