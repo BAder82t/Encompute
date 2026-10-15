@@ -71,10 +71,11 @@ correct. See the [changelog](../CHANGELOG.md) and
   an asset; authorizing a privacy spender and a privacy spend; approving a
   policy; submitting, cancelling, approving, starting and completing a job;
   the evaluator's receipt (REST and message); registering an evaluator and
-  reporting its status; and every message kind `receive_message` accepts,
-  including `key.release`: the account, roles, project members, assets and
-  approvals relied on are locked and re-read; a lock wait past 5 s fails the
-  request. Not covered: bootstrap, the background tick (scheduling,
+  reporting its status; and the sending account and roles of every message kind
+  `receive_message` accepts, including `key.release`: locked and re-read, and
+  a lock wait past 5 s fails the request. The message path does not lock
+  assets or approvals, and a `job.completed` message waits for its job row
+  without the 5 s bound. Not covered: bootstrap, the background tick (scheduling,
   evaluator expiry, outbox delivery, anchor sync and the audit checkpoint,
   `checkpoint_audit`), the command-line recovery commands, and read-only
   operations. The key broker's release decision is the broker's own; the

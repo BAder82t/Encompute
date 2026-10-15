@@ -459,8 +459,11 @@ candidates were not tested.
   approval of and revoking an asset; authorizing a privacy spender and a
   privacy spend; approving a policy; submitting, cancelling, approving,
   starting and completing a job; the evaluator's receipt (REST and message);
-  registering an evaluator and reporting its status; and every message kind
-  `receive_message` accepts, including `key.release`. Inside the transaction
+  registering an evaluator and reporting its status; and, for the sending
+  account and roles only, every message kind `receive_message` accepts,
+  including `key.release` (the message path does not lock assets or
+  approvals, and a `job.completed` message waits for its job row without the
+  5 s bound). For the other operations, inside the transaction
   that takes effect and after the row locks it needs, it re-reads the
   caller's account status and roles, the project membership, the assets and
   the approvals covering them (`ops::revalidate`), in one lock order

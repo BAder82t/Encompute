@@ -440,8 +440,10 @@ project member; registering, approving, withdrawing the approval of and
 revoking an asset; authorizing a privacy spender and a privacy spend;
 approving a policy; submitting, cancelling, approving, starting and
 completing a job; the evaluator's receipt (REST and message); registering an
-evaluator and reporting its status; and every message kind `receive_message`
-accepts, including `key.release`. Not covered: bootstrap, the background
+evaluator and reporting its status; and, for the sending account and roles only, every
+message kind `receive_message` accepts, including `key.release`; that path
+does not lock assets or approvals, and a `job.completed` message waits for
+its job row without the 5 s bound. Not covered: bootstrap, the background
 tick (scheduling, evaluator expiry, outbox delivery, anchor sync and the
 audit checkpoint, `checkpoint_audit`), the command-line recovery commands,
 and read-only operations. The key broker's release decision is the broker's

@@ -393,10 +393,11 @@ Related: [support matrix](docs/support-matrix.md),
   an asset; authorizing a privacy spender and a privacy spend; approving a
   policy; submitting, cancelling, approving, starting and completing a job;
   the evaluator's receipt (REST and message); registering an evaluator and
-  reporting its status; and every message kind `receive_message` accepts,
-  including `key.release` (account, roles, project members, assets,
-  approvals, job row locked and re-read; a lock wait past 5 s fails the
-  request). Not covered: bootstrap, the background tick (scheduling,
+  reporting its status; and the sending account and roles of every message kind
+  `receive_message` accepts, including `key.release` (locked and re-read;
+  a lock wait past 5 s fails the request; the message path does not lock
+  assets or approvals, and a `job.completed` message waits for its job row
+  without the 5 s bound). Not covered: bootstrap, the background tick (scheduling,
   evaluator expiry, outbox delivery, anchor sync and the audit checkpoint,
   `checkpoint_audit`), the command-line recovery commands, and read-only
   operations. The key broker's release decision is the broker's own; the
