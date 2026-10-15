@@ -493,9 +493,7 @@ impl Architecture {
                         "the architecture's config is not the model package's config.json",
                     ));
                 }
-                let v: serde_json::Value =
-                    serde_json::from_str(config).map_err(|e| bad(format!("config.json: {e}")))?;
-                if crate::hf::check_config(&v)? != p.model_type {
+                if crate::hf::check_config_text(config)? != p.model_type {
                     return Err(bad("the architecture's model type is not the package's"));
                 }
                 if self.kwargs["num_labels"].as_u64() != Some(u64::from(p.num_labels))
