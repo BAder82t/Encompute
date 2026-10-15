@@ -48,8 +48,9 @@ build feature changes.
   `encompute-control anchor-ledgers --operator NAME (--asset ID ... | --all)`
   after checking the genesis against the owner's records (audited as
   `privacy.ledger.genesis_anchored`). Ledgers that already have an anchored
-  checkpoint are unaffected. That step trusts the database for those
-  ledgers.
+  checkpoint are not changed (and not re-examined: a genesis that 0.3.0
+  anchored stays as it was). That step trusts the database for those
+  ledgers and is not a validation of the owner's original cap.
 - **A transition the anchor held, reverted while the service ran, permitted
   the operation it denied (ENC-SF-2026-413, High).** A restored revocation,
   disabled user or service account, cancelled job, withdrawn approval,
@@ -83,8 +84,22 @@ build feature changes.
   rollback alarm, and nothing is acknowledged. What is recorded is the
   committed checkpoint, not the database head, so a change after the write
   is refused at the next spend and at start.
-- **What a deployer must do.** Upgrade to 0.3.1. There is no migration and
-  no configuration change. A client can now see `500 ENC2202` for a spend
+- **What a deployer must do.** Upgrade to 0.3.1 and follow
+  [Upgrading from 0.3.0 to 0.3.1](docs/deployment.md#upgrading-from-030-to-031-security-upgrade):
+  back up the database and the independently held anchor first; review every
+  ledger's genesis against the data owner's records before running
+  `encompute-control anchor-ledgers` (with the service stopped, then restart
+  it). There is no migration and no configuration change. There is no
+  supported security downgrade to 0.3.0: a 0.3.0 binary started on the 0.3.1
+  database and anchor accepted and anchored a SQL-forged genesis; to roll
+  back, restore the pre-upgrade database dump together with its anchor. A
+  genesis that 0.3.0 already anchored is not re-examined and nothing repairs
+  it automatically. `anchor-ledgers` records what the database holds now; it
+  does not validate the owner's original cap (no owner-signed cap exists),
+  and `--all` anchors every unanchored ledger without review. Until it has
+  run, spends on a ledger the anchor holds no checkpoint for fail with
+  `500 ENC2202 ... is not anchored` and raise the rollback alarm
+  (`encompute_state_rollback_total`); start-up is not refused. A client can now see `500 ENC2202` for a spend
   whose entry was erased in that interval; the spend was not acknowledged and
   retrying the same event is correct. An asset registered while its genesis
   was being rewritten stays registered with a ledger no spend is accepted
@@ -93,6 +108,11 @@ build feature changes.
   forgets spending since the backup, so keep the anchor outside the backup
   set. An erase after the anchor holds the entry is detected at the next
   spend and at start; it denies service and does not forget spending.
+  Restoration or deletion of the same anchored records is detected within
+  the implemented checks; creation of new role, membership or approval
+  records (or a user or service account recreated under a new ID) may not be
+  detectable through an ID-based anchor, and the external anchor does not
+  independently authenticate every newly introduced database authority.
   Details: threat model section 4.6 and `KNOWN_LIMITATIONS.md`.
 
 ### Supply chain and notices

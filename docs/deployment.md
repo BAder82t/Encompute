@@ -230,6 +230,204 @@ encrypted assets
   nothing. There is no fallback to local or plaintext keys. Production
   brokers refuse development stores.
 
+## Upgrading from 0.3.0 to 0.3.1 (security upgrade)
+
+0.3.1 changes no database schema, API, wire format or anchor format:
+`encompute-control migrate` reports schema version 4 before and after, and
+the anchor file is read as it is. What changes is how the control plane
+treats privacy ledgers and anchored revocations, and on an existing
+installation that needs one reviewed operator action. Read this whole
+section before you start. The [release notes](release-notes-0.3.1.md) and the
+[changelog](../CHANGELOG.md) say what each finding was.
+
+**What to do, in this order:**
+
+1. **Back up the database and the anchor, together, before you install
+   0.3.1.** Use [backup.sh](../deploy/docker-compose/backup.sh), or a
+   `pg_dump` plus a copy of the anchor (the directory behind
+   `ENCOMPUTE_ANCHOR_DIR`, or the vault path behind
+   `ENCOMPUTE_ANCHOR_BAO_ADDR`). Keep the anchor copy where neither the
+   database's backup tooling nor the database administrator can rewrite it,
+   and take it before the database, as `backup.sh` does. Keep both until you
+   have finished this section and trust the result: they are the only
+   supported way back (see
+   [No supported downgrade](#no-supported-downgrade-to-030)).
+2. **Install 0.3.1 and start it.** There is no migration to run. Start-up is
+   not refused because of this release. If any privacy ledger has no
+   checkpoint in the anchor (see below), the log line `unanchored_ledgers`
+   names it and the gauge `encompute_unanchored_ledgers` counts it. Go on to
+   step 3 whatever the count is.
+3. **Review every ledger's genesis against the data owner's own records,
+   before you run `anchor-ledgers`.** The genesis holds the privacy budget
+   (the cap: unit, epsilon and delta) that every spend is checked against.
+   The control plane cannot tell a genuine budget from a forged one: nothing
+   the data owner signed binds it in 0.3. Compare it with a record that does
+   not come from this database: the registration request or configuration
+   the owner submitted, the owner's ticket or contract, and so on. List the
+   ledgers with a read-only query:
+
+   ```sql
+   SELECT l.asset_id, l.organization_id,
+          l.genesis->'budget' AS budget,            -- unit, epsilon, delta: compare with the owner
+          l.genesis->>'privacy_policy_id' AS policy_hash,
+          l.frozen_reason, l.created_at,
+          (SELECT count(*) FROM privacy_entries e WHERE e.asset_id = l.asset_id) AS entries
+   FROM privacy_ledgers l
+   ORDER BY l.created_at, l.asset_id;
+   ```
+
+   The budget of one asset is also returned by `GET /v1/privacy/{asset}`
+   (fields `budget`, `spent`, `entries`, `root`, `frozen`) to a data owner,
+   auditor, organization admin or security admin of the asset's
+   organization; `GET /v1/privacy/{asset}/ledger` exports the whole ledger.
+   Do this for **every** ledger, not only for the ones the log names as
+   unanchored. A ledger that 0.3.0 already anchored keeps the genesis it was
+   anchored with, and 0.3.1 cannot tell whether that genesis was genuine
+   (see [What the upgrade does not repair](#what-the-upgrade-does-not-repair)).
+
+   Compare the spending as well. Every accepted spend is one ledger entry
+   and one audit event of the same asset; a duplicate delivery of an event
+   adds neither:
+
+   ```sql
+   SELECT l.asset_id,
+          count(*) FILTER (WHERE e.entry->'event'->>'kind' = 'reserve') AS ledger_reserves,
+          count(*) FILTER (WHERE e.entry->'event'->>'kind' = 'commit')  AS ledger_commits,
+          (SELECT count(*) FROM audit_events a
+            WHERE a.resource_id = l.asset_id AND a.action = 'privacy.spent')     AS audit_spent,
+          (SELECT count(*) FROM audit_events a
+            WHERE a.resource_id = l.asset_id AND a.action = 'privacy.committed') AS audit_committed
+   FROM privacy_ledgers l LEFT JOIN privacy_entries e ON e.asset_id = l.asset_id
+   GROUP BY l.asset_id ORDER BY l.asset_id;
+   ```
+
+   `ledger_reserves` should equal `audit_spent`, and `ledger_commits`
+   should equal `audit_committed`. More audit events than ledger entries
+   means a spend was acknowledged and its entry later erased: the ledger's
+   remaining budget is larger than the truth. Treat it as an incident. (The
+   audit chain itself is checked by `encompute-control verify-state`. A
+   database writer who can also rewrite the audit trail defeats this
+   comparison.)
+4. **Anchor the ledgers you checked, with the service stopped.** Stop the
+   control plane, run the command with the environment the service uses
+   (with Compose: `docker compose stop control`, then
+   `docker compose run --rm control anchor-ledgers --operator NAME --asset ID`),
+   and start the service again afterwards:
+
+   ```sh
+   encompute-control anchor-ledgers --operator NAME --asset ID [--asset ID ...]
+   ```
+
+   For each ledger the command prints the budget, the entry count and the
+   checkpoint root, writes the audit event `privacy.ledger.genesis_anchored`,
+   and ends with `ANCHORED N ledger(s)`. A ledger that already has an
+   anchored checkpoint is refused (exit 2, "is not an unanchored privacy
+   ledger") and nothing changes.
+
+   Why the service must be stopped: the command starts its own control plane
+   on the same anchor and writes the anchor from that second process. A
+   running `serve` keeps its own in-memory copy of the anchor and re-reads
+   the stored one only when one of its own anchor writes loses a
+   compare-and-set, so it can keep refusing the ledger you just anchored. It
+   also puts two processes on one anchor, against the one-process-per-anchor
+   rule above.
+   *Read in the code:* the CLI runs `Control::start` in its own process
+   (`main.rs`); `Anchor` keeps the state in memory and reloads it only on a
+   "changed concurrently" error in `try_update` (`anchor.rs`); a spend reads
+   that in-memory copy (`anchor.snapshot()` in `ops/assets.rs`). *Not run:*
+   the command against a live service. The upgrade check ran it with the
+   service stopped.
+5. **Check the result.** After the restart `encompute_unanchored_ledgers`
+   should be 0, or list only the ledgers you decided not to anchor, and a
+   spend on an anchored ledger is accepted.
+
+**What `anchor-ledgers` is not.** It records the checkpoint the database
+holds *now* as the ledger's anchored checkpoint. It is not a cryptographic
+validation of the data owner's original privacy cap: no owner-signed cap
+exists in 0.3, so the budget in the database is whatever the registration
+request said, or whatever a database writer put there. The command trusts the
+database for the ledgers it anchors, and the review in step 3, done by you,
+is the only check that the number is the right one. An operator who anchors a
+rewritten or forged genesis anchors it, and from then on the control plane
+enforces that cap. **`--all` makes blind use easy:** it anchors every
+unanchored ledger without asking about any of them. Use it only after every
+ledger it will anchor has been reviewed as in step 3; otherwise name the
+assets with `--asset`.
+
+**What operators will see until the command has run.** A ledger that the
+anchor holds no checkpoint for refuses every spend with HTTP 500 and
+`ENC2202 PRIVACY STATE ROLLBACK: the privacy ledger of <asset> is not
+anchored ...`. This is the intended fail-closed behavior, and it is
+expected after the upgrade for those ledgers: nothing fails open, start-up
+is not refused, and everything else keeps working. It is reported as a
+rollback, though: each refused attempt writes the log line
+`state_rollback_detected` (state `privacy-unanchored`) and raises
+`encompute_state_rollback_total{label="privacy-unanchored"}`, and the gauge
+`encompute_unanchored_ledgers` stays above 0. Tell whoever is paged by the
+rollback alert before you upgrade. The ledgers affected are those 0.3.0
+never anchored (an anchor write that failed during registration and was
+followed by a crash, or a ledger row written into the database). Ledgers
+whose creation 0.3.0 acknowledged are already anchored and need nothing.
+Reading a ledger (`GET /v1/privacy/{asset}`) still works and shows what the
+database holds, so you can do step 3.
+
+### What the upgrade does not repair
+
+- **A genesis that 0.3.0 already anchored is not re-examined, and nothing
+  repairs it automatically.** On 0.3.0 a ledger whose genesis was forged or
+  rewritten (before its first spend, or in the interval of its
+  registration) was anchored with that genesis. After the upgrade it is
+  anchored, passes every 0.3.1 check and spends up to the forged cap. The
+  upgrade cannot detect this, and there is no command that corrects an
+  anchored genesis; step 3 is the only check. If you find one that is wrong,
+  stop spending on it and handle it as an incident.
+- **Spends 0.3.0 forgot, and revocations it never anchored.** On 0.3.0 a
+  spend erased between its commit and its anchoring, or a revocation,
+  disable, cancellation, withdrawal or removal undone in that interval, was
+  acknowledged and not anchored. 0.3.1 cannot find these afterwards. Use the
+  comparison in step 3, and re-issue any revocation whose acknowledgement
+  predates 0.3.1 if you cannot confirm the current state.
+
+### No supported downgrade to 0.3.0
+
+Do not roll back by putting the 0.3.0 binary back. It starts on the database
+and anchor that 0.3.1 used, and it re-opens the findings 0.3.1 fixed. In a
+check of that swap, 0.3.0 accepted and anchored a spend on a ledger whose
+genesis had been forged with SQL (a budget of epsilon 3000), which 0.3.1 had
+refused. 0.3.1 then started on the result and held that genesis as
+authentic. Whatever is written during the rollback period is anchored on the
+older, weaker terms.
+
+The only supported rollback is to restore the database dump taken before the
+upgrade **together with the anchor copy taken at the same time**, and then
+start 0.3.0. The pre-upgrade dump with the newer anchor is refused by 0.3.0
+(ENC2202). The other choice is to stay on 0.3.1.
+
+### Restoring both the database and the anchor
+
+If the database and the independently held anchor are both restored to an
+old state that is consistent with itself, 0.3.1 does not detect it:
+everything since that state is forgotten (privacy spending, revocations,
+disables, cancellations, withdrawals and removals). That is out of scope for
+this release, as it was for 0.3.0. Keep the anchor outside the database's
+backup set, and restore it only into an empty volume.
+
+### What the anchor does not cover
+
+Restoration or deletion of the same anchored records is detected within the
+implemented checks. Creation of NEW role, membership or approval records (or a
+user/service account recreated under a new ID) may not be detectable through
+an ID-based anchor. The external anchor does not independently authenticate
+every newly introduced database authority. 0.3.1 does not prevent someone
+with write access to the database from recreating authority that was revoked.
+
+The interval between a request's check and the use it permits is not short by
+guarantee, and it is not absent. How long a request can be held in it is
+controlled by whoever holds locks on the database tables, so no duration
+should be assumed.
+
+<<B1-B2-WORDING>>
+
 ## Upgrading from 0.3.0-rc.3 or earlier
 
 - **Service accounts with `security_admin`.** Earlier releases let an
@@ -345,11 +543,15 @@ encompute-control anchor-ledgers --operator NAME --asset ID [--asset ID ...]
 encompute-control anchor-ledgers --operator NAME --all
 ```
 
-This trusts the database for those ledgers: it anchors the checkpoint the
+Stop the service before you run it, and start it again afterwards. This
+trusts the database for those ledgers: it anchors the checkpoint the
 database holds now, prints it (budget, entry count, root) and audits it as
-`privacy.ledger.genesis_anchored`. After upgrading from 0.3.0 or an earlier
-0.3.1 build, ledgers that already have an anchored checkpoint need nothing;
-check the gauge once.
+`privacy.ledger.genesis_anchored`. It is not a validation of the owner's
+original cap, and `--all` anchors every unanchored ledger without asking
+about any of them. After upgrading from 0.3.0 or an earlier 0.3.1 build,
+ledgers that already have an anchored checkpoint need nothing; check the
+gauge once. The full upgrade steps, with the review to do first, are in
+[Upgrading from 0.3.0 to 0.3.1](#upgrading-from-030-to-031-security-upgrade).
 
 **A latched control plane.** The service checks the database against every
 anchored revocation, disable, cancellation, approval withdrawal, project leave

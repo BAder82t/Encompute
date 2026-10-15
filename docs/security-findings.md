@@ -429,12 +429,15 @@ candidates were not tested.
   so at the largest supported anchor the requests of one service are
   serialized through a check of about 18 ms. An anchor beyond 1 MiB cannot
   be written to OpenBao at all.
-- Window that remains: none between requests at any anchor size: every
-  request is checked before it runs, and a revert is found by the next
-  request or tick, which refuses it. A request already past its check when
-  the writer reverts can finish (milliseconds). A restored anchor together
-  with the database, and a writer who is also the anchor's custodian, are
-  out of scope (threat model).
+- Window that remains: no request skips the check, at any anchor size:
+  every request is checked before it runs, and a revert is found by the
+  next request or tick, which refuses it. A request already past its check
+  when the writer reverts can finish; how long it can be held after its
+  check is not bounded here, because a writer that holds table locks
+  controls it, so no duration is claimed (see the check-to-use gap in the
+  upgrade notes). A restored anchor together with the database, and a
+  writer who is also the anchor's custodian, are out of scope (threat
+  model).
 - B1 (found in review of the first fix, fixed before 0.3.1): the first
   version skipped the next checks for ten times the cost of a check that
   took more than 20 ms (at most 2 s). The cost was measured around the
