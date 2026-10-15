@@ -50,6 +50,7 @@ services:
     # The image runs as an unprivileged user and needs no setuid binary:
     # nothing in the container may gain privileges through one.
     security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
 
   evaluator:
     image: encompute-evaluator:${ENCOMPUTE_VERSION:-dev}
@@ -69,6 +70,7 @@ services:
     # The image runs as an unprivileged user and needs no setuid binary:
     # nothing in the container may gain privileges through one.
     security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
 
   openbao:
     image: openbao/openbao:2.1.0
@@ -99,6 +101,7 @@ services:
     # The image runs as an unprivileged user and needs no setuid binary:
     # nothing in the container may gain privileges through one.
     security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
 
   secagg:
     image: encompute-services:${ENCOMPUTE_VERSION:-dev}
@@ -116,6 +119,7 @@ services:
     # The image runs as an unprivileged user and needs no setuid binary:
     # nothing in the container may gain privileges through one.
     security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
 
 secrets:
   db-password: {file: ./secrets/db-password}
