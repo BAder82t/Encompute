@@ -73,13 +73,29 @@ build feature changes.
   revocation message is a database row; a writer can trigger the latch (a
   denial of service). See `KNOWN_LIMITATIONS.md`.
 - **Authorization is re-read inside the transaction that takes effect
-  (hardening).** Job submission, every operation of an authenticated user or
-  service account, approval use, role and project-membership actions, job
-  cancel and the evaluator's start lock the rows they rely on (account,
-  roles, project members, assets, approvals) and re-read them inside their
-  own transaction, in one lock order at READ COMMITTED, with a 5 s lock
-  timeout that fails the request. It narrows the gap between the live check
-  and the effect; it does not close or bound it.
+  (hardening).** For the API operations that call `ops::revalidate`:
+  creating an organization, user, service account, project, plan or policy
+  proposal; disabling a user or service account; removing a role; recording
+  a key rotation; adding or removing a project member; registering,
+  approving, withdrawing the approval of and revoking an asset; authorizing
+  a privacy spender and a privacy spend; approving a policy; submitting,
+  cancelling, approving, starting and completing a job; the evaluator's
+  receipt (REST and message); registering an evaluator and reporting its
+  status; and every message kind `receive_message` accepts, including
+  `key.release`, the rows relied on (account, roles, project members,
+  assets, approvals, and the job row where one is updated) are locked and
+  re-read inside the operation's own transaction, in one lock order at READ
+  COMMITTED, with a 5 s lock timeout that fails the request. Not covered:
+  bootstrap, the background tick (scheduling, evaluator expiry, outbox
+  delivery, anchor sync and the audit checkpoint, `checkpoint_audit`), the
+  command-line recovery commands, and read-only operations. The key broker's
+  release decision is the broker's own; the control plane only records its
+  report. It narrows the gap between the live check and the effect; it does
+  not close or bound it. Status: the original check-to-use attack (B2) was
+  NOT EXECUTED; the defensive revalidation is implemented; full database-
+  writer TOCTOU resistance is NOT INDEPENDENTLY ESTABLISHED; the B3
+  limitation is unchanged (authority recreated under a new ID is not
+  detected).
 - **Who is affected.** Deployments of 0.3.0 that use privacy budgets and
   face the database attacker above. The 0.3 release candidates were not
   tested and may be affected too. The audit trail still records the

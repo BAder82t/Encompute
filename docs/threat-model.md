@@ -426,8 +426,8 @@ rollback.
 - **A transition reverted after the anchor holds it** (ENC-SF-2026-413,
   fixed in 0.3.1) is found by the next request or background tick and
   latches the control plane. What remains: a request already past its
-  check when the writer reverts can finish (each state-changing operation
-  re-reads its authority inside its own transaction after locking the rows,
+  check when the writer reverts can finish (the operations that call `ops::revalidate`
+  (see `docs/security-findings.md`, ENC-SF-2026-413, for the list and the exceptions) re-read their authority inside their own transaction after locking the rows,
   which narrows the gap between the check and the effect; it does not close
   it or bound how long a request can be held before its transaction takes
   its locks); the check runs on every request

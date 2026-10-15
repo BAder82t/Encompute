@@ -700,14 +700,12 @@ impl Control {
             // until this transaction ends: a concurrent revocation or
             // withdrawal either commits first (and is seen here) or waits,
             // then finds this job and fails it.
-            revalidate(
-                t,
-                &ctx.principal,
-                &Authority::principal()
-                    .project(&r.project)
-                    .assets(&sources)
-                    .approvals(&r.project, &r.purpose, &org),
-            )?;
+            let mut authority = Authority::principal().project(&r.project).assets(&sources);
+            if !sources.is_empty() {
+                // (a job over no registered asset has no approvals to lock)
+                authority = authority.approvals(&r.project, &r.purpose, &org);
+            }
+            revalidate(t, &ctx.principal, &authority)?;
             for a in &sources {
                 let asset = asset_visible(t, &ctx.principal, a)?;
                 if asset.status == "revoked" {
@@ -930,7 +928,7 @@ impl Control {
     pub fn cancel_job(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         self.db
             .tx(|t| {
-                revalidate(t, &ctx.principal, &Authority::principal())?;
+                revalidate(t, &ctx.principal, &Authority::principal().job_lock(id))?;
                 let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
                 if !ctx.principal.member_of(&j.organization) {
                     return Err(not_found("job", id));
@@ -979,7 +977,7 @@ impl Control {
     /// sets `require_job_approval`).
     pub fn approve_job(&self, ctx: &Ctx, id: &str) -> Result<Value> {
         let out = self.db.tx(|t| {
-            revalidate(t, &ctx.principal, &Authority::principal())?;
+            revalidate(t, &ctx.principal, &Authority::principal().job_lock(id))?;
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             job_visible(t, ctx, &j)?;
             if j.state != JobState::WaitingForApproval {
@@ -1156,7 +1154,11 @@ impl Control {
             // The evaluator's account, then the job's source assets (shared),
             // before the job row: the order a revocation takes (asset, then
             // the jobs it fails). The status read below follows the locks.
-            revalidate(t, &ctx.principal, &Authority::principal().job_sources(id))?;
+            revalidate(
+                t,
+                &ctx.principal,
+                &Authority::principal().job_sources(id).job_lock(id),
+            )?;
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             if j.evaluator.as_deref() != Some(ctx.actor()) {
                 return Err(not_found("job", id));
@@ -1212,15 +1214,19 @@ impl Control {
     /// The evaluator's signed receipt for a job it ran (message or call).
     pub fn evaluator_completed(
         &self,
+        principal: &crate::authn::Principal,
         evaluator: &str,
         request: &str,
         id: &str,
         receipt: &Value,
         eval_seconds: Option<f64>,
     ) -> Result<Value> {
-        let out = self
-            .db
-            .tx(|t| self.evaluator_completed_in(t, evaluator, request, id, receipt))?;
+        let out = self.db.tx(|t| {
+            // The evaluator's account (as for the same report sent as a
+            // message), then the job row, before the effect.
+            revalidate(t, principal, &Authority::principal().job_lock(id))?;
+            self.evaluator_completed_in(t, evaluator, request, id, receipt)
+        })?;
         if let Some(s) = eval_seconds {
             self.metrics
                 .observe("encompute_evaluation_duration_seconds", "all", s);
@@ -1297,7 +1303,7 @@ impl Control {
     /// binding against the job's spec and the registered evaluator key.
     pub fn complete_job(&self, ctx: &Ctx, id: &str, r: CompleteJob) -> Result<Value> {
         let res = self.db.tx(|t| {
-            revalidate(t, &ctx.principal, &Authority::principal())?;
+            revalidate(t, &ctx.principal, &Authority::principal().job_lock(id))?;
             let j = job_row(t, id, true)?.ok_or_else(|| not_found("job", id))?;
             if !ctx.principal.member_of(&j.organization) {
                 return Err(not_found("job", id));

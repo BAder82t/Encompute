@@ -697,7 +697,9 @@ fn lock_timeout_on_the_job_row_fails_closed_for_cancel_and_start() {
 }
 
 // ---------------------------------------------------------------------------
-// ordinary concurrency, correct lock order
+// ordinary concurrency, correct lock order. These three are smoke tests:
+// the interleaving is not controlled, so they show no deadlock and a
+// consistent outcome, and are not evidence for the lock order.
 
 /// Runs `a` and `b` at the same moment on two threads; both must return
 /// well within the lock timeout.
@@ -724,7 +726,7 @@ fn race<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + 
 }
 
 #[test]
-fn concurrent_revoke_and_submit_both_complete_with_a_consistent_outcome() {
+fn smoke_concurrent_revoke_and_submit_both_complete_with_a_consistent_outcome() {
     let (mut submitted, mut refused) = (0, 0);
     for round in 0..8u64 {
         let Some(w) = world() else { return };
@@ -768,7 +770,7 @@ fn concurrent_revoke_and_submit_both_complete_with_a_consistent_outcome() {
 }
 
 #[test]
-fn concurrent_role_removal_and_submit_both_complete_with_a_consistent_outcome() {
+fn smoke_concurrent_role_removal_and_submit_both_complete_with_a_consistent_outcome() {
     for round in 0..6u64 {
         let Some(w) = world() else { return };
         let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
@@ -802,7 +804,7 @@ fn concurrent_role_removal_and_submit_both_complete_with_a_consistent_outcome() 
 }
 
 #[test]
-fn concurrent_user_disable_and_cancel_both_complete_with_a_consistent_outcome() {
+fn smoke_concurrent_user_disable_and_cancel_both_complete_with_a_consistent_outcome() {
     for round in 0..6 {
         let Some(w) = world() else { return };
         let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
@@ -827,4 +829,172 @@ fn concurrent_user_disable_and_cancel_both_complete_with_a_consistent_outcome() 
         let st = text(&url, &format!("SELECT state FROM jobs WHERE id = '{job}'"));
         assert_eq!(st, if cs == 200 { "cancelled" } else { "queued" });
     }
+}
+
+// ---------------------------------------------------------------------------
+// wait, then refuse (deterministic): a holder transaction performs the
+// revocation and keeps its row lock uncommitted; the request is started and
+// seen blocked on that lock; the holder COMMITS within the timeout (the
+// revocation lands; nothing is reverted); the request is then refused.
+
+/// Whether some session of this database waits on a lock.
+fn blocked(url: &str) -> bool {
+    one(
+        url,
+        "SELECT count(*) FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'",
+    ) > 0
+}
+
+fn wait_then_refuse<T: Send>(url: &str, revoke_sql: &str, request: impl FnOnce() -> T + Send) -> T {
+    let mut holder = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    holder.batch_execute("BEGIN").unwrap();
+    holder.batch_execute(revoke_sql).unwrap();
+    std::thread::scope(|s| {
+        let h = s.spawn(request);
+        let t0 = Instant::now();
+        while !blocked(url) {
+            assert!(
+                t0.elapsed() < Duration::from_secs(3),
+                "the request never blocked on the lock"
+            );
+            assert!(!h.is_finished(), "the request finished without waiting");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        holder.batch_execute("COMMIT").unwrap();
+        h.join().unwrap()
+    })
+}
+
+#[test]
+fn wait_then_refuse_asset_revoked_while_submit_waits() {
+    let Some(w) = world() else { return };
+    let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
+    let plan = model_plan(&w);
+    let (s, v) = wait_then_refuse(
+        &url,
+        &format!("UPDATE assets SET status = 'revoked', revoked_at = now() WHERE id = '{m}'"),
+        || submit_http(&w, &cl, &plan, &m, "wait-asset"),
+    );
+    assert_eq!(s, 409, "{v}");
+    assert_eq!(one(&url, "SELECT count(*) FROM jobs"), 0);
+    assert_eq!(
+        one(
+            &url,
+            "SELECT count(*) FROM audit_events WHERE action = 'job.created'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn wait_then_refuse_role_removed_while_submit_waits() {
+    let Some(w) = world() else { return };
+    let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
+    let plan = model_plan(&w);
+    let id = id_of(&w, &w.b_dev);
+    let (s, v) = wait_then_refuse(
+        &url,
+        &format!("DELETE FROM memberships WHERE principal_id = '{id}' AND role = 'ml_developer'"),
+        || submit_http(&w, &cl, &plan, &m, "wait-role"),
+    );
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(one(&url, "SELECT count(*) FROM jobs"), 0);
+}
+
+#[test]
+fn wait_then_refuse_user_disabled_while_cancel_waits() {
+    let Some(w) = world() else { return };
+    let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
+    let plan = model_plan(&w);
+    let (s, j) = w.job(&plan, &[&m], "wait-user-job");
+    assert_eq!(s, 201, "{j}");
+    let job = j["id"].as_str().unwrap().to_owned();
+    let id = id_of(&w, &w.b_dev);
+    let (s, v) = wait_then_refuse(
+        &url,
+        &format!("UPDATE users SET status = 'disabled' WHERE id = '{id}'"),
+        || cl.call(&w.b_dev, "POST", &format!("/v1/jobs/{job}/cancel"), None),
+    );
+    assert_eq!(s, 401, "{v}");
+    assert_eq!(
+        text(&url, &format!("SELECT state FROM jobs WHERE id = '{job}'")),
+        "queued"
+    );
+    assert_eq!(
+        one(
+            &url,
+            "SELECT count(*) FROM audit_events WHERE action = 'job.cancelled'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn wait_then_refuse_evaluator_disabled_while_its_receipt_waits() {
+    let Some(w) = world() else { return };
+    let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
+    let plan = model_plan(&w);
+    let (s, j) = w.job(&plan, &[&m], "wait-receipt-job");
+    assert_eq!(s, 201, "{j}");
+    let job = j["id"].as_str().unwrap().to_owned();
+    let ev = w.evaluator.id.clone();
+    let (s, v) = wait_then_refuse(
+        &url,
+        &format!("UPDATE service_accounts SET status = 'disabled' WHERE id = '{ev}'"),
+        || {
+            cl.call(
+                &w.evaluator.service,
+                "POST",
+                &format!("/v1/jobs/{job}/receipt"),
+                Some(json!({"receipt": {}})),
+            )
+        },
+    );
+    assert_eq!(s, 401, "{v}");
+    assert_eq!(
+        text(&url, &format!("SELECT state FROM jobs WHERE id = '{job}'")),
+        "queued"
+    );
+    assert_eq!(
+        one(
+            &url,
+            "SELECT count(*) FROM audit_events WHERE action = 'job.executed'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn the_five_second_wait_ends_with_the_revalidation() {
+    // After the revalidation, a wait on a lock the operation takes itself
+    // (the audit head here) is not cut at 5 s: it keeps the setting in force
+    // before the helper ran.
+    let Some(w) = world() else { return };
+    let (cl, url) = (http(&w), w.t.env0.url.clone());
+    let mut holder = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    holder.batch_execute("BEGIN").unwrap();
+    holder
+        .batch_execute("SELECT seq FROM audit_head WHERE id FOR UPDATE")
+        .unwrap();
+    let t0 = Instant::now();
+    let (s, v) = std::thread::scope(|sc| {
+        let h = sc.spawn(|| {
+            cl.call(
+                &w.b_dev,
+                "POST",
+                "/v1/plans",
+                Some(json!({"project": w.project, "program": exact_own(&w.model_b)})),
+            )
+        });
+        std::thread::sleep(Duration::from_secs(7));
+        holder.batch_execute("COMMIT").unwrap();
+        h.join().unwrap()
+    });
+    assert_eq!(s, 201, "{v}");
+    assert!(
+        t0.elapsed() >= Duration::from_secs(6),
+        "it waited past 5 s: {:?}",
+        t0.elapsed()
+    );
 }

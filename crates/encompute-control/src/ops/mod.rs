@@ -49,6 +49,8 @@ pub(crate) struct Authority<'a> {
     /// `(project, purpose, organization)`: the asset approvals covering
     /// `assets` for that organization, locked shared.
     approvals: Option<(&'a str, &'a str, &'a str)>,
+    /// A job row locked for update (after the assets), inside the bounded wait.
+    job_lock: Option<&'a str>,
 }
 
 impl<'a> Authority<'a> {
@@ -65,6 +67,10 @@ impl<'a> Authority<'a> {
     }
     pub(crate) fn job_sources(mut self, job: &'a str) -> Self {
         self.job_sources = Some(job);
+        self
+    }
+    pub(crate) fn job_lock(mut self, job: &'a str) -> Self {
+        self.job_lock = Some(job);
         self
     }
     pub(crate) fn approvals(mut self, project: &'a str, purpose: &'a str, org: &'a str) -> Self {
@@ -102,12 +108,29 @@ pub(crate) fn revalidate(
     p: &crate::authn::Principal,
     scope: &Authority<'_>,
 ) -> encompute_ir::Result<()> {
+    // The 5 s timeout covers this helper only: the setting in force before
+    // it is put back on success (on any error the transaction is rolled back).
+    let previous: String = t
+        .query_one("SELECT current_setting('lock_timeout')", &[])
+        .map_err(lock_err)?
+        .get(0);
+    t.batch_execute(REVALIDATE_LOCK_TIMEOUT).map_err(lock_err)?;
+    revalidate_locked(t, p, scope)?;
+    t.execute("SELECT set_config('lock_timeout', $1, true)", &[&previous])
+        .map_err(lock_err)?;
+    Ok(())
+}
+
+fn revalidate_locked(
+    t: &mut impl postgres::GenericClient,
+    p: &crate::authn::Principal,
+    scope: &Authority<'_>,
+) -> encompute_ir::Result<()> {
     use crate::authn::PrincipalKind;
     use crate::authz::{forbidden, not_found};
     use encompute_ir::{Code, Error};
 
     let db = |e: postgres::Error| lock_err(e);
-    t.batch_execute(REVALIDATE_LOCK_TIMEOUT).map_err(db)?;
 
     // 1. The account.
     let (table, code, what) = match p.kind {
@@ -178,8 +201,16 @@ pub(crate) fn revalidate(
             .map_err(db)?
         {
             let v: serde_json::Value = r.get(0);
-            ids.extend(serde_json::from_value::<Vec<String>>(v).unwrap_or_default());
+            let sources: Vec<String> = serde_json::from_value(v).map_err(|e| {
+                crate::model::bad(format!("job {job}: its source assets cannot be read: {e}"))
+            })?;
+            ids.extend(sources);
         }
+    }
+    if scope.approvals.is_some() && ids.is_empty() {
+        return Err(crate::model::bad(
+            "revalidating approvals needs the assets they cover",
+        ));
     }
     if !ids.is_empty() {
         ids.sort();
@@ -198,6 +229,12 @@ pub(crate) fn revalidate(
             )
             .map_err(db)?;
         }
+    }
+
+    // 5. The job row, last: after every table above.
+    if let Some(job) = scope.job_lock {
+        t.query("SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE", &[&job])
+            .map_err(db)?;
     }
     Ok(())
 }

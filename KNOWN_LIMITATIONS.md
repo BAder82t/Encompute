@@ -385,13 +385,27 @@ Related: [support matrix](docs/support-matrix.md),
   message is a database row; the latch is a denial of service a writer can
   trigger. The anchor restored together with the database and
   compromised custody of the anchor or signing key remain out of scope.
-  Each state-changing operation also re-reads the caller's account, roles,
-  project membership, assets and approvals inside its own transaction after
-  locking the rows (a lock wait past 5 s fails the request). That narrows
-  the gap between the live check and the effect; it does not close or bound
-  it, and its resistance to a writer with direct database access has not
-  been independently established. Authority recreated under a new ID is not
-  detected (unchanged).
+  Revalidation inside the transaction covers the API operations that call
+  `ops::revalidate`: creating an organization, user, service account,
+  project, plan or policy proposal; disabling a user or service account;
+  removing a role; recording a key rotation; adding or removing a project
+  member; registering, approving, withdrawing the approval of and revoking
+  an asset; authorizing a privacy spender and a privacy spend; approving a
+  policy; submitting, cancelling, approving, starting and completing a job;
+  the evaluator's receipt (REST and message); registering an evaluator and
+  reporting its status; and every message kind `receive_message` accepts,
+  including `key.release` (account, roles, project members, assets,
+  approvals, job row locked and re-read; a lock wait past 5 s fails the
+  request). Not covered: bootstrap, the background tick (scheduling,
+  evaluator expiry, outbox delivery, anchor sync and the audit checkpoint,
+  `checkpoint_audit`), the command-line recovery commands, and read-only
+  operations. The key broker's release decision is the broker's own; the
+  control plane only records its report. It narrows the gap between the live
+  check and the effect; it does not close or bound it. Status: the original
+  check-to-use attack (B2) was NOT EXECUTED; the defensive revalidation is
+  implemented; full database-writer TOCTOU resistance is NOT INDEPENDENTLY
+  ESTABLISHED; the B3 limitation is unchanged (authority recreated under a
+  new ID is not detected).
 - **Release boundary.** 0.3.1 strengthens externally anchored privacy accounting, revocation and denial operations against identified database rollback attacks. It does not provide comprehensive protection against every form of database-administrator compromise or independently authenticate every newly introduced authority record.
 - **A ledger the anchor holds no genesis for refuses spends (ENC-SF-2026-412,
   fixed in 0.3.1).** If a crash or an anchor outage falls between a

@@ -174,7 +174,7 @@ impl Control {
             r.policy.clone()
         };
         let out = self.db.tx(|t| {
-            revalidate(t, &ctx.principal, &Authority::principal())?;
+            revalidate(t, &ctx.principal, &Authority::principal().assets(&r.parents))?;
             // Parents must be visible and not revoked.
             let mut roots = BTreeSet::new();
             for p in &r.parents {
@@ -365,7 +365,12 @@ impl Control {
     pub fn approve_asset(&self, ctx: &Ctx, id: &str, r: ApproveAsset) -> Result<Value> {
         check_name("purpose", &r.purpose)?;
         self.db.tx(|t| {
-            revalidate(t, &ctx.principal, &Authority::principal().project(&r.project))?;
+            let asset = [id.to_owned()];
+            revalidate(
+                t,
+                &ctx.principal,
+                &Authority::principal().project(&r.project).assets(&asset),
+            )?;
             let a = asset_row(t, id)?.ok_or_else(|| not_found("asset", id))?;
             if !ctx.principal.member_of(&a.organization) {
                 return Err(not_found("asset", id));
@@ -830,7 +835,9 @@ impl Control {
     /// returns: committed spending is never forgotten.
     pub fn privacy_spend(&self, ctx: &Ctx, asset: &str, event: PrivacyEvent) -> Result<Value> {
         let res = self.db.tx(|t| {
-            revalidate(t, &ctx.principal, &Authority::principal())?;
+            // The asset (shared) comes before the ledger row in the lock order.
+            let spent = [asset.to_owned()];
+            revalidate(t, &ctx.principal, &Authority::principal().assets(&spent))?;
             let row = t
                 .query_opt(
                     "SELECT organization_id, frozen_reason FROM privacy_ledgers WHERE asset_id = $1 FOR UPDATE",

@@ -451,25 +451,38 @@ candidates were not tested.
   complete in that time fails the request (ENC1701, 500; a database that
   does not answer is not proof of a rollback, so it does not latch) and
   never counts as a pass.
-- B2 hardening (transactional revalidation, 0.3.1): implemented. Each
-  state-changing operation now re-reads, inside the transaction that takes
-  effect and after the row locks it needs, the caller's account status and
-  roles, the project membership, the source assets and the approvals
-  covering them (`ops::revalidate`), in one lock order (account, roles,
-  project members, assets, approvals, then the job rows), at READ COMMITTED,
-  with a 5 s `lock_timeout` that fails the request. Covered: job submission,
-  authenticated user or service account, approval use, role-based actions,
-  project membership actions, job cancel and the evaluator's start. The key
-  broker release only records the broker's report and the outbox delivery
-  reads the anchor, so neither acts on a database row state and neither
-  changed. Status: implemented; the original check-to-use scenario was NOT
-  EXECUTED; resistance of the design to a database writer with direct access
-  is NOT INDEPENDENTLY ESTABLISHED. It narrows the gap between the live check
-  and the effect; it does not close or bound it. B3 (authority recreated
-  under a new ID) is unchanged. Tests:
-  `crates/encompute-control/tests/txn_revalidation.rs` (per class, refusal
-  with the state already revoked, valid authority, lock timeout, concurrent
-  revoke, role removal and disable with submit and cancel).
+- B2 hardening (transactional revalidation, 0.3.1): implemented for the API
+  operations that call `ops::revalidate`: creating an organization, user,
+  service account, project, plan or policy proposal; disabling a user or
+  service account; removing a role; recording a key rotation; adding or
+  removing a project member; registering, approving, withdrawing the
+  approval of and revoking an asset; authorizing a privacy spender and a
+  privacy spend; approving a policy; submitting, cancelling, approving,
+  starting and completing a job; the evaluator's receipt (REST and message);
+  registering an evaluator and reporting its status; and every message kind
+  `receive_message` accepts, including `key.release`. Inside the transaction
+  that takes effect and after the row locks it needs, it re-reads the
+  caller's account status and roles, the project membership, the assets and
+  the approvals covering them (`ops::revalidate`), in one lock order
+  (account, roles, project members, assets, approvals, then the job row), at
+  READ COMMITTED, with a 5 s `lock_timeout` scoped to the helper (the
+  previous setting is restored afterwards) that fails the request. Not
+  covered: bootstrap, the background tick (scheduling, evaluator expiry,
+  outbox delivery, anchor sync and the audit checkpoint,
+  `checkpoint_audit`), the command-line recovery commands, and read-only
+  operations. The key broker's release decision is the broker's own; the
+  control plane only records its report; the outbox delivery reads the
+  anchor and acts on no row state. Status: the original check-to-use attack
+  (B2) was NOT EXECUTED; the defensive revalidation is implemented; full
+  database-writer TOCTOU resistance is NOT INDEPENDENTLY ESTABLISHED; the B3
+  limitation is unchanged (authority recreated under a new ID is not
+  detected). It narrows the gap between the live check and the effect; it
+  does not close or bound it. Tests: `crates/encompute-
+  control/tests/txn_revalidation.rs` (per class, refusal with the state
+  already revoked, valid authority, lock timeout, and wait-then-refuse: a
+  holder commits a revocation while the request waits on its row lock).
+  Three concurrent runs in that file are smoke tests only (the interleaving
+  is not controlled).
 - Tests (B1): `anchor_enforce_nothrottle.rs`: a table lock held 400 ms on
   `assets` and on `users`, then the revocation / disable restored at once,
   is refused and latched; the same with the anchor's lock held 400 ms; a
