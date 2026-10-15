@@ -381,6 +381,7 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
             }
             let v: Value = parse(&r.body)?;
             ok(control.evaluator_completed(
+                &ctx.principal,
                 ctx.actor(),
                 &ctx.request_id,
                 id,
