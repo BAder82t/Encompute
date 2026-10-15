@@ -38,29 +38,33 @@ struct TestDatabases {
 
 impl Drop for TestDatabases {
     fn drop(&mut self) {
-        if self.names.is_empty() {
+        drop_databases(&self.admin, &self.names);
+    }
+}
+
+/// Ends the sessions of, and drops, `names` (last created first). Never
+/// panics: it runs from a thread-local destructor, where a panic aborts.
+fn drop_databases(admin: &str, names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    let mut c = match postgres::Client::connect(admin, postgres::NoTls) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("test databases {names:?} not dropped: {e}");
             return;
         }
-        // Never panic here: a panicking thread-local destructor aborts.
-        let mut c = match postgres::Client::connect(&self.admin, postgres::NoTls) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("test databases {:?} not dropped: {e}", self.names);
-                return;
-            }
-        };
-        for name in self.names.iter().rev() {
-            // End the sessions first (a pool, a spawned server or a leaked
-            // client may still hold one); FORCE ends any that reconnect.
-            let _ = c.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-                  WHERE datname = $1 AND pid <> pg_backend_pid()",
-                &[name],
-            );
-            if let Err(e) = c.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-            {
-                eprintln!("test database {name} not dropped: {e}");
-            }
+    };
+    for name in names.iter().rev() {
+        // End the sessions first (a pool, a spawned server or a leaked
+        // client may still hold one); FORCE ends any that reconnect.
+        let _ = c.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+              WHERE datname = $1 AND pid <> pg_backend_pid()",
+            &[name],
+        );
+        if let Err(e) = c.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")) {
+            eprintln!("test database {name} not dropped: {e}");
         }
     }
 }
@@ -118,6 +122,29 @@ pub fn fresh_database() -> Option<String> {
 
 fn admin_url() -> String {
     std::env::var("ENCOMPUTE_TEST_DATABASE_URL").unwrap()
+}
+
+/// Drops the databases this test created so far, now: ends every session on
+/// them (the pools of control planes still held by a spawned HTTP server
+/// thread, which never stops) and removes them, so a test's connections do
+/// not wait for the test to end. Only for tests that finished with them.
+pub fn drop_test_databases_now() {
+    if let Some(t) = CREATED.with(|c| c.borrow_mut().take()) {
+        drop(t);
+    }
+}
+
+/// Like [`drop_test_databases_now`] for one database (`url`'s): a looping
+/// test calls it at the end of each round so the rounds' pools do not add up.
+pub fn drop_test_database_now(url: &str) {
+    let name = db_name(url);
+    let admin = admin_url();
+    CREATED.with(|c| {
+        if let Some(t) = c.borrow_mut().as_mut() {
+            t.names.retain(|n| *n != name);
+        }
+    });
+    drop_databases(&admin, &[name]);
 }
 
 pub fn db_name(url: &str) -> String {

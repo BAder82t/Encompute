@@ -17,6 +17,8 @@
 
 mod common;
 
+use std::sync::{Condvar, Mutex};
+
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -25,6 +27,38 @@ use encompute_control::model::{ServiceKind, SubmitJob};
 use encompute_control::Ctx;
 use encompute_ir::Code;
 use serde_json::{json, Value};
+
+/// PostgreSQL allows 100 connections by default and every test here builds a
+/// control plane with its own pool (up to 16 connections) plus holder and
+/// probe connections; the looping tests build one per round. At most `SLOTS`
+/// of these tests run at once, whatever the runner's thread count, so the
+/// file stays well inside the default limit. A slot is released only after
+/// the test's databases (and with them every session of its pools) are gone.
+const SLOTS: usize = 3;
+static FREE: (Mutex<usize>, Condvar) = (Mutex::new(SLOTS), Condvar::new());
+
+struct Slot;
+
+fn slot() -> Slot {
+    let (m, cv) = &FREE;
+    let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
+    while *n == 0 {
+        n = cv.wait(n).unwrap_or_else(|e| e.into_inner());
+    }
+    *n -= 1;
+    Slot
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        // The test's world is dropped before this (declared first, dropped
+        // last); end the pools the spawned HTTP server still holds.
+        drop_test_databases_now();
+        let (m, cv) = &FREE;
+        *m.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        cv.notify_one();
+    }
+}
 
 fn http(w: &World) -> Client {
     let addr = live(
@@ -162,6 +196,7 @@ fn approved_dataset_plan(w: &World) -> String {
 
 #[test]
 fn class1_revoked_asset_is_refused_in_the_transaction_and_leaves_nothing() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let m = w.model_b.clone();
@@ -200,6 +235,7 @@ fn class1_revoked_asset_is_refused_in_the_transaction_and_leaves_nothing() {
 
 #[test]
 fn class1_submitter_role_removed_is_refused_in_the_transaction() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let m = w.model_b.clone();
@@ -238,6 +274,7 @@ fn class1_submitter_role_removed_is_refused_in_the_transaction() {
 
 #[test]
 fn class1_project_membership_ended_is_refused_in_the_transaction() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let (d, p) = (w.dataset_a.clone(), w.project.clone());
@@ -273,6 +310,7 @@ fn class1_project_membership_ended_is_refused_in_the_transaction() {
 
 #[test]
 fn class2_disabled_user_cannot_change_state_through_a_stale_principal() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let stale = ctx(principal(&w, &w.b_dev));
@@ -317,6 +355,7 @@ fn class2_disabled_user_cannot_change_state_through_a_stale_principal() {
 
 #[test]
 fn class2_disabled_service_account_cannot_start_a_job_through_a_stale_principal() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let m = w.model_b.clone();
@@ -362,6 +401,7 @@ fn class2_disabled_service_account_cannot_start_a_job_through_a_stale_principal(
 
 #[test]
 fn class3_withdrawn_approval_is_refused_in_the_transaction() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let (d, p) = (w.dataset_a.clone(), w.project.clone());
@@ -398,6 +438,7 @@ fn class3_withdrawn_approval_is_refused_in_the_transaction() {
 
 #[test]
 fn class4_role_removed_is_refused_for_cancel_and_leaves_the_job() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let m = w.model_b.clone();
@@ -425,6 +466,7 @@ fn class4_role_removed_is_refused_for_cancel_and_leaves_the_job() {
 
 #[test]
 fn class4_role_removed_is_refused_for_an_owner_action() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let m = w.model_b.clone();
@@ -452,6 +494,7 @@ fn class4_role_removed_is_refused_for_an_owner_action() {
 
 #[test]
 fn class5_left_project_cannot_plan_through_a_stale_principal() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let p = w.project.clone();
@@ -495,6 +538,7 @@ fn class5_left_project_cannot_plan_through_a_stale_principal() {
 
 #[test]
 fn class6_cancelled_and_failed_jobs_do_not_start_and_a_valid_start_runs() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let url = w.t.env0.url.clone();
     let m = w.model_b.clone();
@@ -590,6 +634,7 @@ fn submit_http(w: &World, cl: &Client, plan: &str, src: &str, key: &str) -> (u16
 
 #[test]
 fn lock_timeout_on_the_account_row_fails_closed() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
     let plan = model_plan(&w);
@@ -608,6 +653,7 @@ fn lock_timeout_on_the_account_row_fails_closed() {
 
 #[test]
 fn lock_timeout_on_the_asset_row_fails_closed() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
     let plan = model_plan(&w);
@@ -631,6 +677,7 @@ fn lock_timeout_on_the_asset_row_fails_closed() {
 
 #[test]
 fn lock_timeout_on_the_approval_row_fails_closed() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let (cl, url, d) = (http(&w), w.t.env0.url.clone(), w.dataset_a.clone());
     let plan = approved_dataset_plan(&w);
@@ -647,6 +694,7 @@ fn lock_timeout_on_the_approval_row_fails_closed() {
 
 #[test]
 fn lock_timeout_on_the_job_row_fails_closed_for_cancel_and_start() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
     let plan = model_plan(&w);
@@ -727,6 +775,7 @@ fn race<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + 
 
 #[test]
 fn smoke_concurrent_revoke_and_submit_both_complete_with_a_consistent_outcome() {
+    let _slot = slot();
     let (mut submitted, mut refused) = (0, 0);
     for round in 0..8u64 {
         let Some(w) = world() else { return };
@@ -765,12 +814,15 @@ fn smoke_concurrent_revoke_and_submit_both_complete_with_a_consistent_outcome() 
             refused += 1;
             assert_eq!(one(&url, "SELECT count(*) FROM jobs"), 0);
         }
+        // This round is done: end its pool before the next round builds one.
+        drop_test_database_now(&url);
     }
     eprintln!("RACE revoke/submit: submit committed first {submitted}, revoke first {refused}");
 }
 
 #[test]
 fn smoke_concurrent_role_removal_and_submit_both_complete_with_a_consistent_outcome() {
+    let _slot = slot();
     for round in 0..6u64 {
         let Some(w) = world() else { return };
         let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
@@ -800,11 +852,14 @@ fn smoke_concurrent_role_removal_and_submit_both_complete_with_a_consistent_outc
             ),
             0
         );
+        // This round is done: end its pool before the next round builds one.
+        drop_test_database_now(&url);
     }
 }
 
 #[test]
 fn smoke_concurrent_user_disable_and_cancel_both_complete_with_a_consistent_outcome() {
+    let _slot = slot();
     for round in 0..6 {
         let Some(w) = world() else { return };
         let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
@@ -828,6 +883,8 @@ fn smoke_concurrent_user_disable_and_cancel_both_complete_with_a_consistent_outc
         assert!(cs == 200 || cs == 401, "{cs} {cv}");
         let st = text(&url, &format!("SELECT state FROM jobs WHERE id = '{job}'"));
         assert_eq!(st, if cs == 200 { "cancelled" } else { "queued" });
+        // This round is done: end its pool before the next round builds one.
+        drop_test_database_now(&url);
     }
 }
 
@@ -868,6 +925,7 @@ fn wait_then_refuse<T: Send>(url: &str, revoke_sql: &str, request: impl FnOnce()
 
 #[test]
 fn wait_then_refuse_asset_revoked_while_submit_waits() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
     let plan = model_plan(&w);
@@ -889,6 +947,7 @@ fn wait_then_refuse_asset_revoked_while_submit_waits() {
 
 #[test]
 fn wait_then_refuse_role_removed_while_submit_waits() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
     let plan = model_plan(&w);
@@ -904,6 +963,7 @@ fn wait_then_refuse_role_removed_while_submit_waits() {
 
 #[test]
 fn wait_then_refuse_user_disabled_while_cancel_waits() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
     let plan = model_plan(&w);
@@ -932,6 +992,7 @@ fn wait_then_refuse_user_disabled_while_cancel_waits() {
 
 #[test]
 fn wait_then_refuse_evaluator_disabled_while_its_receipt_waits() {
+    let _slot = slot();
     let Some(w) = world() else { return };
     let (cl, url, m) = (http(&w), w.t.env0.url.clone(), w.model_b.clone());
     let plan = model_plan(&w);
@@ -967,6 +1028,7 @@ fn wait_then_refuse_evaluator_disabled_while_its_receipt_waits() {
 
 #[test]
 fn the_five_second_wait_ends_with_the_revalidation() {
+    let _slot = slot();
     // After the revalidation, a wait on a lock the operation takes itself
     // (the audit head here) is not cut at 5 s: it keeps the setting in force
     // before the helper ran.
