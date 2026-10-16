@@ -5,9 +5,14 @@
 # Run from the repository root after scripts/install-openfhe.sh. It builds the
 # three release binaries in clean, separate target directories:
 #
-#   A0  the shipping order, in $PWD/target (as the binaries job does)
-#   A   the shipping order, in diag/target-A:
+#   A0  OLD ORDER, EXPECTED TO DIFFER, in $PWD/target. The v0.3.1 shipping
+#       order (env.sh sourced with OPENFHE_ROOT still unset, exported after),
+#       kept as the intentionally defective reference. It is not part of any
+#       pass/fail.
+#   A   OLD ORDER, EXPECTED TO DIFFER, in diag/target-A:
 #         . scripts/release/env.sh DIR; export OPENFHE_ROOT=...; cargo build ...
+#       (env.sh now defaults OPENFHE_ROOT when the install exists, so for
+#       A0 and A the install directory is hidden while env.sh is sourced.)
 #   B   OPENFHE_ROOT exported before sourcing env.sh
 #   C   B again, in a fresh shell and a fresh target directory
 #   D   the gate's way: OPENFHE_ROOT exported, then repro-check.sh --openfhe
@@ -105,14 +110,17 @@ path_report() {  # path_report CFG BINARY FILE
   rm -f "$tmp"
 }
 
-build_cfg() {  # build_cfg CFG ORDER TARGET   (ORDER: shipping | root-first)
+build_cfg() {  # build_cfg CFG ORDER TARGET   (ORDER: old-order = the defective v0.3.1 order | root-first)
   local cfg="$1" order="$2" target="$3"
   echo "=== configuration $cfg ($order) in $target"
   (
     clean_env
     case "$order" in
-      shipping)
-        . scripts/release/env.sh "$target"
+      old-order)  # the OLD order: env.sh runs while OPENFHE_ROOT is unset
+        mv "$OPENFHE_DIR" "$OPENFHE_DIR.hidden"
+        rc=0; . scripts/release/env.sh "$target" || rc=$?
+        mv "$OPENFHE_DIR.hidden" "$OPENFHE_DIR"
+        [ "$rc" = 0 ] || return "$rc"
         export OPENFHE_ROOT="$OPENFHE_DIR" ;;
       root-first)
         export OPENFHE_ROOT="$OPENFHE_DIR"
@@ -125,8 +133,8 @@ build_cfg() {  # build_cfg CFG ORDER TARGET   (ORDER: shipping | root-first)
   rm -rf "$target"
 }
 
-build_cfg A0 shipping "$ROOT/target"
-build_cfg A shipping "$OUT/target-A"
+build_cfg A0 old-order "$ROOT/target"
+build_cfg A old-order "$OUT/target-A"
 build_cfg B root-first "$OUT/target-B"
 build_cfg C root-first "$OUT/target-C"
 
@@ -181,6 +189,7 @@ same() {  # same CFG1 CFG2 -> "yes", "no" or "partial (bin=yes/no ...)"
     echo
   done
   echo
+  echo "(A and A0 are the old order, expected to differ from B; informational only)"
   echo "A==B?   $(same A B)"
   echo "B==C?   $(same B C)"
   echo "B==D?   $(same B D1)   (D2: $(same B D2))"

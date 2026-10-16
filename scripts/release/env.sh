@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Build environment of a release, sourced by the release scripts and by
 # .github/workflows/release.yml:
 #
@@ -7,9 +8,49 @@
 # a fixed timestamp (the commit's), no local paths in the binaries, one
 # codegen unit, no incremental state. Symbols are kept: the commercial and
 # evaluator audits read them (scripts/audit-*.sh).
+#
+# OPENFHE_ROOT contract. The OpenFHE install must be known BEFORE this file is
+# sourced, because the path remap for it is computed here, once:
+#   - unset or empty, and <repo>/.deps/openfhe exists: that becomes the root;
+#   - set: used exactly as given, never replaced. It must be a valid static
+#     install (an absolute path without a trailing slash, holding
+#     include/openfhe/pke/openfhe.h and the three static libraries that
+#     scripts/install-openfhe.sh installs); otherwise sourcing fails;
+#   - unset or empty and no default directory: no OpenFHE remap (builds
+#     without OpenFHE only).
+# Exporting OPENFHE_ROOT after sourcing leaves the OpenFHE paths unremapped
+# and changes the binaries (the cause of the v0.3.1 shipped-binary mismatch).
 
 _encompute_root="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 _encompute_target="${1:-${CARGO_TARGET_DIR:-$_encompute_root/target}}"
+
+if [ -z "${OPENFHE_ROOT:-}" ] && [ -d "$_encompute_root/.deps/openfhe" ]; then
+  OPENFHE_ROOT="$_encompute_root/.deps/openfhe"
+fi
+if [ -n "${OPENFHE_ROOT:-}" ]; then
+  _encompute_bad=""
+  case "$OPENFHE_ROOT" in
+    /*/) _encompute_bad="has a trailing slash (the path remap would not match)" ;;
+    /*) ;;
+    *) _encompute_bad="is not an absolute path" ;;
+  esac
+  if [ -z "$_encompute_bad" ] && [ ! -f "$OPENFHE_ROOT/include/openfhe/pke/openfhe.h" ]; then
+    _encompute_bad="has no include/openfhe/pke/openfhe.h"
+  fi
+  if [ -z "$_encompute_bad" ]; then
+    for _encompute_lib in pke binfhe core; do
+      [ -f "$OPENFHE_ROOT/lib/libOPENFHE${_encompute_lib}_static.a" ] ||
+        _encompute_bad="has no lib/libOPENFHE${_encompute_lib}_static.a"
+    done
+  fi
+  if [ -n "$_encompute_bad" ]; then
+    echo "env.sh: OPENFHE_ROOT=$OPENFHE_ROOT $_encompute_bad; install OpenFHE with scripts/install-openfhe.sh or set OPENFHE_ROOT to a valid static install BEFORE sourcing env.sh" >&2
+    unset _encompute_root _encompute_target _encompute_bad _encompute_lib
+    return 1 2>/dev/null || exit 1
+  fi
+  unset _encompute_bad _encompute_lib
+  export OPENFHE_ROOT
+fi
 
 # The commit time, not the build time: embedded by anything that stamps a
 # date (tar, zip, wheels, C/C++ __DATE__ through the compiler, macOS ar).

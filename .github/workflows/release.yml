@@ -111,8 +111,9 @@ jobs:
         run: ./scripts/install-openfhe.sh
       - name: release binaries
         run: |
-          . scripts/release/env.sh "$PWD/target"
+          # OPENFHE_ROOT first: env.sh computes the OpenFHE path remap from it.
           export OPENFHE_ROOT="$PWD/.deps/openfhe"
+          . scripts/release/env.sh "$PWD/target"
           cargo build --release --locked -p encompute-cli -p encompute-evaluator -p encompute-control \
             --features encompute-cli/openfhe,encompute-evaluator/openfhe
           ./scripts/audit-evaluator-binary.sh target/release/encompute-evaluator
@@ -122,8 +123,9 @@ jobs:
           # maturin from the lock, hashes checked.
           awk '/^maturin==/{p=1; print; next} p && /^[a-z]/{p=0} p' scripts/release/python/constraints.txt > "$RUNNER_TEMP/maturin.txt"
           .venv/bin/pip install --require-hashes --no-deps -r "$RUNNER_TEMP/maturin.txt"
-          . scripts/release/env.sh "$PWD/target"
+          # OPENFHE_ROOT first: env.sh computes the OpenFHE path remap from it.
           export OPENFHE_ROOT="$PWD/.deps/openfhe"
+          . scripts/release/env.sh "$PWD/target"
           .venv/bin/maturin build --release --locked --features openfhe --auditwheel repair \
             -m crates/encompute-py/Cargo.toml -o wheels
           ls -l wheels

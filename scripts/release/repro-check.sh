@@ -46,8 +46,14 @@ build() {  # build N
   echo "== build $1 in $t"
   (
     # shellcheck source=/dev/null
-    . scripts/release/env.sh "$t"
+    # OPENFHE_ROOT, when set, is validated and remapped by env.sh; unset, it
+    # defaults to .deps/openfhe there. An OpenFHE build needs one of them.
+    . scripts/release/env.sh "$t" || exit 1
+    case "$FEATURES" in
+      *openfhe*) [ -n "${OPENFHE_ROOT:-}" ] || { echo "repro-check: an OpenFHE build needs OPENFHE_ROOT or .deps/openfhe (scripts/install-openfhe.sh)" >&2; exit 1; } ;;
+    esac
     echo "   SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
+    echo "   OPENFHE_ROOT=${OPENFHE_ROOT:-<unset>}"
     cargo "${args[@]}" 2>&1 | tail -n 2
   ) || return 1
 }
