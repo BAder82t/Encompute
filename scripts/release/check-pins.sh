@@ -64,6 +64,13 @@ else
   fi
 fi
 
+# OpenFHE's own objects must not embed the source or install path.
+if grep -q 'ffile-prefix-map=\$SRC=/openfhe-src' scripts/install-openfhe.sh &&
+   grep -q 'ffile-prefix-map=\$PREFIX=/openfhe' scripts/install-openfhe.sh &&
+   grep -q 'DCMAKE_CXX_FLAGS=' scripts/install-openfhe.sh && grep -q 'DCMAKE_C_FLAGS=' scripts/install-openfhe.sh; then
+  row "OpenFHE path map" "PASS (install-openfhe.sh maps the source and install paths; build id $(sed -n 's/^BUILD_ID="\(.*\)"/\1/p' scripts/install-openfhe.sh | sed "s/\$OPENFHE_VERSION/$v_inst/"))"
+else bad "OpenFHE path map" "install-openfhe.sh does not pass -ffile-prefix-map for the OpenFHE source and install paths"; fi
+
 # Python: the lock matches the training image's pins and pyproject's ranges.
 lock=scripts/release/python/constraints.txt
 req=deploy/confidential-space-training/requirements.txt
