@@ -13,7 +13,8 @@
 #         . scripts/release/env.sh DIR; export OPENFHE_ROOT=...; cargo build ...
 #       (env.sh now defaults OPENFHE_ROOT when the install exists, so for
 #       A0 and A the install directory is hidden while env.sh is sourced.)
-#   B   OPENFHE_ROOT exported before sourcing env.sh
+#   B   THE SHIPPING BUILD: scripts/release/build-release-binaries.sh, the
+#       script the binaries job runs, with OPENFHE_ROOT given before env.sh
 #   C   B again, in a fresh shell and a fresh target directory
 #   D   the gate's way: OPENFHE_ROOT exported, then repro-check.sh --openfhe
 #       (it builds twice by itself: D1 and D2)
@@ -110,9 +111,22 @@ path_report() {  # path_report CFG BINARY FILE
   rm -f "$tmp"
 }
 
-build_cfg() {  # build_cfg CFG ORDER TARGET   (ORDER: old-order = the defective v0.3.1 order | root-first)
+build_cfg() {  # build_cfg CFG ORDER TARGET   (ORDER: old-order = the defective v0.3.1 order | root-first | ship = the shipping script)
   local cfg="$1" order="$2" target="$3"
   echo "=== configuration $cfg ($order) in $target"
+  if [ "$order" = ship ]; then
+    # The real shipping script, by construction. It sources env.sh itself, so
+    # nothing is sourced beforehand (env.sh appends to CFLAGS and CXXFLAGS).
+    (
+      clean_env
+      OPENFHE_ROOT="$OPENFHE_DIR" scripts/release/build-release-binaries.sh "$target"
+    )
+    # The environment the script used, recorded from a separate subshell.
+    ( clean_env; export OPENFHE_ROOT="$OPENFHE_DIR"; . scripts/release/env.sh "$target"; dump_env "$cfg" )
+    ( clean_env; collect "$cfg" "$target/release" )
+    rm -rf "$target"
+    return 0
+  fi
   (
     clean_env
     case "$order" in
@@ -120,7 +134,7 @@ build_cfg() {  # build_cfg CFG ORDER TARGET   (ORDER: old-order = the defective 
         mv "$OPENFHE_DIR" "$OPENFHE_DIR.hidden"
         rc=0; . scripts/release/env.sh "$target" || rc=$?
         mv "$OPENFHE_DIR.hidden" "$OPENFHE_DIR"
-        [ "$rc" = 0 ] || return "$rc"
+        [ "$rc" = 0 ] || exit "$rc"
         export OPENFHE_ROOT="$OPENFHE_DIR" ;;
       root-first)
         export OPENFHE_ROOT="$OPENFHE_DIR"
@@ -135,8 +149,8 @@ build_cfg() {  # build_cfg CFG ORDER TARGET   (ORDER: old-order = the defective 
 
 build_cfg A0 old-order "$ROOT/target"
 build_cfg A old-order "$OUT/target-A"
-build_cfg B root-first "$OUT/target-B"
-build_cfg C root-first "$OUT/target-C"
+build_cfg B ship "$OUT/target-B"
+build_cfg C ship "$OUT/target-C"
 
 # D: the gate's invocation (scripts/release-check.sh exports OPENFHE_ROOT, then
 # runs repro-check.sh --openfhe --digests ...). --keep leaves its two builds

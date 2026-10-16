@@ -111,11 +111,9 @@ jobs:
         run: ./scripts/install-openfhe.sh
       - name: release binaries
         run: |
-          # OPENFHE_ROOT first: env.sh computes the OpenFHE path remap from it.
-          export OPENFHE_ROOT="$PWD/.deps/openfhe"
-          . scripts/release/env.sh "$PWD/target"
-          cargo build --release --locked -p encompute-cli -p encompute-evaluator -p encompute-control \
-            --features encompute-cli/openfhe,encompute-evaluator/openfhe
+          # The exact shipping build (the diagnostic runs the same script): it
+          # resolves and validates OPENFHE_ROOT before sourcing env.sh.
+          OPENFHE_ROOT="$PWD/.deps/openfhe" scripts/release/build-release-binaries.sh "$PWD/target"
           ./scripts/audit-evaluator-binary.sh target/release/encompute-evaluator
       - name: Python wheel
         run: |

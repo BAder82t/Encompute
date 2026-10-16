@@ -302,7 +302,8 @@ fi
 check "security scans" env IMAGES="${IMAGES:-}" REQUIRE_IMAGES="${REQUIRE_IMAGES:-}" scripts/release/scan.sh
 check "build pins" scripts/release/check-pins.sh
 check "shipped digests check" bash -c 'scripts/release/test-compare-shipped-digests.sh &&
-  scripts/release/test-env-openfhe.sh'
+  scripts/release/test-env-openfhe.sh &&
+  scripts/release/test-build-release-binaries.sh'
 
 if [ "$REPRO" = 1 ]; then
   # The digests of the matching builds are kept with the gate's reports: the
