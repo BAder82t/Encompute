@@ -115,6 +115,13 @@ jobs:
           # resolves and validates OPENFHE_ROOT before sourcing env.sh.
           OPENFHE_ROOT="$PWD/.deps/openfhe" scripts/release/build-release-binaries.sh "$PWD/target"
           ./scripts/audit-evaluator-binary.sh target/release/encompute-evaluator
+      # Fail closed: no build path may remain in a Linux binary. (The macOS
+      # binaries have other path forms and are not checked.)
+      - name: binary path guard (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          scripts/release/check-binary-paths.sh target/release/encompute \
+            target/release/encompute-evaluator target/release/encompute-control
       - name: Python wheel
         run: |
           python -m venv .venv

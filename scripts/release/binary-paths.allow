@@ -1,0 +1,8 @@
+# Exceptions to scripts/release/check-binary-paths.sh.
+#
+# One line per exception: a FIXED STRING, a TAB, and a one-line justification.
+# A string the guard reports that contains the fixed string is excused. A line
+# without a justification is an error. Remapping the path is almost always the
+# right fix instead (scripts/release/env.sh, scripts/install-openfhe.sh).
+#
+# No exceptions at the moment.

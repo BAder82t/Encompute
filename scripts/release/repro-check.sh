@@ -12,6 +12,9 @@
 # release job compares it with the binaries it signs
 # (scripts/release/compare-shipped-digests.sh).
 #
+# On Linux it also runs scripts/release/check-binary-paths.sh on the binaries
+# (no build path may remain in them).
+#
 # Exit status: 0 when every binary is byte-identical, 1 otherwise. A
 # difference is reported with the first differing sections where the
 # platform tools allow (docs/release-process.md explains the known ones).
@@ -108,6 +111,14 @@ while IFS= read -r b; do
   fi
 done <<<"$blist"
 echo
+# Linux release binaries must not name a build path (the macOS binaries have
+# other path forms and are not checked here).
+if [ "$(uname -s)" = Linux ] && [ $status -eq 0 ] && [ "$compared" -gt 0 ]; then
+  guarded=()
+  while IFS= read -r b; do guarded+=("$W/build-1/target/release/$b"); done <<<"$blist"
+  scripts/release/check-binary-paths.sh "${guarded[@]}" || status=1
+  echo
+fi
 [ "$compared" -gt 0 ] || { echo "REPRO CHECK FAILED: no binary was compared"; exit 1; }
 if [ $status -eq 0 ] && [ -n "$DIGESTS" ]; then
   mkdir -p "$(dirname "$DIGESTS")"

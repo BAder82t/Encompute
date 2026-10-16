@@ -91,6 +91,10 @@ collect() {  # collect CFG BINDIR [TAG]
     echo "$(sha "$dir/$b")  $b" >> "$OUT/digests-$cfg.txt"
     path_report "$cfg" "$b" "$dir/$b"
   done
+  # The path guard of the release, in report-only mode: it never fails this
+  # experiment, it records what the release guard would say.
+  scripts/release/check-binary-paths.sh --report-only \
+    "$dir/${BINS[0]}" "$dir/${BINS[1]}" "$dir/${BINS[2]}" > "$OUT/pathguard-$cfg.txt" 2>&1 || true
 }
 
 # The strings of a binary that name build paths: counts and the first 40 lines.
@@ -210,6 +214,13 @@ same() {  # same CFG1 CFG2 -> "yes", "no" or "partial (bin=yes/no ...)"
   echo "A0==A?  $(same A0 A)"
   echo "D1==D2? $(same D1 D2)"
   echo "A==D?   $(same A D1)"
+  echo
+  echo "# the release path guard (report only), verdict per configuration"
+  for c in "${CFGS[@]}"; do
+    if [ -f "$OUT/pathguard-$c.txt" ]; then
+      printf '%-6s %s binaries with build paths (of 3)\n' "$c" "$(grep -c '^FAIL' "$OUT/pathguard-$c.txt" || true)"
+    else printf '%-6s n/a\n' "$c"; fi
+  done
   echo
   echo "# build-path strings per binary (count of lines matching any pattern)"
   for c in "${CFGS[@]}"; do

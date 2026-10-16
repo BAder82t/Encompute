@@ -63,12 +63,13 @@ case_ "an absent tarball fails" 1 "no tarball" "$W/good.txt" "$W/absent.tar.gz"
 
 # repro-check.sh --digests: a fake cargo stands in for the two builds.
 RC="$W/rc"; mkdir -p "$RC/scripts/release" "$RC/bin"
-cp scripts/release/repro-check.sh scripts/release/env.sh "$RC/scripts/release/"
+cp scripts/release/repro-check.sh scripts/release/env.sh scripts/release/check-binary-paths.sh \
+  scripts/release/binary-paths.allow "$RC/scripts/release/"
 cat > "$RC/bin/cargo" <<'CARGO'
 #!/usr/bin/env bash
 case "$1" in
   metadata) empty='{"packages":[]}'; printf '%s\n' "${FAKE_META_JSON:-$empty}" ;;
-  build) mkdir -p "$CARGO_TARGET_DIR/release"; [ -z "${FAKE_BIN:-}" ] || echo same > "$CARGO_TARGET_DIR/release/$FAKE_BIN" ;;
+  build) mkdir -p "$CARGO_TARGET_DIR/release"; [ -z "${FAKE_BIN:-}" ] || echo "${FAKE_CONTENT:-same}" > "$CARGO_TARGET_DIR/release/$FAKE_BIN" ;;
 esac
 CARGO
 chmod +x "$RC/bin/cargo"
@@ -83,5 +84,13 @@ else echo "FAIL  repro-check --digests writes nothing when a binary is missing (
 out="$(env FAKE_META_JSON='{"packages":[]}' PATH="$RC/bin:$PATH" bash "$RC/scripts/release/repro-check.sh" --digests "$W/rec/none.txt" 2>&1)"; code=$?
 if [ $code -ne 0 ] && [ ! -e "$W/rec/none.txt" ]; then echo "PASS  repro-check --digests fails when there is no binary to compare"
 else echo "FAIL  repro-check --digests fails when there is no binary to compare (exit $code)"; sed 's/^/    | /' <<<"$out"; fails=$((fails + 1)); fi
+
+# On Linux repro-check.sh also runs the binary path guard: matching binaries that
+# name a build path fail the check and no digest is recorded.
+if [ "$(uname -s)" = Linux ]; then
+  out="$(cd "$RC" && env FAKE_META_JSON="$META" FAKE_BIN=fakebin FAKE_CONTENT=/home/runner/work/x.rs PATH="$RC/bin:$PATH" bash scripts/release/repro-check.sh --digests "$W/rec/path.txt" 2>&1)"; code=$?
+  if [ $code -ne 0 ] && grep -q "BINARY PATH CHECK FAILED" <<<"$out" && [ ! -e "$W/rec/path.txt" ]; then echo "PASS  repro-check fails and records nothing when a binary names a build path"
+  else echo "FAIL  repro-check path guard (exit $code)"; sed 's/^/    | /' <<<"$out"; fails=$((fails + 1)); fi
+else echo "SKIP  repro-check path guard case (Linux only)"; fi
 
 [ "$fails" = 0 ] && echo "ALL CASES PASSED" || { echo "$fails CASE(S) FAILED"; exit 1; }
