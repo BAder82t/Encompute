@@ -41,7 +41,14 @@ Semantic versioning. Release candidates carry `-rc.N`:
 | first candidate | `v0.3.0-rc.1` | `0.3.0-rc.1` | `0.3.0rc1` |
 | next candidate | `v0.3.0-rc.2` | `0.3.0-rc.2` | `0.3.0rc2` |
 | release | `v0.3.0` | `0.3.0` | `0.3.0` |
-| patch | `v0.3.1` | `0.3.1` | `0.3.1` |
+| patch | `v0.3.2` | `0.3.2` | `0.3.2` |
+
+`v0.3.1` exists only as a failed release attempt: its workflow stopped at the
+shipped-binary identity check, before signing or a draft release, because the
+shipping build did not remap the OpenFHE path (see "The OpenFHE root comes
+first" below). The tag is kept as evidence, is never moved or reused, and no
+artifact built from it is supported. `v0.3.2` carries the same source and
+fixes with a corrected pipeline.
 
 The Python version is the PEP 440 spelling of the same version.
 `scripts/release/check-version.sh <tag>` checks that the tag, `Cargo.toml`,
@@ -356,10 +363,69 @@ compiler and CMake versions for the record.
 - `SOURCE_DATE_EPOCH` = the commit time (anything that stamps a date uses it);
 - `--remap-path-prefix` for the checkout, the target directory, cargo's
   registry, rustup and `OPENFHE_ROOT`, and `-ffile-prefix-map` for C/C++, so
-  no local path enters a binary;
+  no local path enters a binary (`/target`, `/encompute`, `/cargo`, `/rustup`,
+  `/openfhe`, and `/openfhe-src` inside OpenFHE's own objects);
 - `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`, `CARGO_PROFILE_RELEASE_DEBUG=0`,
   `CARGO_INCREMENTAL=0`; symbols are kept (the audits read them);
 - `ZERO_AR_DATE=1` for macOS archives.
+
+#### The OpenFHE root comes first
+
+`env.sh` computes the OpenFHE path remap once, from the `OPENFHE_ROOT` it sees
+when it is sourced, so the root must be known before. The contract:
+
+- `OPENFHE_ROOT` unset (or empty) and `<repo>/.deps/openfhe` exists: that
+  directory is the root.
+- `OPENFHE_ROOT` set: it is used exactly as given and never replaced. It must
+  be an absolute path without a trailing slash, with
+  `include/openfhe/pke/openfhe.h` and the three static libraries
+  `install-openfhe.sh` installs, or sourcing `env.sh` fails with an error.
+  An inherited wrong value (a leftover `OPENFHE_ROOT` from a service
+  environment file, for example) is therefore an error or a visibly different
+  root, never a silent substitution: a caller that means another root
+  exports it before sourcing.
+- Exporting `OPENFHE_ROOT` after sourcing `env.sh` is the v0.3.1 defect: no
+  OpenFHE remap, different binaries. Every caller exports first
+  (`build-release-binaries.sh`, the wheel step, `repro-check.sh`).
+
+`scripts/release/build-release-binaries.sh [TARGET_DIR]` is the shipping
+build of the three binaries (resolve and validate the root, source `env.sh`,
+check that the three flag sets remap it, `cargo build --release --locked`).
+The `binaries` job and the diagnostic run it; `repro-check.sh` stays the
+gate's own builder. `scripts/release/test-env-openfhe.sh` and
+`test-build-release-binaries.sh` are their self-tests.
+
+#### The binary path guard
+
+`scripts/release/check-binary-paths.sh BINARY...` fails if the strings of a
+binary contain `/.deps/`, `/openfhe-development`, or a path under `/home/`,
+`/Users/`, `/root/`, `/tmp/`, `/var/`, `/builds/` or `/runner/`; the fixed
+remap targets above are the only prefixes a path may start with. It runs on the
+Linux binaries in the `binaries` job (right after they are built), in
+`repro-check.sh` on Linux, and, report only, in the diagnostic. The macOS
+binaries are not checked (their path forms have not been inspected). An
+exception goes in `scripts/release/binary-paths.allow` with a one-line
+justification; there are none, and a path is almost always fixed by remapping
+it instead. `test-check-binary-paths.sh` is the self-test.
+
+#### The diagnostic dispatch
+
+A nonpublishing run that builds the release binaries in several
+configurations on two clean runners and compares the digests (no tag, no
+signing, no registry login, no release; the release jobs are skipped):
+
+```sh
+gh workflow run release.yml --ref <branch> -f diagnostic=true
+```
+
+`scripts/release/diag-openfhe-order.sh` builds the configurations: A0 and A
+(the old order, labelled expected to differ and not part of any pass or fail),
+B and C (the shipping build, `build-release-binaries.sh`, twice) and D (the
+gate's `repro-check.sh`, twice), then `diag-compare-jobs.sh` compares them
+within and across the two jobs. A healthy result is B = C = D1 = D2 inside
+each job and across both jobs, with A different, and the path guard's report
+clean for B, C and D. Use it whenever the build environment, the toolchain
+image or `install-openfhe.sh` changes.
 
 Release tarballs are written by `scripts/release/pack.py` (sorted entries,
 fixed owner and modes, `SOURCE_DATE_EPOCH` mtimes, a zeroed gzip header) and
@@ -407,8 +473,9 @@ together by digest:
 - `scripts/release/test-compare-shipped-digests.sh` is the selftest of the
   comparison (a matching tarball passes; a changed byte, a missing binary,
   an extra binary, an empty, wrong-name or truncated digest file each fail)
-  and of `--digests`; `release-check.sh` runs it as the row "shipped digests
-  check".
+  and of `--digests`; `release-check.sh` runs it, with the self-tests of
+  `env.sh`, `build-release-binaries.sh` and `check-binary-paths.sh`, as the
+  row "shipped digests check".
 - Not covered: the macOS arm64 binaries and the wheels have no gate build.
   They are built once, by the `binaries` job, and are the workflow's output
   at the tagged commit signed with the same identity.
@@ -420,8 +487,12 @@ together by digest:
   evaluator and the wheel. Two builds against the *same* OpenFHE install are
   identical (above); builds against OpenFHE compiled by a different compiler
   version, or with different CPU flags, differ in the OpenFHE code. Its CMake
-  build is not path-remapped. The release workflow compiles OpenFHE fresh on
-  the runner (no cache), so a rebuild on the same runner image reproduces it.
+  build maps its source and install directories to `/openfhe-src` and
+  `/openfhe` (`-ffile-prefix-map`, build id `static-4`), so the OpenFHE objects
+  do not depend on the checkout path. The release workflow compiles OpenFHE
+  fresh on the runner (no cache), so a rebuild on the same runner image
+  reproduces it. That the two CI jobs' OpenFHE builds are byte-identical is
+  shown by the diagnostic run, not assumed.
 - **macOS code signatures.** The linker's ad-hoc signature is derived from
   the content and is reproducible. A Developer ID signature (not used for
   0.3) would add a signing time and a certificate, and differ per signing.

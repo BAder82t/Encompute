@@ -180,18 +180,21 @@ Related: [support matrix](docs/support-matrix.md),
   cancellation, withdrawal or removal rescans all the anchored-state
   tables. Both fail closed. A hash-chained governance event log will
   replace these sets, and these costs, before general availability.
-- **Privacy spending before 0.3.1 was not bound to the anchor.** In 0.3.0
+- **Privacy spending before 0.3.2 was not bound to the anchor.** In 0.3.0
   and the 0.3 release candidates, a database writer (the model of threat
   model section 4.6, in a deployment whose anchor it cannot write) who
   erased a spend between its commit and its anchoring left the spend
   acknowledged and forgotten, and one who rewrote a new ledger's genesis in
   that window had the rewrite anchored. These versions claimed that
-  committed spending is never forgotten; it was not. 0.3.1 acknowledges a
+  committed spending is never forgotten; it was not. 0.3.2 acknowledges a
   spend or a creation only when the anchor holds exactly what it committed
   (ENC-SF-2026-326, ENC-SF-2026-329). Upgrade; there is no migration. A
   ledger changed after the anchor holds its entry is refused at the next
   spend and at start (a denial of service, not forgotten spending). A client
   may see ENC2202 for a spend whose entry was erased; retrying is correct.
+  The first supported release containing these fixes is 0.3.2. 0.3.1 was a
+  failed release attempt (its workflow stopped before publishing) and must
+  not be used.
 - **An anchor restored from the same backup forgets later spend.** When
   the database and the anchor are restored together, privacy spend rolls
   back to the backup. Keep the anchor outside the backup set, in the
@@ -370,11 +373,11 @@ Related: [support matrix](docs/support-matrix.md),
   [docs/deployment.md](docs/deployment.md).
 - **Python 3.11 or later** is required. CI tests 3.11 and 3.12.
 - **Revocations, disables, cancellations, withdrawals and removals were not
-  bound to the anchor before 0.3.1 (ENC-SF-2026-411, ENC-SF-2026-413).** In
+  bound to the anchor before 0.3.2 (ENC-SF-2026-411, ENC-SF-2026-413).** In
   0.3.0, a database writer who undid one between the call's commit and its
   anchoring left it acknowledged and never anchored, and one reverted after
   the anchor held it permitted the denied operation until the next restart.
-  0.3.1 anchors the IDs the call itself wrote (ENC2202 when the database no
+  0.3.2 anchors the IDs the call itself wrote (ENC2202 when the database no
   longer holds them) and checks the database against every anchored
   transition before each request and on each background tick, latching the
   control plane (ENC2202, `/ready` 503) on a mismatch. Limits: a request
@@ -407,9 +410,9 @@ Related: [support matrix](docs/support-matrix.md),
   implemented; full database-writer TOCTOU resistance is NOT INDEPENDENTLY
   ESTABLISHED; the B3 limitation is unchanged (authority recreated under a
   new ID is not detected).
-- **Release boundary.** 0.3.1 strengthens externally anchored privacy accounting, revocation and denial operations against identified database rollback attacks. It does not provide comprehensive protection against every form of database-administrator compromise or independently authenticate every newly introduced authority record.
+- **Release boundary.** 0.3.2 strengthens externally anchored privacy accounting, revocation and denial operations against identified database rollback attacks. It does not provide comprehensive protection against every form of database-administrator compromise or independently authenticate every newly introduced authority record.
 - **A ledger the anchor holds no genesis for refuses spends (ENC-SF-2026-412,
-  fixed in 0.3.1).** If a crash or an anchor outage falls between a
+  fixed in 0.3.2).** If a crash or an anchor outage falls between a
   registration's commit and its anchoring (or a database writer inserts a
   ledger row), the ledger refuses every spend (ENC2202) and
   `encompute_unanchored_ledgers` counts it until the process re-anchors the

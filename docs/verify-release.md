@@ -161,10 +161,9 @@ OpenFHE build give the same bytes (docs/release-process.md,
 ```sh
 git clone --branch "$TAG" https://github.com/BAder82t/Encompute.git && cd Encompute
 ./scripts/install-openfhe.sh
-. scripts/release/env.sh "$PWD/target"
-OPENFHE_ROOT="$PWD/.deps/openfhe" cargo build --release --locked \
-  -p encompute-cli -p encompute-evaluator -p encompute-control \
-  --features encompute-cli/openfhe,encompute-evaluator/openfhe
+# The shipping build: it resolves OPENFHE_ROOT (default .deps/openfhe) before
+# it sources scripts/release/env.sh, then runs cargo build --release --locked.
+scripts/release/build-release-binaries.sh "$PWD/target"
 sha256sum target/release/encompute target/release/encompute-control
 tar -xzf "../encompute-$V/encompute-$V-linux-x86_64.tar.gz" -O "encompute-$V-linux-x86_64/encompute" | sha256sum
 ```

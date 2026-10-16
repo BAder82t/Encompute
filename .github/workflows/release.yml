@@ -7,6 +7,7 @@ name: release
 #
 #   push a tag v0.3.0-rc.1 (on release/0.3)   -> the full pipeline and a draft
 #   workflow_dispatch                          -> a dry run: artifacts only, no release
+#   workflow_dispatch -f diagnostic=true       -> the nonpublishing diagnostic (binary digests only)
 #
 # Actions are pinned by commit; the comment names the release.
 

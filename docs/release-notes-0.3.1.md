@@ -1,5 +1,10 @@
 # Encompute 0.3.1: release notes
 
+> **0.3.1 was not released.** Its release workflow stopped at the shipped-binary
+> identity check, before anything was published. Use
+> [0.3.2](release-notes-0.3.2.md), which has the same source and fixes. These
+> notes describe that source and stay as the detailed record of the fixes.
+
 A security patch release for the stable 0.3 line. It fixes two privacy
 accounting findings in the control plane (ENC-SF-2026-326 and
 ENC-SF-2026-329), and changes container base images, security-policy
@@ -24,7 +29,7 @@ anchor held, reverted while the service ran, permitted the operation it
 denied until the next restart (ENC-SF-2026-413). Upgrade; there is no
 migration, with one operator step if `encompute_unanchored_ledgers` is not 0
 after the upgrade (see
-[Upgrading from 0.3.0 to 0.3.1](deployment.md#upgrading-from-030-to-031-security-upgrade):
+[Upgrading from 0.3.0 to 0.3.2](deployment.md#upgrading-from-030-to-032-security-upgrade):
 back up the database and the anchor first, review every ledger's genesis
 before `anchor-ledgers`, and do not downgrade by swapping the 0.3.0 binary
 back in). A client may see `500 ENC2202` for a spend

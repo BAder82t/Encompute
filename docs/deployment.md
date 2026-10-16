@@ -230,20 +230,25 @@ encrypted assets
   nothing. There is no fallback to local or plaintext keys. Production
   brokers refuse development stores.
 
-## Upgrading from 0.3.0 to 0.3.1 (security upgrade)
+## Upgrading from 0.3.0 to 0.3.2 (security upgrade)
 
-0.3.1 changes no database schema, API, wire format or anchor format:
+The first supported release containing these fixes is 0.3.2. 0.3.1 was a
+failed release attempt (its release workflow stopped before anything was
+published, and its tag is kept only as evidence) and must not be used: do
+not upgrade to it, and if you built it from source, move to 0.3.2.
+
+0.3.2 changes no database schema, API, wire format or anchor format:
 `encompute-control migrate` reports schema version 4 before and after, and
 the anchor file is read as it is. What changes is how the control plane
 treats privacy ledgers and anchored revocations, and on an existing
 installation that needs one reviewed operator action. Read this whole
-section before you start. The [release notes](release-notes-0.3.1.md) and the
+section before you start. The [release notes](release-notes-0.3.2.md) and the
 [changelog](../CHANGELOG.md) say what each finding was.
 
 **What to do, in this order:**
 
 1. **Back up the database and the anchor, together, before you install
-   0.3.1.** Use [backup.sh](../deploy/docker-compose/backup.sh), or a
+   0.3.2.** Use [backup.sh](../deploy/docker-compose/backup.sh), or a
    `pg_dump` plus a copy of the anchor (the directory behind
    `ENCOMPUTE_ANCHOR_DIR`, or the vault path behind
    `ENCOMPUTE_ANCHOR_BAO_ADDR`). Keep the anchor copy where neither the
@@ -252,7 +257,7 @@ section before you start. The [release notes](release-notes-0.3.1.md) and the
    have finished this section and trust the result: they are the only
    supported way back (see
    [No supported downgrade](#no-supported-downgrade-to-030)).
-2. **Install 0.3.1 and start it.** There is no migration to run. Start-up is
+2. **Install 0.3.2 and start it.** There is no migration to run. Start-up is
    not refused because of this release. If any privacy ledger has no
    checkpoint in the anchor (see below), the log line `unanchored_ledgers`
    names it and the gauge `encompute_unanchored_ledgers` counts it. Go on to
@@ -282,7 +287,7 @@ section before you start. The [release notes](release-notes-0.3.1.md) and the
    organization; `GET /v1/privacy/{asset}/ledger` exports the whole ledger.
    Do this for **every** ledger, not only for the ones the log names as
    unanchored. A ledger that 0.3.0 already anchored keeps the genesis it was
-   anchored with, and 0.3.1 cannot tell whether that genesis was genuine
+   anchored with, and 0.3.2 cannot tell whether that genesis was genuine
    (see [What the upgrade does not repair](#what-the-upgrade-does-not-repair)).
 
    Compare the spending as well. Every accepted spend is one ledger entry
@@ -377,36 +382,36 @@ database holds, so you can do step 3.
   repairs it automatically.** On 0.3.0 a ledger whose genesis was forged or
   rewritten (before its first spend, or in the interval of its
   registration) was anchored with that genesis. After the upgrade it is
-  anchored, passes every 0.3.1 check and spends up to the forged cap. The
+  anchored, passes every 0.3.2 check and spends up to the forged cap. The
   upgrade cannot detect this, and there is no command that corrects an
   anchored genesis; step 3 is the only check. If you find one that is wrong,
   stop spending on it and handle it as an incident.
 - **Spends 0.3.0 forgot, and revocations it never anchored.** On 0.3.0 a
   spend erased between its commit and its anchoring, or a revocation,
   disable, cancellation, withdrawal or removal undone in that interval, was
-  acknowledged and not anchored. 0.3.1 cannot find these afterwards. Use the
+  acknowledged and not anchored. 0.3.2 cannot find these afterwards. Use the
   comparison in step 3, and re-issue any revocation whose acknowledgement
-  predates 0.3.1 if you cannot confirm the current state.
+  predates 0.3.2 if you cannot confirm the current state.
 
 ### No supported downgrade to 0.3.0
 
 Do not roll back by putting the 0.3.0 binary back. It starts on the database
-and anchor that 0.3.1 used, and it re-opens the findings 0.3.1 fixed. In a
+and anchor that 0.3.2 used, and it re-opens the findings 0.3.2 fixed. In a
 check of that swap, 0.3.0 accepted and anchored a spend on a ledger whose
-genesis had been forged with SQL (a budget of epsilon 3000), which 0.3.1 had
-refused. 0.3.1 then started on the result and held that genesis as
+genesis had been forged with SQL (a budget of epsilon 3000), which 0.3.2 had
+refused. 0.3.2 then started on the result and held that genesis as
 authentic. Whatever is written during the rollback period is anchored on the
 older, weaker terms.
 
 The only supported rollback is to restore the database dump taken before the
 upgrade **together with the anchor copy taken at the same time**, and then
 start 0.3.0. The pre-upgrade dump with the newer anchor is refused by 0.3.0
-(ENC2202). The other choice is to stay on 0.3.1.
+(ENC2202). The other choice is to stay on 0.3.2.
 
 ### Restoring both the database and the anchor
 
 If the database and the independently held anchor are both restored to an
-old state that is consistent with itself, 0.3.1 does not detect it:
+old state that is consistent with itself, 0.3.2 does not detect it:
 everything since that state is forgotten (privacy spending, revocations,
 disables, cancellations, withdrawals and removals). That is out of scope for
 this release, as it was for 0.3.0. Keep the anchor outside the database's
@@ -418,7 +423,7 @@ Restoration or deletion of the same anchored records is detected within the
 implemented checks. Creation of NEW role, membership or approval records (or a
 user/service account recreated under a new ID) may not be detectable through
 an ID-based anchor. The external anchor does not independently authenticate
-every newly introduced database authority. 0.3.1 does not prevent someone
+every newly introduced database authority. 0.3.2 does not prevent someone
 with write access to the database from recreating authority that was revoked.
 
 The interval between a request's check and the use it permits is not short by
@@ -513,7 +518,7 @@ alarm: a `state_rollback_detected` log line and the
 `encompute_state_rollback_total` metric. A ledger frozen in the anchor is
 refused for spending whatever the database says (ENC2201).
 
-From 0.3.1 a spend (and the creation of an asset with a privacy budget) is
+From 0.3.2 a spend (and the creation of an asset with a privacy budget) is
 acknowledged only when the anchor holds exactly the entry, or genesis, that
 call committed. A ledger changed between the commit and the anchoring is
 refused with ENC2202 and the same alarm; the client sees an error, not an
@@ -578,7 +583,7 @@ original cap, and `--all` anchors every unanchored ledger without asking
 about any of them. After upgrading from 0.3.0 or an earlier 0.3.1 build,
 ledgers that already have an anchored checkpoint need nothing; check the
 gauge once. The full upgrade steps, with the review to do first, are in
-[Upgrading from 0.3.0 to 0.3.1](#upgrading-from-030-to-031-security-upgrade).
+[Upgrading from 0.3.0 to 0.3.2](#upgrading-from-030-to-032-security-upgrade).
 
 **A latched control plane.** The service checks the database against every
 anchored revocation, disable, cancellation, approval withdrawal, project leave

@@ -1,6 +1,44 @@
 # Changelog
 
-## 0.3.1 (security patch release)
+## 0.3.2 (release pipeline fixes; first supported release of the 0.3.1 fixes)
+
+0.3.1 was not released as a complete release. Its workflow built and gated
+the release but stopped at the shipped-binary identity check, before anything
+was published: the Linux binaries the shipping job built were not the
+binaries the gate had built and approved. The tag `v0.3.1` is kept as
+evidence and must not be used. 0.3.2 has the same fixes and source as the
+0.3.1 source tag (everything under "0.3.1" below), the product code is
+unchanged, and only the release pipeline differs.
+
+### Release pipeline
+
+- **The OpenFHE path remap was missing from the shipping build.** The
+  shipping job sourced `scripts/release/env.sh` and only then exported
+  `OPENFHE_ROOT`, so the build had no `/openfhe` path remap while the
+  gate's builds did. `env.sh` now resolves and validates the root before it
+  computes its flags (an explicit root is never replaced, an invalid one
+  fails), every caller passes the root before sourcing, and the shipping
+  build is one script, `scripts/release/build-release-binaries.sh`, that the
+  `binaries` job and the diagnostic both run.
+- **OpenFHE's own source and install paths are remapped.** The binaries
+  embedded `<checkout>/.deps/src/openfhe-development/...` paths from
+  OpenFHE's own objects, which agreed across jobs only because the checkout
+  path was the same. `scripts/install-openfhe.sh` now passes
+  `-ffile-prefix-map` for them (build id `static-4`). This changes every
+  binary digest.
+- **A binary path guard fails closed.** `scripts/release/check-binary-paths.sh`
+  fails if a Linux release binary names a build path (`/.deps/`,
+  `/openfhe-development`, a home, `/tmp`, `/var`, `/builds` or CI directory).
+  It runs in the `binaries` job, in the reproducibility check and, report
+  only, in the diagnostic.
+- **A nonpublishing diagnostic mode** of the release workflow
+  (`workflow_dispatch` with `diagnostic=true`) builds the release binaries in
+  several configurations on two clean runners and compares their digests. It
+  runs none of the release jobs.
+- Self-tests for the above run in the release check; version 0.3.2 and
+  lockfiles.
+
+## 0.3.1 (security patch release; not released, shipped in 0.3.2)
 
 0.3.0 is not modified; its artifacts keep their digests. This release fixes
 two privacy-accounting findings in `encompute-control` and carries the
@@ -109,7 +147,7 @@ build feature changes.
   committed checkpoint, not the database head, so a change after the write
   is refused at the next spend and at start.
 - **What a deployer must do.** Upgrade to 0.3.1 and follow
-  [Upgrading from 0.3.0 to 0.3.1](docs/deployment.md#upgrading-from-030-to-031-security-upgrade):
+  [Upgrading from 0.3.0 to 0.3.2](docs/deployment.md#upgrading-from-030-to-032-security-upgrade):
   back up the database and the independently held anchor first; review every
   ledger's genesis against the data owner's records before running
   `encompute-control anchor-ledgers` (with the service stopped, then restart
