@@ -14,6 +14,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      diagnostic:
+        description: "Nonpublishing diagnostic: build the release binaries in several configurations on two clean runners and compare their digests. Runs none of the release jobs."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,6 +36,7 @@ env:
 jobs:
   prepare:
     name: version and source archive
+    if: ${{ !inputs.diagnostic }}
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -78,6 +84,7 @@ jobs:
 
   binaries:
     name: binaries and wheel (${{ matrix.target }})
+    if: ${{ !inputs.diagnostic }}
     needs: prepare
     strategy:
       fail-fast: true
@@ -147,6 +154,7 @@ jobs:
 
   images:
     name: container images
+    if: ${{ !inputs.diagnostic }}
     needs: prepare
     runs-on: ubuntu-24.04
     permissions:
@@ -302,6 +310,7 @@ jobs:
   # released images. A required row that fails or is skipped stops the release.
   release-check:
     name: release check (all gates)
+    if: ${{ !inputs.diagnostic }}
     needs: [prepare, images]
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -375,6 +384,7 @@ jobs:
 
   release:
     name: checksums, signatures, draft release
+    if: ${{ !inputs.diagnostic }}
     needs: [prepare, binaries, images, release-check]
     runs-on: ubuntu-24.04
     permissions:
@@ -451,3 +461,55 @@ jobs:
         with:
           name: signed-dry-run
           path: dist/*
+
+  # ---- Diagnostic mode (workflow_dispatch with diagnostic=true) -------------
+  # Nonpublishing: read-only token, no registry login, no signing, no release,
+  # no tag, no secrets. It builds the release binaries in several
+  # configurations on two independent runners and compares the digests.
+  diag-build:
+    name: diag-build-${{ matrix.n }}
+    if: ${{ inputs.diagnostic }}
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2]
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      # No build cache, as in the binaries job.
+      - name: OpenFHE (pinned tag, commit verified)
+        run: ./scripts/install-openfhe.sh
+      - name: build in several configurations and compare
+        run: ./scripts/release/diag-openfhe-order.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: diag-build-${{ matrix.n }}
+          path: |
+            diag/bin
+            diag/*.txt
+            diag/*.log
+          if-no-files-found: error
+
+  diag-compare:
+    name: diag-compare
+    if: ${{ inputs.diagnostic }}
+    needs: diag-build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: diag-build-1
+          path: diag-1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: diag-build-2
+          path: diag-2
+      - name: compare the digests within and across the two jobs
+        run: ./scripts/release/diag-compare-jobs.sh diag-1 diag-2
