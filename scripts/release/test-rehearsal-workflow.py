@@ -3,15 +3,16 @@
 
   test-rehearsal-workflow.py [ROOT] [--base-ref GITREF]
 
-1. job gating: for each of (diagnostic, rehearsal) in {false,true}^2 and for a tag
-   push (no inputs), exactly the intended jobs run (the `if` expressions are evaluated);
-2. rehearsal jobs: `permissions` is exactly {contents: read}, none is a `needs` of any
+1. job gating: for each of (diagnostic, rehearsal, stress) in {false,true}^3 and for a tag
+   push (no inputs), exactly the intended jobs run (the `if` expressions are evaluated;
+   stress wins over rehearsal, rehearsal over diagnostic);
+2. rehearsal and stress jobs: `permissions` is exactly {contents: read}, none is a `needs` of any
    other job outside the rehearsal set, none contains a forbidden string;
 3. tag push runs prepare, binaries, images, release-check, release and no other job;
 4. rehearse-compare runs compare-shipped-digests.sh with the arguments of `release`;
 5. rehearse-release-check: same services/env as release-check, no allow-skip, --repro,
    five images load-only (push false), no outputs that push;
-6. with --base-ref: the existing jobs differ from that ref only in their `if:` line.
+6. with --base-ref: the existing jobs (also the rehearsal ones) differ from that ref only in their `if:` line.
 """
 import pathlib
 import re
@@ -37,11 +38,12 @@ bad = []
 REAL = ["prepare", "binaries", "images", "release-check", "release"]
 DIAG = ["diag-build", "diag-compare"]
 REH = ["rehearse-prepare", "rehearse-binaries", "rehearse-release-check", "rehearse-compare", "rehearse-window-load"]
-if set(jobs) != set(REAL + DIAG + REH):
+STRESS = ["stress-window"]
+if set(jobs) != set(REAL + DIAG + REH + STRESS):
     bad.append(f"unexpected job set: {sorted(jobs)}")
 
 inp = on["workflow_dispatch"]["inputs"]
-for k in ("diagnostic", "rehearsal"):
+for k in ("diagnostic", "rehearsal", "stress"):
     if inp.get(k, {}).get("type") != "boolean" or inp[k].get("default") is not False:
         bad.append(f"input {k} must be a boolean defaulting to false")
 
@@ -65,13 +67,12 @@ def running(ctx):
 
 
 F, T = False, True
-cases = {
-    "tag push (no inputs)": ({"diagnostic": None, "rehearsal": None}, set(REAL)),
-    "dispatch, both false": ({"diagnostic": F, "rehearsal": F}, set(REAL)),
-    "dispatch diagnostic=true": ({"diagnostic": T, "rehearsal": F}, set(DIAG)),
-    "dispatch rehearsal=true": ({"diagnostic": F, "rehearsal": T}, set(REH)),
-    "dispatch both true (rehearsal wins)": ({"diagnostic": T, "rehearsal": T}, set(REH)),
-}
+cases = {"tag push (no inputs)": ({"diagnostic": None, "rehearsal": None, "stress": None}, set(REAL))}
+for d in (F, T):
+    for r in (F, T):
+        for st in (F, T):
+            want = set(STRESS) if st else set(REH) if r else set(DIAG) if d else set(REAL)
+            cases[f"dispatch diagnostic={d} rehearsal={r} stress={st}"] = ({"diagnostic": d, "rehearsal": r, "stress": st}, want)
 for label, (ctx, want) in cases.items():
     got = running(ctx)
     ok = got == want
@@ -86,12 +87,17 @@ for n in REH:
     for d in needs:
         if d not in REH:
             bad.append(f"{n} needs {d}, outside the rehearsal set")
-for n in REAL + DIAG:
+for n in REAL + DIAG + REH:
     needs = jobs[n].get("needs", [])
     needs = [needs] if isinstance(needs, str) else needs
     for d in needs:
-        if d in REH:
-            bad.append(f"{n} needs rehearsal job {d}")
+        if d in STRESS or (n in REAL + DIAG and d in REH):
+            bad.append(f"{n} needs {d}")
+if jobs["stress-window"].get("needs"):
+    bad.append("stress-window must not need any job")
+for n in REAL + DIAG + REH:
+    if "!inputs.stress" not in str(jobs[n].get("if")):
+        bad.append(f"{n} does not exclude stress: {jobs[n].get('if')!r}")
 
 # permissions and forbidden strings
 lines = text.splitlines()
@@ -114,7 +120,7 @@ FORBIDDEN = [
     "secrets.", "GITHUB_TOKEN", "GH_TOKEN", "sigstore", "docker push", "ghcr.io", "push: true", "push=true",
     "attest-build-provenance", "allow-skip", "contents: write",
 ]
-for n in REH:
+for n in REH + STRESS:
     if jobs[n].get("permissions") != {"contents": "read"}:
         bad.append(f"{n} permissions: {jobs[n].get('permissions')!r}, want exactly contents: read")
     if jobs[n]["runs-on"] not in ("ubuntu-24.04", "${{ matrix.os }}"):
@@ -132,6 +138,25 @@ if "matrix" in jobs["rehearse-binaries"]["strategy"]:
     inc = jobs["rehearse-binaries"]["strategy"]["matrix"]["include"]
     if [i["target"] for i in inc] != ["linux-x86_64"] or inc[0]["os"] != "ubuntu-24.04":
         bad.append(f"rehearse-binaries matrix: {inc}")
+sw = jobs["stress-window"]
+if sw.get("timeout-minutes") != 240 or sw["runs-on"] != "ubuntu-24.04" or sw.get("if") != "${{ inputs.stress }}":
+    bad.append("stress-window must be ubuntu-24.04, timeout 240, if inputs.stress")
+rw = jobs["rehearse-window-load"]
+if sw["services"] != rw["services"] or sw["env"] != rw["env"]:
+    bad.append("stress-window services/env differ from rehearse-window-load")
+sruns = [st.get("run", "") for st in sw["steps"]]
+if "scripts/release/stress-window.sh stress-logs" not in [r.strip() for r in sruns]:
+    bad.append("stress-window must run scripts/release/stress-window.sh stress-logs")
+if not any("--no-run" in r for r in sruns):
+    bad.append("stress-window does not build the test binaries once")
+ups = [st for st in sw["steps"] if str(st.get("uses", "")).startswith("actions/upload-artifact@")]
+if len(ups) != 1 or ups[0].get("if") != "always()" or ups[0]["with"].get("path") != "stress-logs/":
+    bad.append("stress-window must upload stress-logs/ with always()")
+for sf in ("stress-window.sh", "stress-summary.py"):
+    body = (root / "scripts/release" / sf).read_text()
+    for f in ("docker login", "cosign", "gh release", "git tag", "git push", "secrets.", "GITHUB_TOKEN", "docker push", "curl "):
+        if f in body:
+            bad.append(f"{sf} contains forbidden string {f!r}")
 if jobs["rehearse-window-load"].get("timeout-minutes") != 120:
     bad.append("rehearse-window-load timeout-minutes")
 if jobs["rehearse-release-check"].get("timeout-minutes") != 300:
@@ -196,7 +221,7 @@ if base_ref:
         if m and m.group(1) in jobs:
             ostarts[m.group(1)] = i
     oorder = sorted(ostarts, key=ostarts.get)
-    for n in REAL + DIAG:
+    for n in REAL + DIAG + REH:
         i = ostarts[n]
         j = next((ostarts[o] for o in oorder if ostarts[o] > i), len(old))
         o = [l for l in old[i:j] if not re.match(r"^    if: ", l)]

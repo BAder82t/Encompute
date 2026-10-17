@@ -10,6 +10,8 @@ name: release
 #   workflow_dispatch -f diagnostic=true       -> the nonpublishing diagnostic (binary digests only)
 #   workflow_dispatch -f rehearsal=true        -> the nonpublishing rehearsal of the Ubuntu 24.04 release path
 #                                                 (everything but signing, registry push and the release)
+#   workflow_dispatch -f stress=true           -> the nonpublishing window stress: each proven-window test on its
+#                                                 own, 45 runs, under CPU load (runs nothing else)
 #
 # Actions are pinned by commit; the comment names the release.
 
@@ -24,6 +26,10 @@ on:
         default: false
       rehearsal:
         description: "Nonpublishing rehearsal of the complete Ubuntu 24.04 release path: the Linux binaries and tarball, the five images built locally, the full release check, and the shipped-binary comparison. Runs none of the other jobs. No signing, no registry, no release."
+        type: boolean
+        default: false
+      stress:
+        description: "Nonpublishing window stress: every proven-window test of the anchor suites on its own, 45 runs each, under CPU load, with a per-test summary. Runs none of the other jobs. No signing, no registry, no release."
         type: boolean
         default: false
 
@@ -43,7 +49,7 @@ env:
 jobs:
   prepare:
     name: version and source archive
-    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal && !inputs.stress }}
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -91,7 +97,7 @@ jobs:
 
   binaries:
     name: binaries and wheel (${{ matrix.target }})
-    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal && !inputs.stress }}
     needs: prepare
     strategy:
       fail-fast: true
@@ -168,7 +174,7 @@ jobs:
 
   images:
     name: container images
-    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal && !inputs.stress }}
     needs: prepare
     runs-on: ubuntu-24.04
     permissions:
@@ -324,7 +330,7 @@ jobs:
   # released images. A required row that fails or is skipped stops the release.
   release-check:
     name: release check (all gates)
-    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal && !inputs.stress }}
     needs: [prepare, images]
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -398,7 +404,7 @@ jobs:
 
   release:
     name: checksums, signatures, draft release
-    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal && !inputs.stress }}
     needs: [prepare, binaries, images, release-check]
     runs-on: ubuntu-24.04
     permissions:
@@ -482,7 +488,7 @@ jobs:
   # configurations on two independent runners and compares the digests.
   diag-build:
     name: diag-build-${{ matrix.n }}
-    if: ${{ inputs.diagnostic && !inputs.rehearsal }}
+    if: ${{ inputs.diagnostic && !inputs.rehearsal && !inputs.stress }}
     strategy:
       fail-fast: false
       matrix:
@@ -512,7 +518,7 @@ jobs:
 
   diag-compare:
     name: diag-compare
-    if: ${{ inputs.diagnostic && !inputs.rehearsal }}
+    if: ${{ inputs.diagnostic && !inputs.rehearsal && !inputs.stress }}
     needs: diag-build
     runs-on: ubuntu-24.04
     steps:
@@ -537,7 +543,7 @@ jobs:
   # token, no secrets, no registry login. When rehearsal=true no other job runs.
   rehearse-prepare:
     name: rehearse version and epoch
-    if: ${{ inputs.rehearsal }}
+    if: ${{ inputs.rehearsal && !inputs.stress }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -575,7 +581,7 @@ jobs:
   # artifact is the shipped tarball and its companions.
   rehearse-binaries:
     name: rehearse binaries and wheel (${{ matrix.target }})
-    if: ${{ inputs.rehearsal }}
+    if: ${{ inputs.rehearsal && !inputs.stress }}
     needs: rehearse-prepare
     strategy:
       fail-fast: true
@@ -654,7 +660,7 @@ jobs:
   # so no multi-gigabyte image transfer between jobs is needed.
   rehearse-release-check:
     name: rehearse release check (all gates)
-    if: ${{ inputs.rehearsal }}
+    if: ${{ inputs.rehearsal && !inputs.stress }}
     needs: rehearse-prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -795,7 +801,7 @@ jobs:
   # release check reproduced, and nothing after it.
   rehearse-compare:
     name: rehearse shipped-binary comparison
-    if: ${{ inputs.rehearsal }}
+    if: ${{ inputs.rehearsal && !inputs.stress }}
     needs: [rehearse-prepare, rehearse-binaries, rehearse-release-check]
     runs-on: ubuntu-24.04
     permissions:
@@ -828,7 +834,7 @@ jobs:
   # Extra: the corrected proven-window tests, repeatedly, on a loaded machine.
   rehearse-window-load:
     name: rehearse window tests under CPU load
-    if: ${{ inputs.rehearsal }}
+    if: ${{ inputs.rehearsal && !inputs.stress }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -892,4 +898,51 @@ jobs:
         with:
           name: window-load-logs
           path: window-logs/
+          if-no-files-found: ignore
+
+  # Stress only (workflow_dispatch -f stress=true): each proven-window test on its own, 45 runs,
+  # under CPU load. Every run is one cargo test with --exact, so its log holds exactly that test.
+  stress-window:
+    name: stress the window tests one by one under CPU load
+    if: ${{ inputs.stress }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: encompute
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: encompute
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+      openbao:
+        image: openbao/openbao:2.1.0
+        env:
+          BAO_DEV_ROOT_TOKEN_ID: ci-root
+          BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+        options: --cap-add IPC_LOCK
+    env:
+      ENCOMPUTE_TEST_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
+      ENCOMPUTE_TEST_BAO_ADDR: http://127.0.0.1:8200
+      ENCOMPUTE_TEST_BAO_TOKEN: ci-root
+      ENCOMPUTE_REQUIRE_SERVICES: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - name: build the window tests once
+        run: |
+          for t in anchor_window_adversarial anchor_negatives anchor_window anchor_genesis anchor_failclosed; do
+            cargo test -q -p encompute-control --test "$t" --no-run
+          done
+      - name: 45 runs of each test under CPU load, then the per-test summary
+        run: scripts/release/stress-window.sh stress-logs
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: window-stress-logs
+          path: stress-logs/
           if-no-files-found: ignore
