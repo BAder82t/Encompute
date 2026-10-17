@@ -394,6 +394,18 @@ Pins).
 | Base images | `Dockerfile.*` and `deploy/confidential-space*/Dockerfile` `FROM …@sha256:` (multi-arch index digests) | `check-pins.sh` |
 | Actions | every `uses:` in `.github/workflows/*.yml` is `@<40-hex commit SHA> # <version>` | `check-pins.sh` |
 
+**The Python lock is resolved at a recorded time.** `scripts/release/python/lock-cutoff.txt` holds one fixed RFC 3339 UTC timestamp (now `2026-10-17T20:49:00Z`). `lock-python.sh` passes it to `uv pip compile --exclude-newer` in both modes, so uv resolves only what PyPI published before that instant, and `--check` asks the same question every time: it fails only when `constraints.txt` differs from what the declared inputs resolve to at the recorded cutoff. A package that publishes later no longer makes the check fail; the release lock does not drift. The generated header of `constraints.txt` repeats the cutoff. To update the lock, set `lock-cutoff.txt` to a later time (the current UTC time, to the minute; it must be later than the upload of every artifact you expect), run `scripts/release/lock-python.sh`, then regenerate the training image's lock from `deploy/confidential-space-training` and commit both:
+
+```sh
+uv pip compile requirements.txt -c ../../scripts/release/python/constraints.txt \
+  --python-version 3.11 --python-platform x86_64-manylinux_2_28 \
+  --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match \
+  --exclude-newer "$(cat ../../scripts/release/python/lock-cutoff.txt)" \
+  --generate-hashes --no-header -o requirements.lock
+```
+
+Use uv 0.13.0 for both. The PyTorch CPU index publishes no upload times: uv warns that each of its files is "missing an upload date" and treats it as uploaded at the cutoff, so that index is not filtered by time. Only the exact pins taken from it (`torch==2.3.1`, from the training image's `requirements.txt`) and their hashes are read from it live.
+
 **C++ toolchain.** OpenFHE and the cxx bridges are compiled by the host's
 C++ compiler; it is recorded, not pinned. Release Linux builds use the
 `ubuntu-24.04` runner's GCC 13 and CMake 3.28+; the evaluator image uses
