@@ -7,7 +7,7 @@ name: release
 #
 #   push a tag v0.3.0-rc.1 (on release/0.3)   -> the full pipeline and a draft
 #   workflow_dispatch                          -> a dry run: artifacts only, no release
-#   workflow_dispatch -f diagnostic=true       -> the nonpublishing diagnostic (binary digests only)
+#   workflow_dispatch -f diagnostic=true       -> the nonpublishing diagnostic (binary digests; window-test reruns)
 #
 # Actions are pinned by commit; the comment names the release.
 
@@ -521,3 +521,72 @@ jobs:
           path: diag-2
       - name: compare the digests within and across the two jobs
         run: ./scripts/release/diag-compare-jobs.sh diag-1 diag-2
+
+  # ---- Window-test diagnostic (same dispatch: diagnostic=true) --------------
+  # TEST-ONLY and nonpublishing: read-only token, no registry login, no signing,
+  # no release, no tag, no secrets. It reruns the two regression tests that
+  # failed in the v0.3.2 release check (the genesis-rewrite window test of the
+  # first spend and the role-removal window test), on three independent runners
+  # with the same PostgreSQL and OpenBao service containers as release-check,
+  # first the original tests, then passively instrumented copies, and uploads
+  # the logs and traces with a classification (harness / product / inconclusive).
+  diag-tests:
+    name: diag-tests-${{ matrix.n }}
+    if: ${{ inputs.diagnostic }}
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: encompute
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: encompute
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+      openbao:
+        image: openbao/openbao:2.1.0
+        env:
+          BAO_DEV_ROOT_TOKEN_ID: ci-root
+          BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+        options: --cap-add IPC_LOCK
+    env:
+      CARGO_TERM_COLOR: always
+      ENCOMPUTE_TEST_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
+      ENCOMPUTE_TEST_BAO_ADDR: http://127.0.0.1:8200
+      ENCOMPUTE_TEST_BAO_TOKEN: ci-root
+      DIAG_N: "40"
+      DIAG_FULL_RUNS: "2"
+      DIAG_RUNNER: ${{ matrix.n }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - name: the instrumented copies are the generated ones
+        run: python3 -I scripts/release/diag-make-traced.py --check .
+      - name: rerun the two window tests (original, then instrumented)
+        env:
+          DIAG_PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: ./scripts/release/diag-tests.sh diag-tests-out
+      - name: summary
+        if: always()
+        run: |
+          [ -f diag-tests-out/classification.txt ] && {
+            echo '```'
+            sed -n '/^SUMMARY/,$p' diag-tests-out/classification.txt | head -120
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: diag-tests-${{ matrix.n }}
+          path: diag-tests-out
+          if-no-files-found: error
