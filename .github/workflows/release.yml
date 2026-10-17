@@ -877,7 +877,14 @@ jobs:
               fi
             done
           done
-          if grep -l INCONCLUSIVE window-logs/*.log; then echo "INCONCLUSIVE seen"; rc=1; fi
+          # The negative control in anchor_negatives prints INCONCLUSIVE on purpose (4 lines: two
+          # panic messages and the two lines the test prints about them). Any other occurrence,
+          # or a different count there, is a window that was not proven.
+          for f in window-logs/*.log; do
+            want=0; case "$(basename "$f")" in anchor_negatives.*) want=4 ;; esac
+            got=$(grep -c INCONCLUSIVE "$f" || true)
+            if [ "$got" != "$want" ]; then echo "INCONCLUSIVE count $got (expected $want) in $f"; rc=1; fi
+          done
           [ "$rc" = 0 ] && echo "all 100 runs passed, none inconclusive"
           exit "$rc"
       - if: always()
