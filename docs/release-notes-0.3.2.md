@@ -1,6 +1,14 @@
 # Encompute 0.3.2: release notes
 
-A patch release for the stable 0.3 line. It is the first supported release
+> **0.3.2 was not released.** Its tag workflow built and gated the release,
+> and its release-check job failed on two timing-based regression tests (the
+> test helper, not the product code; see the [0.3.3 notes](release-notes-0.3.3.md)),
+> so nothing was signed and no GitHub release was created. The tag `v0.3.2`
+> is kept as evidence and must not be used, and the public `0.3.2` image tag
+> belongs to this failed attempt. Use [0.3.3](release-notes-0.3.3.md). These
+> notes stay as the record of the pipeline fixes 0.3.2 made.
+
+The patch release 0.3.2 was meant to be the first supported release
 that contains the fixes made in the source tagged 0.3.1: the two privacy
 accounting findings in the control plane (ENC-SF-2026-326 and
 ENC-SF-2026-329), the revocation and anchor findings found while closing them
@@ -9,7 +17,7 @@ notice changes. The product code is the 0.3.1 source; 0.3.2 changes the
 release pipeline only. No API, format, migration or build feature changes.
 0.3.0 is not modified: its tag, artifacts and digests stay as published.
 
-## Use 0.3.2, not 0.3.1
+## What stopped 0.3.1
 
 0.3.1 was never released as a complete release. Its release workflow built
 and gated the artifacts, then stopped at the shipped-binary identity check,
@@ -55,7 +63,7 @@ disables, cancellations, withdrawals and removals likewise; a ledger the
 anchor holds no genesis for refuses spends until an operator reviews and
 anchors it; and the database is checked against the anchored transitions
 before every request. Upgrade with
-[Upgrading from 0.3.0 to 0.3.2](deployment.md#upgrading-from-030-to-032-security-upgrade):
+[Upgrading from 0.3.0 to 0.3.3](deployment.md#upgrading-from-030-to-033-security-upgrade):
 back up the database and the anchor first, review every ledger's genesis
 before `anchor-ledgers`, and do not downgrade by swapping the 0.3.0 binary
 back in. See the [changelog](../CHANGELOG.md) and
@@ -63,8 +71,8 @@ back in. See the [changelog](../CHANGELOG.md) and
 
 ## Verifying
 
-[verify-release.md](verify-release.md): use the tag `v0.3.2`. The image
-digests are in the release's `images.txt` files.
+Nothing to verify for 0.3.2: it produced no signed artifacts. Use the tag
+`v0.3.3` ([verify-release.md](verify-release.md)).
 
 ## What is not changed
 

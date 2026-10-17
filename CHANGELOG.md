@@ -1,14 +1,64 @@
 # Changelog
 
-## 0.3.2 (release pipeline fixes; first supported release of the 0.3.1 fixes)
+## 0.3.3 (test harness and rehearsal; first supported release of the 0.3.1 fixes)
 
-0.3.1 was not released as a complete release. Its workflow built and gated
-the release but stopped at the shipped-binary identity check, before anything
-was published: the Linux binaries the shipping job built were not the
+0.3.1 and 0.3.2 are failed release attempts. Neither produced a GitHub
+release or signed artifacts. Their tags (`v0.3.1`, `v0.3.2`) are immutable
+and kept as evidence; they must not be used, and the public container image
+tags `0.3.1` and `0.3.2` belong to those attempts. The first supported
+release containing the 0.3 anchor fixes is 0.3.3. It has the same product
+code as 0.3.2 (and the same fixes as the 0.3.1 source tag, everything under
+"0.3.1" below): nothing under `crates/*/src` changed.
+
+### Test harness
+
+- **A shared test helper proves the adversarial window or fails loudly.** The
+  v0.3.2 tag workflow's release check failed on two timing-based regression
+  tests (`w05_genesis_rewritten_in_the_window_of_the_first_spend` and
+  `role_removal_undone_in_the_window_is_not_acknowledged`). The test helper
+  took its two table locks with one `LOCK TABLE a, b`, which PostgreSQL
+  acquires sequentially, so under load the service's post-commit read could
+  run before the attacker held the second table. The server-log chronology
+  of 28 natural failures of the first test on GitHub runners showed 28 "tore"
+  observations (the genesis read before the attacker's lock, the entries read
+  after the attack) and no in-window attack that the service acknowledged.
+  The product code was not at fault and is not changed.
+- `crates/encompute-control/tests/common/window.rs` is now the one helper for
+  these tests. It holds the locks in a fixed order, confirms that the attack
+  happened inside the window, and otherwise reports INCONCLUSIVE and fails
+  instead of passing or failing on a race it did not control.
+- A negative control shows the helper reports INCONCLUSIVE when the window is
+  not proven. W05b, the accepted race after verification, is kept as its own
+  test and is not folded into the proven-window tests.
+
+### Release pipeline
+
+- **A nonpublishing rehearsal** of the complete Ubuntu 24.04 release path:
+  `gh workflow run release.yml --ref <branch> -f rehearsal=true`. It builds
+  the Linux binaries and tarball, builds the five images locally, runs the
+  whole release check and the shipped-binary comparison, and runs the window
+  tests repeatedly under CPU load. It has a read-only token, no secrets, no
+  registry login and no signing, and creates no release (jobs `rehearse-*`;
+  no other job runs). `scripts/release/test-rehearsal-workflow.py` checks its
+  gating and permissions statically.
+- A `v*` tag must be preceded by a green rehearsal on the exact candidate
+  commit and the Azure gate (see docs/release-process.md).
+- Version 0.3.3 and lockfiles.
+
+## 0.3.2 (failed release attempt; not released)
+
+0.3.2 was not released. Its tag workflow's release-check job failed on two
+timing-based regression tests (see 0.3.3), so nothing was signed and no
+GitHub release was created. The tag `v0.3.2` is kept as evidence and must not be used. It
+corrected the defect that stopped 0.3.1, as follows.
+
+0.3.1 was not released as a complete release either. Its workflow built and gated
+the release but stopped at the shipped-binary identity check, before signing
+or any GitHub release: the Linux binaries the shipping job built were not the
 binaries the gate had built and approved. The tag `v0.3.1` is kept as
-evidence and must not be used. 0.3.2 has the same fixes and source as the
-0.3.1 source tag (everything under "0.3.1" below), the product code is
-unchanged, and only the release pipeline differs.
+evidence and must not be used. 0.3.2 had the same fixes and source as the
+0.3.1 source tag (everything under "0.3.1" below), the product code was
+unchanged, and only the release pipeline differed.
 
 ### Release pipeline
 
@@ -38,7 +88,7 @@ unchanged, and only the release pipeline differs.
 - Self-tests for the above run in the release check; version 0.3.2 and
   lockfiles.
 
-## 0.3.1 (security patch release; not released, shipped in 0.3.2)
+## 0.3.1 (security patch release; failed release attempt, shipped in 0.3.3)
 
 0.3.0 is not modified; its artifacts keep their digests. This release fixes
 two privacy-accounting findings in `encompute-control` and carries the
@@ -146,8 +196,8 @@ build feature changes.
   rollback alarm, and nothing is acknowledged. What is recorded is the
   committed checkpoint, not the database head, so a change after the write
   is refused at the next spend and at start.
-- **What a deployer must do.** Upgrade to 0.3.1 and follow
-  [Upgrading from 0.3.0 to 0.3.2](docs/deployment.md#upgrading-from-030-to-032-security-upgrade):
+- **What a deployer must do.** Upgrade to 0.3.3 (0.3.1 was never released) and follow
+  [Upgrading from 0.3.0 to 0.3.3](docs/deployment.md#upgrading-from-030-to-033-security-upgrade):
   back up the database and the independently held anchor first; review every
   ledger's genesis against the data owner's records before running
   `encompute-control anchor-ledgers` (with the service stopped, then restart

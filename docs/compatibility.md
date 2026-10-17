@@ -5,9 +5,9 @@ ciphertexts, receipts, trust bundles, privacy ledgers, training records,
 database rows. This page says, for each one, which versions can read it,
 what needs a migration, and what fails closed.
 
-It describes release 0.3.2. [Changes since 0.3.0-rc.3](#changes-since-030-rc3)
+It describes release 0.3.3. [Changes since 0.3.0-rc.3](#changes-since-030-rc3)
 lists what an rc.3 installation must rebuild, re-key or upgrade, and
-[Changes in 0.3.2](#changes-in-032) what a 0.3.0 installation must do. For which
+[Changes in 0.3.3](#changes-in-033) what a 0.3.0 installation must do. For which
 capabilities are supported at all,
 see [support-matrix.md](support-matrix.md). For API and CLI stability, see
 [api-stability.md](api-stability.md).
@@ -205,7 +205,7 @@ model (a new package, a new spec). Existing adapters keep their lineage.
 | On mismatch | A database newer than the binary: ENC1602, "the database schema (version N) is newer than this control plane". An applied migration whose checksum changed: ENC1602. |
 | Audit events | No version field. The version is in the hash domain `encompute.audit-event.v1`. A broken chain: ENC2301. |
 | 0003 | `0003_consent_bound_sharing.sql` adds `asset_approval_members` (an approval covers the organizations that were project members when it was given) and a `status` (`invited` or `active`) on `project_members`. Existing approvals cover the members that had joined by then (each such grant dated from its approval, so a backup migrated twice gets the same rows), and existing memberships stay active. An organization added later sees nothing of an asset until its owner approves again. |
-| Downgrade | Unsupported. From 0.3.2 to 0.3.0 there is no supported security downgrade (see [Changes in 0.3.2](#changes-in-032)). Schema version 4 refuses an 0.3.0-rc.3 control plane, and once the 0.3.0-rc.4 control plane has written its new anchor sets (ended jobs, withdrawn approvals, removed memberships and roles) an rc.3 binary cannot read the anchor. To roll back, restore the database backup taken before the upgrade together with its matching anchor; the anchor check refuses an older database otherwise (ENC2202, then `encompute-control recover`). |
+| Downgrade | Unsupported. From 0.3.3 to 0.3.0 there is no supported security downgrade (see [Changes in 0.3.3](#changes-in-033)). Schema version 4 refuses an 0.3.0-rc.3 control plane, and once the 0.3.0-rc.4 control plane has written its new anchor sets (ended jobs, withdrawn approvals, removed memberships and roles) an rc.3 binary cannot read the anchor. To roll back, restore the database backup taken before the upgrade together with its matching anchor; the anchor check refuses an older database otherwise (ENC2202, then `encompute-control recover`). |
 
 ### Control Plane API v1
 
@@ -278,23 +278,24 @@ verified with rc.3.
 | Control-plane database | Migration 0003 | Applied at `migrate`, `serve` or `recover` |
 | Job submissions (`POST /v1/jobs`) | `source_assets` must equal the registered assets the program binds, each once, for every job; empty when it binds none. Jobs recorded before with other sources fail the trust report's `source assets` check | Bind the assets in the program (`asset "<asset ID>" ...`, `input ... asset "<asset ID>"`) or send an empty list |
 
-## Changes in 0.3.2
+## Changes in 0.3.3
 
-The first supported release containing these changes is 0.3.2. 0.3.1 was a
-failed release attempt and must not be used; 0.3.2 has the same source and
-fixes as the 0.3.1 source tag, built by a corrected release pipeline.
+The first supported release containing these changes is 0.3.3. 0.3.1 and
+0.3.2 were failed release attempts and must not be used; 0.3.3 has the same
+product code as 0.3.2 and the same fixes as the 0.3.1 source tag, built by a
+corrected release pipeline and checked by a corrected test harness.
 
-0.3.2 is a security patch release. It changes no artifact format: the
+0.3.3 is a security patch release. It changes no artifact format: the
 database schema stays at version 4 (the migrations are byte-identical to
 0.3.0's), the anchor format and version are unchanged, and no receipt, key,
 ciphertext or compiled-artifact version changes.
 
 | Artifact | What changed | What to do |
 |---|---|---|
-| State anchor | Same format and version; 0.3.2 reads and writes the anchor 0.3.0 wrote | Nothing. Back up the anchor with the database before upgrading |
-| Privacy ledgers the anchor holds no checkpoint for (only those 0.3.0 failed to anchor) | Every spend is refused (ENC2202, "is not anchored") until an operator anchors them | Review each ledger's genesis against the owner's records, then `encompute-control anchor-ledgers`, with the service stopped. See [Upgrading from 0.3.0 to 0.3.2](deployment.md#upgrading-from-030-to-032-security-upgrade) |
-| Ledgers 0.3.0 already anchored | Unchanged; their genesis is not re-examined | Review them too: 0.3.2 cannot tell a genuine genesis from one forged on 0.3.0 |
-| Downgrade to 0.3.0 | **No supported security downgrade.** A 0.3.0 binary starts on the 0.3.2 database and anchor and re-opens the fixed findings (it accepted and anchored a SQL-forged genesis in a check) | To roll back, restore the pre-upgrade database dump together with the anchor copy taken with it |
+| State anchor | Same format and version; 0.3.3 reads and writes the anchor 0.3.0 wrote | Nothing. Back up the anchor with the database before upgrading |
+| Privacy ledgers the anchor holds no checkpoint for (only those 0.3.0 failed to anchor) | Every spend is refused (ENC2202, "is not anchored") until an operator anchors them | Review each ledger's genesis against the owner's records, then `encompute-control anchor-ledgers`, with the service stopped. See [Upgrading from 0.3.0 to 0.3.3](deployment.md#upgrading-from-030-to-033-security-upgrade) |
+| Ledgers 0.3.0 already anchored | Unchanged; their genesis is not re-examined | Review them too: 0.3.3 cannot tell a genuine genesis from one forged on 0.3.0 |
+| Downgrade to 0.3.0 | **No supported security downgrade.** A 0.3.0 binary starts on the 0.3.3 database and anchor and re-opens the fixed findings (it accepted and anchored a SQL-forged genesis in a check) | To roll back, restore the pre-upgrade database dump together with the anchor copy taken with it |
 
 ## Known inconsistencies
 

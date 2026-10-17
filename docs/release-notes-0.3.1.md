@@ -1,9 +1,10 @@
 # Encompute 0.3.1: release notes
 
 > **0.3.1 was not released.** Its release workflow stopped at the shipped-binary
-> identity check, before anything was published. Use
-> [0.3.2](release-notes-0.3.2.md), which has the same source and fixes. These
-> notes describe that source and stay as the detailed record of the fixes.
+> identity check, before signing or any GitHub release. Do not use it, and do
+> not use [0.3.2](release-notes-0.3.2.md), also a failed attempt. Use
+> [0.3.3](release-notes-0.3.3.md), which has the same fixes. These notes
+> describe the 0.3.1 source and stay as the detailed record of the fixes.
 
 A security patch release for the stable 0.3 line. It fixes two privacy
 accounting findings in the control plane (ENC-SF-2026-326 and
@@ -29,7 +30,7 @@ anchor held, reverted while the service ran, permitted the operation it
 denied until the next restart (ENC-SF-2026-413). Upgrade; there is no
 migration, with one operator step if `encompute_unanchored_ledgers` is not 0
 after the upgrade (see
-[Upgrading from 0.3.0 to 0.3.2](deployment.md#upgrading-from-030-to-032-security-upgrade):
+[Upgrading from 0.3.0 to 0.3.3](deployment.md#upgrading-from-030-to-033-security-upgrade):
 back up the database and the anchor first, review every ledger's genesis
 before `anchor-ledgers`, and do not downgrade by swapping the 0.3.0 binary
 back in). A client may see `500 ENC2202` for a spend
@@ -99,8 +100,8 @@ Release boundary: 0.3.1 strengthens externally anchored privacy accounting, revo
 
 ## Verifying
 
-[verify-release.md](verify-release.md): use the tag `v0.3.1`. The new image
-digests are in the release's `images.txt` files.
+[verify-release.md](verify-release.md): there is nothing to verify for 0.3.1: it
+produced no signed artifacts. Use the tag `v0.3.3`.
 
 ## What is not changed
 

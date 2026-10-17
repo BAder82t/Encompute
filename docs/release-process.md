@@ -41,14 +41,26 @@ Semantic versioning. Release candidates carry `-rc.N`:
 | first candidate | `v0.3.0-rc.1` | `0.3.0-rc.1` | `0.3.0rc1` |
 | next candidate | `v0.3.0-rc.2` | `0.3.0-rc.2` | `0.3.0rc2` |
 | release | `v0.3.0` | `0.3.0` | `0.3.0` |
-| patch | `v0.3.2` | `0.3.2` | `0.3.2` |
+| patch | `v0.3.3` | `0.3.3` | `0.3.3` |
 
-`v0.3.1` exists only as a failed release attempt: its workflow stopped at the
-shipped-binary identity check, before signing or a draft release, because the
-shipping build did not remap the OpenFHE path (see "The OpenFHE root comes
-first" below). The tag is kept as evidence, is never moved or reused, and no
-artifact built from it is supported. `v0.3.2` carries the same source and
-fixes with a corrected pipeline.
+`v0.3.1` and `v0.3.2` exist only as failed release attempts. Neither has a
+GitHub release or signed artifacts. Their tags are immutable, kept as
+evidence, never moved or reused, and no artifact built from them is
+supported (the public image tags `0.3.1` and `0.3.2` belong to them).
+
+- `v0.3.1` stopped at the shipped-binary identity check, before signing,
+  because the shipping build ran `env.sh` before exporting `OPENFHE_ROOT`,
+  so the OpenFHE path remap was missing (see "The OpenFHE root comes first"
+  below).
+- `v0.3.2` fixed that, but its `release-check` job failed on two
+  timing-based regression tests: the test helper took its two table locks
+  with one `LOCK TABLE a, b`, which PostgreSQL acquires one table after the
+  other, so under load the service could read before the simulated attacker
+  held the second table. The product code was not at fault. The helper now
+  proves the adversarial window or fails loudly as INCONCLUSIVE.
+
+`v0.3.3` carries the same product code with the corrected helper and the
+rehearsal below.
 
 The Python version is the PEP 440 spelling of the same version.
 `scripts/release/check-version.sh <tag>` checks that the tag, `Cargo.toml`,
@@ -125,9 +137,43 @@ A failed RC is never re-tagged: fix on the branch and cut `rc.N+1`.
 `workflow_dispatch` runs the same pipeline as a dry run on any branch; it
 signs the artifacts but creates no release.
 
+## The rehearsal
+
+A nonpublishing run of the complete Ubuntu 24.04 release path, on any branch:
+
+```sh
+gh workflow run release.yml --ref <branch> -f rehearsal=true
+```
+
+It runs only the `rehearse-*` jobs, each with a read-only token, no secrets,
+no registry login and no signing, and creates no release. They:
+
+- build the Linux binaries (`build-release-binaries.sh`) and the release
+  tarball, as the `binaries` job does;
+- build the five images locally (never pushed) and run the whole release
+  check against exactly those, with Postgres and OpenBao;
+- compare the shipped tarball's binaries with the ones the release check
+  reproduced (`compare-shipped-digests.sh`), the check that stopped v0.3.1;
+- run the five anchor window test files 20 times each under CPU load, and
+  fail on any INCONCLUSIVE line other than the negative control's expected
+  four.
+
+It does not prove: signing, provenance attestation, the registry push, the
+draft release, macOS builds, the wheel on macOS, Confidential Space or any
+live check, or the Azure gate. A green rehearsal on one run is evidence about
+that commit and that runner image, not about a later change.
+`scripts/release/test-rehearsal-workflow.py` checks statically that the
+rehearsal jobs stay gated and read-only.
+
+**A `v*` tag must be preceded by a green rehearsal on the exact candidate
+commit, and by the Azure gate on that commit.** Do not tag on the strength of
+a rehearsal of a different commit.
+
 ## Checklist
 
 Copy into the release PR.
+
+- [ ] `rehearsal=true` run is green on the exact candidate commit, and the Azure gate has passed on it
 
 - [ ] `release/0.3` contains only security fixes, critical bug fixes and release docs since the branch point
 - [ ] versions bumped; `scripts/release/check-version.sh vX` passes
