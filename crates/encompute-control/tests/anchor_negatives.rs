@@ -14,70 +14,9 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
+use common::window::{in_window, in_window_parts, in_window_with, Fault, Opts, Part, INCONCLUSIVE};
 use common::*;
 use serde_json::{json, Value};
-
-/// Runs `acting` (the service call) while a database-owner session waits for
-/// the call's write to the first of `tables`, queues ACCESS EXCLUSIVE on all
-/// of them behind it (granted the instant the call commits, before any
-/// post-commit read of them by the service),
-/// runs `attack_sql` (with triggers and constraints off, as the owner can),
-/// and only then lets the service's read proceed.
-fn in_window<R: Send>(
-    url: &str,
-    tables: &[&str],
-    attack_sql: &str,
-    acting: impl FnOnce() -> R + Send,
-) -> R {
-    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    c.batch_execute(
-        "CREATE OR REPLACE FUNCTION atk_sleep() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(1.0); RETURN NULL; END $$ LANGUAGE plpgsql;
-         DROP TRIGGER IF EXISTS atk_slow ON audit_events;
-         CREATE TRIGGER atk_slow AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION atk_sleep();",
-    )
-    .unwrap();
-    let done = AtomicBool::new(false);
-    let r = std::thread::scope(|s| {
-        let h = s.spawn(|| {
-            let mut a = postgres::Client::connect(url, postgres::NoTls).unwrap();
-            let me: i32 = a.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
-            loop {
-                let n: i64 = a
-                    .query_one(
-                        "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
-                         WHERE c.relname=$1 AND l.mode='RowExclusiveLock' AND l.granted AND l.pid<>$2",
-                        &[&tables[0], &me],
-                    )
-                    .unwrap()
-                    .get(0);
-                if n > 0 {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            let mut tx = a.transaction().unwrap();
-            tx.batch_execute(&format!("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE", tables.join(", ")))
-                .unwrap();
-            std::thread::sleep(Duration::from_millis(500));
-            tx.batch_execute(&format!(
-                "SET LOCAL session_replication_role = replica; {attack_sql}"
-            ))
-            .unwrap();
-            tx.commit().unwrap();
-            done.store(true, Ordering::SeqCst);
-        });
-        let r = acting();
-        h.join().unwrap();
-        r
-    });
-    assert!(done.load(Ordering::SeqCst));
-    c.batch_execute("DROP TRIGGER IF EXISTS atk_slow ON audit_events")
-        .unwrap();
-    r
-}
 
 fn sql(url: &str, q: &str) {
     postgres::Client::connect(url, postgres::NoTls)
@@ -99,6 +38,16 @@ fn refused(s: u16, v: &Value, what: &str) -> bool {
         && v["message"]
             .as_str()
             .is_some_and(|m| m.contains(&format!("{what} STATE ROLLBACK")))
+}
+/// Subsequent enforcement: the anchor keeps the removal the call committed, so
+/// a restart over the database the attacker restored is refused (not served).
+fn restart_refuses(t: T, what: &str) {
+    let e = t
+        .restart()
+        .err()
+        .expect("a restart over the restored state must be refused");
+    let e = e.to_string();
+    assert!(e.contains(&format!("{what} STATE ROLLBACK")), "{e}");
 }
 fn rollbacks_counted(t: &T) -> bool {
     t.control
@@ -182,19 +131,22 @@ fn withdrawn_approval_restored_in_the_window_is_not_acknowledged() {
              CREATE TABLE atk_apm AS SELECT * FROM asset_approval_members WHERE asset_id='{d}'"
         ),
     );
-    let undo = format!(
-        "DELETE FROM withdrawn_grants WHERE asset_id='{d}';
-         INSERT INTO asset_approvals SELECT * FROM atk_ap;
-         INSERT INTO asset_approval_members SELECT * FROM atk_apm"
-    );
-    let (s, v) = in_window(
+    // The undo is split by the table each statement modifies: each part runs in
+    // the session that holds that table (all three held at the commit).
+    let undo_grants = format!("DELETE FROM withdrawn_grants WHERE asset_id='{d}'");
+    let (s, v) = in_window_parts(
         &url,
         &[
-            "withdrawn_grants",
-            "asset_approvals",
-            "asset_approval_members",
+            ("withdrawn_grants", &undo_grants),
+            (
+                "asset_approvals",
+                "INSERT INTO asset_approvals SELECT * FROM atk_ap",
+            ),
+            (
+                "asset_approval_members",
+                "INSERT INTO asset_approval_members SELECT * FROM atk_apm",
+            ),
         ],
-        &undo,
         || {
             w.t.call(
                 &w.a_owner,
@@ -206,6 +158,7 @@ fn withdrawn_approval_restored_in_the_window_is_not_acknowledged() {
     );
     assert!(refused(s, &v, "APPROVAL"), "{s} {v}");
     assert!(!w.t.control.anchor.snapshot().withdrawn_grants.is_empty());
+    restart_refuses(w.t, "APPROVAL");
 }
 
 /// (4) a service account disabled, then enabled again in the window.
@@ -239,6 +192,7 @@ fn service_disable_undone_in_the_window_is_not_acknowledged() {
         .snapshot()
         .disabled_services
         .contains("secagg-9"));
+    restart_refuses(w.t, "SERVICE ACCOUNT");
 }
 
 /// (5) a user disabled, then enabled again in the window.
@@ -259,6 +213,7 @@ fn user_disable_undone_in_the_window_is_not_acknowledged() {
     });
     assert!(refused(s, &v, "USER"), "{s} {v}");
     assert!(w.t.control.anchor.snapshot().disabled_users.contains(&id));
+    restart_refuses(w.t, "USER");
 }
 
 /// (6) a job cancelled, then revived in the window.
@@ -276,6 +231,7 @@ fn cancelled_job_revived_in_the_window_is_not_acknowledged() {
     });
     assert!(refused(s, &v, "JOB"), "{s} {v}");
     assert!(w.t.control.anchor.snapshot().ended_jobs.contains(&job));
+    restart_refuses(w.t, "JOB");
 }
 
 /// (7) a role removed, then given back (same membership) in the window.
@@ -302,19 +258,30 @@ fn role_removal_undone_in_the_window_is_not_acknowledged() {
         ),
     );
     let role = scalar(&url, "SELECT membership_id FROM atk_roles");
-    let undo = format!(
-        "DELETE FROM removed_roles WHERE id='{role}'; INSERT INTO memberships SELECT * FROM atk_roles"
+    // Split by table: the service reads `memberships` after its commit, so that
+    // table is held too (and the whole undo lands before that read).
+    let undo_removed = format!("DELETE FROM removed_roles WHERE id='{role}'");
+    let (s, v) = in_window_parts(
+        &url,
+        &[
+            (
+                "memberships",
+                "INSERT INTO memberships SELECT * FROM atk_roles",
+            ),
+            ("removed_roles", &undo_removed),
+        ],
+        || {
+            w.t.call(
+                &w.a_admin,
+                "POST",
+                "/v1/organizations/hospital-a/memberships/remove",
+                Some(json!({"principal": principal, "role": "ml_developer"})),
+            )
+        },
     );
-    let (s, v) = in_window(&url, &["removed_roles", "memberships"], &undo, || {
-        w.t.call(
-            &w.a_admin,
-            "POST",
-            "/v1/organizations/hospital-a/memberships/remove",
-            Some(json!({"principal": principal, "role": "ml_developer"})),
-        )
-    });
     assert!(refused(s, &v, "ROLE"), "{s} {v}");
     assert!(w.t.control.anchor.snapshot().removed_roles.contains(&role));
+    restart_refuses(w.t, "ROLE");
 }
 
 /// (8) an organization leaves a project; its membership is back in the window.
@@ -331,13 +298,16 @@ fn project_leave_undone_in_the_window_is_not_acknowledged() {
         ),
     );
     let mid = scalar(&url, "SELECT membership_id FROM atk_pm");
-    let undo = format!(
-        "DELETE FROM removed_memberships WHERE id='{mid}'; INSERT INTO project_members SELECT * FROM atk_pm"
-    );
-    let (s, v) = in_window(
+    let undo_removed = format!("DELETE FROM removed_memberships WHERE id='{mid}'");
+    let (s, v) = in_window_parts(
         &url,
-        &["removed_memberships", "project_members"],
-        &undo,
+        &[
+            (
+                "project_members",
+                "INSERT INTO project_members SELECT * FROM atk_pm",
+            ),
+            ("removed_memberships", &undo_removed),
+        ],
         || {
             w.t.call(
                 &w.a_admin,
@@ -355,4 +325,96 @@ fn project_leave_undone_in_the_window_is_not_acknowledged() {
         .snapshot()
         .removed_memberships
         .contains(&mid));
+    restart_refuses(w.t, "MEMBERSHIP");
+}
+
+/// Negative control for the window helper itself. A window that misses is
+/// reported as INCONCLUSIVE, never silently accepted:
+///
+/// 1. the old `LOCK TABLE a, b` behaviour (the second table is requested only
+///    after the first was granted, i.e. after the target's commit): the second
+///    request cannot be queued behind the target, the barrier does not hold;
+/// 2. an attacker that holds a table the service never reads after its commit:
+///    the service answers without ever being seen waiting behind the attacker;
+/// 3. the same scenario with the correct sequencing passes, and the undone
+///    disable is refused (so the detector is not just always failing).
+#[test]
+fn window_helper_negative_control_a_missed_window_is_inconclusive() {
+    let Some(w) = world() else { return };
+    let url = w.t.env0.url.clone();
+    let disable = |subject: &str, parts: &[Part<'_>], opts: &Opts| {
+        let me = user(&w.t, &w.a_admin, "hospital-a", subject, &["auditor"]);
+        let id = w.t.ok(&me, "GET", "/v1/whoami", None)["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let undo = format!("UPDATE users SET status='active' WHERE id='{id}'");
+        let parts: Vec<Part> = parts
+            .iter()
+            .map(|p| Part {
+                table: p.table,
+                sql: if p.sql == "<undo>" { &undo } else { p.sql },
+            })
+            .collect();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            in_window_with(&url, &parts, opts, || {
+                w.t.call(
+                    &w.a_admin,
+                    "POST",
+                    &format!("/v1/organizations/hospital-a/users/{id}/disable"),
+                    None,
+                )
+            })
+        }));
+        (id, caught)
+    };
+    let msg = |e: &Box<dyn std::any::Any + Send>| -> String {
+        e.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    };
+    let quick = Opts {
+        barrier_timeout: std::time::Duration::from_secs(3),
+        observe_timeout: std::time::Duration::from_secs(3),
+        ..Opts::default()
+    };
+    // The target writes both `users` and `audit_head`.
+    let both = [
+        Part {
+            table: "users",
+            sql: "<undo>",
+        },
+        Part {
+            table: "audit_head",
+            sql: "",
+        },
+    ];
+    // 1. sequential locks (the old behaviour)
+    let sequential = Opts {
+        fault: Fault::SequentialLocks,
+        ..quick
+    };
+    let (_, caught) = disable("ctl-1", &both, &sequential);
+    let e = caught.expect_err("a sequentially requested lock must be reported");
+    eprintln!("negative control 1: {}", msg(&e));
+    assert!(
+        msg(&e).contains(INCONCLUSIVE) && msg(&e).contains("queued behind the target"),
+        "{}",
+        msg(&e)
+    );
+    // 2. the attacker holds a table the service does not read after its commit
+    let uncovered = [Part {
+        table: "audit_head",
+        sql: "SELECT 1",
+    }];
+    let (_, caught) = disable("ctl-2", &uncovered, &quick);
+    let e = caught.expect_err("a window the service never waits in must be reported");
+    eprintln!("negative control 2: {}", msg(&e));
+    assert!(msg(&e).contains(INCONCLUSIVE), "{}", msg(&e));
+    // 3. the correct sequencing on the same scenario is a proven window
+    let (id, caught) = disable("ctl-3", &both, &quick);
+    let (s, v) = caught.expect("a proven window is not inconclusive");
+    assert!(refused(s, &v, "USER"), "{s} {v}");
+    assert!(w.t.control.anchor.snapshot().disabled_users.contains(&id));
 }

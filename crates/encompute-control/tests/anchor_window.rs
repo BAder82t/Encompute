@@ -13,9 +13,7 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
+use common::window;
 use common::*;
 use serde_json::{json, Value};
 
@@ -46,59 +44,23 @@ fn entries(url: &str, d: &str) -> i64 {
     .get(0)
 }
 
-/// Run `acting` (the service call) while a database-owner session waits for
-/// the call's INSERT into `table`, queues ACCESS EXCLUSIVE behind it (granted
-/// the instant the call commits, before the service's post-commit read),
-/// runs `attack_sql`, and only then lets the service's read proceed.
+/// The shared window (`common/window.rs`), with the attack run as the ordinary
+/// role, as this file always did.
 fn in_window<R: Send>(
     url: &str,
-    table: &str,
+    tables: &[&str],
     attack_sql: &str,
     acting: impl FnOnce() -> R + Send,
 ) -> R {
-    // The attacker slows the call's audit insert so the window to queue the lock exists.
-    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    c.batch_execute(
-        "CREATE OR REPLACE FUNCTION atk_sleep() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(1.0); RETURN NULL; END $$ LANGUAGE plpgsql;
-         DROP TRIGGER IF EXISTS atk_slow ON audit_events;
-         CREATE TRIGGER atk_slow AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION atk_sleep();",
-    ).unwrap();
-    let done = AtomicBool::new(false);
-    let r =
-        std::thread::scope(|s| {
-            let h =
-                s.spawn(|| {
-                    let mut a = postgres::Client::connect(url, postgres::NoTls).unwrap();
-                    let me: i32 = a.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
-                    // wait until another backend holds RowExclusiveLock on the table
-                    loop {
-                        let n: i64 = a.query_one(
-                    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
-                     WHERE c.relname=$1 AND l.mode='RowExclusiveLock' AND l.granted AND l.pid<>$2",
-                    &[&table, &me]).unwrap().get(0);
-                        if n > 0 {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    let mut tx = a.transaction().unwrap();
-                    // blocks until the service's transaction has committed
-                    tx.batch_execute(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))
-                        .unwrap();
-                    // the service's post-commit read is now queued behind us
-                    std::thread::sleep(Duration::from_millis(500));
-                    tx.batch_execute(attack_sql).unwrap();
-                    tx.commit().unwrap();
-                    done.store(true, Ordering::SeqCst);
-                });
-            let r = acting();
-            h.join().unwrap();
-            r
-        });
-    assert!(done.load(Ordering::SeqCst));
-    c.batch_execute("DROP TRIGGER IF EXISTS atk_slow ON audit_events")
-        .unwrap();
-    r
+    window::in_window_as(url, tables, attack_sql, false, acting)
+}
+
+fn in_window_readonly<R: Send>(
+    url: &str,
+    attack_sql: &str,
+    acting: impl FnOnce() -> R + Send,
+) -> R {
+    window::in_window_readonly(url, attack_sql, false, acting)
 }
 
 fn rollback_refused(s: u16, v: &Value) -> bool {
@@ -126,9 +88,12 @@ fn spend_erased_in_the_window_is_not_acknowledged() {
     let seq0 = anchored_seq(&w.t, &d);
     let snap0 = w.t.control.anchor.snapshot();
     let del = format!("DELETE FROM privacy_entries WHERE asset_id='{d}' AND seq > {seq0}");
-    let (s, v) = in_window(&w.t.env0.url, "privacy_entries", &del, || {
-        spend(&w.t, &w.a_owner, &d, "s-1", 18)
-    });
+    let (s, v) = in_window(
+        &w.t.env0.url,
+        &["privacy_entries", "privacy_ledgers"],
+        &del,
+        || spend(&w.t, &w.a_owner, &d, "s-1", 18),
+    );
     assert!(
         rollback_refused(s, &v),
         "an erased spend must not be acknowledged: {s} {v}"
@@ -151,63 +116,6 @@ fn spend_erased_in_the_window_is_not_acknowledged() {
     assert_eq!(v2["duplicate"], false);
     assert_eq!(anchored_seq(&w.t, &d), seq0 + 1);
     w.t.restart().expect("an honest ledger starts");
-}
-
-fn wait_blocked_on(c: &mut postgres::Client, table: &str) {
-    for _ in 0..4000 {
-        let n: i64 = c
-            .query_one(
-                "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
-                 WHERE c.relname=$1 AND NOT l.granted AND l.pid<>pg_backend_pid()",
-                &[&table],
-            )
-            .unwrap()
-            .get(0);
-        if n > 0 {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    panic!("the window did not open on {table}");
-}
-
-/// Like [`in_window`] for a call that writes nothing (the duplicate answer),
-/// so no insert of its own opens the window. One session holds
-/// `privacy_entries`, so the call stalls inside its transaction after it
-/// locked the ledger row; a second queues ACCESS EXCLUSIVE on
-/// `privacy_ledgers` behind that row lock, runs `attack_sql` the instant the
-/// call commits, and only then lets the call's post-commit read proceed.
-fn in_window_readonly<R: Send>(
-    url: &str,
-    attack_sql: &str,
-    acting: impl FnOnce() -> R + Send,
-) -> R {
-    let mut hold = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    hold.batch_execute("BEGIN; LOCK TABLE privacy_entries IN ACCESS EXCLUSIVE MODE")
-        .unwrap();
-    std::thread::scope(|s| {
-        let attacker = s.spawn(|| {
-            let mut a = postgres::Client::connect(url, postgres::NoTls).unwrap();
-            wait_blocked_on(&mut a, "privacy_entries");
-            let mut tx = a.transaction().unwrap();
-            // granted the instant the call commits
-            tx.batch_execute("LOCK TABLE privacy_ledgers IN ACCESS EXCLUSIVE MODE")
-                .unwrap();
-            std::thread::sleep(Duration::from_millis(500));
-            tx.batch_execute(attack_sql).unwrap();
-            tx.commit().unwrap();
-        });
-        let releaser = s.spawn(move || {
-            let mut w = postgres::Client::connect(url, postgres::NoTls).unwrap();
-            wait_blocked_on(&mut w, "privacy_entries"); // the call is inside its transaction
-            wait_blocked_on(&mut w, "privacy_ledgers"); // the attacker is queued behind it
-            hold.batch_execute("COMMIT").unwrap();
-        });
-        let r = acting();
-        attacker.join().unwrap();
-        releaser.join().unwrap();
-        r
-    })
 }
 
 /// A retry of an event the ledger already holds (the duplicate answer) is
@@ -280,9 +188,12 @@ fn repeated_erase_in_the_window_does_not_defeat_the_cap() {
     for i in 0..n {
         let seq0 = anchored_seq(&w.t, &d);
         let del = format!("DELETE FROM privacy_entries WHERE asset_id='{d}' AND seq > {seq0}");
-        let (s, v) = in_window(&w.t.env0.url, "privacy_entries", &del, || {
-            spend(&w.t, &w.a_owner, &d, &format!("atk-{i}"), 18)
-        });
+        let (s, v) = in_window(
+            &w.t.env0.url,
+            &["privacy_entries", "privacy_ledgers"],
+            &del,
+            || spend(&w.t, &w.a_owner, &d, &format!("atk-{i}"), 18),
+        );
         if s == 200 {
             acked += 1;
         } else {
@@ -315,7 +226,7 @@ fn genesis_rewritten_in_the_window_is_not_acknowledged() {
     assert_eq!(spend(&w.t, &w.a_owner, &w.dataset_a, "s-0", 18).0, 200);
     let body = json!({"organization": "hospital-a", "kind": "dataset", "name": "patients-2027", "digest": "c".repeat(64), "privacy_budget": budget(3.0)});
     let sql = "UPDATE privacy_ledgers SET genesis = jsonb_set(genesis, '{budget,epsilon}', '\"30.0\"'::jsonb) WHERE created_at > now() - interval '1 minute' AND asset_id NOT IN (SELECT asset_id FROM privacy_entries)";
-    let (s, v) = in_window(&w.t.env0.url, "privacy_ledgers", sql, || {
+    let (s, v) = in_window(&w.t.env0.url, &["privacy_ledgers"], sql, || {
         w.t.call(&w.a_owner, "POST", "/v1/assets", Some(body.clone()))
     });
     assert!(
@@ -357,7 +268,7 @@ fn ledger_row_deleted_in_the_window_is_not_acknowledged() {
     let Some(w) = world() else { return };
     let body = json!({"organization": "hospital-a", "kind": "dataset", "name": "patients-2028", "digest": "d".repeat(64), "privacy_budget": budget(3.0)});
     let sql = "DELETE FROM privacy_ledgers WHERE created_at > now() - interval '1 minute' AND asset_id NOT IN (SELECT asset_id FROM privacy_entries) AND asset_id NOT IN (SELECT asset_id FROM privacy_spenders)";
-    let (s, v) = in_window(&w.t.env0.url, "privacy_ledgers", sql, || {
+    let (s, v) = in_window(&w.t.env0.url, &["privacy_ledgers"], sql, || {
         w.t.call(&w.a_owner, "POST", "/v1/assets", Some(body.clone()))
     });
     assert!(rollback_refused(s, &v), "{s} {v}");

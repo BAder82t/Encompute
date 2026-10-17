@@ -11,6 +11,7 @@ mod common;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use common::window::{in_window, in_window_hooked, in_window_readonly, Opts, Part};
 use common::*;
 use encompute_privacy::{LedgerView, PrivacyEvent};
 use serde_json::{json, Value};
@@ -42,134 +43,12 @@ fn entries(url: &str, d: &str) -> i64 {
     .get(0)
 }
 
-/// Run `acting` (the service call) while a database-owner session waits for
-/// the call's INSERT into `table`, queues ACCESS EXCLUSIVE behind it (granted
-/// the instant the call commits, before the service's post-commit read),
-/// runs `attack_sql`, and only then lets the service's read proceed.
-fn in_window<R: Send>(
-    url: &str,
-    tables: &[&str],
-    attack_sql: &str,
-    acting: impl FnOnce() -> R + Send,
-) -> R {
-    let table = tables[0];
-    // The attacker slows the call's audit insert so the window to queue the lock exists.
-    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    c.batch_execute(
-        "CREATE OR REPLACE FUNCTION atk_sleep() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(1.0); RETURN NULL; END $$ LANGUAGE plpgsql;
-         DROP TRIGGER IF EXISTS atk_slow ON audit_events;
-         CREATE TRIGGER atk_slow AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION atk_sleep();",
-    ).unwrap();
-    let done = AtomicBool::new(false);
-    let r =
-        std::thread::scope(|s| {
-            let h =
-                s.spawn(|| {
-                    let mut a = postgres::Client::connect(url, postgres::NoTls).unwrap();
-                    let me: i32 = a.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
-                    // wait until another backend holds RowExclusiveLock on the table
-                    loop {
-                        let n: i64 = a.query_one(
-                    "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
-                     WHERE c.relname=$1 AND l.mode='RowExclusiveLock' AND l.granted AND l.pid<>$2",
-                    &[&table, &me]).unwrap().get(0);
-                        if n > 0 {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    let mut tx = a.transaction().unwrap();
-                    // blocks until the service's transaction has committed
-                    tx.batch_execute(&format!(
-                        "LOCK TABLE {} IN ACCESS EXCLUSIVE MODE",
-                        tables.join(", ")
-                    ))
-                    .unwrap();
-                    // the service's post-commit read is now queued behind us
-                    std::thread::sleep(Duration::from_millis(500));
-                    tx.batch_execute(&format!(
-                        "SET LOCAL session_replication_role = replica; {attack_sql}"
-                    ))
-                    .unwrap();
-                    tx.commit().unwrap();
-                    done.store(true, Ordering::SeqCst);
-                });
-            let r = acting();
-            h.join().unwrap();
-            r
-        });
-    assert!(done.load(Ordering::SeqCst));
-    c.batch_execute("DROP TRIGGER IF EXISTS atk_slow ON audit_events")
-        .unwrap();
-    r
-}
-
 fn rollback_refused(s: u16, v: &Value) -> bool {
     s == 500
         && v["code"] == "ENC2202"
         && v["message"]
             .as_str()
             .is_some_and(|m| m.contains("PRIVACY STATE ROLLBACK"))
-}
-
-fn wait_blocked_on(c: &mut postgres::Client, table: &str) {
-    for _ in 0..4000 {
-        let n: i64 = c
-            .query_one(
-                "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
-                 WHERE c.relname=$1 AND NOT l.granted AND l.pid<>pg_backend_pid()",
-                &[&table],
-            )
-            .unwrap()
-            .get(0);
-        if n > 0 {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    panic!("the window did not open on {table}");
-}
-
-/// Like [`in_window`] for a call that writes nothing (the duplicate answer),
-/// so no insert of its own opens the window. One session holds
-/// `privacy_entries`, so the call stalls inside its transaction after it
-/// locked the ledger row; a second queues ACCESS EXCLUSIVE on
-/// `privacy_ledgers` behind that row lock, runs `attack_sql` the instant the
-/// call commits, and only then lets the call's post-commit read proceed.
-fn in_window_readonly<R: Send>(
-    url: &str,
-    attack_sql: &str,
-    acting: impl FnOnce() -> R + Send,
-) -> R {
-    let mut hold = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    hold.batch_execute("BEGIN; LOCK TABLE privacy_entries IN ACCESS EXCLUSIVE MODE")
-        .unwrap();
-    std::thread::scope(|s| {
-        let attacker = s.spawn(|| {
-            let mut a = postgres::Client::connect(url, postgres::NoTls).unwrap();
-            wait_blocked_on(&mut a, "privacy_entries");
-            let mut tx = a.transaction().unwrap();
-            // granted the instant the call commits
-            tx.batch_execute("LOCK TABLE privacy_ledgers IN ACCESS EXCLUSIVE MODE")
-                .unwrap();
-            std::thread::sleep(Duration::from_millis(500));
-            tx.batch_execute(&format!(
-                "SET LOCAL session_replication_role = replica; {attack_sql}"
-            ))
-            .unwrap();
-            tx.commit().unwrap();
-        });
-        let releaser = s.spawn(move || {
-            let mut w = postgres::Client::connect(url, postgres::NoTls).unwrap();
-            wait_blocked_on(&mut w, "privacy_entries"); // the call is inside its transaction
-            wait_blocked_on(&mut w, "privacy_ledgers"); // the attacker is queued behind it
-            hold.batch_execute("COMMIT").unwrap();
-        });
-        let r = acting();
-        attacker.join().unwrap();
-        releaser.join().unwrap();
-        r
-    })
 }
 
 fn sql(url: &str, q: &str) {
@@ -227,9 +106,12 @@ fn w01_first_spend_erased_in_the_window() {
     let d = w.dataset_a.clone();
     assert_eq!(anchored_seq(&w.t, &d), 0, "creation anchored the genesis");
     let del = format!("DELETE FROM privacy_entries WHERE asset_id='{d}'");
-    let (s, v) = in_window(&w.t.env0.url, &["privacy_entries"], &del, || {
-        spend(&w.t, &w.a_owner, &d, "f-0", 18)
-    });
+    let (s, v) = in_window(
+        &w.t.env0.url,
+        &["privacy_entries", "privacy_ledgers"],
+        &del,
+        || spend(&w.t, &w.a_owner, &d, "f-0", 18),
+    );
     assert!(rollback_refused(s, &v), "{s} {v}");
     assert_eq!(anchored_seq(&w.t, &d), 0);
     let (s, v) = spend(&w.t, &w.a_owner, &d, "f-0", 18);
@@ -244,9 +126,12 @@ fn w02_spend_replaced_by_a_forged_valid_entry() {
     let d = w.dataset_a.clone();
     assert_eq!(spend(&w.t, &w.a_owner, &d, "s-0", 18).0, 200);
     let forged = forge_after(&w.t.env0.url, &d, 1, reserve("forged", 100000));
-    let (s, v) = in_window(&w.t.env0.url, &["privacy_entries"], &forged, || {
-        spend(&w.t, &w.a_owner, &d, "s-1", 18)
-    });
+    let (s, v) = in_window(
+        &w.t.env0.url,
+        &["privacy_entries", "privacy_ledgers"],
+        &forged,
+        || spend(&w.t, &w.a_owner, &d, "s-1", 18),
+    );
     assert!(
         rollback_refused(s, &v),
         "a replaced entry must not be acknowledged: {s} {v}"
@@ -273,7 +158,9 @@ fn w03_duplicate_answer_replaced_by_a_forged_entry() {
     std::fs::write(&f, &old).unwrap();
     let t = env0.start().expect("a ledger ahead of its anchor starts");
     let forged = forge_after(&t.env0.url, &d, 1, reserve("forged", 1));
-    let (s, v) = in_window_readonly(&t.env0.url, &forged, || spend(&t, &a_owner, &d, "s-1", 18));
+    let (s, v) = in_window_readonly(&t.env0.url, &forged, true, || {
+        spend(&t, &a_owner, &d, "s-1", 18)
+    });
     assert!(rollback_refused(s, &v), "{s} {v}");
     assert_eq!(anchored_seq(&t, &d), 1);
 }
@@ -292,7 +179,8 @@ fn w04_genesis_rewritten_after_anchoring_then_spend() {
 }
 
 // ---- W05: genesis rewritten in the window of the first spend ----
-// The attacker queues on both tables the call wrote, so the service's reads wait.
+// The attacker holds both tables the service reads after its commit (the genesis
+// first), each queued behind the call before it commits, so no read can precede the rewrite.
 #[test]
 fn w05_genesis_rewritten_in_the_window_of_the_first_spend() {
     let Some(w) = world() else { return };
@@ -300,7 +188,7 @@ fn w05_genesis_rewritten_in_the_window_of_the_first_spend() {
     let rewrite = format!("UPDATE privacy_ledgers SET genesis = jsonb_set(genesis, '{{budget,epsilon}}', '\"300.0\"'::jsonb) WHERE asset_id='{d}'");
     let (s, v) = in_window(
         &w.t.env0.url,
-        &["privacy_entries", "privacy_ledgers"],
+        &["privacy_ledgers", "privacy_entries"],
         &rewrite,
         || spend(&w.t, &w.a_owner, &d, "f-0", 18),
     );
@@ -314,25 +202,56 @@ fn w05_genesis_rewritten_in_the_window_of_the_first_spend() {
     );
 }
 
-// ---- W05b: the same rewrite, locking only the entries table: the service has
-// already read the genesis, so the call is acknowledged for an entry the ledger
-// does hold; the anchor holds the honest chain, so the rewrite is refused at the
-// next spend and the cap is not defeated. ----
+// ---- W05b: the ACCEPTED post-verification race, kept separate from W05 ----
+// The same rewrite, but the attacker holds only the entries table: the service
+// reads the genesis (unblocked) BEFORE the rewrite, then its entries read waits
+// and sees the entry it appended. The call is acknowledged for a state it
+// verified (the honest chain); the rewrite landed after that verification, so
+// this is NOT a pre-verification window and proves nothing about rollback
+// detection of the call itself. What must hold instead: the anchor holds exactly
+// the honest checkpoint the call committed, the altered genesis cannot authorise
+// another spend, and a restart refuses the changed ledger. (W05 is the test of
+// the pre-verification rewrite.)
 #[test]
 fn w05b_genesis_rewritten_after_the_service_read_it() {
     let Some(w) = world() else { return };
     let d = w.dataset_a.clone();
+    let url = w.t.env0.url.clone();
+    let honest_genesis = serde_json::to_value(view_of(&url, &d).genesis).unwrap();
     let rewrite = format!("UPDATE privacy_ledgers SET genesis = jsonb_set(genesis, '{{budget,epsilon}}', '\"300.0\"'::jsonb) WHERE asset_id='{d}'");
-    let (s, v) = in_window(&w.t.env0.url, &["privacy_entries"], &rewrite, || {
+    let (s, v) = in_window(&url, &["privacy_entries"], &rewrite, || {
         spend(&w.t, &w.a_owner, &d, "f-0", 18)
     });
-    // Depending on whether the service read the genesis before the rewrite
-    // (acknowledged for an entry the ledger held then) or after (refused),
-    // the rewritten ledger is never accepted again.
-    assert!(s == 200 || (s == 500 && v["code"] == "ENC2202"), "{s} {v}");
+    assert_eq!(
+        s, 200,
+        "the genesis read precedes the rewrite, so the call is acknowledged: {s} {v}"
+    );
+    // the checkpoint of the honest chain: the original genesis and the committed entry
+    let entries: Vec<Value> = view_of(&url, &d)
+        .entries
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect();
+    let honest: LedgerView =
+        serde_json::from_value(json!({"genesis": honest_genesis, "entries": entries})).unwrap();
+    let honest_cp = honest.checkpoint().unwrap();
+    assert_eq!(honest_cp.seq, 1);
+    assert_eq!(
+        w.t.control.anchor.snapshot().ledgers[&d],
+        honest_cp,
+        "the anchor holds exactly the checkpoint (seq and root) the call committed"
+    );
+    assert_eq!(v["seq"], 1);
     let (s2, v2) = spend(&w.t, &w.a_owner, &d, "f-1", 18);
-    assert!(s2 == 500 && v2["code"] == "ENC2202", "{s2} {v2}");
-    assert!(w.t.restart().is_err() || s != 200);
+    assert!(
+        s2 == 500 && v2["code"] == "ENC2202",
+        "the altered genesis must not authorise another spend: {s2} {v2}"
+    );
+    assert_eq!(anchored_seq(&w.t, &d), 1, "nothing further is anchored");
+    assert!(
+        w.t.restart().is_err(),
+        "a restart refuses the changed ledger"
+    );
 }
 
 // ---- W06: two concurrent spends, the first one's entry erased in the window ----
@@ -442,14 +361,21 @@ fn w10_spend_on_a_ledger_created_then_erased_in_the_window() {
     let id = created["id"].as_str().unwrap().to_owned();
     assert_eq!(anchored_seq(&w.t, &id), 0);
     let del = format!("DELETE FROM privacy_entries WHERE asset_id='{id}'");
-    let (s, v) = in_window(&w.t.env0.url, &["privacy_entries"], &del, || {
-        spend(&w.t, &w.a_owner, &id, "n-0", 18)
-    });
+    let (s, v) = in_window(
+        &w.t.env0.url,
+        &["privacy_entries", "privacy_ledgers"],
+        &del,
+        || spend(&w.t, &w.a_owner, &id, "n-0", 18),
+    );
     assert!(rollback_refused(s, &v), "{s} {v}");
     assert_eq!(anchored_seq(&w.t, &id), 0);
 }
 
 // ---- W11: the background tick racing the window ----
+// The tick starts only once the helper has PROVEN the window (the attacker holds
+// both tables, the call's own post-commit read is seen waiting behind them), so a
+// tick that detects the rollback cannot stand in for a window the call missed; it
+// then races the attack and the release.
 #[test]
 fn w11_background_tick_racing_the_window() {
     let Some(w) = world() else { return };
@@ -457,17 +383,35 @@ fn w11_background_tick_racing_the_window() {
     assert_eq!(spend(&w.t, &w.a_owner, &d, "s-0", 18).0, 200);
     let seq0 = anchored_seq(&w.t, &d);
     let stop = AtomicBool::new(false);
+    let ticking = AtomicBool::new(false);
     let del = format!("DELETE FROM privacy_entries WHERE asset_id='{d}' AND seq > {seq0}");
     let (s, v) = std::thread::scope(|sc| {
         let ticker = sc.spawn(|| {
             while !stop.load(Ordering::SeqCst) {
-                w.t.control.tick();
+                if ticking.load(Ordering::SeqCst) {
+                    w.t.control.tick();
+                }
                 std::thread::sleep(Duration::from_millis(20));
             }
         });
-        let r = in_window(&w.t.env0.url, &["privacy_entries"], &del, || {
-            spend(&w.t, &w.a_owner, &d, "s-1", 18)
-        });
+        let parts = [
+            Part {
+                table: "privacy_entries",
+                sql: &del,
+            },
+            Part {
+                table: "privacy_ledgers",
+                sql: "",
+            },
+        ];
+        let start_ticks = || ticking.store(true, Ordering::SeqCst);
+        let r = in_window_hooked(
+            &w.t.env0.url,
+            &parts,
+            &Opts::default(),
+            Some(&start_ticks),
+            || spend(&w.t, &w.a_owner, &d, "s-1", 18),
+        );
         stop.store(true, Ordering::SeqCst);
         ticker.join().unwrap();
         r
@@ -481,9 +425,12 @@ fn w11_background_tick_racing_the_window() {
 fn w12_control_noop_attack_is_acknowledged() {
     let Some(w) = world() else { return };
     let d = w.dataset_a.clone();
-    let (s, v) = in_window(&w.t.env0.url, &["privacy_entries"], "SELECT 1", || {
-        spend(&w.t, &w.a_owner, &d, "s-0", 18)
-    });
+    let (s, v) = in_window(
+        &w.t.env0.url,
+        &["privacy_entries", "privacy_ledgers"],
+        "SELECT 1",
+        || spend(&w.t, &w.a_owner, &d, "s-0", 18),
+    );
     assert_eq!(s, 200, "{v}");
     assert_eq!(anchored_seq(&w.t, &d), 1);
 }
@@ -494,9 +441,12 @@ fn w13_entry_and_audit_trace_erased_in_the_window() {
     let Some(w) = world() else { return };
     let d = w.dataset_a.clone();
     let both = format!("DELETE FROM privacy_entries WHERE asset_id='{d}'; DELETE FROM audit_events WHERE seq = (SELECT max(seq) FROM audit_events); UPDATE audit_head SET seq = (SELECT max(seq) FROM audit_events), hash = (SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1) WHERE id");
-    let (s, v) = in_window(&w.t.env0.url, &["privacy_entries"], &both, || {
-        spend(&w.t, &w.a_owner, &d, "s-0", 18)
-    });
+    let (s, v) = in_window(
+        &w.t.env0.url,
+        &["privacy_entries", "privacy_ledgers"],
+        &both,
+        || spend(&w.t, &w.a_owner, &d, "s-0", 18),
+    );
     assert!(not_acked(s), "{s} {v}");
     assert_eq!(anchored_seq(&w.t, &d), 0);
 }
@@ -508,9 +458,12 @@ fn w14_earlier_entry_modified_in_the_window() {
     let d = w.dataset_a.clone();
     assert_eq!(spend(&w.t, &w.a_owner, &d, "s-0", 18).0, 200);
     let edit = format!("UPDATE privacy_entries SET entry = jsonb_set(entry, '{{event,sigma2}}', '1'::jsonb) WHERE asset_id='{d}' AND seq=1");
-    let (s, v) = in_window(&w.t.env0.url, &["privacy_entries"], &edit, || {
-        spend(&w.t, &w.a_owner, &d, "s-1", 18)
-    });
+    let (s, v) = in_window(
+        &w.t.env0.url,
+        &["privacy_entries", "privacy_ledgers"],
+        &edit,
+        || spend(&w.t, &w.a_owner, &d, "s-1", 18),
+    );
     assert!(not_acked(s), "{s} {v}");
     assert_eq!(anchored_seq(&w.t, &d), 1);
 }

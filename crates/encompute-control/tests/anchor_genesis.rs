@@ -11,9 +11,7 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
+use common::window::in_window;
 use common::*;
 use serde_json::{json, Value};
 
@@ -79,66 +77,6 @@ fn refused_unanchored(s: u16, v: &Value) -> bool {
         && v["message"]
             .as_str()
             .is_some_and(|m| m.contains("not anchored"))
-}
-
-/// Runs `acting` while a database-owner session queues ACCESS EXCLUSIVE on
-/// `tables` behind the call's write to the first of them (granted the instant
-/// the call commits), runs `attack_sql` there, and only then lets the
-/// service's post-commit read proceed.
-fn in_window<R: Send>(
-    url: &str,
-    tables: &[&str],
-    attack_sql: &str,
-    acting: impl FnOnce() -> R + Send,
-) -> R {
-    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    c.batch_execute(
-        "CREATE OR REPLACE FUNCTION atk_sleep() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(1.0); RETURN NULL; END $$ LANGUAGE plpgsql;
-         DROP TRIGGER IF EXISTS atk_slow ON audit_events;
-         CREATE TRIGGER atk_slow AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION atk_sleep();",
-    )
-    .unwrap();
-    let done = AtomicBool::new(false);
-    let r = std::thread::scope(|s| {
-        let h = s.spawn(|| {
-            let mut a = postgres::Client::connect(url, postgres::NoTls).unwrap();
-            let me: i32 = a.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
-            loop {
-                let n: i64 = a
-                    .query_one(
-                        "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
-                         WHERE c.relname=$1 AND l.mode='RowExclusiveLock' AND l.granted AND l.pid<>$2",
-                        &[&tables[0], &me],
-                    )
-                    .unwrap()
-                    .get(0);
-                if n > 0 {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            let mut tx = a.transaction().unwrap();
-            tx.batch_execute(&format!(
-                "LOCK TABLE {} IN ACCESS EXCLUSIVE MODE",
-                tables.join(", ")
-            ))
-            .unwrap();
-            std::thread::sleep(Duration::from_millis(500));
-            tx.batch_execute(&format!(
-                "SET LOCAL session_replication_role = replica; {attack_sql}"
-            ))
-            .unwrap();
-            tx.commit().unwrap();
-            done.store(true, Ordering::SeqCst);
-        });
-        let r = acting();
-        h.join().unwrap();
-        r
-    });
-    assert!(done.load(Ordering::SeqCst));
-    c.batch_execute("DROP TRIGGER IF EXISTS atk_slow ON audit_events")
-        .unwrap();
-    r
 }
 
 #[cfg(unix)]

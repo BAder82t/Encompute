@@ -21,6 +21,8 @@ use encompute_control::transport::InMemoryTransport;
 use encompute_control::Control;
 use encompute_verification::ServiceSigner;
 
+pub mod window;
+
 pub const SECRET: &str = "test-development-secret";
 
 static N: AtomicU64 = AtomicU64::new(0);

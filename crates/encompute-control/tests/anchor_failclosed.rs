@@ -10,10 +10,10 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
+use common::window::in_window;
 use common::*;
 use encompute_control::anchor::{AnchorStore, DirAnchor, StateAnchor};
 use encompute_control::authn::Authenticator;
@@ -357,60 +357,6 @@ fn fc6_a_checkpoint_the_ledger_does_not_extend_is_refused_and_not_anchored() {
     assert_eq!(t.control.anchor.snapshot().ledgers[&d], before);
 }
 
-/// Runs `acting` while a database-owner session queues ACCESS EXCLUSIVE on
-/// `tables` behind the call's write (granted the instant it commits) and runs
-/// `attack_sql` before the service's post-commit read.
-fn in_window<R: Send>(
-    url: &str,
-    tables: &[&str],
-    attack_sql: &str,
-    acting: impl FnOnce() -> R + Send,
-) -> R {
-    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    c.batch_execute(
-        "CREATE OR REPLACE FUNCTION atk_sleep() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(1.0); RETURN NULL; END $$ LANGUAGE plpgsql;
-         DROP TRIGGER IF EXISTS atk_slow ON audit_events;
-         CREATE TRIGGER atk_slow AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION atk_sleep();",
-    )
-    .unwrap();
-    let done = AtomicBool::new(false);
-    let r = std::thread::scope(|s| {
-        let h = s.spawn(|| {
-            let mut a = postgres::Client::connect(url, postgres::NoTls).unwrap();
-            let me: i32 = a.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
-            loop {
-                let n: i64 = a
-                    .query_one(
-                        "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
-                         WHERE c.relname=$1 AND l.mode='RowExclusiveLock' AND l.granted AND l.pid<>$2",
-                        &[&tables[0], &me],
-                    )
-                    .unwrap()
-                    .get(0);
-                if n > 0 {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            let mut tx = a.transaction().unwrap();
-            tx.batch_execute(&format!("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE", tables.join(", ")))
-                .unwrap();
-            std::thread::sleep(Duration::from_millis(500));
-            tx.batch_execute(&format!("SET LOCAL session_replication_role = replica; {attack_sql}"))
-                .unwrap();
-            tx.commit().unwrap();
-            done.store(true, Ordering::SeqCst);
-        });
-        let r = acting();
-        h.join().unwrap();
-        r
-    });
-    assert!(done.load(Ordering::SeqCst));
-    c.batch_execute("DROP TRIGGER IF EXISTS atk_slow ON audit_events")
-        .unwrap();
-    r
-}
-
 /// Another user is disabled instead of the one the call disabled: the
 /// database holds *a* disable, not the call's (a mismatched ID).
 #[test]
@@ -480,9 +426,12 @@ fn fc8_a_different_event_in_the_ledger_is_refused() {
         "DELETE FROM privacy_entries WHERE asset_id='{d}' AND seq > 1;
          INSERT INTO privacy_entries (asset_id, seq, entry) VALUES ('{d}', 2, '{ej}'::jsonb)"
     );
-    let (s, v) = in_window(&t.env0.url, &["privacy_entries"], &attack, || {
-        spend(t, &w.a_owner, &d, "e1")
-    });
+    let (s, v) = in_window(
+        &t.env0.url,
+        &["privacy_entries", "privacy_ledgers"],
+        &attack,
+        || spend(t, &w.a_owner, &d, "e1"),
+    );
     assert!(rollback_refused(s, &v, "PRIVACY"), "{s} {v}");
     assert_eq!(anchored_seq(t, &d), 1, "the forged entry is not anchored");
     sql(&t.env0.url, "SELECT 1");
