@@ -530,6 +530,10 @@ jobs:
   # with the same PostgreSQL and OpenBao service containers as release-check,
   # first the original tests, then passively instrumented copies, and uploads
   # the logs and traces with a classification (harness / product / inconclusive).
+  # The instrumented phase also turns on the PostgreSQL server log of every
+  # statement and lock wait (ALTER SYSTEM through the service container, no
+  # secret and no parameter values) so each failure carries a direct,
+  # statement-level timeline.
   diag-tests:
     name: diag-tests-${{ matrix.n }}
     if: ${{ inputs.diagnostic }}
@@ -581,7 +585,8 @@ jobs:
         run: |
           [ -f diag-tests-out/classification.txt ] && {
             echo '```'
-            sed -n '/^SUMMARY/,$p' diag-tests-out/classification.txt | head -120
+            sed -n '/^SUMMARY/,/^DETAIL of non-window_ok/p' diag-tests-out/classification.txt | head -70
+            sed -n '/^DIRECT CHRONOLOGY/,/^TIMELINES/p' diag-tests-out/classification.txt | head -60
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

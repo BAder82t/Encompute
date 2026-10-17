@@ -16,6 +16,8 @@
 # env:   ENCOMPUTE_TEST_DATABASE_URL   required (the PostgreSQL service)
 #        DIAG_N              repetitions of each run kind (default 40)
 #        DIAG_FULL_RUNS      whole-crate sequential runs, as the control plane row (default 2)
+#        DIAG_SKIP_ORIGINAL  1: skip phase A and the whole-crate runs (local use; CI runs both)
+#        DIAG_ONLY_TEST      adv | neg: run only that test (local use; default both)
 #        DIAG_RUNNER         label of this runner (default 1)
 #        DIAG_PG_CONTAINER   docker id of the PostgreSQL service: when set and
 #                            track_commit_timestamp is off, it is enabled between phase A and
@@ -82,6 +84,34 @@ enable_commit_ts() {
   echo "track_commit_timestamp after restart: ${cur:-unknown}" | tee -a "$OUT/notes.txt"
 }
 
+# Direct statement-level chronology: the PostgreSQL service logs every statement (parse, bind,
+# execute, with durations), every lock wait longer than 1 ms (who waits for what, who holds it,
+# and `acquired .. after N ms` when it ends), and the transaction id of each line. Prefix
+# '%m [%p] x=%x a=%a d=%d ': time, backend pid, transaction id, application name, database.
+# Parameters are not logged (log_parameter_max_length = 0), so no row content reaches the log.
+# Only phase B (the instrumented runs) is logged; phase A stays unperturbed.
+SERVER_LOG=0
+enable_server_log() {
+  if [ -z "${DIAG_PG_CONTAINER:-}" ]; then
+    echo "no container: the server log is not enabled (no direct chronology)" | tee -a "$OUT/notes.txt"
+    return 0
+  fi
+  local kv
+  for kv in "log_statement=all" "log_min_duration_statement=0" "log_duration=off" \
+            "log_line_prefix=%m [%p] x=%x a=%a d=%d " "log_lock_waits=on" "deadlock_timeout=1ms" \
+            "log_connections=on" "log_parameter_max_length=0" "log_error_verbosity=default"; do
+    psql_q "ALTER SYSTEM SET ${kv%%=*} = '${kv#*=}'" >/dev/null 2>&1 || echo "ALTER SYSTEM ${kv%%=*} failed" | tee -a "$OUT/notes.txt"
+  done
+  psql_q "SELECT pg_reload_conf()" >/dev/null 2>&1
+  sleep 1
+  local s
+  for s in log_statement log_min_duration_statement log_line_prefix log_lock_waits deadlock_timeout log_connections log_parameter_max_length; do
+    echo "server log setting $s = $(psql_q "SHOW $s" 2>&1)" | tee -a "$OUT/notes.txt"
+  done
+  [ "$(psql_q 'SHOW log_statement' 2>/dev/null)" = all ] && [ "$(psql_q 'SHOW log_lock_waits' 2>/dev/null)" = on ] && SERVER_LOG=1
+  echo "SERVER_LOG=$SERVER_LOG" | tee -a "$OUT/notes.txt"
+}
+
 # run_one <variant> <mode> <iteration> <binary> <test> <require 0|1>
 run_one() {
   local variant="$1" mode="$2" it="$3" bin="$4" test="$5" req="$6"
@@ -98,24 +128,35 @@ run_one() {
   if [ "$variant" = traced ]; then tr="trace/$id.jsonl"; env_cmd+=("ENCOMPUTE_TEST_TRACE=$OUT/$tr"); fi
   local -a cmd=(cargo test -q -p encompute-control --test "$b")
   [ "$mode" = alone ] && cmd+=(-- --exact "$test")
-  local t0 t1 rc
+  local t0 t1 rc pg=""
   t0=$(date +%s)
   "${env_cmd[@]}" "${cmd[@]}" >"$OUT/$log" 2>&1
   rc=$?
   t1=$(date +%s)
   rm -rf "$tmp"
-  printf '{"id":"%s","runner":"%s","variant":"%s","mode":"%s","iteration":%d,"binary":"%s","test":"%s","rc":%d,"secs":%d,"start":%d,"log":"%s","trace":"%s"}\n' \
-    "$id" "$RUNNER" "$variant" "$mode" "$it" "$b" "$test" "$rc" "$((t1 - t0))" "$t0" "$log" "$tr" >>"$RES"
+  if [ "$variant" = traced ] && [ "$SERVER_LOG" = 1 ] && [ -s "$OUT/$tr" ]; then
+    # the server log of this run (one second of margin), reduced to the databases of the run's
+    # in_window calls and scrubbed of token-like runs
+    pg="logs/pg-$id.log.gz"
+    docker logs --since "$((t0 - 1))" "$DIAG_PG_CONTAINER" 2>&1 \
+      | python3 -I "$(dirname "$0")/diag-classify-window.py" --filter-log "$OUT/$tr" | gzip >"$OUT/$pg" || pg=""
+  fi
+  printf '{"id":"%s","runner":"%s","variant":"%s","mode":"%s","iteration":%d,"binary":"%s","test":"%s","rc":%d,"secs":%d,"start":%d,"log":"%s","trace":"%s","pglog":"%s"}\n' \
+    "$id" "$RUNNER" "$variant" "$mode" "$it" "$b" "$test" "$rc" "$((t1 - t0))" "$t0" "$log" "$tr" "$pg" >>"$RES"
   echo "[$(date -u +%T)] $id rc=$rc $((t1 - t0))s"
 }
 
 phase() { # phase <variant>
   local v="$1" i
   for ((i = 1; i <= N; i++)); do
-    run_one "$v" load "$i" "$ADV_BIN" "$ADV_TEST" 0   # 'Rust workspace' row: no ENCOMPUTE_REQUIRE_SERVICES
-    run_one "$v" load "$i" "$NEG_BIN" "$NEG_TEST" 1   # 'control plane' row: ENCOMPUTE_REQUIRE_SERVICES=1
-    run_one "$v" alone "$i" "$ADV_BIN" "$ADV_TEST" 0
-    run_one "$v" alone "$i" "$NEG_BIN" "$NEG_TEST" 1
+    if [ "${DIAG_ONLY_TEST:-}" != neg ]; then
+      run_one "$v" load "$i" "$ADV_BIN" "$ADV_TEST" 0   # 'Rust workspace' row: no ENCOMPUTE_REQUIRE_SERVICES
+    fi
+    if [ "${DIAG_ONLY_TEST:-}" != adv ]; then
+      run_one "$v" load "$i" "$NEG_BIN" "$NEG_TEST" 1   # 'control plane' row: ENCOMPUTE_REQUIRE_SERVICES=1
+    fi
+    if [ "${DIAG_ONLY_TEST:-}" != neg ]; then run_one "$v" alone "$i" "$ADV_BIN" "$ADV_TEST" 0; fi
+    if [ "${DIAG_ONLY_TEST:-}" != adv ]; then run_one "$v" alone "$i" "$NEG_BIN" "$NEG_TEST" 1; fi
   done
 }
 
@@ -123,8 +164,10 @@ echo "== build (once)"
 ( cargo test -q -p encompute-control --no-run ) >"$OUT/build.log" 2>&1 || { tail -30 "$OUT/build.log"; echo "build failed"; exit 1; }
 record_env before
 
+if [ "${DIAG_SKIP_ORIGINAL:-0}" != 1 ]; then
 echo "== phase A: original tests"
 phase original
+fi
 
 # Whole-crate sequential runs (all test binaries of the crate one after the other, as the
 # control plane row runs them), original tests, to keep the sequence the release check has.
@@ -134,6 +177,7 @@ for f in crates/encompute-control/tests/*.rs; do
   b="$(basename "$f" .rs)"
   case "$b" in *_traced) ;; *) FULL_ARGS+=(--test "$b") ;; esac
 done
+[ "${DIAG_SKIP_ORIGINAL:-0}" = 1 ] && FULL=0
 for ((i = 1; i <= FULL; i++)); do
   id="r${RUNNER}-original-full-$(printf %03d "$i")"
   tmp="$(mktemp -d "$OUT/tmp.XXXXXX")"
@@ -147,6 +191,7 @@ done
 
 echo "== commit timestamps for phase B"
 enable_commit_ts
+enable_server_log
 record_env after
 
 echo "== phase B: instrumented copies"

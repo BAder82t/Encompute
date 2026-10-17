@@ -18,6 +18,19 @@
 //! * everything else (audit rows of the call, xids, commit order) is read
 //!   AFTER the call, on the helper's own connection.
 //!
+//! Direct statement-level chronology (added): when the PostgreSQL service logs every statement
+//! and every lock wait (scripts/release/diag-tests.sh, phase B), the helper additionally
+//! * tags its own sessions (`application_name` diag-helper / diag-attacker / diag-monitor) so
+//!   the server log names them, and silences the monitor's and the attacker's poll statements
+//!   (session-level `log_statement=none`), which would only flood the log;
+//! * runs a `clock_timestamp()` handshake (marked `diag:hs:..`) and a marker statement
+//!   `diag:call_start` before the call and `diag:response` the instant `acting()` returns, on
+//!   the helper's own idle connection, so the server log carries the response time on the
+//!   server clock;
+//! * emits a `server_ids` event: database name/oid, the oids of the tables, the pids.
+//! The verdict from this server log is computed by scripts/release/diag-classify-window.py.
+//! None of this adds a lock or a sleep inside the call.
+//!
 //! No sleep and no lock is added. Events are kept in memory and written, in
 //! one append, after the call; set `ENCOMPUTE_TEST_TRACE=<file>`.
 //!
@@ -256,8 +269,55 @@ pub fn in_window_traced<R: Send + Debug>(
         .get(0);
     let helper_pid: i32 = c.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
 
+    // ---- direct chronology set-up (before the call starts) ----
+    c.batch_execute(&format!("SET application_name = 'diag-helper-{call_id}'"))
+        .unwrap();
+    mon.batch_execute("SET application_name = 'diag-monitor'; SET log_statement = 'none'; SET log_min_duration_statement = -1")
+        .unwrap();
+    // Clock handshake: server clock minus client wall clock, from the round trip of least
+    // delay. Server log lines (%m) are on the server clock; the in-test times are on this one.
+    let mut hs_best: Option<(i64, i64, i64)> = None; // (rtt_us, offset_us, server_us)
+    for i in 0..7 {
+        let b = wall_us();
+        let srv: i64 = c
+            .query_one(
+                &format!("SELECT (extract(epoch from clock_timestamp())*1000000)::bigint /* diag:hs:{call_id}:{i} */"),
+                &[],
+            )
+            .map(|r| r.get(0))
+            .unwrap_or(0);
+        let a = wall_us();
+        let rtt = a - b;
+        let off = srv - (a + b) / 2;
+        if hs_best.is_none_or(|h| rtt < h.0) {
+            hs_best = Some((rtt, off, srv));
+        }
+    }
+    let (hs_rtt_us, hs_offset_us, _) = hs_best.unwrap_or((0, 0, 0));
+    let db_name: String = c.query_one("SELECT current_database()::text", &[]).unwrap().get(0);
+    let db_oid: i64 = c
+        .query_one("SELECT oid::bigint FROM pg_database WHERE datname = current_database()", &[])
+        .unwrap()
+        .get(0);
+    let rel_oids: Vec<(String, i64)> = c
+        .query(
+            "SELECT relname::text, oid::bigint FROM pg_class WHERE relname = ANY($1) AND relnamespace = 'public'::regnamespace ORDER BY relname",
+            &[&rel],
+        )
+        .map(|rs| rs.iter().map(|r| (r.get(0), r.get(1))).collect())
+        .unwrap_or_default();
+    c.batch_execute(&format!("SELECT 'diag:call_start:{call_id}'"))
+        .unwrap();
+
     let t0 = Instant::now();
     let w0 = wall_us();
+    sink.lock().unwrap().ev(json!({
+        "ev": "server_ids", "call_id": call_id, "test": test, "database": db_name, "database_oid": db_oid,
+        "relation_oids": rel_oids.iter().map(|(n, o)| (n.clone(), json!(o))).collect::<serde_json::Map<String, Value>>(),
+        "helper_pid": helper_pid, "monitor_pid": mon_pid,
+        "clock_offset_us": hs_offset_us, "clock_rtt_us": hs_rtt_us,
+        "clock_note": "server_time_us = client_wall_us + clock_offset_us",
+    }));
     sink.lock().unwrap().ev(json!({
         "ev": "call_start", "call_id": call_id, "test": test, "t_ms": 0.0, "wall_us": w0,
         "tables": tables, "attack_sql": scrub(attack_sql, 300), "audit_baseline_seq": baseline,
@@ -298,6 +358,12 @@ pub fn in_window_traced<R: Send + Debug>(
             let mut a = postgres::Client::connect(url, postgres::NoTls).unwrap();
             let me: i32 = a.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
             att.lock().unwrap().pid = me;
+            // the poll (every 5 ms) is not logged by the server; the attacker's own statements
+            // from the LOCK onwards are
+            a.batch_execute(&format!(
+                "SET application_name = 'diag-attacker-{call_id}'; SET log_statement = 'none'; SET log_min_duration_statement = -1"
+            ))
+            .unwrap();
             // wait until another backend holds RowExclusiveLock on the table (original predicate)
             let mut polls = 0u64;
             let pids: Vec<i32> = loop {
@@ -320,6 +386,7 @@ pub fn in_window_traced<R: Send + Debug>(
                 g.match_pids = pids;
                 g.lock_request_ms = g.match_t_ms;
             }
+            a.batch_execute("SET log_statement = 'all'; SET log_min_duration_statement = 0").unwrap();
             let mut tx = a.transaction().unwrap();
             // blocks until the service's transaction has committed
             // SELF-TEST of the classifier only (never set in CI): take the first table, wait,
@@ -378,6 +445,9 @@ pub fn in_window_traced<R: Send + Debug>(
         let r = acting();
         call_end_ms = t0.elapsed().as_secs_f64() * 1000.0;
         call_end_wall = wall_us();
+        // the response, on the server clock: a marker statement on the helper's idle connection
+        // (the service and the attacker are not touched)
+        let _ = c.batch_execute(&format!("SELECT 'diag:response:{call_id}'"));
         let hr = h.join();
         stop.store(true, Ordering::SeqCst);
         let _ = mon_h.join();
