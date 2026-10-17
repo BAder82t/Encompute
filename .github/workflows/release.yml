@@ -8,6 +8,8 @@ name: release
 #   push a tag v0.3.0-rc.1 (on release/0.3)   -> the full pipeline and a draft
 #   workflow_dispatch                          -> a dry run: artifacts only, no release
 #   workflow_dispatch -f diagnostic=true       -> the nonpublishing diagnostic (binary digests only)
+#   workflow_dispatch -f rehearsal=true        -> the nonpublishing rehearsal of the Ubuntu 24.04 release path
+#                                                 (everything but signing, registry push and the release)
 #
 # Actions are pinned by commit; the comment names the release.
 
@@ -18,6 +20,10 @@ on:
     inputs:
       diagnostic:
         description: "Nonpublishing diagnostic: build the release binaries in several configurations on two clean runners and compare their digests. Runs none of the release jobs."
+        type: boolean
+        default: false
+      rehearsal:
+        description: "Nonpublishing rehearsal of the complete Ubuntu 24.04 release path: the Linux binaries and tarball, the five images built locally, the full release check, and the shipped-binary comparison. Runs none of the other jobs. No signing, no registry, no release."
         type: boolean
         default: false
 
@@ -37,7 +43,7 @@ env:
 jobs:
   prepare:
     name: version and source archive
-    if: ${{ !inputs.diagnostic }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -85,7 +91,7 @@ jobs:
 
   binaries:
     name: binaries and wheel (${{ matrix.target }})
-    if: ${{ !inputs.diagnostic }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
     needs: prepare
     strategy:
       fail-fast: true
@@ -162,7 +168,7 @@ jobs:
 
   images:
     name: container images
-    if: ${{ !inputs.diagnostic }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
     needs: prepare
     runs-on: ubuntu-24.04
     permissions:
@@ -318,7 +324,7 @@ jobs:
   # released images. A required row that fails or is skipped stops the release.
   release-check:
     name: release check (all gates)
-    if: ${{ !inputs.diagnostic }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
     needs: [prepare, images]
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -392,7 +398,7 @@ jobs:
 
   release:
     name: checksums, signatures, draft release
-    if: ${{ !inputs.diagnostic }}
+    if: ${{ !inputs.diagnostic && !inputs.rehearsal }}
     needs: [prepare, binaries, images, release-check]
     runs-on: ubuntu-24.04
     permissions:
@@ -476,7 +482,7 @@ jobs:
   # configurations on two independent runners and compares the digests.
   diag-build:
     name: diag-build-${{ matrix.n }}
-    if: ${{ inputs.diagnostic }}
+    if: ${{ inputs.diagnostic && !inputs.rehearsal }}
     strategy:
       fail-fast: false
       matrix:
@@ -506,7 +512,7 @@ jobs:
 
   diag-compare:
     name: diag-compare
-    if: ${{ inputs.diagnostic }}
+    if: ${{ inputs.diagnostic && !inputs.rehearsal }}
     needs: diag-build
     runs-on: ubuntu-24.04
     steps:
@@ -521,3 +527,362 @@ jobs:
           path: diag-2
       - name: compare the digests within and across the two jobs
         run: ./scripts/release/diag-compare-jobs.sh diag-1 diag-2
+
+  # ---- Rehearsal mode (workflow_dispatch with rehearsal=true) ----------------
+  # Nonpublishing rehearsal of the Ubuntu 24.04 release path with the same steps
+  # the tag workflow runs, up to but excluding signing, the registry push and
+  # the release: the Linux binaries, wheel and tarball, the five images (built
+  # and kept on the runner, never pushed), the whole release check including
+  # the shipped-binary identity comparison. Every job here has a read-only
+  # token, no secrets, no registry login. When rehearsal=true no other job runs.
+  rehearse-prepare:
+    name: rehearse version and epoch
+    if: ${{ inputs.rehearsal }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      epoch: ${{ steps.v.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      # The `prepare` job's computation, unchanged.
+      - id: v
+        name: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            TAG="${GITHUB_REF_NAME}"
+            scripts/release/check-version.sh "$TAG"
+            V="${TAG#v}"
+          else
+            TAG=""
+            V="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)-dev.$(git rev-parse --short=12 HEAD)"
+          fi
+          case "$V" in *-rc.*|*-dev.*) PRE=true ;; *) PRE=false ;; esac
+          {
+            echo "version=$V"
+            echo "tag=$TAG"
+            echo "prerelease=$PRE"
+            echo "epoch=$(git log -1 --format=%ct)"
+          } >> "$GITHUB_OUTPUT"
+      - name: pins
+        run: scripts/release/check-pins.sh --network
+
+  # The `binaries` job for linux-x86_64, step for step (none is dropped); the
+  # artifact is the shipped tarball and its companions.
+  rehearse-binaries:
+    name: rehearse binaries and wheel (${{ matrix.target }})
+    if: ${{ inputs.rehearsal }}
+    needs: rehearse-prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      V: ${{ needs.rehearse-prepare.outputs.version }}
+      SOURCE_DATE_EPOCH: ${{ needs.rehearse-prepare.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - if: runner.os == 'macOS'
+        run: brew install libomp
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # No build cache: a release builds from a clean state.
+      - name: OpenFHE (pinned tag, commit verified)
+        run: ./scripts/install-openfhe.sh
+      - name: release binaries
+        run: |
+          # The exact shipping build (the diagnostic runs the same script): it
+          # resolves and validates OPENFHE_ROOT before sourcing env.sh.
+          OPENFHE_ROOT="$PWD/.deps/openfhe" scripts/release/build-release-binaries.sh "$PWD/target"
+          ./scripts/audit-evaluator-binary.sh target/release/encompute-evaluator
+      # Fail closed: no build path may remain in a Linux binary.
+      - name: binary path guard (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          scripts/release/check-binary-paths.sh target/release/encompute \
+            target/release/encompute-evaluator target/release/encompute-control
+      - name: Python wheel
+        run: |
+          python -m venv .venv
+          # maturin from the lock, hashes checked.
+          awk '/^maturin==/{p=1; print; next} p && /^[a-z]/{p=0} p' scripts/release/python/constraints.txt > "$RUNNER_TEMP/maturin.txt"
+          .venv/bin/pip install --require-hashes --no-deps -r "$RUNNER_TEMP/maturin.txt"
+          # OPENFHE_ROOT first: env.sh computes the OpenFHE path remap from it.
+          export OPENFHE_ROOT="$PWD/.deps/openfhe"
+          . scripts/release/env.sh "$PWD/target"
+          .venv/bin/maturin build --release --locked --features openfhe --auditwheel repair \
+            -m crates/encompute-py/Cargo.toml -o wheels
+          ls -l wheels
+      - name: commercial dependency audit (binaries and wheel)
+        run: WHEELS="$(ls wheels/*.whl)" ./scripts/audit-commercial-build.sh target/release
+      - name: package, SBOMs
+        run: |
+          mkdir -p dist
+          T="${{ matrix.target }}"
+          python3 scripts/release/pack.py "dist/encompute-$V-$T.tar.gz" "encompute-$V-$T" \
+            target/release/encompute target/release/encompute-evaluator target/release/encompute-control \
+            LICENSE LICENSING.md THIRD_PARTY_NOTICES.md
+          cp wheels/*.whl dist/
+          W="$(ls dist/*.whl)"
+          python3 scripts/release/python_licenses.py scripts/release/python/constraints.txt \
+            --json target/python-licenses.json
+          python3 scripts/sbom.py --artifact cli --file target/release/encompute -o "dist/encompute-$V-$T.encompute.cdx.json"
+          python3 scripts/sbom.py --artifact evaluator --file target/release/encompute-evaluator -o "dist/encompute-$V-$T.encompute-evaluator.cdx.json"
+          python3 scripts/sbom.py --artifact control --file target/release/encompute-control -o "dist/encompute-$V-$T.encompute-control.cdx.json"
+          python3 scripts/sbom.py --artifact wheel --file "$W" --python-lock scripts/release/python/constraints.txt \
+            --python-licenses target/python-licenses.json -o "$W.cdx.json"
+          ls -l dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rehearse-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The `images` and `release-check` jobs in one: the five images are built
+  # here (load only, never pushed) and the release check scans exactly those,
+  # so no multi-gigabyte image transfer between jobs is needed.
+  rehearse-release-check:
+    name: rehearse release check (all gates)
+    if: ${{ inputs.rehearsal }}
+    needs: rehearse-prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: encompute
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: encompute
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+      openbao:
+        image: openbao/openbao:2.1.0
+        env:
+          BAO_DEV_ROOT_TOKEN_ID: ci-root
+          BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+        options: --cap-add IPC_LOCK
+    env:
+      ENCOMPUTE_TEST_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
+      ENCOMPUTE_TEST_BAO_ADDR: http://127.0.0.1:8200
+      ENCOMPUTE_TEST_BAO_TOKEN: ci-root
+      # The local images built below, by tag (the real job passes registry digests).
+      IMAGES: encompute-evaluator:rehearsal encompute-control:rehearsal encompute-services:rehearsal encompute-confidential-space:rehearsal encompute-training:rehearsal
+      # scan.sh fails unless each of these was among the scanned images.
+      REQUIRE_IMAGES: encompute-evaluator encompute-control encompute-services encompute-confidential-space encompute-training
+      REQUIRE_TOOLS: "1"
+    steps:
+      # Not in the real job: the image builds share this runner with the release
+      # check, so free the space the hosted image preinstalls.
+      - name: free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-deny,cargo-audit
+      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - name: trivy, pip-audit, PostgreSQL client
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt"
+          sha256sum --check --ignore-missing "trivy_${TRIVY_VERSION}_checksums.txt"
+          sudo tar -xzf "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" -C /usr/local/bin trivy
+          python -m pip install -q "pip-audit==2.10.0"
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client >/dev/null
+      - run: ./scripts/install-openfhe.sh
+      # The five images of the `images` job: same Dockerfiles, target, platform,
+      # build arguments and labels; loaded into the local daemon, not pushed.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.evaluator
+          platforms: linux/amd64
+          build-args: SOURCE_DATE_EPOCH=${{ needs.rehearse-prepare.outputs.epoch }}
+          tags: encompute-evaluator:rehearsal
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          load: true
+          push: false
+          provenance: false
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.control
+          platforms: linux/amd64
+          build-args: SOURCE_DATE_EPOCH=${{ needs.rehearse-prepare.outputs.epoch }}
+          tags: encompute-control:rehearsal
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          load: true
+          push: false
+          provenance: false
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.services
+          platforms: linux/amd64
+          build-args: SOURCE_DATE_EPOCH=${{ needs.rehearse-prepare.outputs.epoch }}
+          tags: encompute-services:rehearsal
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          load: true
+          push: false
+          provenance: false
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/confidential-space/Dockerfile
+          platforms: linux/amd64
+          build-args: SOURCE_DATE_EPOCH=${{ needs.rehearse-prepare.outputs.epoch }}
+          tags: encompute-confidential-space:rehearsal
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          load: true
+          push: false
+          provenance: false
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/confidential-space-training/Dockerfile
+          target: production
+          platforms: linux/amd64
+          build-args: SOURCE_DATE_EPOCH=${{ needs.rehearse-prepare.outputs.epoch }}
+          tags: encompute-training:rehearsal
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          load: true
+          push: false
+          provenance: false
+      - name: the five images are loaded
+        run: |
+          for i in $IMAGES; do docker image inspect --format "$i {{.Id}} {{.Architecture}}" "$i"; done
+          df -h /
+      - name: scripts/release-check.sh
+        run: ./scripts/release-check.sh --repro
+      - if: always()
+        name: reports
+        run: |
+          mkdir -p reports
+          cp -r target/release-scan target/sbom reports/ 2>/dev/null || true
+          [ -f target/release-scan/vulnerabilities.md ] && cat target/release-scan/vulnerabilities.md >> "$GITHUB_STEP_SUMMARY" || true
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate-reports
+          path: reports/
+
+  # The `release` job's check that the shipped Linux binaries are the ones the
+  # release check reproduced, and nothing after it.
+  rehearse-compare:
+    name: rehearse shipped-binary comparison
+    if: ${{ inputs.rehearsal }}
+    needs: [rehearse-prepare, rehearse-binaries, rehearse-release-check]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      V: ${{ needs.rehearse-prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rehearse-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: gate-reports
+          path: gate
+      - name: both digest lists
+        continue-on-error: true
+        run: |
+          echo "== the release check's reproduced digests (gate/release-scan/repro-digests.txt)"
+          cat gate/release-scan/repro-digests.txt
+          echo "== the shipped tarball dist/encompute-$V-linux-x86_64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/shipped"
+          tar -xzf "dist/encompute-$V-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/shipped"
+          (cd "$RUNNER_TEMP/shipped"/* && sha256sum encompute encompute-evaluator encompute-control)
+      - name: Linux binaries are the ones the release check reproduced
+        run: scripts/release/compare-shipped-digests.sh gate/release-scan/repro-digests.txt "dist/encompute-$V-linux-x86_64.tar.gz"
+
+  # Extra: the corrected proven-window tests, repeatedly, on a loaded machine.
+  rehearse-window-load:
+    name: rehearse window tests under CPU load
+    if: ${{ inputs.rehearsal }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: encompute
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: encompute
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+      openbao:
+        image: openbao/openbao:2.1.0
+        env:
+          BAO_DEV_ROOT_TOKEN_ID: ci-root
+          BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+        options: --cap-add IPC_LOCK
+    env:
+      ENCOMPUTE_TEST_DATABASE_URL: postgres://encompute:ci-only-password@127.0.0.1:5432/encompute
+      ENCOMPUTE_TEST_BAO_ADDR: http://127.0.0.1:8200
+      ENCOMPUTE_TEST_BAO_TOKEN: ci-root
+      ENCOMPUTE_REQUIRE_SERVICES: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - name: build the window tests once
+        run: |
+          for t in anchor_window_adversarial anchor_negatives anchor_window anchor_genesis anchor_failclosed; do
+            cargo test -q -p encompute-control --test "$t" --no-run
+          done
+      - name: 20 runs of each under CPU load
+        run: |
+          mkdir -p window-logs
+          N=$(( $(nproc) * 4 ))
+          for _ in $(seq "$N"); do yes > /dev/null & done
+          trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
+          echo "load: $N busy loops on $(nproc) cores"
+          rc=0
+          for t in anchor_window_adversarial anchor_negatives anchor_window anchor_genesis anchor_failclosed; do
+            for i in $(seq 20); do
+              if ! cargo test -q -p encompute-control --test "$t" -- --nocapture > "window-logs/$t.$i.log" 2>&1; then
+                echo "FAIL $t run $i"; tail -n 30 "window-logs/$t.$i.log"; rc=1
+              fi
+            done
+          done
+          if grep -l INCONCLUSIVE window-logs/*.log; then echo "INCONCLUSIVE seen"; rc=1; fi
+          [ "$rc" = 0 ] && echo "all 100 runs passed, none inconclusive"
+          exit "$rc"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: window-load-logs
+          path: window-logs/
+          if-no-files-found: ignore
