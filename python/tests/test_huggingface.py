@@ -167,6 +167,103 @@ def test_package_settings_outside_the_allowlist_are_refused(repo, tmp_path):
     hf.import_model(str(repo))
 
 
+def _with_config(repo, tmp_path, name, text):
+    d = tmp_path / name
+    shutil.copytree(repo, d)
+    (d / "config.json").write_text(text)
+    return d
+
+
+def test_configuration_files_and_oversized_configs_are_refused_before_any_parser(
+        repo, tmp_path, monkeypatch):
+    """CVE-2025-3263: Transformers 4.46 matches every entry of a config.json `configuration_files`
+    list with config\\.(.*)\\.json, which is quadratic in an entry that repeats `config.` and does
+    not end in .json (measured: 70 KB about 3 s, 140 KB about 12 s, 280 KB about 53 s). Import
+    refuses the list, a config.json over the cap and invalid JSON, with no Transformers loader
+    or configuration function ever called."""
+    import time
+
+    import transformers
+    from transformers import configuration_utils as cu
+
+    def forbidden(*a, **k):
+        raise AssertionError("a Transformers parser ran on an unchecked configuration")
+
+    monkeypatch.setattr(cu, "get_configuration_file", forbidden)
+    monkeypatch.setattr(cu.PretrainedConfig, "get_config_dict", classmethod(forbidden))
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", classmethod(forbidden))
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", classmethod(forbidden))
+    good = json.loads((repo / "config.json").read_text())
+    for kb in (70, 140, 280):
+        cfg = dict(good, configuration_files=["config." * (kb * 1000 // 7)])
+        text = json.dumps(cfg)
+        assert kb * 1000 < len(text) < hf.MAX_CONFIG_BYTES
+        d = _with_config(repo, tmp_path, f"cf-{kb}", text)
+        t = time.monotonic()
+        refused(lambda d=d: hf.import_model(str(d)), "configuration_files")
+        assert time.monotonic() - t < 5, kb
+    # Any value, nested too.
+    for i, cfg in enumerate((dict(good, configuration_files=[]),
+                             dict(good, configuration_files=["config.json"]),
+                             dict(good, text_config={"configuration_files": ["x"]}))):
+        d = _with_config(repo, tmp_path, f"cf-any-{i}", json.dumps(cfg))
+        refused(lambda d=d: hf.import_model(str(d)), "configuration_files")
+    # Over the cap, and not valid JSON or UTF-8: refused, not parsed.
+    big = json.dumps(good) + " " * hf.MAX_CONFIG_BYTES
+    d = _with_config(repo, tmp_path, "cf-big", big)
+    refused(lambda: hf.import_model(str(d)))
+    for i, bad in enumerate(("{", "[1]", "")):
+        d = _with_config(repo, tmp_path, f"cf-bad-{i}", bad)
+        refused(lambda d=d: hf.import_model(str(d)))
+    d = tmp_path / "cf-latin1"
+    shutil.copytree(repo, d)
+    (d / "config.json").write_bytes(b'{"model_type": "bert", "x": "\xff"}')
+    refused(lambda: hf.import_model(str(d)), "UTF-8")
+    # The unchanged repository, and a large but legitimate configuration, are accepted.
+    big_ok = dict(good, id2label={str(i): f"LABEL_{i}" for i in range(20000)})
+    assert 200_000 < len(json.dumps(big_ok)) < hf.MAX_CONFIG_BYTES
+    d = _with_config(repo, tmp_path, "cf-ok", json.dumps(big_ok))
+    assert hf.import_model(str(d)).model_type == "bert"
+    hf.import_model(str(repo))
+
+
+def test_a_configuration_changed_after_the_check_never_reaches_a_loader(repo, tmp_path,
+                                                                         monkeypatch):
+    """The checked bytes are the bound bytes, and a loader re-verifies them: a config.json
+    swapped in during the import, in the package afterwards, or handed to the worker factory
+    is refused, not loaded."""
+    src = tmp_path / "toctou"
+    shutil.copytree(repo, src)
+    evil = json.dumps(dict(json.loads((repo / "config.json").read_text()),
+                           configuration_files=["config." * 10000]))
+    # 1. Swapped between the check and the digest: the digest is of the other bytes.
+    real = hf._sha256
+    calls = []
+
+    def swap_then_hash(path):
+        if path.name == "config.json" and not calls:
+            calls.append(path)
+            path.write_text(evil)
+        return real(path)
+
+    monkeypatch.setattr(hf, "_sha256", swap_then_hash)
+    refused(lambda: hf.import_model(str(src)), "changed while")
+    monkeypatch.undo()
+    # 2. Swapped in the package after the import: the tokenizer and model loaders refuse it
+    #    before Transformers opens the file.
+    pkg = hf.import_model(str(repo))
+    (pkg.path / "config.json").write_text(evil)
+    refused(lambda: pkg.tokenizer(), "changed after the import")
+    refused(lambda: hf._verify_package_config(pkg.path, pkg.manifest), "changed after")
+    # 3. The worker factory checks the text it is given (the spec binds it by digest).
+    with pytest.raises(encompute.EncomputeError) as e:
+        hf.from_config(evil, 2)
+    assert e.value.code == "ENC2504" and "configuration_files" in str(e.value)
+    with pytest.raises(encompute.EncomputeError) as e:
+        hf.from_config(json.dumps({"model_type": "bert"}) + " " * hf.MAX_CONFIG_BYTES, 2)
+    assert e.value.code == "ENC2504"
+
+
 def test_symbolic_links_never_enter_a_package(repo, tmp_path):
     """Review finding TR-3 (ENC-SF-2026-072): a local model directory's symbolic link would
     copy whatever file it names (any file the importing user can read) into

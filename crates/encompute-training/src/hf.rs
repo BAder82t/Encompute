@@ -159,14 +159,65 @@ pub fn check_file(path: &str) -> Result<()> {
     )))
 }
 
+/// The most bytes a `config.json` may have: 1 MiB. The supported
+/// architectures' configurations are about 1 KiB (a classifier head with
+/// thousands of labels reaches tens of KiB), so the cap is generous for
+/// every real configuration and bounds the work any parser does on one.
+pub const MAX_CONFIG_BYTES: usize = 1 << 20;
+
+/// The key Transformers (4.46) follows from `config.json` to pick another
+/// configuration file: it matches every entry of the list with the regular
+/// expression `config\.(.*)\.json`, whose cost is quadratic in the length
+/// of an entry that repeats `config.` and does not end in `.json`
+/// (CVE-2025-3263). `save_pretrained` never writes it.
+const CONFIGURATION_FILES: &str = "configuration_files";
+
+/// Whether `v` has [`CONFIGURATION_FILES`] as an object key at any depth.
+fn names_configuration_files(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(o) => {
+            o.contains_key(CONFIGURATION_FILES) || o.values().any(names_configuration_files)
+        }
+        serde_json::Value::Array(a) => a.iter().any(names_configuration_files),
+        _ => false,
+    }
+}
+
+/// [`check_config`] on a `config.json`'s text: refuses one over
+/// [`MAX_CONFIG_BYTES`] or not valid JSON before anything else reads it,
+/// and returns the model type. Every caller that accepts a model
+/// configuration (import, the training spec, the worker) goes through
+/// this, so the bytes that are checked are the bytes that are parsed.
+pub fn check_config_text(text: &str) -> Result<String> {
+    if text.len() > MAX_CONFIG_BYTES {
+        return Err(bad(format!(
+            "config.json is {} bytes; at most {MAX_CONFIG_BYTES} are accepted",
+            text.len()
+        )));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| bad(format!("config.json: {e}")))?;
+    check_config(&v)
+}
+
 /// Refuses a `config.json` that names custom code or an unsupported
 /// architecture, asks for quantization (loaders run extra code and
-/// libraries for it), or chooses the attention implementation (the worker
-/// always builds eager attention, which per-example gradients need).
+/// libraries for it), chooses the attention implementation (the worker
+/// always builds eager attention, which per-example gradients need), or
+/// has a `configuration_files` list (Transformers would match its entries
+/// against a regular expression with quadratic cost, and the list only
+/// redirects to other configuration files, which a package does not hold).
 pub fn check_config(config: &serde_json::Value) -> Result<String> {
     let o = config
         .as_object()
         .ok_or_else(|| bad("config.json is not an object"))?;
+    if names_configuration_files(config) {
+        return Err(bad(format!(
+            "config.json has {CONFIGURATION_FILES}, which a package may not (it redirects \
+             Transformers to other configuration files, and matching its entries can take \
+             unbounded time)"
+        )));
+    }
     for k in ["auto_map", "trust_remote_code", "custom_pipelines"] {
         if o.contains_key(k) {
             return Err(bad(format!(
