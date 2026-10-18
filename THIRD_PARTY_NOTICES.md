@@ -274,7 +274,7 @@ them:
 | rfc6979 | 0.4.0 | Apache-2.0 OR MIT |
 | ring | 0.17.14 | Apache-2.0 AND ISC |
 | rsa | 0.9.10 | MIT OR Apache-2.0 |
-| rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 |
 | rustls-webpki | 0.103.15 | ISC |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 |
@@ -1113,7 +1113,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-#### 57 file(s): base64 0.22.1 (LICENSE-APACHE), bitflags 2.13.2 (LICENSE-APACHE), bumpalo 3.20.3 (LICENSE-APACHE), cfg-if 1.0.5 (LICENSE-APACHE), curve25519-dalek-derive 0.1.1 (LICENSE-APACHE), displaydoc 0.2.7 (LICENSE-APACHE), equivalent 1.0.2 (LICENSE-APACHE), ff 0.13.1 (LICENSE-APACHE), ff 0.14.0 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), group 0.13.0 (LICENSE-APACHE), group 0.14.0 (LICENSE-APACHE), hash32 0.3.1 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), heapless 0.9.3 (LICENSE-APACHE), heck 0.5.0 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), indexmap 2.14.2 (LICENSE-APACHE), js-sys 0.3.105 (LICENSE-APACHE), lazy_static 1.5.0 (LICENSE-APACHE), lock_api 0.4.14 (LICENSE-APACHE), log 0.4.34 (LICENSE-APACHE), num-bigint 0.4.8 (LICENSE-APACHE), num-bigint 0.5.1 (LICENSE-APACHE), num-bigint-dig 0.8.6 (LICENSE-APACHE), num-integer 0.1.47 (LICENSE-APACHE), num-iter 0.1.46 (LICENSE-APACHE), num-rational 0.4.2 (LICENSE-APACHE), num-traits 0.2.19 (LICENSE-APACHE), once_cell 1.21.4 (LICENSE-APACHE), parking_lot 0.12.5 (LICENSE-APACHE), parking_lot_core 0.9.12 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), postgres 0.19.14 (LICENSE-APACHE), postgres-protocol 0.6.12 (LICENSE-APACHE), postgres-types 0.2.14 (LICENSE-APACHE), rsa 0.9.10 (LICENSE-APACHE), rustls 0.23.45 (LICENSE-APACHE), scopeguard 1.2.0 (LICENSE-APACHE), smallvec 1.16.1 (LICENSE-APACHE), socket2 0.6.5 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), tokio-postgres 0.7.18 (LICENSE-APACHE), unicode-bidi 0.3.18 (LICENSE-APACHE), unicode-normalization 0.1.25 (LICENSE-APACHE), unicode-properties 0.1.4 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE), wasi 0.11.1+wasi-snapshot-preview1 (LICENSE-APACHE), wasi 0.14.7+wasi-0.2.4 (LICENSE-APACHE), wasip2 1.0.4+wasi-0.2.12 (LICENSE-APACHE), wasm-bindgen 0.2.128 (LICENSE-APACHE), wasm-bindgen-macro 0.2.128 (LICENSE-APACHE), wasm-bindgen-macro-support 0.2.128 (LICENSE-APACHE), wasm-bindgen-shared 0.2.128 (LICENSE-APACHE), web-sys 0.3.105 (LICENSE-APACHE), wit-bindgen 0.57.1 (LICENSE-APACHE)
+#### 57 file(s): base64 0.22.1 (LICENSE-APACHE), bitflags 2.13.2 (LICENSE-APACHE), bumpalo 3.20.3 (LICENSE-APACHE), cfg-if 1.0.5 (LICENSE-APACHE), curve25519-dalek-derive 0.1.1 (LICENSE-APACHE), displaydoc 0.2.7 (LICENSE-APACHE), equivalent 1.0.2 (LICENSE-APACHE), ff 0.13.1 (LICENSE-APACHE), ff 0.14.0 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), group 0.13.0 (LICENSE-APACHE), group 0.14.0 (LICENSE-APACHE), hash32 0.3.1 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), heapless 0.9.3 (LICENSE-APACHE), heck 0.5.0 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), indexmap 2.14.2 (LICENSE-APACHE), js-sys 0.3.105 (LICENSE-APACHE), lazy_static 1.5.0 (LICENSE-APACHE), lock_api 0.4.14 (LICENSE-APACHE), log 0.4.34 (LICENSE-APACHE), num-bigint 0.4.8 (LICENSE-APACHE), num-bigint 0.5.1 (LICENSE-APACHE), num-bigint-dig 0.8.6 (LICENSE-APACHE), num-integer 0.1.47 (LICENSE-APACHE), num-iter 0.1.46 (LICENSE-APACHE), num-rational 0.4.2 (LICENSE-APACHE), num-traits 0.2.19 (LICENSE-APACHE), once_cell 1.21.4 (LICENSE-APACHE), parking_lot 0.12.5 (LICENSE-APACHE), parking_lot_core 0.9.12 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), postgres 0.19.14 (LICENSE-APACHE), postgres-protocol 0.6.12 (LICENSE-APACHE), postgres-types 0.2.14 (LICENSE-APACHE), rsa 0.9.10 (LICENSE-APACHE), rustls 0.23.46 (LICENSE-APACHE), scopeguard 1.2.0 (LICENSE-APACHE), smallvec 1.16.1 (LICENSE-APACHE), socket2 0.6.5 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), tokio-postgres 0.7.18 (LICENSE-APACHE), unicode-bidi 0.3.18 (LICENSE-APACHE), unicode-normalization 0.1.25 (LICENSE-APACHE), unicode-properties 0.1.4 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE), wasi 0.11.1+wasi-snapshot-preview1 (LICENSE-APACHE), wasi 0.14.7+wasi-0.2.4 (LICENSE-APACHE), wasip2 1.0.4+wasi-0.2.12 (LICENSE-APACHE), wasm-bindgen 0.2.128 (LICENSE-APACHE), wasm-bindgen-macro 0.2.128 (LICENSE-APACHE), wasm-bindgen-macro-support 0.2.128 (LICENSE-APACHE), wasm-bindgen-shared 0.2.128 (LICENSE-APACHE), web-sys 0.3.105 (LICENSE-APACHE), wit-bindgen 0.57.1 (LICENSE-APACHE)
 
 ```
 Apache License
@@ -6728,7 +6728,7 @@ OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-#### 1 file(s): rustls 0.23.45 (LICENSE-ISC)
+#### 1 file(s): rustls 0.23.46 (LICENSE-ISC)
 
 ```
 ISC License (ISC)
@@ -6748,7 +6748,7 @@ ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
 ```
 
-#### 1 file(s): rustls 0.23.45 (LICENSE-MIT)
+#### 1 file(s): rustls 0.23.46 (LICENSE-MIT)
 
 ```
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
