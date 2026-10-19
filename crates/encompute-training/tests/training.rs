@@ -1466,3 +1466,113 @@ fn editing_the_broker_binding_cannot_swap_brokers_unnoticed() {
     dropped.broker_organizations.clear();
     assert_eq!(dropped.validate().unwrap_err().code, Code::TrainingSpec);
 }
+
+/// The model configuration is validated before any parser runs on it:
+/// `configuration_files` is refused (Transformers 4.46 matches each entry
+/// with a regular expression whose cost is quadratic in an entry that
+/// repeats `config.` and does not end in `.json`), a `config.json` over the
+/// size cap is refused, and so is invalid JSON. The training spec re-checks
+/// the very bytes it binds by digest, so the worker never loads a
+/// configuration this check did not see.
+#[test]
+fn model_configurations_with_a_configuration_files_list_or_over_the_cap_are_refused() {
+    use encompute_training::hf::{check_config_text, MAX_CONFIG_BYTES};
+    use std::time::{Duration, Instant};
+
+    // The measured pathological shapes: one entry of about 70, 140 and 280
+    // KB made of `config.` repeats (the entry is what drives the cost).
+    for kb in [70usize, 140, 280] {
+        let entry = "config.".repeat(kb * 1000 / 7);
+        let text = format!(r#"{{"model_type": "bert", "configuration_files": ["{entry}"]}}"#);
+        assert!(text.len() > kb * 1000 && text.len() < MAX_CONFIG_BYTES);
+        let t = Instant::now();
+        let e = check_config_text(&text).unwrap_err();
+        assert!(t.elapsed() < Duration::from_millis(500), "{kb} KB");
+        assert_eq!(e.code, Code::ModelPackage, "{kb} KB");
+        assert!(e.message.contains("configuration_files"), "{}", e.message);
+    }
+    // Whatever the value, at any depth, even inside an array.
+    for c in [
+        r#"{"model_type": "bert", "configuration_files": []}"#,
+        r#"{"model_type": "bert", "configuration_files": null}"#,
+        r#"{"model_type": "bert", "configuration_files": ["config.json"]}"#,
+        r#"{"model_type": "bert", "text_config": {"configuration_files": ["x"]}}"#,
+        r#"{"model_type": "bert", "list": [{"a": {"configuration_files": 1}}]}"#,
+    ] {
+        let e = check_config_text(c).unwrap_err();
+        assert_eq!(e.code, Code::ModelPackage, "{c}");
+    }
+    // A legitimate configuration, small and large (many labels), is accepted.
+    assert_eq!(
+        check_config_text(
+            r#"{"model_type": "bert", "hidden_size": 32, "architectures": ["BertModel"]}"#
+        )
+        .unwrap(),
+        "bert"
+    );
+    let labels: String = (0..20_000)
+        .map(|i| format!(r#""{i}": "LABEL_{i}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let big = format!(r#"{{"model_type": "distilbert", "id2label": {{{labels}}}}}"#);
+    assert!(big.len() > 200_000 && big.len() <= MAX_CONFIG_BYTES);
+    assert_eq!(check_config_text(&big).unwrap(), "distilbert");
+    // Over the cap: refused on size alone, before it is parsed.
+    let pad = " ".repeat(MAX_CONFIG_BYTES);
+    let e = check_config_text(&format!(r#"{{"model_type": "bert"{pad}}}"#)).unwrap_err();
+    assert_eq!(e.code, Code::ModelPackage);
+    assert!(e.message.contains("at most"), "{}", e.message);
+    // Exactly at the cap is accepted.
+    let head = r#"{"model_type": "bert"}"#;
+    let at = format!("{head}{}", " ".repeat(MAX_CONFIG_BYTES - head.len()));
+    assert_eq!(at.len(), MAX_CONFIG_BYTES);
+    check_config_text(&at).unwrap();
+    // Invalid or non-object JSON fails closed.
+    for c in [
+        "",
+        "{",
+        "[1]",
+        "null",
+        r#"{"model_type": "bert",}"#,
+        "\u{feff}{}",
+    ] {
+        assert_eq!(
+            check_config_text(c).unwrap_err().code,
+            Code::ModelPackage,
+            "{c:?}"
+        );
+    }
+
+    // A spec binds its configuration's bytes by digest and re-checks them:
+    // a package whose config.json (bound, so the digests agree) carries the
+    // list, or is over the cap, does not validate, so a worker is never
+    // handed it.
+    let entry = "config.".repeat(10_000);
+    let oversized = format!(
+        r#"{{"model_type": "bert"{}}}"#,
+        " ".repeat(MAX_CONFIG_BYTES)
+    );
+    for cfg in [
+        format!(r#"{{"model_type": "bert", "configuration_files": ["{entry}"]}}"#),
+        oversized,
+    ] {
+        let mut s = hf_spec();
+        let digest = sha256_hex(cfg.as_bytes());
+        let p = s.base_model.huggingface.as_mut().unwrap();
+        p.files[0].sha256 = digest.clone();
+        p.config_digest = digest;
+        p.tokenizer_digest = p.expected_tokenizer_digest();
+        s.base_model.architecture = serde_json::json!({
+            "factory": HF_FACTORY,
+            "kwargs": {"config": cfg, "num_labels": 2, "task": "sequence-classification"},
+        })
+        .to_string();
+        let e = s.validate().unwrap_err();
+        assert_eq!(e.code, Code::ModelPackage);
+        assert!(
+            e.message.contains("configuration_files") || e.message.contains("at most"),
+            "{}",
+            e.message
+        );
+    }
+}
