@@ -94,7 +94,7 @@ the connection string says so: `sslmode=require`, `verify-ca` or
 `verify-full`, with `sslrootcert` (a PEM file, or `system`), and `sslcert` and
 `sslkey` for a server that wants a client certificate. Without `sslmode` it
 connects in plaintext, as it always has: keep that database on a private
-network that only the control plane can reach. **Breaking change for production:** in production mode
+network that only the control plane can reach. **Unreleased (`main` only), breaking change for production:** in production mode
 (`ENCOMPUTE_ENV=production`) the control plane requires `sslmode=verify-full`
 (with `sslrootcert`; chain and host name). Weaker settings are downgrades with
 named opt-outs, each logging a warning at every start and refusing any other

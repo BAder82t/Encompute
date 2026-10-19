@@ -212,9 +212,12 @@ Security: see the advisory
 and [SECURITY.md](SECURITY.md) (reporting and supported versions). The
 advisory credits the maintainers' internal review, which was AI-assisted and
 is not an independent audit. Internal reviews, assurance suites and test
-matrices in this repository are not independent external audits, and no
-external audit of Encompute is claimed. Findings from earlier reviews are
-kept in [docs/security-findings.md](docs/security-findings.md) as history.
+matrices in this repository are not independent external audits. Earlier
+documents describe a review of 0.3.0-rc.3 as independent or external; those
+descriptions are kept as history and have not been re-verified. Findings from
+earlier reviews are kept in [docs/security-findings.md](docs/security-findings.md).
+v0.3.3 has documented residual limits: see [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
+and the advisory's "What 0.3.3 does not fix".
 
 ## License
 

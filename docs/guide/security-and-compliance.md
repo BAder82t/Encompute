@@ -52,8 +52,9 @@ The supported release is v0.3.3. The security advisory
 describes what it fixes and what it does not. The advisory credits the
 maintainers' internal review, which was AI-assisted and is not an
 independent audit. Internal reviews, assurance suites and test matrices are
-not independent external audits, and no external audit of Encompute is
-claimed.
+not independent external audits. Earlier documents in this repository
+describe a review of 0.3.0-rc.3 as independent or external; those descriptions
+are kept as history and have not been re-verified.
 
 - [Findings and their status](../security-findings.md) (history of earlier
   reviews)

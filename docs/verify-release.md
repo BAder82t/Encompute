@@ -105,7 +105,7 @@ while read -r IMG; do
   cosign verify-attestation "$IMG" --type cyclonedx \
     --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null &&
   echo "verified: $IMG"
-done < <(cat "encompute-$V-images.txt" "encompute-$V-tee-images.txt")
+done < <(cat "encompute-$V-images.txt" "encompute-$V-tee-images.txt")  # bash or zsh
 ```
 
 `cosign verify-attestation --type cyclonedx` checks the SBOM attached to the
@@ -122,7 +122,7 @@ while read -r IMG; do
   gh attestation verify "oci://$IMG" -R "$REPO" \
     --signer-workflow BAder82t/Encompute/.github/workflows/release.yml \
     --source-ref "refs/tags/$TAG"
-done < <(cat "encompute-$V-images.txt" "encompute-$V-tee-images.txt")
+done < <(cat "encompute-$V-images.txt" "encompute-$V-tee-images.txt")  # bash or zsh
 ```
 
 The output names the commit, the workflow run and the runner. The commit

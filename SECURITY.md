@@ -12,7 +12,10 @@
 
 Reviews and test suites run by the maintainers, including AI-assisted
 reviews, assurance suites and adversarial test matrices, are not independent
-external audits. No external audit of Encompute is claimed.
+external audits. Earlier documents in this repository describe a review of 0.3.0-rc.3 as
+independent or external; those descriptions are kept as history and have not
+been re-verified. Some findings of that review were only partly fixed; see
+[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
 Only the production build is in scope for security fixes: OpenFHE CKKS,
 OpenFHE exact (BinFHE and the BGV subset), the control plane, key brokers,

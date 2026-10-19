@@ -154,10 +154,12 @@ the certificate and vault steps with its own.
 7. **The rest.** `docker compose up -d`.
 8. **Validate.** `./validate.sh` (below).
 
-Images are pinned by digest. The evaluator image defaults to the digest
-published with the v0.3.0 release, which is an unsupported release (verify it as
-[verify-release.md](verify-release.md) describes; override it with
-`ENCOMPUTE_EVALUATOR_IMAGE`). The control plane and services images have no
+Images are pinned by digest. The evaluator image in `compose.yaml` still
+defaults to a digest published with v0.3.0, which is unsupported. Before you
+start the topology set `ENCOMPUTE_EVALUATOR_IMAGE` to the
+`encompute-evaluator@sha256:...` line of the signed
+`encompute-0.3.3-images.txt` of the supported release (verify it as
+[verify-release.md](verify-release.md) describes). The control plane and services images have no
 default, as explained above; name them by digest (or, in a laboratory, by
 image ID: the validator accepts both as pinned). The release images are
 `linux/amd64`.

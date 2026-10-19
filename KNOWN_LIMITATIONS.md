@@ -16,12 +16,18 @@ for what to report.
 > protection will ship. `v0.3.0` through `v0.3.2` are not supported (see
 > [SECURITY.md](SECURITY.md)).
 
+Related: [support matrix](docs/support-matrix.md),
+[threat model](docs/threat-model.md),
+[cryptography](docs/cryptography.md), [performance](docs/performance.md).
+
 ## Residual limitations of the supported release (v0.3.3)
 
 From the security advisory
 [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
 ("What 0.3.3 does not fix"). v0.3.3 does not provide comprehensive
-protection against every form of database-administrator compromise:
+protection against every form of database-administrator compromise. These are
+the advisory's residuals only; the complete list for v0.3.3 is the
+[KNOWN_LIMITATIONS.md at the v0.3.3 tag](https://github.com/BAder82t/Encompute/blob/v0.3.3/KNOWN_LIMITATIONS.md):
 
 - The database and the external anchor restored together to an older
   consistent state are not detected. Compromise of the signing key or of the
@@ -36,6 +42,13 @@ protection against every form of database-administrator compromise:
   `anchor-ledgers` records what the database currently holds and does not
   validate the owner's original budget cap.
 - There is no supported downgrade to 0.3.0.
+- The anchor does not independently authenticate every newly introduced
+  database authority.
+- Authorization is revalidated in the transaction that takes effect for the
+  API operations listed in the v0.3.3 release notes. This narrows, and does
+  not close, the gap between a request's check and its effect.
+- Ledgers that were never anchored refuse spends until `anchor-ledgers` is
+  run.
 
 ## Security model
 
@@ -62,8 +75,9 @@ protection against every form of database-administrator compromise:
   "Open" list. The security advisory
   [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
   came from the maintainers' internal, AI-assisted review. Internal reviews
-  and test matrices are not independent external audits, and no external
-  audit of Encompute is claimed.
+  and test matrices are not independent external audits. Earlier documents
+  describe a review of 0.3.0-rc.3 as independent or external; those
+  descriptions are kept as history and have not been re-verified.
 - **Receipts are signed claims, not proofs.** An evaluator signs what it
   says it computed. A dishonest evaluator can sign a wrong result, and the
   receipt still verifies. Only verified execution rules this out, and it
