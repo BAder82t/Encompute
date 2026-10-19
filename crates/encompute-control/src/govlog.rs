@@ -214,28 +214,39 @@ pub fn is_deny(kind: &str, refs: &BTreeMap<String, String>) -> bool {
 
 /// Appends one event inside the caller's transaction.
 ///
-/// Two round trips, each a single typed statement (no separate prepare):
-/// the head locked, with the partition's size and the complete subtrees
-/// on its right edge (all the new leaf can need), then one statement
-/// writing the event, the subtrees it completes and the head.
+/// Three round trips, each a single typed statement (no separate prepare):
+/// the head locked, then the partition's size and the complete subtrees on
+/// its right edge (all the new leaf can need) read after the lock, then one
+/// statement writing the event, the subtrees it completes and the head.
 pub fn append(t: &mut impl GenericClient, d: Draft) -> Result<Recorded> {
     let partition = d.partition.to_string();
+    // The head is locked in a statement of its own, and the partition read
+    // in the next one: under READ COMMITTED each statement takes its own
+    // snapshot, so the second sees everything the transaction ahead of us
+    // committed while we waited. One statement for both read the size and
+    // the edge with the snapshot from before the wait, and a transaction
+    // that had waited wrote a leaf at a position already used (500 ENC1701,
+    // ENC-SF-2026-341).
+    let h = t
+        .query_typed_one(
+            "SELECT h.gseq, h.hash FROM governance_head h WHERE h.id FOR UPDATE OF h",
+            &[],
+        )
+        .map_err(db_err)?;
+    let (head, prev): (i64, String) = (h.get(0), h.get(1));
     let r = t
         .query_typed_one(
-            "SELECT h.gseq, h.hash, s.n,
+            "SELECT s.n,
                     ARRAY(SELECT x.level::text || ':' || x.hash FROM governance_tree_nodes x
                            WHERE x.partition = $1
                              AND (x.level, x.idx) IN (SELECT l, (s.n >> l) - 1 FROM generate_series(0, 62) AS l
                                                        WHERE ((s.n >> l) & 1) = 1))
-               FROM governance_head h
-               CROSS JOIN LATERAL (SELECT COALESCE(max(e.pseq), 0) AS n FROM governance_events e
-                                    WHERE e.partition = $1) s
-              WHERE h.id FOR UPDATE OF h",
+               FROM (SELECT COALESCE(max(e.pseq), 0) AS n FROM governance_events e
+                      WHERE e.partition = $1) s",
             &[(&partition, Type::TEXT)],
         )
         .map_err(db_err)?;
-    let (head, prev, size, edge): (i64, String, i64, Vec<String>) =
-        (r.get(0), r.get(1), r.get(2), r.get(3));
+    let (size, edge): (i64, Vec<String>) = (r.get(0), r.get(1));
     let mut siblings = HashMap::new();
     for x in edge {
         let (l, h) = x
