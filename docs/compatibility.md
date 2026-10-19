@@ -5,7 +5,9 @@ ciphertexts, receipts, trust bundles, privacy ledgers, training records,
 database rows. This page says, for each one, which versions can read it,
 what needs a migration, and what fails closed.
 
-It describes release 0.3.0. [Changes since 0.3.0-rc.3](#changes-since-030-rc3)
+It describes the 0.3 line as of release 0.3.0 and, where it says so, the
+unreleased 0.4 development on `main` (for example state anchor version 2),
+which is not part of v0.3.3 or any release. [Changes since 0.3.0-rc.3](#changes-since-030-rc3)
 lists what an rc.3 installation must rebuild, re-key or upgrade. For which
 capabilities are supported at all,
 see [support-matrix.md](support-matrix.md). For API and CLI stability, see

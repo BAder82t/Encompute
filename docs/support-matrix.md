@@ -1,9 +1,22 @@
 # Support matrix
 
-This is the one authoritative list of what Encompute supports, for release
-0.3.0. The [status summary](guide/status-summary.md) is a
-short version of this page. If they disagree, this page wins, and the
+This is the one authoritative list of what Encompute supports. The
+supported release is **v0.3.3**; see [SECURITY.md](../SECURITY.md) for which
+versions receive security fixes. The [status summary](guide/status-summary.md)
+is a short version of this page. If they disagree, this page wins, and the
 summary is a bug.
+
+**Version boundary.** The tables below describe the supported 0.3 release
+line (v0.3.3), except where a row or section is marked **unreleased**. This
+file lives on `main`, which is unreleased development (version `0.4.0-rc.1`
+in the source; no `v0.4.*` tag or release exists), so unreleased rows
+describe work in progress that is not part of any release and carries no
+support status. The matrix as published with the release is at the
+[`v0.3.3` tag](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/support-matrix.md).
+Releases `v0.3.0` through `v0.3.2` are not supported (v0.3.0 is affected by
+the security advisory
+[GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp);
+v0.3.1 and v0.3.2 were incomplete release attempts).
 
 ## Statuses
 
@@ -42,7 +55,7 @@ maturin develop --release --features openfhe
 
 | Capability | Status | Details |
 |---|---|---|
-| Remote evaluator (`encompute-evaluator serve`, `run --remote`) | **Supported** | Plain HTTP, and its client of the control plane is plain HTTP: put a TLS proxy in front of it (the reference production topology does). The evaluator binary links no client cryptography (`scripts/audit-evaluator-binary.sh`). |
+| Remote evaluator (`encompute-evaluator serve`, `run --remote`) | **Supported** | Plain HTTP, and its client of the control plane is plain HTTP: put a TLS proxy in front of it (the unreleased reference production topology does). The evaluator binary links no client cryptography (`scripts/audit-evaluator-binary.sh`). |
 | Evaluator worker processes (`--workers N`) | **Supported** | Crash restart and replay within one machine. |
 | Evaluator on several machines | **Unsupported** | Each evaluator is a single node. The control plane can schedule jobs across several registered evaluators, but one job never spans machines. |
 | Evaluation-key cache | **Supported** | Bounded (`ENCOMPUTE_KEY_CACHE_BYTES`, LRU), per session. |
@@ -87,8 +100,8 @@ maturin develop --release --features openfhe
 | Customer-managed root keys: OpenBao Transit | **Supported** | OpenBao 2.1.0 is tested in CI. |
 | Customer-managed root keys: HashiCorp Vault Transit | **Supported subset** | Same Transit API and the same adapter. Not tested in CI against Vault itself. |
 | Other KMS (AWS KMS, GCP KMS, Azure Key Vault) | **Unsupported** | No adapter yet. |
-| Docker Compose deployment | **Supported** | Control plane, PostgreSQL, OpenFHE evaluator, key broker, SecAgg coordinator, with backup, restore and a smoke test. The bundled OpenBao runs in development mode, in memory: replace it with your own KMS for real keys, or use the reference production topology. |
-| Reference production topology ([production-deployment.md](production-deployment.md)) | **Supported subset** | One machine, Docker Compose: a TLS edge (mutual TLS on its operations and key-broker listeners), PostgreSQL that accepts only TLS, an external OpenBao in server mode (not dev mode), secrets as files, health checks, a backup drill, and `deploy/production/validate.sh`, which checks configuration (not security properties) and fails a deliberately misconfigured topology (`deploy/production/negative/run.sh`). The control plane verifies PostgreSQL itself (production requires `sslmode=verify-full`; weaker modes need named opt-outs; a client certificate) and the key broker verifies the vault itself (`BAO_CACERT`): native TLS, no sidecars, in images built from this source (the published v0.3.0 images predate it). Other HTTPS clients (CLI, SDK, identity provider keys, the state-anchor client) still trust only the public roots. No high availability, no secure-aggregation coordinator, no KMS beyond OpenBao and Vault Transit. |
+| Docker Compose deployment | **Supported** | Control plane, PostgreSQL, OpenFHE evaluator, key broker, SecAgg coordinator, with backup, restore and a smoke test. The bundled OpenBao runs in development mode, in memory: replace it with your own KMS for real keys, or, in unreleased `main` only, use the reference production topology. |
+| Reference production topology ([production-deployment.md](production-deployment.md)) | **Unreleased** (`main` only; not in v0.3.3) | One machine, Docker Compose: a TLS edge (mutual TLS on its operations and key-broker listeners), PostgreSQL that accepts only TLS, an external OpenBao in server mode (not dev mode), secrets as files, health checks, a backup drill, and `deploy/production/validate.sh`, which checks configuration (not security properties) and fails a deliberately misconfigured topology (`deploy/production/negative/run.sh`). The control plane verifies PostgreSQL itself (production requires `sslmode=verify-full`; weaker modes need named opt-outs; a client certificate) and the key broker verifies the vault itself (`BAO_CACERT`): native TLS, no sidecars, in images built from this source (the published v0.3.0 images predate it). Other HTTPS clients (CLI, SDK, identity provider keys, the state-anchor client) still trust only the public roots. No high availability, no secure-aggregation coordinator, no KMS beyond OpenBao and Vault Transit. |
 | Kubernetes, Helm | **Unsupported** | Not provided yet. |
 | Message transport | **Supported subset** | HTTP with an outbox, and in-memory. No message-broker adapter yet. |
 
@@ -99,28 +112,29 @@ maturin develop --release --features openfhe
 | Python SDK (`encompute`) | **Supported** | Compile, run, test, explain, policies, planner, `Project`, `Client`. Requires Python 3.11 or later; CI tests 3.11 and 3.12. See [api-stability.md](api-stability.md) for which names are stable. |
 | `encompute.torch` | **Supported** | Needs the `torch` or `huggingface` extra. |
 | `encompute` CLI | **Supported** | Development-only flags (`--development`, `--mock-root`, `attest mock-root`, `attest simulate-launcher`, `plan --allow-development`) are unsupported in production. |
-| Assurance suite (`assurance-report`) | **Supported** (release gate) | Not published. 150 invariants in 0.3.0 (179 in 0.4.0-rc.1). |
+| Assurance suite (`assurance-report`) | **Supported** (release gate) | Not published. 150 invariants in v0.3.3 (179 on unreleased `main`). |
 
-## Governed projects (0.4.0-rc.1, release candidate)
+## Governed projects (unreleased development on `main`, version 0.4.0-rc.1)
 
-None of this is part of 0.3.0. It is in the 0.4.0 release candidate, which
-is pre-release: it has no support status yet, has had no independent
-security review (one is planned before 0.4.0), and its formats and names may
-change before 0.4.0. The table says what is built, what is not, and what has
+None of this is part of v0.3.3 or any release. It is unreleased
+development: there is no `v0.4.*` tag or release, it has no support status,
+its control-plane security remediation is still in progress, it has had no
+independent security review, and its formats and names may change before
+any 0.4 release. Do not use it to upgrade a 0.3.x deployment. The table says what is built, what is not, and what has
 not been shown.
 See [public-sector.md](public-sector.md).
 
 | Capability | State | Details |
 |---|---|---|
-| Governed projects, owner-signed authorizations, purposes, optional per-job four eyes | Release candidate | Governance keys, one authorization per owner, purpose, program and dataset version, strict windows, non-retroactive revocation. |
-| Sovereign key custody and two-part key release | Release candidate | Each institution's keys stay at a key broker it registered; a broker releases only with the owner's signed authorization and a single-use ticket. Rollback guard through a generation mark in the owner's KMS (OpenBao Transit and KV tested; no other KMS). |
-| Release classes, derived results, retention, auditor | Release candidate | Compiler-checked release forms; derived results with lineage consent; deletion dates; a read-only auditor organization. |
-| Governance log, anchor, verifiable audit | Release candidate | Needs the control plane's state anchor outside the database's failure domain. |
-| Privacy scopes and aggregate mode (statistics) | Release candidate | Secure aggregation with differential privacy; central DP. Examples: [public-health-statistics](../examples/public-sector/public-health-statistics/). |
-| Residency and operators | Release candidate | Constraints decide placement; declared locations are attributable, not proven; only attested zones are checked cryptographically, and today only by the key broker. |
-| Cross-agency report and evidence bundle | Release candidate | The report cannot read SATISFIED yet (decryption control and linkage are not evidenced). |
-| Bounded-category release to one agency | Release candidate | Single source, no linkage. Example: [fraud-signal](../examples/public-sector/fraud-signal/). |
-| Confidential model collaboration | Experimental, as in 0.3.0 | Examples 15 to 18; no separate governed example. |
+| Governed projects, owner-signed authorizations, purposes, optional per-job four eyes | Unreleased, in development | Governance keys, one authorization per owner, purpose, program and dataset version, strict windows, non-retroactive revocation. |
+| Sovereign key custody and two-part key release | Unreleased, in development | Each institution's keys stay at a key broker it registered; a broker releases only with the owner's signed authorization and a single-use ticket. Rollback guard through a generation mark in the owner's KMS (OpenBao Transit and KV tested; no other KMS). |
+| Release classes, derived results, retention, auditor | Unreleased, in development | Compiler-checked release forms; derived results with lineage consent; deletion dates; a read-only auditor organization. |
+| Governance log, anchor, verifiable audit | Unreleased, in development | Needs the control plane's state anchor outside the database's failure domain. |
+| Privacy scopes and aggregate mode (statistics) | Unreleased, in development | Secure aggregation with differential privacy; central DP. Examples: [public-health-statistics](../examples/public-sector/public-health-statistics/). |
+| Residency and operators | Unreleased, in development | Constraints decide placement; declared locations are attributable, not proven; only attested zones are checked cryptographically, and today only by the key broker. |
+| Cross-agency report and evidence bundle | Unreleased, in development | The report cannot read SATISFIED yet (decryption control and linkage are not evidenced). |
+| Bounded-category release to one agency | Unreleased, in development | Single source, no linkage. Example: [fraud-signal](../examples/public-sector/fraud-signal/). |
+| Confidential model collaboration | Experimental, as in 0.3.x | Examples 15 to 18; no separate governed example. |
 | Record linkage, record-level exact computation across institutions | **Unsupported**: not built | Needs external cryptographic review before it ships. Example A and the flagship demo wait for it. |
 | Recipient-held, attested-decryptor or threshold decryption of a governed result | **Unsupported**: not built | The report row "Decryption control" is NOT EVIDENCED. |
 | Release gating | In `scripts/release-check.sh` | The Examples row requires both public-sector examples to run; the governance attacks row runs `scripts/governance-attacks.sh` when the test services are configured; the assurance row runs the governance invariants. |

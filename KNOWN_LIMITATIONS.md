@@ -5,17 +5,58 @@ assumptions. Read this before you put real data through it. These are
 documented limitations, not vulnerabilities: see [SECURITY.md](SECURITY.md)
 for what to report.
 
+> **Version boundary.** The supported release is **v0.3.3**. This file is on
+> `main`, which is unreleased development (version `0.4.0-rc.1` in the
+> source; no `v0.4.*` tag or release exists), so it mixes limitations of the
+> 0.3 line with limitations of work in progress. The file as released is at
+> the [`v0.3.3` tag](https://github.com/BAder82t/Encompute/blob/v0.3.3/KNOWN_LIMITATIONS.md);
+> use it for a v0.3.3 deployment. Anything here that is not in that file, and
+> everything under "Public-sector governance", describes unreleased `main`:
+> it is not a v0.3.3 behaviour, and nothing here promises that an unfinished
+> protection will ship. `v0.3.0` through `v0.3.2` are not supported (see
+> [SECURITY.md](SECURITY.md)).
+
 Related: [support matrix](docs/support-matrix.md),
 [threat model](docs/threat-model.md),
 [cryptography](docs/cryptography.md), [performance](docs/performance.md).
+
+## Residual limitations of the supported release (v0.3.3)
+
+From the security advisory
+[GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
+("What 0.3.3 does not fix"). v0.3.3 does not provide comprehensive
+protection against every form of database-administrator compromise. These are
+the advisory's residuals only; the complete list for v0.3.3 is the
+[KNOWN_LIMITATIONS.md at the v0.3.3 tag](https://github.com/BAder82t/Encompute/blob/v0.3.3/KNOWN_LIMITATIONS.md):
+
+- The database and the external anchor restored together to an older
+  consistent state are not detected. Compromise of the signing key or of the
+  anchor's custodian is out of scope.
+- Authority recreated under a new record id (a role, membership or approval,
+  or a user or service account recreated with the same subject or key) is not
+  detected, because the anchor is keyed by id.
+- A request already past its check can be held for a time the database writer
+  controls; no duration is claimed, and resistance to a writer who holds
+  locks to exploit that gap has not been independently established.
+- A privacy-ledger genesis that 0.3.0 already anchored is not repaired:
+  `anchor-ledgers` records what the database currently holds and does not
+  validate the owner's original budget cap.
+- There is no supported downgrade to 0.3.0.
+- The anchor does not independently authenticate every newly introduced
+  database authority.
+- Authorization is revalidated in the transaction that takes effect for the
+  API operations listed in the v0.3.3 release notes. This narrows, and does
+  not close, the gap between a request's check and its effect.
+- Ledgers that were never anchored refuse spends until `anchor-ledgers` is
+  run.
 
 ## Security model
 
 - **No formal proof of the whole system.** The cryptographic building
   blocks (CKKS, BinFHE, BGV, Ed25519, HPKE, secure aggregation, the
   discrete Gaussian) have published analyses. Their composition in
-  Encompute has none. The assurance suite tests 175 security invariants
-  (150 in 0.3; the rest cover the public-sector governance work below)
+  Encompute has none. The assurance suite on `main` tests 179 security invariants
+  (150 in v0.3.3; the rest cover the unreleased governance work below)
   with positive, negative, adversarial and end-to-end evidence. A passing
   report means those invariants held for the tested cases. It does not
   prove the system secure.
@@ -26,12 +67,17 @@ Related: [support matrix](docs/support-matrix.md),
   judge it against; evaluating validity at execution time is planned. An
   authorization without a purpose or policy applies to every purpose or
   policy, and authorizations name no project.
-- **An independent security review of 0.3.0-rc.3 has reported.** Its
-  55 findings, 7 more from a later review of their fixes
-  (ENC-SF-2026-033 to 094), and the fixes are listed in
-  [docs/security-findings.md](docs/security-findings.md). Some are only
-  partly fixed; the remainders are listed below and in that page's
-  "Open" list.
+- **Earlier review findings, and the 2026 security advisory.** The findings
+  of an earlier review of 0.3.0-rc.3 and of their fixes
+  (ENC-SF-2026-033 to 094) are listed as history in
+  [docs/security-findings.md](docs/security-findings.md); some were only
+  partly fixed, and the remainders are listed below and in that page's
+  "Open" list. The security advisory
+  [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
+  came from the maintainers' internal, AI-assisted review. Internal reviews
+  and test matrices are not independent external audits. Earlier documents
+  describe a review of 0.3.0-rc.3 as independent or external; those
+  descriptions are kept as history and have not been re-verified.
 - **Receipts are signed claims, not proofs.** An evaluator signs what it
   says it computed. A dishonest evaluator can sign a wrong result, and the
   receipt still verifies. Only verified execution rules this out, and it
@@ -486,11 +532,13 @@ Related: [support matrix](docs/support-matrix.md),
   program's semantics and applies its own floor of core requirements, but
   its exact-equality check still uses the planner's own derivation.
 
-## Public-sector governance (0.4.0-rc.1, release candidate; not part of 0.3)
+## Public-sector governance (unreleased development on `main`; not part of 0.3 or v0.3.3)
 
-Governed projects are in the 0.4.0 release candidate, which is not
-production-ready and has had no independent security review (see
-[docs/public-sector.md](docs/public-sector.md)). They have these limits:
+Governed projects are unreleased development (version `0.4.0-rc.1` in the
+source; no `v0.4.*` release exists). Their security remediation is still in
+progress, they are not production-ready, and they have had no independent
+security review (see [docs/public-sector.md](docs/public-sector.md)). They
+have these limits:
 
 - **`source_revoked_at` is not erasure.** Revoking a source marks the
   derived results downstream and blocks their new use, derivation and

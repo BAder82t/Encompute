@@ -32,8 +32,8 @@ use the `manylinux` wheel of the same release):
 ```sh
 git clone https://github.com/BAder82t/Encompute && cd Encompute
 python3 -m venv hello-env && . hello-env/bin/activate
-gh release download v0.3.0 -R BAder82t/Encompute -p 'encompute-0.3.0-cp311-abi3-macosx_11_0_arm64.whl'
-pip install ./encompute-0.3.0-cp311-abi3-macosx_11_0_arm64.whl
+gh release download v0.3.3 -R BAder82t/Encompute -p 'encompute-0.3.3-cp311-abi3-macosx_11_0_arm64.whl'
+pip install ./encompute-0.3.3-cp311-abi3-macosx_11_0_arm64.whl
 examples/00_hello_encrypted/run.sh
 ```
 
@@ -44,8 +44,8 @@ in mock mode and says that nothing was encrypted.
 
 ## Expected output
 
-This is the real output of the released 0.3.0 wheel (macOS arm64, Python
-3.12, a clean virtual environment). The byte sizes and timings differ from
+This is the real output of the released 0.3.3 wheel (macOS arm64, Python
+3.11, a clean virtual environment). The byte sizes and timings differ from
 machine to machine and run to run; the rest is stable.
 
 ```text

@@ -1,6 +1,6 @@
 # API stability
 
-What you can build on, and what may still change. It covers release 0.3.0.
+What you can build on, and what may still change. It covers the 0.3 line, as documented for release 0.3.0; v0.3.3 changes no API (see its [release notes](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/release-notes-0.3.3.md)). Unreleased changes on `main` are marked as such.
 Artifact formats (models, receipts, ledgers, checkpoints) are covered
 separately in [compatibility.md](compatibility.md).
 

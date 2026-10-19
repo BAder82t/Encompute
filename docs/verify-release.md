@@ -15,10 +15,12 @@ release; each one takes a few seconds.
 
 You need `sha256sum` (or `shasum` on macOS), [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
 2.4 or later, and the [GitHub CLI](https://cli.github.com/) 2.49 or later.
-The examples use `v0.3.0`; replace it with the release you verify.
+The examples use `v0.3.3`, the current supported release; replace it with the
+release you verify. Do not use `v0.3.1` or `v0.3.2`: they were incomplete
+release attempts with no signed artifacts (see [SECURITY.md](../SECURITY.md)).
 
 ```sh
-TAG=v0.3.0
+TAG=v0.3.3
 V=${TAG#v}
 REPO=BAder82t/Encompute
 # The only identity allowed to sign a release: the release workflow, on a tag.
@@ -35,7 +37,8 @@ ISSUER=https://token.actions.githubusercontent.com
 | `encompute-$V-macos-arm64.tar.gz` | the same for macOS 11+ on Apple silicon (needs `brew install libomp`) |
 | `encompute-$V-*.whl` | the Python SDK (`encompute`), with OpenFHE |
 | `*.cdx.json` | a CycloneDX SBOM for each binary, wheel and image |
-| `encompute-$V-images.txt` | the container images, by digest |
+| `encompute-$V-images.txt` | the evaluator, control and services container images, by digest |
+| `encompute-$V-tee-images.txt` | the Confidential Space workload images (`encompute-confidential-space`, `encompute-training`), by digest |
 | `SHA256SUMS` | the SHA-256 of every file above |
 | `*.sigstore.json` | the Sigstore bundle (signature, certificate, transparency-log proof) of each file |
 
@@ -78,20 +81,31 @@ To pin one exact tag instead of any release tag, use
 
 ### Container images
 
-Always pull and run images by digest, from `encompute-$V-images.txt`:
+Always pull and run images by digest, from `encompute-$V-images.txt` (and
+`encompute-$V-tee-images.txt` for the Confidential Space workload images).
+For v0.3.3 the files contain:
+
+```text
+# encompute-0.3.3-images.txt
+ghcr.io/bader82t/encompute-evaluator@sha256:a28d8c5387cf556d96cd7edb3d348b54388a4d18e7e9ad679ffca99633632ab6
+ghcr.io/bader82t/encompute-control@sha256:d95e4e44b5fdf9f1853072490963e6ef3d77c718bbee0d21629a50bc681f996b
+ghcr.io/bader82t/encompute-services@sha256:d27544929cb80b84c7f32a48dd9cbe5a9a5fbdb9b27ec0f3d081c55326a2b2d7
+# encompute-0.3.3-tee-images.txt
+ghcr.io/bader82t/encompute-confidential-space@sha256:60b1a9d19f054b87c8eea328772aaea5770ba9340c6e402032c8d904621a8225
+ghcr.io/bader82t/encompute-training@sha256:29dd67b3b542abd4aa70129567dd76a1ef39232e0d649e7e99e4f7c6b8d7964a
+```
+
+Check them against the signed file you downloaded, not against this page.
 
 ```sh
-cat "encompute-$V-images.txt"
-# ghcr.io/bader82t/encompute-evaluator@sha256:...
-# ghcr.io/bader82t/encompute-control@sha256:...
-# ghcr.io/bader82t/encompute-services@sha256:...
+cat "encompute-$V-images.txt" "encompute-$V-tee-images.txt"
 
 while read -r IMG; do
   cosign verify "$IMG" --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null &&
   cosign verify-attestation "$IMG" --type cyclonedx \
     --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null &&
   echo "verified: $IMG"
-done < "encompute-$V-images.txt"
+done < <(cat "encompute-$V-images.txt" "encompute-$V-tee-images.txt")  # bash or zsh
 ```
 
 `cosign verify-attestation --type cyclonedx` checks the SBOM attached to the
@@ -108,7 +122,7 @@ while read -r IMG; do
   gh attestation verify "oci://$IMG" -R "$REPO" \
     --signer-workflow BAder82t/Encompute/.github/workflows/release.yml \
     --source-ref "refs/tags/$TAG"
-done < "encompute-$V-images.txt"
+done < <(cat "encompute-$V-images.txt" "encompute-$V-tee-images.txt")  # bash or zsh
 ```
 
 The output names the commit, the workflow run and the runner. The commit
@@ -141,19 +155,32 @@ jq -r '.components[] | select(.name=="OpenFHE") | "\(.name) \(.version) \(.prope
 The `hashes` of an SBOM's `metadata.component` is the SHA-256 of the file it
 describes.
 
+## The Linux binaries are the ones the release check reproduced
+
+In v0.3.3, before it signs anything, the release workflow compares the SHA-256 of the
+three binaries inside `encompute-$V-linux-x86_64.tar.gz` with the digests the
+release check recorded for the binaries it built twice and found
+byte-identical (`scripts/release/compare-shipped-digests.sh`). Any mismatch,
+missing or extra binary, or empty digest stops the workflow, so a signed
+Linux tarball holds the reproduced binaries. The macOS binaries and the
+wheels are not covered by this comparison (docs/release-process.md,
+"Reproducibility").
+
 ## Reproducing a binary (optional)
 
 The Rust binaries are built reproducibly: the same commit, toolchain and
 OpenFHE build give the same bytes (docs/release-process.md,
 "Reproducibility"). On Ubuntu 24.04 x86_64:
 
+The commands below use the scripts of the tag you check out, so they match
+that release (the unreleased `main` does not have all of them).
+
 ```sh
 git clone --branch "$TAG" https://github.com/BAder82t/Encompute.git && cd Encompute
 ./scripts/install-openfhe.sh
-. scripts/release/env.sh "$PWD/target"
-OPENFHE_ROOT="$PWD/.deps/openfhe" cargo build --release --locked \
-  -p encompute-cli -p encompute-evaluator -p encompute-control \
-  --features encompute-cli/openfhe,encompute-evaluator/openfhe
+# The shipping build: it resolves OPENFHE_ROOT (default .deps/openfhe) before
+# it sources scripts/release/env.sh, then runs cargo build --release --locked.
+scripts/release/build-release-binaries.sh "$PWD/target"
 sha256sum target/release/encompute target/release/encompute-control
 tar -xzf "../encompute-$V/encompute-$V-linux-x86_64.tar.gz" -O "encompute-$V-linux-x86_64/encompute" | sha256sum
 ```

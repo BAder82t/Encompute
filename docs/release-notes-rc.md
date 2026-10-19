@@ -1,6 +1,6 @@
 # Encompute 0.3.0-rc.4: release notes
 
-> Historical notes for 0.3.0-rc.4. The stable release is described in [release-notes-0.3.0.md](release-notes-0.3.0.md).
+> Historical notes for 0.3.0-rc.4, which is unsupported. The current supported release is [v0.3.3](https://github.com/BAder82t/Encompute/releases/tag/v0.3.3); see [SECURITY.md](../SECURITY.md).
 
 This is the second published release candidate of
 0.3.0. The independent security review of 0.3.0-rc.3

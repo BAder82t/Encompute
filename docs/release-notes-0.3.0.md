@@ -1,5 +1,11 @@
 # Encompute 0.3.0: release notes
 
+> **Superseded.** v0.3.0 is affected by the security advisory
+> [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
+> and is no longer supported. The current supported release is
+> [v0.3.3](https://github.com/BAder82t/Encompute/releases/tag/v0.3.3). These
+> notes are kept as history.
+
 This is the first stable release of 0.3. Its content is that of
 0.3.0-rc.4 ([rc.4 notes](release-notes-rc.md)), which went through the
 release gate and an 8-hour soak, plus a dependency lock bump, release

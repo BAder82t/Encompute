@@ -20,7 +20,9 @@ it leaves. Read the limits first.
   rehearsed locally and in CI, and the live run on Google Cloud has not
   been done.
 - Several security findings from the 0.3.0-rc.3 review are only partly
-  fixed.
+  fixed, and the v0.3.3 security update has documented residual limits
+  (see [SECURITY.md](../../SECURITY.md) and the advisory
+  [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)).
 
 ## 2. The threat model
 
@@ -43,16 +45,20 @@ it leaves. Read the limits first.
 - [Verification](verification.md): receipts, and the three verification
   states.
 
-## 4. The independent review
+## 4. Security history
 
-The independent review of 0.3.0-rc.3 and a later review of its fixes
-reported 62 findings. All are fixed in 0.3.0, several only partly. The fixes
-were checked internally (two adversarial review passes, the release gate and
-a soak). The reviewers have not reviewed the fixes in 0.3.0.
+The supported release is v0.3.3. The security advisory
+[GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
+describes what it fixes and what it does not. The advisory credits the
+maintainers' internal review, which was AI-assisted and is not an
+independent audit. Internal reviews, assurance suites and test matrices are
+not independent external audits. Earlier documents in this repository
+describe a review of 0.3.0-rc.3 as independent or external; those descriptions
+are kept as history and have not been re-verified.
 
-- [Findings and their status](../security-findings.md)
-- [Review package](../../security-review/)
-- [Release notes](../release-notes-0.3.0.md)
+- [Findings and their status](../security-findings.md) (history of earlier
+  reviews)
+- [Release notes for v0.3.3](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/release-notes-0.3.3.md)
 - Report a vulnerability: [SECURITY.md](../../SECURITY.md).
 
 ## 5. Check what you download
