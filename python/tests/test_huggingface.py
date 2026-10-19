@@ -264,6 +264,58 @@ def test_a_configuration_changed_after_the_check_never_reaches_a_loader(repo, tm
     assert e.value.code == "ENC2504"
 
 
+@pytest.mark.parametrize("change, match", [
+    ("configuration_files", "changed after the import"),
+    ("oversized", "over"),
+    ("other_bytes", "changed after the import"),
+])
+@pytest.mark.parametrize("path", ["model", "tokenizer"])
+def test_a_config_changed_after_the_import_is_refused_before_the_model_or_tokenizer_loads(
+        repo, monkeypatch, change, match, path):
+    """The sequence a loader meets: the package is imported (validated and pinned), then its
+    config.json changes, then the load call. `huggingface()` and `ModelPackage.tokenizer()`
+    re-verify the file against the pinned digest, size cap and native check right before
+    Transformers opens it; the loaders are stubbed to raise if reached.
+
+    Proves: a change made before that re-verify is refused and no loader runs. Does not prove:
+    a change made after it, between the re-verify and Transformers' own read (LIM-091)."""
+    import transformers
+    from transformers import configuration_utils as cu
+
+    reached = []
+
+    def forbidden(*a, **k):
+        reached.append(1)
+        raise AssertionError("a Transformers loader ran on a changed configuration")
+
+    good = (repo / "config.json").read_text()
+    changed = {
+        "configuration_files": json.dumps(dict(json.loads(good),
+                                               configuration_files=["config." * 10000])),
+        "oversized": good + " " * hf.MAX_CONFIG_BYTES,
+        "other_bytes": good + "\n ",
+    }[change]
+    real_import = hf.import_model
+
+    def import_then_change(*a, **k):
+        pkg = real_import(*a, **k)
+        (pkg.path / "config.json").write_text(changed)
+        return pkg
+
+    for cls in (transformers.AutoModelForSequenceClassification, transformers.AutoTokenizer,
+                transformers.AutoConfig):
+        monkeypatch.setattr(cls, "from_pretrained", classmethod(forbidden))
+    monkeypatch.setattr(cu, "get_configuration_file", forbidden)
+    monkeypatch.setattr(cu.PretrainedConfig, "get_config_dict", classmethod(forbidden))
+    if path == "model":
+        monkeypatch.setattr(hf, "import_model", import_then_change)
+        refused(lambda: hf.huggingface(str(repo)), match)
+    else:
+        pkg = import_then_change(str(repo))
+        refused(lambda: pkg.tokenizer(), match)
+    assert reached == []
+
+
 def test_symbolic_links_never_enter_a_package(repo, tmp_path):
     """Review finding TR-3 (ENC-SF-2026-072): a local model directory's symbolic link would
     copy whatever file it names (any file the importing user can read) into
