@@ -4,12 +4,15 @@
 
 | Release | Status | Security fixes |
 |---|---|---|
-| 0.4.0 release candidates (`0.4.0-rc.N`) | pre-release; governance functionality, not production-ready, no independent review yet | yes, on the latest candidate |
-| 0.3.x | current stable release. The independent review of 0.3.0-rc.3 reported findings that are fixed in 0.3.0, several only partly; the fixes themselves have not been independently reviewed. The review package is in [security-review/](security-review/) | yes |
-| 0.3.0 release candidates (`0.3.0-rc.N`) | historical; superseded by 0.3.0 | no: upgrade to 0.3.0 |
-| `main` | development | yes |
-| 0.2.x | superseded | no: upgrade to 0.3 |
+| [0.3.3](https://github.com/BAder82t/Encompute/releases/tag/v0.3.3) | **current supported release** (the first completed release with the fixes for [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)) | yes |
+| 0.3.0, 0.3.1, 0.3.2 and the 0.3.0 release candidates (`0.3.0-rc.N`) | **unsupported**. 0.3.0 and its release candidates are affected by the advisory (`encompute-control` `>= 0.3.0-rc.1, < 0.3.1`). `v0.3.1` and `v0.3.2` were incomplete release attempts: no completed GitHub release, no signed release artifacts, and their container image tags must not be used | no: upgrade to 0.3.3 |
+| `main` (version `0.4.0-rc.1` in the source) | **unreleased development**; no `v0.4.*` tag or release exists. Its control-plane security remediation is still in progress. Do not deploy it as a release | development only; reports welcome |
+| 0.2.x | superseded | no: upgrade to 0.3.3 |
 | 0.1.x | superseded | no |
+
+Reviews and test suites run by the maintainers, including AI-assisted
+reviews, assurance suites and adversarial test matrices, are not independent
+external audits. No external audit of Encompute is claimed.
 
 Only the production build is in scope for security fixes: OpenFHE CKKS,
 OpenFHE exact (BinFHE and the BGV subset), the control plane, key brokers,

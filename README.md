@@ -14,10 +14,22 @@ depending on the workload. The security boundary is not the application or the
 AI model: authorization and release decisions are enforced by Encompute and by
 organization-controlled key brokers.
 
-> **Release status:** `v0.3.0` is the current stable release. `main` contains
-> substantial unreleased governance and security work intended for the next
-> release line. That work is not part of a stable release and should not be
-> described as production-ready.
+> **Security update: use v0.3.3.** The current supported release is
+> [`v0.3.3`](https://github.com/BAder82t/Encompute/releases/tag/v0.3.3).
+> Security advisory
+> [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
+> (medium) covers privacy-budget accounting and governance-state rollback
+> protection in the control plane. Per the advisory, `encompute-control`
+> `>= 0.3.0-rc.1, < 0.3.1` is affected (the supported stable version
+> affected is 0.3.0, and the four 0.3.0 release candidates share the flaws);
+> the fixed version is 0.3.3. `v0.3.1` and `v0.3.2` were incomplete,
+> unsupported release attempts: they have no completed GitHub release or
+> signed release artifacts, and their container image tags must not be used.
+> Upgrade to v0.3.3.
+>
+> **`main` is unreleased development** (version `0.4.0-rc.1` in the source;
+> there is no `v0.4.*` tag or release). Its control-plane security work is
+> still in progress and it is not production-ready.
 
 You write ordinary Python and mark which values are secret. Encompute encrypts
 them, runs the program on a machine that never holds the key, and checks the
@@ -91,15 +103,17 @@ what software it runs.
 ## Try it in five minutes
 
 You need Python 3.11 or later. This installs the released package (macOS on
-Apple silicon shown; the [release](https://github.com/BAder82t/Encompute/releases/tag/v0.3.0)
-has a wheel for Linux x86_64 too) and runs the starter,
-[example 00](examples/00_hello_encrypted/):
+Apple silicon shown; the [v0.3.3 release](https://github.com/BAder82t/Encompute/releases/tag/v0.3.3)
+has a wheel for Linux x86_64 too; [verify what you download](docs/verify-release.md)) and runs the starter,
+[example 00](examples/00_hello_encrypted/). The clone supplies the example
+script (it is on `main`; the v0.3.3 tag does not have it); the package you
+run is the v0.3.3 wheel:
 
 ```sh
 git clone https://github.com/BAder82t/Encompute && cd Encompute
 python3 -m venv .hello && . .hello/bin/activate
-gh release download v0.3.0 -R BAder82t/Encompute -p 'encompute-0.3.0-cp311-abi3-macosx_11_0_arm64.whl'
-pip install ./encompute-0.3.0-cp311-abi3-macosx_11_0_arm64.whl
+gh release download v0.3.3 -R BAder82t/Encompute -p 'encompute-0.3.3-cp311-abi3-macosx_11_0_arm64.whl'
+pip install ./encompute-0.3.3-cp311-abi3-macosx_11_0_arm64.whl
 examples/00_hello_encrypted/run.sh
 ```
 
@@ -163,29 +177,44 @@ has a table by goal. All topics are in the [guide](docs/guide/README.md):
 
 ## Status and support
 
-**Stable:** `v0.3.0`. It includes the confidential-computation
-compiler and runtime, OpenFHE-backed encrypted execution, secure aggregation,
-differential privacy, trust and evidence machinery, confidential fine-tuning,
-and the documented 0.3 support surface.
+**Stable:** `v0.3.3`, the current supported release. It includes the
+confidential-computation compiler and runtime, OpenFHE-backed encrypted
+execution, secure aggregation, differential privacy, trust and evidence
+machinery, confidential fine-tuning, the documented 0.3 support surface, and
+the control-plane fixes described in the security advisory
+[GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp).
+The documentation that matches it is at the
+[`v0.3.3` tag](https://github.com/BAder82t/Encompute/tree/v0.3.3) (for
+example its
+[deployment guide](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/deployment.md)
+and [release notes](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/release-notes-0.3.3.md)).
+`v0.3.0` and the 0.3.0 release candidates are affected by the advisory;
+`v0.3.1` and `v0.3.2` are not supported (see the notice at the top).
 
-**Development (`main`):** additionally contains unreleased work for governed
-cross-organization computation: purpose-bound authorization,
+**Development (`main`, unreleased):** additionally contains work in progress
+for governed cross-organization computation: purpose-bound authorization,
 organization-controlled governance keys, revocation, multi-owner key custody,
 governance lineage and event logging, privacy-budget governance, and hardened
-production deployment infrastructure. Development-branch functionality is not
-part of `v0.3.0` and should not be treated as a stable or production-ready
-release.
+production deployment infrastructure. None of it is part of `v0.3.3`. Its
+security remediation is not finished, so do not treat it as a stable or
+production-ready release, and do not follow its 0.4 migration material on a
+0.3.x deployment. Pages in this repository that describe it say so.
 
 What is supported, what is a subset, and what is experimental, research only
 or unsupported is in the [support matrix](docs/support-matrix.md), with a short
 [summary](docs/guide/status-summary.md). Also: [known limitations](KNOWN_LIMITATIONS.md),
-[release notes](docs/release-notes-0.3.0.md), [changelog](CHANGELOG.md),
+[release notes for v0.3.3](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/release-notes-0.3.3.md), [changelog](CHANGELOG.md),
 [threat model](docs/threat-model.md), [security findings](docs/security-findings.md),
 [repository layout](docs/guide/layout.md) and [roadmap](docs/guide/roadmap.md).
 
-An independent review of 0.3.0-rc.3 reported findings that are fixed in
-0.3.0, some only partly. The reviewers have not reviewed the fixes.
-Security reports: [SECURITY.md](SECURITY.md).
+Security: see the advisory
+[GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
+and [SECURITY.md](SECURITY.md) (reporting and supported versions). The
+advisory credits the maintainers' internal review, which was AI-assisted and
+is not an independent audit. Internal reviews, assurance suites and test
+matrices in this repository are not independent external audits, and no
+external audit of Encompute is claimed. Findings from earlier reviews are
+kept in [docs/security-findings.md](docs/security-findings.md) as history.
 
 ## License
 

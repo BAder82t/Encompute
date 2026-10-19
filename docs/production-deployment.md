@@ -1,5 +1,11 @@
 # Reference production topology
 
+> **Unreleased.** This page, `deploy/production` and the native TLS they rely
+> on exist only on `main` (unreleased development; no `v0.4.*` release
+> exists). They are not part of v0.3.3 and are not upgrade instructions for a
+> 0.3.x deployment. For the supported release, use the
+> [v0.3.3 deployment guide](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/deployment.md).
+
 This page describes one blessed topology for running Encompute with TLS in
 front of every client, PostgreSQL that accepts only TLS and that the control
 plane verifies itself, an external OpenBao or Vault that the key broker
@@ -87,7 +93,7 @@ host is exempt. Development mode is not restricted. Both opt-outs take `true` or
 `false` and refuse to start on anything else.
 
 The native TLS clients are in images built from this source and in the first
-release that contains them. The published v0.3.0 images predate them: with
+release that contains them. The published 0.3.x images, including v0.3.3, are built from sources that predate them: with
 those images the control plane cannot parse `sslmode=verify-full` and the
 broker cannot trust your CA. `compose.yaml` therefore has no default image for
 the control plane and the services: `ENCOMPUTE_CONTROL_IMAGE` and
@@ -149,7 +155,7 @@ the certificate and vault steps with its own.
 8. **Validate.** `./validate.sh` (below).
 
 Images are pinned by digest. The evaluator image defaults to the digest
-published with the v0.3.0 release (verify it as
+published with the v0.3.0 release, which is an unsupported release (verify it as
 [verify-release.md](verify-release.md) describes; override it with
 `ENCOMPUTE_EVALUATOR_IMAGE`). The control plane and services images have no
 default, as explained above; name them by digest (or, in a laboratory, by

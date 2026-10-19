@@ -1,12 +1,12 @@
 # Confidential cross-agency computation
 
-> **Status: available in the 0.4.0 release-candidate line (`0.4.0-rc.1`).
-> This is pre-release functionality undergoing release validation. An
-> independent external security review is planned before 0.4.0; it is not yet
+> **Status: unreleased development on `main` (version `0.4.0-rc.1`; no
+> `v0.4.*` tag or release exists). Its security remediation is still in
+> progress. It has had no independent external security review and is not
 > claimed production-ready.** It is
-> not part of the stable 0.3 release. Features, names and formats may still
+> not part of the stable 0.3 release (v0.3.3). Features, names and formats may still
 > change before 0.4.0. Parts of this page describe designs that are not
-> built; what is in the release candidate is listed under "Status in
+> built; what is built on `main` is listed under "Status in
 > 0.4.0-rc.1" below.
 
 Encompute lets public institutions compute across organizational
@@ -211,7 +211,7 @@ Encompute will not be:
 
 ## Status in 0.4.0-rc.1
 
-Included in the 0.4.0 release candidate (pre-release, not production-ready):
+Included in the unreleased 0.4 development version on `main` (not a release, not production-ready):
 
 - **Phase 1, governed projects and owner-signed authorizations.**
   Governance keys, purposes, owner authorizations (with optional

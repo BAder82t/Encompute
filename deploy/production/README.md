@@ -28,7 +28,7 @@ security properties.
 | `lab-up.sh`, `gen-test-certs.sh` | laboratory only: the whole runbook with throwaway certificates (`lab-up.sh down` removes it) |
 
 The control plane and the key broker need images that contain native TLS: the
-published v0.3.0 images predate it. Set `ENCOMPUTE_CONTROL_IMAGE` and
+published 0.3.x images, including v0.3.3, predate it. This directory is unreleased development on `main`. Set `ENCOMPUTE_CONTROL_IMAGE` and
 `ENCOMPUTE_SERVICES_IMAGE`, or let the laboratory build them from this checkout
 with `LAB_BUILD_IMAGES=1` (heavy).
 

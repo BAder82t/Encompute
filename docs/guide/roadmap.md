@@ -2,7 +2,7 @@
 
 What is done and what is next.
 
-- **In the 0.4.0 release candidate (pre-release)**: [confidential cross-agency
+- **In unreleased 0.4 development on `main` (no `v0.4.*` release exists)**: [confidential cross-agency
   computation](../public-sector.md), governed projects, sovereign key custody,
   governed release and the governance log.
 - **Succinct proofs**: a zkVM proof of the same relation, starting with

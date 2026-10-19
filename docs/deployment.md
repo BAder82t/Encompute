@@ -1,5 +1,20 @@
 # Deploying Encompute
 
+> **Version boundary.** The supported release is **v0.3.3**. This page is on
+> `main`, which is unreleased development (version `0.4.0-rc.1` in the
+> source; no `v0.4.*` tag or release exists), so it describes both. To
+> deploy or upgrade v0.3.x, follow the guide as released at the
+> [`v0.3.3` tag](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/deployment.md),
+> in particular its section
+> [Upgrading from 0.3.0 to 0.3.3 (security upgrade)](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/deployment.md#upgrading-from-030-to-033-security-upgrade),
+> which this page does not reproduce. Governed projects, the governance log
+> and its mirror, residency and operators, project checkpoints, evidence
+> bundles, state anchor version 2 and the schema migrations they need
+> (0005 onward) exist only on `main`: they are unreleased, their security
+> remediation is still in progress, and they are not instructions for
+> upgrading a 0.3.x deployment. `v0.3.0` through `v0.3.2` are not supported
+> (see [SECURITY.md](../SECURITY.md)).
+
 This guide covers the first supported deployment: the control plane with
 PostgreSQL, OpenFHE evaluators, key brokers backed by a customer-managed
 root key, and secure-aggregation coordinators, on Docker Compose
@@ -493,6 +508,11 @@ may be handled and which organizations may operate the machines.
 
 ## Upgrading from 0.3.0-rc.3 or earlier
 
+> Historical. Release candidates of 0.3.0 are unsupported and affected by the
+> security advisory
+> [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp);
+> move to v0.3.3 (see the version boundary at the top of this page).
+
 - **Service accounts with `security_admin`.** Earlier releases let an
   organization admin give `security_admin` to an automation account, so
   one admin could supply both approvals of a policy. 0.3.0 refuses the
@@ -521,7 +541,13 @@ may be handled and which organizations may operate the machines.
   backup together with its matching anchor, then start the older
   release.
 
-## Upgrading from 0.3.0: state anchor version 2
+## Unreleased (0.4 development): state anchor version 2
+
+> **Not an upgrade path for v0.3.x.** This section describes a migration that
+> exists only on unreleased `main`. No release contains it, and it has not
+> been through a release process. If you run v0.3.0 or a release candidate,
+> follow the [v0.3.3 section "Upgrading from 0.3.0 to 0.3.3"](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/deployment.md#upgrading-from-030-to-033-security-upgrade)
+> instead. v0.3.3 does not change the anchor format (it stays version 1).
 
 The state anchor of 0.3.0 (version 1) held the sets of every revoked,
 disabled, ended, withdrawn, removed and expired ID, and grew with each.

@@ -1,18 +1,32 @@
 # Changelog
 
-> **Breaking change for production deployments:** with
+> **Release status.** The current supported release is
+> [v0.3.3](https://github.com/BAder82t/Encompute/releases/tag/v0.3.3)
+> (see [0.3.3](#033-test-harness-and-rehearsal-first-supported-release-of-the-031-fixes)
+> below). It fixes the issues in the security advisory
+> [GHSA-rm8x-939m-3fgp](https://github.com/BAder82t/Encompute/security/advisories/GHSA-rm8x-939m-3fgp)
+> (medium), which affects `encompute-control` `>= 0.3.0-rc.1, < 0.3.1`
+> (0.3.0 and its release candidates). `v0.3.1` and `v0.3.2` were incomplete,
+> unsupported release attempts (no GitHub release, no signed artifacts): do
+> not use them. The two "Unreleased" sections at the top are development work
+> on `main` (version `0.4.0-rc.1` in the source): no `v0.4.*` tag or release
+> exists, and its control-plane security remediation is still in progress.
+> The changelog of the supported release as published is at the
+> [`v0.3.3` tag](https://github.com/BAder82t/Encompute/blob/v0.3.3/CHANGELOG.md).
+
+> **Breaking change in unreleased `main` (not in v0.3.3):** with
 > `ENCOMPUTE_ENV=production` the control plane now refuses a database
 > connection that is not `sslmode=verify-full`. See "BREAKING (production
 > mode)" in the second Unreleased section below before upgrading.
 
-## 0.4.0-rc.1 — release candidate (public-sector governance)
+## Unreleased — 0.4 development, version 0.4.0-rc.1 (public-sector governance)
 
 Governed cross-organization computation
-([docs/public-sector.md](docs/public-sector.md)). Pre-release: not claimed
-production-ready, and the new authorization, key, revocation and log surface
+([docs/public-sector.md](docs/public-sector.md)). Unreleased (no `v0.4.*`
+tag or release exists): not claimed production-ready, and the new authorization, key, revocation and log surface
 has not had an independent security review. None of it is part of 0.3.
 The notes in the next section (production mode: native TLS) also ship in
-this release candidate. Release notes:
+this unreleased work. Draft notes:
 [docs/release-notes-0.4.0-rc.1.md](docs/release-notes-0.4.0-rc.1.md).
 
 - A job submission that leaves the job `authorized` (it was not placed on an
@@ -515,7 +529,7 @@ this release candidate. Release notes:
   part), INV-245 (derived results), INV-246 (retention), INV-230
   (privacy scopes and populations) and INV-241 (aggregate mode); 167
   invariants.
-## 0.4.0-rc.1 — production mode: native TLS and the reference topology
+## Unreleased — 0.4 development: production mode, native TLS and the reference topology
 
 ### Third-party notices: two ported files were missing from THIRD_PARTY_NOTICES.md
 
@@ -577,6 +591,268 @@ names the variable to set.
   the public roots; the evaluator talks plain HTTP to the control plane.
 - **Tests:** `scripts/tls-test-db.sh` starts a TLS PostgreSQL that requires a
   client certificate; `scripts/test-full.sh` checks for it (`tls-postgres`).
+
+## 0.3.3 (test harness and rehearsal; first supported release of the 0.3.1 fixes)
+
+0.3.1 and 0.3.2 are failed release attempts. Neither produced a GitHub
+release or signed artifacts. Their tags (`v0.3.1`, `v0.3.2`) are immutable
+and kept as evidence; they must not be used, and the public container image
+tags `0.3.1` and `0.3.2` belong to those attempts. The first supported
+release containing the 0.3 anchor fixes is 0.3.3. It has the same product
+code as 0.3.2 (and the same fixes as the 0.3.1 source tag, everything under
+"0.3.1" below): nothing under `crates/*/src` changed.
+
+### Test harness
+
+- **A shared test helper proves the adversarial window or fails loudly.** The
+  v0.3.2 tag workflow's release check failed on two timing-based regression
+  tests (`w05_genesis_rewritten_in_the_window_of_the_first_spend` and
+  `role_removal_undone_in_the_window_is_not_acknowledged`). The test helper
+  took its two table locks with one `LOCK TABLE a, b`, which PostgreSQL
+  acquires sequentially, so under load the service's post-commit read could
+  run before the attacker held the second table. The server-log chronology
+  of 28 natural failures of the first test on GitHub runners showed 28 "tore"
+  observations (the genesis read before the attacker's lock, the entries read
+  after the attack) and no in-window attack that the service acknowledged.
+  The product code was not at fault and is not changed.
+- `crates/encompute-control/tests/common/window.rs` is now the one helper for
+  these tests. It holds the locks in a fixed order, confirms that the attack
+  happened inside the window, and otherwise reports INCONCLUSIVE and fails
+  instead of passing or failing on a race it did not control.
+- A negative control shows the helper reports INCONCLUSIVE when the window is
+  not proven. W05b, the accepted race after verification, is kept as its own
+  test and is not folded into the proven-window tests.
+
+### Release pipeline
+
+- **A nonpublishing rehearsal** of the complete Ubuntu 24.04 release path:
+  `gh workflow run release.yml --ref <branch> -f rehearsal=true`. It builds
+  the Linux binaries and tarball, builds the five images locally, runs the
+  whole release check and the shipped-binary comparison, and runs the window
+  tests repeatedly under CPU load. It has a read-only token, no secrets, no
+  registry login and no signing, and creates no release (jobs `rehearse-*`;
+  no other job runs). `scripts/release/test-rehearsal-workflow.py` checks its
+  gating and permissions statically.
+- A `v*` tag must be preceded by a green rehearsal on the exact candidate
+  commit and the Azure gate (see docs/release-process.md).
+- Version 0.3.3 and lockfiles.
+
+## 0.3.2 (failed release attempt; not released)
+
+0.3.2 was not released. Its tag workflow's release-check job failed on two
+timing-based regression tests (see 0.3.3), so nothing was signed and no
+GitHub release was created. The tag `v0.3.2` is kept as evidence and must not be used. It
+corrected the defect that stopped 0.3.1, as follows.
+
+0.3.1 was not released as a complete release either. Its workflow built and gated
+the release but stopped at the shipped-binary identity check, before signing
+or any GitHub release: the Linux binaries the shipping job built were not the
+binaries the gate had built and approved. The tag `v0.3.1` is kept as
+evidence and must not be used. 0.3.2 had the same fixes and source as the
+0.3.1 source tag (everything under "0.3.1" below), the product code was
+unchanged, and only the release pipeline differed.
+
+### Release pipeline
+
+- **The OpenFHE path remap was missing from the shipping build.** The
+  shipping job sourced `scripts/release/env.sh` and only then exported
+  `OPENFHE_ROOT`, so the build had no `/openfhe` path remap while the
+  gate's builds did. `env.sh` now resolves and validates the root before it
+  computes its flags (an explicit root is never replaced, an invalid one
+  fails), every caller passes the root before sourcing, and the shipping
+  build is one script, `scripts/release/build-release-binaries.sh`, that the
+  `binaries` job and the diagnostic both run.
+- **OpenFHE's own source and install paths are remapped.** The binaries
+  embedded `<checkout>/.deps/src/openfhe-development/...` paths from
+  OpenFHE's own objects, which agreed across jobs only because the checkout
+  path was the same. `scripts/install-openfhe.sh` now passes
+  `-ffile-prefix-map` for them (build id `static-4`). This changes every
+  binary digest.
+- **A binary path guard fails closed.** `scripts/release/check-binary-paths.sh`
+  fails if a Linux release binary names a build path (`/.deps/`,
+  `/openfhe-development`, a home, `/tmp`, `/var`, `/builds` or CI directory).
+  It runs in the `binaries` job, in the reproducibility check and, report
+  only, in the diagnostic.
+- **A nonpublishing diagnostic mode** of the release workflow
+  (`workflow_dispatch` with `diagnostic=true`) builds the release binaries in
+  several configurations on two clean runners and compares their digests. It
+  runs none of the release jobs.
+- Self-tests for the above run in the release check; version 0.3.2 and
+  lockfiles.
+
+## 0.3.1 (security patch release; failed release attempt, shipped in 0.3.3)
+
+0.3.0 is not modified; its artifacts keep their digests. This release fixes
+two privacy-accounting findings in `encompute-control` and carries the
+supply-chain and notice changes below. No API, wire format, migration or
+build feature changes.
+
+### Security fixes
+
+- **A privacy spend could be forgotten (ENC-SF-2026-326, High).** 0.3.0
+  documented that committed spending is anchored before it is acknowledged.
+  It was not bound to the entry the spend committed: after the commit the
+  control plane re-read the ledger and anchored whatever the database then
+  held. A database writer (threat model section 4.6: it can read and write
+  PostgreSQL and restore backups, but cannot write the state anchor) who
+  erased the new entry in that interval left the spend acknowledged, nothing
+  anchored and no alarm raised; repeated, the budget cap could be exceeded
+  without bound. A retried event answered as a duplicate had the same gap.
+- **A rewritten genesis was anchored (ENC-SF-2026-329, High).** The same
+  interval during the registration of an asset with a privacy budget: a
+  genesis changed after the commit (for example a larger budget) was
+  anchored and the creation acknowledged.
+- **Revocations, disables, cancellations, withdrawals and removals were
+  acknowledged without being anchored (ENC-SF-2026-411, High).** The same
+  interval for the security-negative transitions: asset revocation, approval
+  withdrawal, disabling a service account or user, cancelling a job, an
+  organization leaving a project, removing a role (and the jobs those fail,
+  and an evaluator's registration). They anchored what the database showed
+  after the commit, so one undone in between was acknowledged, never
+  anchored, and not noticed by a restart. Each now anchors the IDs its own
+  transaction wrote and fails with ENC2202 (retry is correct) when the
+  database no longer holds them. Affects 0.3.0. The anchor-verification
+  alarm now also fires when a spend's ledger fails verification.
+- **A ledger the anchor never recorded accepted any genesis (ENC-SF-2026-412,
+  High; first rated Medium).** A spend on a ledger the anchor held no
+  checkpoint for was checked against whatever genesis the database held and
+  anchored it: 40 of 40 spends acknowledged against an honest cap of a
+  handful. The state is reachable by a crash or an anchor outage during
+  registration, and also by a database writer with no failure at all (delete
+  the ledger row in the creation window, insert its own; or insert a ledger
+  for an asset registered without a budget). Now a spend on such a ledger is
+  refused (ENC2202, "is not anchored"), start-up and the background tick
+  report it (`encompute_unanchored_ledgers`, a log line) without refusing to
+  start, a creation whose anchoring failed is anchored again by the process
+  that committed it, and otherwise an operator runs
+  `encompute-control anchor-ledgers --operator NAME (--asset ID ... | --all)`
+  after checking the genesis against the owner's records (audited as
+  `privacy.ledger.genesis_anchored`). Ledgers that already have an anchored
+  checkpoint are not changed (and not re-examined: a genesis that 0.3.0
+  anchored stays as it was). That step trusts the database for those
+  ledgers and is not a validation of the owner's original cap.
+- **A transition the anchor held, reverted while the service ran, permitted
+  the operation it denied (ENC-SF-2026-413, High).** A restored revocation,
+  disabled user or service account, cancelled job, withdrawn approval,
+  removed role or left project was refused at start-up only: until the next
+  restart a job ran on the revoked asset, the disabled principal
+  authenticated, the cancelled job started (all eight executed over HTTP).
+  Now the database is checked against every anchored transition before each
+  request and on each background tick; a mismatch raises the rollback alarm
+  and latches the control plane (ENC2202 on every request, `/ready` 503)
+  until it is restarted on a restored database. The check is never skipped
+  or throttled (a database lock or slow anchor write a writer controls
+  cannot buy a window), runs under a 5 s lock and statement timeout, and a
+  check that cannot complete fails the request. Cost, on every request:
+  about 3 ms at 700 anchored IDs, 5 ms at 7,000, 18 ms at the 1 MiB anchor
+  limit (release build).
+- **What 0.3.1 still does not do.** It does not eliminate rollback risk. A
+  request already past its check when a writer reverts can finish; the anchor
+  restored together with the database, and compromised custody of the
+  anchor or the signing key, remain out of scope; the key broker's
+  revocation message is a database row; a writer can trigger the latch (a
+  denial of service). See `KNOWN_LIMITATIONS.md`.
+- **Authorization is re-read inside the transaction that takes effect
+  (hardening).** For the API operations that call `ops::revalidate`:
+  creating an organization, user, service account, project, plan or policy
+  proposal; disabling a user or service account; removing a role; recording
+  a key rotation; adding or removing a project member; registering,
+  approving, withdrawing the approval of and revoking an asset; authorizing
+  a privacy spender and a privacy spend; approving a policy; submitting,
+  cancelling, approving, starting and completing a job; the evaluator's
+  receipt (REST and message); registering an evaluator and reporting its
+  status; and every message kind `receive_message` accepts, including
+  `key.release`, the rows relied on (account, roles, project members,
+  assets, approvals, and the job row where one is updated) are locked and
+  re-read inside the operation's own transaction, in one lock order at READ
+  COMMITTED, with a 5 s lock timeout that fails the request. Not covered:
+  bootstrap, the background tick (scheduling, evaluator expiry, outbox
+  delivery, anchor sync and the audit checkpoint, `checkpoint_audit`), the
+  command-line recovery commands, and read-only operations. The key broker's
+  release decision is the broker's own; the control plane only records its
+  report. It narrows the gap between the live check and the effect; it does
+  not close or bound it. Status: the original check-to-use attack (B2) was
+  NOT EXECUTED; the defensive revalidation is implemented; full database-
+  writer TOCTOU resistance is NOT INDEPENDENTLY ESTABLISHED; the B3
+  limitation is unchanged (authority recreated under a new ID is not
+  detected).
+- **Who is affected.** Deployments of 0.3.0 that use privacy budgets and
+  face the database attacker above. The 0.3 release candidates were not
+  tested and may be affected too. The audit trail still records the
+  spends, so a spend with no matching ledger entry in an affected database
+  can be found by comparing the two.
+- **The fix.** A spend, a duplicate answer and a registration are
+  acknowledged only when the anchor holds exactly what the call committed
+  (the appended entry, the returned entry, or the whole genesis, budget
+  included). A ledger changed in between is refused with ENC2202 and the
+  rollback alarm, and nothing is acknowledged. What is recorded is the
+  committed checkpoint, not the database head, so a change after the write
+  is refused at the next spend and at start.
+- **What a deployer must do.** Upgrade to 0.3.3 (0.3.1 was never released) and follow
+  [Upgrading from 0.3.0 to 0.3.3](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/deployment.md#upgrading-from-030-to-033-security-upgrade):
+  back up the database and the independently held anchor first; review every
+  ledger's genesis against the data owner's records before running
+  `encompute-control anchor-ledgers` (with the service stopped, then restart
+  it). There is no migration and no configuration change. There is no
+  supported security downgrade to 0.3.0: a 0.3.0 binary started on the 0.3.1
+  database and anchor accepted and anchored a SQL-forged genesis; to roll
+  back, restore the pre-upgrade database dump together with its anchor. A
+  genesis that 0.3.0 already anchored is not re-examined and nothing repairs
+  it automatically. `anchor-ledgers` records what the database holds now; it
+  does not validate the owner's original cap (no owner-signed cap exists),
+  and `--all` anchors every unanchored ledger without review. Until it has
+  run, spends on a ledger the anchor holds no checkpoint for fail with
+  `500 ENC2202 ... is not anchored` and raise the rollback alarm
+  (`encompute_state_rollback_total`); start-up is not refused. A client can now see `500 ENC2202` for a spend
+  whose entry was erased in that interval; the spend was not acknowledged and
+  retrying the same event is correct. An asset registered while its genesis
+  was being rewritten stays registered with a ledger no spend is accepted
+  on (register it again under another name; start-up asks for recovery).
+- **What remains.** The anchor restored together with the database still
+  forgets spending since the backup, so keep the anchor outside the backup
+  set. An erase after the anchor holds the entry is detected at the next
+  spend and at start; it denies service and does not forget spending.
+  Restoration or deletion of the same anchored records is detected within
+  the implemented checks; creation of new role, membership or approval
+  records (or a user or service account recreated under a new ID) may not be
+  detectable through an ID-based anchor, and the external anchor does not
+  independently authenticate every newly introduced database authority.
+  Details: threat model section 4.6 and `KNOWN_LIMITATIONS.md`.
+
+### Model configuration hardening
+
+- **A model's `config.json` is bounded and checked as text.** Importing a
+  model (and the training spec and the worker that rebuild it) now refuses a
+  `config.json` that has a `configuration_files` key at any depth, is over
+  1 MiB, is not valid JSON or is not UTF-8 (ENC2504). Transformers 4.46
+  matches each entry of that list with a regular expression whose cost grows
+  with the square of an entry's length (CVE-2025-3263: about 30 s for 280 KB
+  here); the import now fails before any Transformers function runs. The
+  import reads `config.json` once and refuses the model if the file's digest
+  is not that of the checked bytes, and the importing side re-verifies the
+  package's `config.json` against its digest before each `from_pretrained`.
+  This guards Encompute's own loaders; the installed Transformers is not
+  upgraded and the exception for the advisory stays (see
+  `security/exceptions.toml`).
+
+### Supply chain and notices
+
+- **Container base images.** The control, services, evaluator and
+  confidential-space images move to a newer pinned `debian:bookworm-slim`
+  and upgrade `perl-base` and `libpcre2-8-0`; the training image moves to
+  `python:3.11.17-slim-bookworm`. The 0.3.0 images carry the older Debian
+  packages (`perl-base` 5.36.0-7+deb12u3: 3 critical and 4 high findings with
+  fixes available; `libpcre2-8-0` 10.42-1+deb12u1: 1 high), which the release
+  scan reports as 28 blocking findings. Rescan of the control and services
+  images: 0 blocking.
+- **Five security-policy exceptions deleted** because the new bases make them
+  stale (tzdata, libssl3, openssl).
+- **Third-party notices.** Two source files are ports of IBM's
+  discrete-gaussian differential privacy code (Apache-2.0):
+  `crates/encompute-privacy/src/sampler.rs` and `accountant.rs`. Their notice
+  and the upstream and license in each file header were missing from 0.3.0;
+  they are added, and `scripts/third_party_notices.py --check` now fails if
+  they go missing again. Comment text only; no code changed.
 
 ## 0.3.0 — 2026-10-02
 

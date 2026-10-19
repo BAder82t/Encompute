@@ -1,10 +1,17 @@
-# Encompute 0.4.0-rc.1: release notes
+# Encompute 0.4.0-rc.1: release notes (unreleased)
 
-This is a release candidate for the 0.4 line, **governed cross-organization
-computation**. It is pre-release. It is not claimed production-ready, and the
-new authorization, key, revocation and log surface has not had an independent
-security review; one is planned before 0.4.0. The stable release remains
-[0.3.0](release-notes-0.3.0.md).
+> **Unreleased.** `0.4.0-rc.1` is the version number on `main`. No `v0.4.*`
+> tag, GitHub release or signed artifact exists, and the control-plane
+> security remediation for this line is still in progress. These notes
+> describe development work, not a release. The supported release is
+> [v0.3.3](https://github.com/BAder82t/Encompute/releases/tag/v0.3.3); see
+> [SECURITY.md](../SECURITY.md).
+
+This describes work toward the 0.4 line, **governed cross-organization
+computation**. It is not claimed production-ready, and the new
+authorization, key, revocation and log surface has not had an independent
+security review. The stable release is
+[0.3.3](https://github.com/BAder82t/Encompute/blob/v0.3.3/docs/release-notes-0.3.3.md).
 
 ## What is in it
 
