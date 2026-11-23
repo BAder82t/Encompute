@@ -360,6 +360,119 @@ fn remote_receipts_and_verify() {
     assert!(err.contains("ENC1606"), "{err}");
 }
 
+/// The trusted evaluator key (pinned, or given with `--trust-evaluator`) is
+/// compared with the evaluator's announced identity before the program,
+/// evaluation keys or ciphertexts are sent; and a pin file that cannot be
+/// read is refused, never silently replaced by trust on first use.
+#[test]
+fn evaluator_trust_is_checked_before_sending_and_a_bad_pin_fails_closed() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-pin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let run = |url: &str, extra: &[&str]| {
+        let mut args = vec![
+            "run",
+            p("adult.encompute").leak(),
+            "--remote",
+            url,
+            "--keys",
+            p("keys").leak(),
+            "--input",
+            "age=30",
+        ];
+        args.extend_from_slice(extra);
+        encompute(&args)
+    };
+    let programs = |url: &str| -> usize {
+        let info: serde_json::Value = ureq::get(&format!("{url}/v1/info"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        info["programs"].as_array().map_or(0, Vec::len)
+    };
+
+    let trusted = serve();
+    let (code, _, err) = run(
+        &trusted,
+        &[
+            "--save-receipt",
+            p("r.json").leak(),
+            "--save-envelopes",
+            p("x").leak(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    // A mock run and its receipt say plainly that nothing was encrypted.
+    assert!(err.contains("mock: the inputs were NOT encrypted"), "{err}");
+    let pin = dir.join("keys/evaluator.pub");
+    let pinned = std::fs::read_to_string(&pin).unwrap();
+    let (code, out, _) = encompute(&[
+        "verify",
+        &p("r.json"),
+        "--trust-evaluator",
+        pinned.trim(),
+        "--model",
+        &p("adult.encompute"),
+        "--request",
+        &p("x/request.bin"),
+        "--response",
+        &p("x/response.bin"),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("MOCK BACKEND: the inputs were NOT encrypted"),
+        "{out}"
+    );
+
+    // Another evaluator: refused before anything is uploaded to it.
+    let other = serve();
+    let (code, _, err) = run(&other, &[]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("ENC1606"), "{err}");
+    assert_eq!(
+        programs(&other),
+        0,
+        "the program was sent to an untrusted evaluator"
+    );
+    let key = pinned.trim().to_owned();
+    let (code, _, err) = run(&other, &["--trust-evaluator", &key]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("ENC1606"), "{err}");
+    assert_eq!(
+        programs(&other),
+        0,
+        "the program was sent to an untrusted evaluator"
+    );
+
+    // A corrupt pin file is refused and kept, not re-pinned.
+    std::fs::write(&pin, [0xff, 0xfe, 0x00, 0x80]).unwrap();
+    let (code, _, err) = run(&other, &[]);
+    assert_ne!(
+        code, 0,
+        "a corrupt pin was replaced by trust on first use: {err}"
+    );
+    assert_eq!(std::fs::read(&pin).unwrap(), [0xff, 0xfe, 0x00, 0x80]);
+    assert_eq!(programs(&other), 0);
+    std::fs::write(&pin, &pinned).unwrap();
+    let (code, _, err) = run(&trusted, &[]);
+    assert_eq!(code, 0, "{err}");
+}
+
 #[test]
 fn privacy_explain_and_graph() {
     let dir = std::env::temp_dir().join(format!("encompute-cli-privacy-{}", std::process::id()));

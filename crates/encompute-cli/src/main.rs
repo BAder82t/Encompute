@@ -576,6 +576,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     }
                     let remote = Remote::new(&url);
                     let trusted = trusted_evaluator(&remote, &dir, trust_evaluator.as_deref())?;
+                    // Before the program, evaluation keys or ciphertexts
+                    // go anywhere: an evaluator announcing another identity
+                    // is refused now. The announcement is unauthenticated;
+                    // the receipt check after execution stays the binding
+                    // one.
+                    let announced = remote.evaluator_identity()?;
+                    if announced.public_key() != trusted.public_key() {
+                        return Err(Error::new(
+                            Code::Receipt,
+                            format!(
+                                "the evaluator at {url} announces enc-eval:{}, not the trusted \
+                                 enc-eval:{}; nothing was sent",
+                                announced.evaluator_id(),
+                                trusted.evaluator_id()
+                            ),
+                        ));
+                    }
                     let run = remote.run(
                         &client,
                         m.program(),
@@ -593,6 +610,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         stats.round_trip_ms
                     );
                     eprintln!("Evaluator receipt       verified");
+                    if client.kind() == BackendKind::Mock {
+                        eprintln!(
+                            "Backend                 mock: the inputs were NOT encrypted \
+                             (development and tests only)"
+                        );
+                    }
                     match (&run.state, &run.proof) {
                         (VerificationState::ExecutionVerified(v), _) => {
                             eprintln!(
@@ -1202,8 +1225,21 @@ fn trusted_evaluator(
     if let Some(hex) = flag {
         return EvaluatorIdentity::from_public_key_hex(hex.trim());
     }
-    if let Ok(hex) = std::fs::read_to_string(&pin) {
-        return EvaluatorIdentity::from_public_key_hex(hex.trim());
+    match std::fs::read_to_string(&pin) {
+        Ok(hex) => return EvaluatorIdentity::from_public_key_hex(hex.trim()),
+        // Only a missing pin means first use. A pin that exists but cannot
+        // be read is refused: replacing it would trust whoever answers now.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(Error::new(
+                Code::Receipt,
+                format!(
+                    "{}: the pinned evaluator key cannot be read ({e}); restore it, remove it \
+                     to pin again on first use, or pass --trust-evaluator",
+                    pin.display()
+                ),
+            ))
+        }
     }
     let announced = remote.evaluator_identity()?;
     // Public: readable by all, whatever the umask.
@@ -1576,6 +1612,11 @@ fn verify(
         None => {}
     }
     section("Receipt");
+    // The mock backend encrypts nothing. A valid receipt for a mock run is
+    // still only a mock run: say so, whoever supplied the request.
+    if r.backend == "mock" {
+        println!("MOCK BACKEND: the inputs were NOT encrypted (development and tests only)");
+    }
     if matches!(attestation, Some(Ok(_))) && result.is_ok() {
         println!("WORKLOAD ATTESTATION VALID");
     }
