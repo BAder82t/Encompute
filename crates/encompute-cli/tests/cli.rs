@@ -1242,3 +1242,133 @@ fn plan_check_and_explain_deep() {
     let (code, _, _) = encompute(&["plan", s, "--infrastructure", i, "--profile", "maximum"]);
     assert_eq!(code, 1);
 }
+
+/// Secret key files another user can read are refused (ENC2605): a
+/// client's `secret.key` and a party identity key must be 0600.
+#[cfg(unix)]
+#[test]
+fn secret_key_files_readable_by_others_are_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("encompute-cli-modes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    let chmod = |f: &str, mode: u32| {
+        std::fs::set_permissions(dir.join(f), std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let url = serve();
+    let run = || {
+        encompute(&[
+            "run",
+            &p("adult.encompute"),
+            "--remote",
+            &url,
+            "--keys",
+            &p("keys"),
+            "--input",
+            "age=30",
+        ])
+    };
+    let (code, _, err) = run();
+    assert_eq!(code, 0, "{err}");
+
+    for mode in [0o644, 0o640, 0o604] {
+        chmod("keys/secret.key", mode);
+        let (code, _, err) = run();
+        assert_ne!(code, 0, "secret.key at {mode:o} was used: {err}");
+        assert!(
+            err.contains("ENC2605") && err.contains("chmod 600"),
+            "{err}"
+        );
+    }
+    chmod("keys/secret.key", 0o600);
+    let (code, _, err) = run();
+    assert_eq!(code, 0, "{err}");
+
+    // A party identity key, reused by `aggregate identity` and signing.
+    let (code, _, err) = encompute(&[
+        "aggregate",
+        "identity",
+        "--party",
+        "p",
+        "--key",
+        &p("p.key"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    chmod("p.key", 0o644);
+    let (code, _, err) = encompute(&[
+        "aggregate",
+        "identity",
+        "--party",
+        "p",
+        "--key",
+        &p("p.key"),
+    ]);
+    assert_ne!(code, 0, "a 0644 party key was used: {err}");
+    assert!(err.contains("ENC2605"), "{err}");
+    chmod("p.key", 0o600);
+    let (code, identity, err) = encompute(&[
+        "aggregate",
+        "identity",
+        "--party",
+        "p",
+        "--key",
+        &p("p.key"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    std::fs::write(dir.join("parties.json"), format!("[{}]", identity.trim())).unwrap();
+
+    // The same key signing an owner authorization in a trust bundle.
+    std::fs::write(
+        dir.join("owned.eir"),
+        "encompute 0.1\nprogram owned precision 0.001 purpose \"x\"\nparty \"p\" \"P\"\n\
+         asset \"a\" dataset owners [\"p\"] readers [\"p\"] purposes [\"x\"] release owner_only\n\
+         %0 = input \"v\" [0.0, 10.0] asset \"a\" : secret u8\n%1 = const [3.0] : public u8\n\
+         %2 = ge %0, %1 : secret bool\noutput \"y\" = %2 to \"p\"\n",
+    )
+    .unwrap();
+    let (code, _, err) = encompute(&["compile", &p("owned.eir"), "-o", &p("owned.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "trust",
+        "init",
+        &p("owned.encompute"),
+        "--parties",
+        &p("parties.json"),
+        "--bundle",
+        &p("t.json"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let authorize = || {
+        encompute(&[
+            "trust",
+            "authorize",
+            "--party",
+            "p",
+            "--key",
+            &p("p.key"),
+            "--bundle",
+            &p("t.json"),
+        ])
+    };
+    chmod("p.key", 0o644);
+    let (code, _, err) = authorize();
+    assert_ne!(code, 0, "a 0644 party key signed an authorization: {err}");
+    assert!(err.contains("ENC2605"), "{err}");
+    chmod("p.key", 0o600);
+    let (code, _, err) = authorize();
+    assert_eq!(code, 0, "{err}");
+}

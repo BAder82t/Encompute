@@ -567,8 +567,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             Error::new(Code::WrongKey, format!("{}: {e}", dir.join(f).display()))
                         })
                     };
-                    let mut client =
-                        ClientSession::restore(m.ids(), m.compiled(), &read("secret.key")?)?;
+                    let secret = encompute_verification::read_secret_file(
+                        &dir.join("secret.key"),
+                        encompute_verification::SecretFile::Private,
+                        |e| {
+                            Error::new(
+                                Code::WrongKey,
+                                format!("{}: {e}", dir.join("secret.key").display()),
+                            )
+                        },
+                    )?;
+                    let mut client = ClientSession::restore(m.ids(), m.compiled(), &secret)?;
                     let eval_keys = read("eval.keys").ok();
                     // Needed to verify execution proofs by re-execution.
                     if let Some(k) = &eval_keys {

@@ -196,12 +196,20 @@ impl Model {
                         )
                     })
                 };
-                let mut c = encompute_runtime::ClientSession::restore(
-                    m.ids(),
-                    m.compiled(),
-                    &read("secret.key").map_err(err)?,
+                let secret = encompute_runtime::verification::read_secret_file(
+                    &d.join("secret.key"),
+                    encompute_runtime::verification::SecretFile::Private,
+                    |e| {
+                        encompute_ir::Error::new(
+                            encompute_ir::Code::WrongKey,
+                            format!("{}: {e}", d.join("secret.key").display()),
+                        )
+                    },
                 )
                 .map_err(err)?;
+                let mut c =
+                    encompute_runtime::ClientSession::restore(m.ids(), m.compiled(), &secret)
+                        .map_err(err)?;
                 let k = read("eval.keys").ok();
                 if let Some(k) = &k {
                     c.attach_evaluation_keys(k).map_err(err)?;

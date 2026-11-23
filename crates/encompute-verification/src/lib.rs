@@ -25,6 +25,7 @@ pub mod placement;
 pub mod proof;
 mod receipt;
 mod reference;
+mod secret_file;
 pub mod service;
 mod spec;
 pub mod ticket;
@@ -47,6 +48,7 @@ pub use receipt::{
     GOVERNED_RECEIPT_VERSION, RECEIPT_VERSION,
 };
 pub use reference::ReferenceTranscriptEvaluator;
+pub use secret_file::{read_secret_file, SecretFile};
 pub use service::{
     JobGrant, MessageEnvelope, ServiceHeaders, ServiceSigner, UploadGrant, UploadKind,
 };

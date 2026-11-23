@@ -585,7 +585,17 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
                     Error::new(Code::WrongKey, format!("{}: {e}", keys.join(f).display()))
                 })
             };
-            let mut client = ClientSession::restore(m.ids(), m.compiled(), &read("secret.key")?)?;
+            let secret = encompute_verification::read_secret_file(
+                &keys.join("secret.key"),
+                encompute_verification::SecretFile::Private,
+                |e| {
+                    Error::new(
+                        Code::WrongKey,
+                        format!("{}: {e}", keys.join("secret.key").display()),
+                    )
+                },
+            )?;
+            let mut client = ClientSession::restore(m.ids(), m.compiled(), &secret)?;
             let eval_keys = read("eval.keys").ok();
             if let Some(k) = &eval_keys {
                 client.attach_evaluation_keys(k)?;

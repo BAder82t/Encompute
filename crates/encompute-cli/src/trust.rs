@@ -305,10 +305,16 @@ pub fn export(adapter: &str, bundle: &Path, a: &AnchorArgs, trust: &TrustArgs) -
     }
 }
 
+/// A party identity key: 32 bytes, accessible to its owner only.
 fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
-    let seed: [u8; 32] = read(p)?
-        .try_into()
-        .map_err(|_| Error::new(Code::TrustAuthorization, "a key file is 32 bytes"))?;
+    let seed: [u8; 32] = encompute_verification::read_secret_file(
+        p,
+        encompute_verification::SecretFile::Private,
+        |e| io(p, e),
+    )?
+    .as_slice()
+    .try_into()
+    .map_err(|_| Error::new(Code::TrustAuthorization, "a key file is 32 bytes"))?;
     Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
 }
 

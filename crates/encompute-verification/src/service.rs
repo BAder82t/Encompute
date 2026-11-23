@@ -119,11 +119,13 @@ impl ServiceSigner {
         Self::from_seed(id, &seed)
     }
 
-    /// Reads a 32-byte seed (raw, or 64 hex characters) from a secret file.
+    /// Reads a 32-byte seed (raw, or 64 hex characters) from a secret file:
+    /// a regular file nobody but its owner can write (it may be a mounted
+    /// secret readable through the mount; see [`crate::SecretFile`]).
     pub fn from_file(id: &str, path: &std::path::Path) -> Result<Self> {
-        let b = Zeroizing::new(
-            std::fs::read(path).map_err(|e| auth(format!("{}: {e}", path.display())))?,
-        );
+        let b = crate::read_secret_file(path, crate::SecretFile::Mounted, |e| {
+            auth(format!("{}: {e}", path.display()))
+        })?;
         let seed: Zeroizing<Vec<u8>> = if b.len() == 32 {
             Zeroizing::new(b.to_vec())
         } else {
