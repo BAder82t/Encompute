@@ -12,4 +12,4 @@ REFUSED  exit 1: INVALID: receipt signature is invalid
 REFUSED  exit 1: INVALID: receipt spec ID does not match
 REFUSED  exit 1: INVALID: receipt was signed by an untrusted evaluator key
 REFUSED  exit 3: RECEIPT SIGNATURE VALID (some bindings not checked)
-REFUSED  exit 2: error[ENC1606]: receipt was signed by an untrusted evaluator key
+REFUSED  exit 2: error[ENC1606]: the evaluator at http://127.0.0.1:
