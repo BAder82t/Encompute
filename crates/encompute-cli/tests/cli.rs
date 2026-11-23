@@ -96,9 +96,10 @@ fn keys_and_audit() {
         let (code, out, _) = encompute(&["audit", a, "--keys", k]);
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("FAIL  keys.secret_permissions"));
-        // Generating keys over a secret.key with a wider mode makes it
-        // owner-only again (not only when the file is created).
-        let (code, _, err) = encompute(&["keys", "generate", a, "-o", k, "--mode", "mock"]);
+        // Replacing a secret.key with a wider mode (--force) leaves an
+        // owner-only one.
+        let (code, _, err) =
+            encompute(&["keys", "generate", a, "-o", k, "--mode", "mock", "--force"]);
         assert_eq!(code, 0, "{err}");
         let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "secret.key is {mode:o}");
@@ -1371,4 +1372,69 @@ fn secret_key_files_readable_by_others_are_refused() {
     chmod("p.key", 0o600);
     let (code, _, err) = authorize();
     assert_eq!(code, 0, "{err}");
+}
+
+/// `keys generate` never replaces an existing secret key unless asked
+/// (`--force`): results encrypted under it would become undecryptable. A
+/// replacement is written to temporary files and renamed into place, so a
+/// failure leaves the old keys whole.
+#[test]
+fn keys_generate_never_replaces_a_secret_key_without_force() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-regen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let generate = |extra: &[&str]| {
+        let mut args = vec![
+            "keys".to_owned(),
+            "generate".to_owned(),
+            p("adult.encompute"),
+            "-o".to_owned(),
+            p("keys"),
+            "--mode".to_owned(),
+            "mock".to_owned(),
+        ];
+        args.extend(extra.iter().map(|s| (*s).to_owned()));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        encompute(&args)
+    };
+    let read = |f: &str| std::fs::read(dir.join("keys").join(f)).unwrap();
+    let (code, _, err) = generate(&[]);
+    assert_eq!(code, 0, "{err}");
+    let (secret, eval) = (read("secret.key"), read("eval.keys"));
+    std::fs::write(dir.join("keys/evaluator.pub"), "pinned\n").unwrap();
+
+    // Without --force: refused, nothing changed.
+    let (code, _, err) = generate(&[]);
+    assert_ne!(code, 0, "a secret key was replaced without --force");
+    assert!(err.contains("ENC1605") && err.contains("--force"), "{err}");
+    assert_eq!(read("secret.key"), secret);
+    assert_eq!(read("eval.keys"), eval);
+
+    // With --force: a new key pair, owner-only, the evaluator pin kept, no
+    // temporary files left behind.
+    let (code, _, err) = generate(&["--force"]);
+    assert_eq!(code, 0, "{err}");
+    assert_ne!(read("secret.key"), secret);
+    assert_ne!(read("eval.keys"), eval);
+    assert_eq!(read("evaluator.pub"), b"pinned\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("keys/secret.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "secret.key is {mode:o}");
+    }
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("keys"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["eval.keys", "evaluator.pub", "secret.key"]);
 }

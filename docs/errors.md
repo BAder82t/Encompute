@@ -23,7 +23,7 @@ Python raises `encompute.EncomputeError` with `.code` and `.message`.
 | ENC1602 | envelope | Wrong kind, format, scheme or backend version | Match client and evaluator versions |
 | ENC1603 | envelope | Made for a different parameter set | Recompile or regenerate keys |
 | ENC1604 | envelope, evaluator | Made for a different program; or an uploaded program compiles to another ID than the job grant names | — |
-| ENC1605 | envelope | Different or unregistered key | Upload `eval.keys` |
+| ENC1605 | envelope, CLI | Different or unregistered key. `keys generate` into a directory that already holds a `secret.key` | Upload `eval.keys`. Generate into another directory, or pass `--force` to replace the key (results encrypted under the old key become undecryptable) |
 | ENC1606 | client | An execution receipt is malformed, has a bad signature, comes from an untrusted evaluator key, or does not match the program, plan, parameters, key, request or response | Do not use the result; check which evaluator you trust (`--trust-evaluator`) and that request and response were not altered |
 | ENC1701 | remote | Network or protocol failure between client and evaluator | — |
 | ENC1702 | client, audit | A semantic transcript is malformed, of an unknown version, or its hash does not match the exact plan or the verification metadata ("transcript commitment mismatch") | Recompile the artifact; do not trust a receipt whose transcript hash differs |

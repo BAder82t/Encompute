@@ -492,6 +492,10 @@ enum KeysCmd {
         output: Option<PathBuf>,
         #[arg(long, default_value = "encrypted")]
         mode: String,
+        /// Replace an existing `secret.key` in the output directory. Results
+        /// encrypted under the old key can then no longer be decrypted.
+        #[arg(long)]
+        force: bool,
     },
     #[command(flatten)]
     Broker(Box<attest::BrokerCmd>),
@@ -946,12 +950,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     model,
                     output,
                     mode,
+                    force,
                 },
         } => {
             let m = load(&model)?;
-            let client = m.new_client(mode.parse()?)?;
             let dir = output
                 .unwrap_or_else(|| model.with_file_name(format!("{}.keys", m.program().name())));
+            // Before generating (seconds and gigabytes for exact programs):
+            // never replace a secret key unless asked.
+            let secret = dir.join("secret.key");
+            if !force && std::fs::symlink_metadata(&secret).is_ok() {
+                return Err(Error::new(
+                    Code::WrongKey,
+                    format!(
+                        "{} exists: replacing it would make every result encrypted under it \
+                         undecryptable. Use another directory, or --force to replace it",
+                        secret.display()
+                    ),
+                ));
+            }
+            let client = m.new_client(mode.parse()?)?;
             write_keys(&dir, &client)?;
             println!("wrote {} (key {})", dir.display(), &client.key_id()[..16]);
             Ok(ExitCode::SUCCESS)
@@ -1748,34 +1766,54 @@ fn compile(source: &str, output: Option<PathBuf>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Write a key pair. Each file is written to a new temporary file (the
+/// secret one created 0600) and renamed into place, evaluation keys first
+/// and the secret key last: a failure part way leaves any existing secret
+/// key whole, never truncated.
 fn write_keys(dir: &Path, client: &ClientSession) -> Result<()> {
-    let io = |e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", dir.display()));
-    std::fs::create_dir_all(dir).map_err(io)?;
-    let secret = dir.join("secret.key");
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    use std::io::Write;
-    let envelope = client.secret_key_envelope()?;
-    let mut f = opts.open(&secret).map_err(io)?;
-    // The mode above applies only to a new file: an existing secret.key
-    // keeps its own, so set it before writing the key.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        f.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(io)?;
-    }
-    f.write_all(&envelope).map_err(io)?;
+    let io =
+        |p: &Path, e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", p.display()));
+    std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+    let envelope = zeroize::Zeroizing::new(client.secret_key_envelope()?);
     let keys = client
         .evaluation_keys()
         .expect("fresh client has evaluation keys");
-    std::fs::write(dir.join("eval.keys"), keys).map_err(io)?;
-    Ok(())
+    replace_file(&dir.join("eval.keys"), keys, false).map_err(|(p, e)| io(&p, e))?;
+    replace_file(&dir.join("secret.key"), &envelope, true).map_err(|(p, e)| io(&p, e))
+}
+
+/// Write `bytes` to `path` through a temporary file in the same directory,
+/// synced, then renamed over `path` (removed again on any error).
+fn replace_file(
+    path: &Path,
+    bytes: &[u8],
+    secret: bool,
+) -> std::result::Result<(), (PathBuf, std::io::Error)> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .map_or_else(Default::default, |n| n.to_owned());
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(&name);
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if secret {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = secret;
+    let written = opts
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        (path.to_owned(), e)
+    })
 }
 
 fn parse_inputs(args: &[String], file: Option<&Path>) -> Result<Inputs> {
