@@ -131,7 +131,9 @@ CREATE TRIGGER job_terms_acceptances_no_truncate
 -- A job inserted under terms is counted against them and numbered: only
 -- under its own project's active terms, and never beyond their max_jobs
 -- (the control plane checks both first, under the same row lock, and
--- audits a refusal; this holds whatever inserts the job).
+-- audits a refusal; this holds whatever inserts the job), and a project
+-- that requires terms gets no job without them. Their window is checked by
+-- the control plane only.
 CREATE FUNCTION encompute_job_terms_count() RETURNS trigger AS $$
 DECLARE
     n BIGINT;
@@ -139,6 +141,11 @@ BEGIN
     IF NEW.terms_id IS NULL THEN
         IF NEW.terms_seq IS NOT NULL THEN
             RAISE EXCEPTION 'a job without terms has no number under them'
+                USING ERRCODE = 'check_violation';
+        END IF;
+        -- A project that requires terms runs no job without them.
+        IF EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id AND terms_required) THEN
+            RAISE EXCEPTION 'project % runs jobs only under job terms', NEW.project_id
                 USING ERRCODE = 'check_violation';
         END IF;
         RETURN NEW;

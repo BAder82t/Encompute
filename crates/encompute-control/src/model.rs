@@ -371,7 +371,9 @@ pub struct JobTerms {
 /// Bounds on a terms document's lists and limit.
 pub const MAX_TERMS_ENTRIES: usize = 64;
 pub const MAX_TERMS_JOBS: u64 = 1_000_000;
-/// Proposed job terms a project may have awaiting acceptance at once.
+/// Proposed job terms one member organization may have awaiting acceptance
+/// in a project at once (per organization, so no member keeps the others
+/// from proposing).
 pub const MAX_OPEN_TERMS_PROPOSALS: i64 = 8;
 
 /// Who holds the keys of a project's sources. In sovereign custody every

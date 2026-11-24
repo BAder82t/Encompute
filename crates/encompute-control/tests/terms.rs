@@ -613,6 +613,21 @@ fn terms_that_take_effect_supersede_every_older_proposal() {
         )),
     );
     assert_eq!(s, 409, "{v}");
+    // The limit is modelco's own: hospital-a can still propose.
+    let theirs = w.t.ok(
+        &w.a_admin,
+        "POST",
+        &url,
+        Some(terms(
+            &[&spec],
+            98,
+            std::slice::from_ref(&key),
+            now() + 3600,
+        )),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     // One taking effect supersedes the other seven: room again.
     w.t.ok(
         &w.a_admin,
@@ -620,6 +635,7 @@ fn terms_that_take_effect_supersede_every_older_proposal() {
         &format!("/v1/terms/{}/accept", open[3]),
         None,
     );
+    assert_eq!(terms_status(&w, &theirs), "superseded");
     for (i, id) in open.iter().enumerate() {
         let want = if i == 3 { "active" } else { "superseded" };
         assert_eq!(terms_status(&w, id), want, "{id}");
@@ -1203,4 +1219,23 @@ fn the_database_counts_and_numbers_jobs_under_terms_and_holds_their_limit() {
     copy(&mut c, "job-copy-4", &third).unwrap();
     assert_eq!(seq(&mut c, "job-copy-4"), 1);
     assert_eq!(terms_view(&w, &third)["jobs"], 1);
+    // Nor a job without terms in a project that requires them.
+    let refused = c
+        .execute(
+            "INSERT INTO jobs
+             SELECT (jsonb_populate_record(NULL::jobs, to_jsonb(j) || jsonb_build_object(
+                         'id', 'job-no-terms', 'idempotency_key', 'no-terms',
+                         'terms_id', NULL, 'terms_seq', NULL))).*
+               FROM jobs j WHERE j.id = $1",
+            &[&job],
+        )
+        .unwrap_err();
+    assert!(
+        refused
+            .as_db_error()
+            .unwrap()
+            .message()
+            .contains("runs jobs only under job terms"),
+        "{refused}"
+    );
 }

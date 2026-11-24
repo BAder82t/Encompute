@@ -22,8 +22,10 @@
 //! accepted them too, so no organization loosens them alone; when terms
 //! become active, every other set of the project's terms, active or still
 //! proposed, is superseded and can never be accepted again (so an older
-//! proposal cannot replace newer terms later). A project has at most
-//! [`MAX_OPEN_TERMS_PROPOSALS`] proposals awaiting acceptance at once. A
+//! proposal cannot replace newer terms later). Each member organization has
+//! at most [`MAX_OPEN_TERMS_PROPOSALS`] of its own proposals awaiting
+//! acceptance in a project at once, so none keeps the others from
+//! proposing. A
 //! project created with `terms_required` runs nothing until terms are
 //! active, and activation makes a project require terms from then on.
 //!
@@ -467,14 +469,15 @@ impl Control {
             check_members(&doc, &p.members)?;
             let open: i64 = t
                 .query_one(
-                    "SELECT count(*) FROM job_terms WHERE project_id = $1 AND status = 'proposed'",
-                    &[&project],
+                    "SELECT count(*) FROM job_terms
+                      WHERE project_id = $1 AND organization_id = $2 AND status = 'proposed'",
+                    &[&project, &org],
                 )
                 .map_err(db_err)?
                 .get(0);
             if open >= MAX_OPEN_TERMS_PROPOSALS {
                 return Err(conflict(format!(
-                    "project {project} has {open} proposed job terms awaiting acceptance, the most it may have at once: terms that become active supersede them"
+                    "{org} has {open} proposed job terms awaiting acceptance in project {project}, the most one organization may have at once: terms that become active supersede them"
                 )));
             }
             let id = new_id("terms");
