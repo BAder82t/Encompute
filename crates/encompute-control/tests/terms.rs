@@ -13,6 +13,13 @@ use std::sync::Arc;
 use common::*;
 use serde_json::{json, Value};
 
+use encompute_evaluator::{compile_program, execution_spec, transcript_for, Ids};
+use encompute_verification::{
+    output_commitment, request_commitment, EvaluatorSigner, ExecutionReceipt,
+};
+
+const KEY_ID: &str = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+
 fn now() -> u64 {
     encompute_verification::service::now()
 }
@@ -449,6 +456,26 @@ fn concurrent_submissions_never_exceed_the_terms() {
     assert_eq!(n, 3);
 }
 
+/// `signer`'s receipt for [`EXACT`] over these bytes.
+fn receipt(signer: &EvaluatorSigner, request: &[u8], response: &[u8]) -> Value {
+    let p = encompute_ir::parse(EXACT).unwrap();
+    let c = compile_program(&p).unwrap();
+    let spec = execution_spec(&Ids::of(&p, &c), &c, c.target_backend());
+    let th = transcript_for(&c, &spec).map(|t| t.id().hex());
+    let r = ExecutionReceipt::new(
+        &spec,
+        th.as_deref(),
+        KEY_ID,
+        request,
+        response,
+        &signer.identity(),
+    )
+    .unwrap()
+    .sign(signer)
+    .unwrap();
+    serde_json::to_value(r).unwrap()
+}
+
 fn terms_status(w: &World, id: &str) -> Value {
     let url = format!("/v1/projects/{}/terms", w.project);
     w.t.ok(&w.b_dev, "GET", &url, None)
@@ -556,6 +583,103 @@ fn terms_that_take_effect_supersede_every_older_proposal() {
             now() + 3600,
         )),
     );
+}
+
+#[test]
+fn a_job_under_terms_runs_only_with_a_receipt_key_they_name() {
+    let Some(w) = world() else { return };
+    let (exact, spec) = plan(&w, EXACT);
+    agree(
+        &w,
+        terms(&[&spec], 5, &[receipt_key(&w.evaluator)], now() + 3600),
+    );
+    let queued = |key: &str| {
+        let (s, v) = w.job(&exact, &[], key);
+        assert_eq!(s, 201, "{v}");
+        assert_eq!(v["state"], "queued", "{v}");
+        v["id"].as_str().unwrap().to_owned()
+    };
+    let state =
+        |job: &str| w.t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{job}"), None)["state"].clone();
+    let other = EvaluatorSigner::from_seed(&[91; 32]);
+    let (req, resp) = (b"request bytes".to_vec(), b"response bytes".to_vec());
+
+    // A job running under the key the terms name, whose evaluator's key
+    // then changes under it (a re-registration fails such a job too; here
+    // only the key changes): the evaluator's receipt under the new key is
+    // refused, and the client's completion with it fails the job.
+    let running = queued("running");
+    w.t.ok(
+        &w.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{running}/start"),
+        None,
+    );
+    w.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE evaluators SET receipt_key = $1 WHERE id = 'evaluator-1'",
+            &[&other.identity().public_key_hex()],
+        )
+        .unwrap();
+    let r = receipt(&other, &req, &resp);
+    let (s, v) = w.t.call(
+        &w.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{running}/receipt"),
+        Some(json!({"receipt": r})),
+    );
+    assert_eq!(s, 403, "{v}");
+    let (s, v) = w.t.call(
+        &w.b_dev,
+        "POST",
+        &format!("/v1/jobs/{running}/complete"),
+        Some(
+            json!({"receipt": r, "request_commitment": request_commitment(&req),
+                    "output_commitment": output_commitment(&resp), "key_id": KEY_ID}),
+        ),
+    );
+    assert!(s >= 400, "{s} {v}");
+    let v =
+        w.t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{running}"), None);
+    assert_eq!(v["state"], "failed", "{v}");
+    assert!(v["error"].as_str().unwrap().contains("terms"), "{v}");
+    assert!(anchored(&w.t, NegSet::EndedJobs, &running));
+
+    // A job queued on the evaluator before it registers again with another
+    // key does not start.
+    w.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE evaluators SET receipt_key = $1 WHERE id = 'evaluator-1'",
+            &[&receipt_key(&w.evaluator)],
+        )
+        .unwrap();
+    let waiting = queued("waiting");
+    w.t.ok(
+        &w.evaluator.service,
+        "POST",
+        "/v1/evaluators",
+        Some(
+            json!({"id": "evaluator-1", "url": "http://evaluator-1.internal:8750",
+                    "receipt_key": other.identity().public_key_hex(),
+                    "backends": ["openfhe", "openfhe-exact"],
+                    "profiles": ["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"],
+                    "openfhe_version": "1.5.1", "capacity": 4}),
+        ),
+    );
+    let (s, v) = w.t.call(
+        &w.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{waiting}/start"),
+        None,
+    );
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(state(&waiting), "queued");
 }
 
 /// Stops `t` and backs its database up as `name`: (the stopped harness,

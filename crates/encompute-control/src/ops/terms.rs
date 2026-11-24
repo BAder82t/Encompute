@@ -413,6 +413,27 @@ pub(crate) fn admit(
     Ok(Ok(Some(id)))
 }
 
+/// Whether terms `d` name `key`, an evaluator's registered receipt key.
+pub(crate) fn names_key(d: &JobTerms, key: &str) -> bool {
+    d.evaluator_keys.contains(&key.to_ascii_lowercase())
+}
+
+/// Whether evaluator `evaluator`'s receipt key, as registered now, is one
+/// terms `d` name (an evaluator may register again with another key after
+/// a job under them was scheduled on it).
+pub(crate) fn names_evaluator(
+    c: &mut impl GenericClient,
+    d: &JobTerms,
+    evaluator: &str,
+) -> Result<bool> {
+    Ok(c.query_opt(
+        "SELECT receipt_key FROM evaluators WHERE id = $1",
+        &[&evaluator],
+    )
+    .map_err(db_err)?
+    .is_some_and(|r| names_key(d, r.get(0))))
+}
+
 /// The document of terms `id` (a job's: never changed, read unlocked).
 pub(crate) fn document(c: &mut impl GenericClient, id: &str) -> Result<JobTerms> {
     let r = c

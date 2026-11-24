@@ -2844,10 +2844,9 @@ impl Control {
                 // Under job terms: only an evaluator whose registered
                 // receipt key they name.
                 .filter(|r| {
-                    terms.as_ref().is_none_or(|d| {
-                        d.evaluator_keys
-                            .contains(&r.get::<_, String>(6).to_ascii_lowercase())
-                    })
+                    terms
+                        .as_ref()
+                        .is_none_or(|d| super::terms::names_key(d, r.get(6)))
                 })
                 .map(|r| {
                     let est = estimated_ms(
@@ -2992,6 +2991,18 @@ impl Control {
                 )));
             }
             let g = j.grant.clone().ok_or_else(|| conflict("no grant"))?;
+            // A job under job terms starts only while its evaluator's
+            // registered receipt key is one they name (it may have
+            // registered again with another key since it was scheduled).
+            if let Some(tid) = &j.terms {
+                let d = super::terms::document(t, tid)?;
+                if !super::terms::names_evaluator(t, &d, ctx.actor())? {
+                    return Err(forbidden(format!(
+                        "job {id} runs under job terms {tid}, which do not name the receipt key {} has registered now",
+                        ctx.actor()
+                    )));
+                }
+            }
             // A governed job starts only while everything it runs under is
             // still valid, strictly, on the control plane's clock; otherwise
             // it fails and is anchored as ended.
@@ -3165,6 +3176,14 @@ impl Control {
                 )
                 .map_err(db_err)?
                 .get(0);
+            // Under job terms, only a receipt key they name counts.
+            if let Some(tid) = &j.terms {
+                if !super::terms::names_key(&super::terms::document(t, tid)?, &key) {
+                    return Err(forbidden(format!(
+                        "job {id} runs under job terms {tid}, which do not name the receipt key {evaluator} has registered now"
+                    )));
+                }
+            }
             let ident = EvaluatorIdentity::from_public_key_hex(&key)?;
             signed.verify_signature(&ident)?;
             if signed.receipt.spec_id != j.spec_id || signed.receipt.program_id != j.program_id {
@@ -3248,6 +3267,10 @@ impl Control {
                 )
                 .map_err(db_err)?
                 .get(0);
+            let terms = match &j.terms {
+                Some(tid) => Some((tid.clone(), super::terms::document(t, tid)?)),
+                None => None,
+            };
             let (_, compiled, spec, doc) = self.load_plan(t, &j.plan)?;
             // A governed job's spec is its plan's under its binding (and
             // its transcript is the one for that spec).
@@ -3272,6 +3295,18 @@ impl Control {
             .and_then(|v| {
                 if j.governance.is_some() {
                     governed_receipt(&j, &signed)?;
+                }
+                // Under job terms the receipt key must be one they name: a
+                // receipt under another key fails the job.
+                if let Some((tid, d)) = &terms {
+                    if !super::terms::names_key(d, &key) {
+                        return Err(Error::new(
+                            Code::Receipt,
+                            format!(
+                                "the receipt key {evaluator} has registered is not one the job's terms {tid} name"
+                            ),
+                        ));
+                    }
                 }
                 Ok(v)
             });
