@@ -365,10 +365,25 @@ pub enum JobsCmd {
         sources: Vec<String>,
         #[arg(short, long = "input")]
         inputs: Vec<String>,
+        /// JSON file mapping input names to numbers or lists.
+        #[arg(long)]
+        inputs_file: Option<PathBuf>,
         #[arg(long)]
         keys: PathBuf,
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Write the evaluator's signed receipt here.
+        #[arg(long)]
+        save_receipt: Option<PathBuf>,
+        /// Write the exchanged request.bin and response.bin here (and
+        /// proof.bin when there is an execution proof), so `encompute
+        /// verify` can check the receipt's commitments later.
+        #[arg(long)]
+        save_envelopes: Option<PathBuf>,
+        /// Write the job as the control plane reports it after completion
+        /// (its ID, state, terms and the signed grant it ran under) here.
+        #[arg(long)]
+        save_job: Option<PathBuf>,
         /// Receipt key (hex) of an evaluator you trust; repeat for several.
         /// Default: `ENCOMPUTE_TRUSTED_EVALUATORS`. A job scheduled on any
         /// other key is refused before anything is sent to the evaluator.
@@ -514,8 +529,12 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
             purpose,
             sources,
             inputs,
+            inputs_file,
             keys,
             idempotency_key,
+            save_receipt,
+            save_envelopes,
+            save_job,
             trust_evaluators,
             allow_unpinned_evaluator,
             placement,
@@ -528,7 +547,7 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
                 allow_unpinned_evaluator,
             )?;
             let m = load(&model)?;
-            let inputs = crate::parse_inputs(&inputs, None)?;
+            let inputs = crate::parse_inputs(&inputs, inputs_file.as_deref())?;
             let job = submit(&c, &m, &project, &purpose, &sources, "out", idempotency_key)?;
             let id = job["id"].as_str().unwrap_or_default().to_owned();
             eprintln!("job {id}: {}", job["state"].as_str().unwrap_or("?"));
@@ -602,6 +621,27 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
                        "output_commitment": output_commitment(&run.response), "key_id": client.key_id()}),
             )?;
             let trust = c.get(&format!("/v1/trust/{id}"))?;
+            // The evidence, as `run --remote` saves it, and the job as the
+            // control plane reports it now (with the grant it ran under).
+            let io = |p: &Path, e: std::io::Error| {
+                Error::new(Code::Artifact, format!("{}: {e}", p.display()))
+            };
+            if let Some(p) = &save_receipt {
+                std::fs::write(p, run.receipt.to_bytes()?).map_err(|e| io(p, e))?;
+            }
+            if let Some(d) = &save_envelopes {
+                std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
+                std::fs::write(d.join("request.bin"), &run.request).map_err(|e| io(d, e))?;
+                std::fs::write(d.join("response.bin"), &run.response).map_err(|e| io(d, e))?;
+                if let Some(p) = &run.proof {
+                    std::fs::write(d.join("proof.bin"), p.to_bytes()?).map_err(|e| io(d, e))?;
+                }
+            }
+            if let Some(p) = &save_job {
+                let job = c.get(&format!("/v1/jobs/{id}"))?;
+                std::fs::write(p, serde_json::to_vec_pretty(&job).expect("serializable"))
+                    .map_err(|e| io(p, e))?;
+            }
             eprintln!(
                 "Job                     {}",
                 done["state"].as_str().unwrap_or("?")
