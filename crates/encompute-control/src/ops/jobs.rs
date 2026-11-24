@@ -2688,14 +2688,35 @@ impl Control {
 
     // --- scheduling ---------------------------------------------------------------
 
-    /// Places authorized jobs on compatible, ready evaluators.
+    /// Places authorized jobs on compatible, ready evaluators, oldest first.
+    ///
+    /// A job under job terms is taken only while a ready evaluator that
+    /// could run it, with room for it, has a receipt key they name, or once
+    /// they have ended (it then fails): jobs waiting for an evaluator that
+    /// is away or full never fill the batch ahead of jobs that can run.
     pub fn schedule_pending(&self) -> Result<()> {
         let ids: Vec<String> = self
             .db
             .conn()?
             .query(
-                "SELECT id FROM jobs WHERE state = 'authorized' ORDER BY created_at LIMIT 100",
-                &[],
+                "SELECT j.id FROM jobs j LEFT JOIN job_terms x ON x.id = j.terms_id
+                  WHERE j.state = 'authorized'
+                    AND (j.terms_id IS NULL
+                         OR (x.document->>'not_after')::bigint <= $1
+                         OR EXISTS (
+                             SELECT 1 FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                              WHERE e.status = 'ready' AND s.status = 'active'
+                                AND (j.governance IS NOT NULL OR s.organization_id IS NULL)
+                                AND e.backends ? j.backend AND e.profiles ? j.profile
+                                AND e.last_heartbeat > now() - make_interval(secs => $2)
+                                AND x.document->'evaluator_keys' ? lower(e.receipt_key)
+                                AND (SELECT count(*) FROM jobs y WHERE y.evaluator_id = e.id
+                                        AND y.state IN ('queued', 'running', 'verifying')) < e.capacity))
+                  ORDER BY j.created_at, j.id LIMIT 100",
+                &[
+                    &(now().min(i64::MAX as u64) as i64),
+                    &(HEARTBEAT_TIMEOUT_SECS as f64),
+                ],
             )
             .map_err(db_err)?
             .iter()
@@ -3728,6 +3749,45 @@ impl Control {
                         .r#ref("reason", "evaluator_restarted"),
                 )?;
             }
+            // Jobs queued on it under job terms that do not name the receipt
+            // key it registers now go back to be scheduled, on an evaluator
+            // they name, instead of waiting for a start it would be refused.
+            let requeued: Vec<(String, String, String)> = t
+                .query(
+                    "SELECT j.id, j.organization_id, j.project_id
+                       FROM jobs j JOIN job_terms x ON x.id = j.terms_id
+                      WHERE j.evaluator_id = $1 AND j.state = 'queued'
+                        AND NOT (x.document->'evaluator_keys' ? lower($2))
+                      ORDER BY j.id FOR UPDATE OF j",
+                    &[&r.id, &r.receipt_key],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|x| (x.get(0), x.get(1), x.get(2)))
+                .collect();
+            for (job, org, project) in &requeued {
+                t.execute(
+                    "UPDATE jobs SET evaluator_id = NULL, job_grant = NULL, estimated_ms = NULL WHERE id = $1",
+                    &[job],
+                )
+                .map_err(db_err)?;
+                self.transition_in(
+                    t,
+                    ctx.actor(),
+                    &ctx.request_id,
+                    job,
+                    JobState::Authorized,
+                    Some("its evaluator registered a receipt key its job terms do not name"),
+                )?;
+                audit::append(
+                    t,
+                    ctx.draft("job.requeued", "job", job, Outcome::Denied)
+                        .org(org)
+                        .project(project)
+                        .r#ref("reason", "receipt_key_not_in_terms")
+                        .r#ref("evaluator", r.id.clone()),
+                )?;
+            }
             let mut d = ctx
                 .draft("evaluator.registered", "evaluator", &r.id, Outcome::Succeeded)
                 .org(&operator)
@@ -3740,9 +3800,17 @@ impl Control {
                 d = d.r#ref("benchmark_profile", p.clone());
             }
             audit::append(t, d)?;
-            Ok(json!({"id": r.id, "status": status, "control_public_key": self.signer.public_key_hex()}))
+            let requeued: Vec<String> = requeued.into_iter().map(|(job, ..)| job).collect();
+            Ok((
+                json!({"id": r.id, "status": status, "control_public_key": self.signer.public_key_hex()}),
+                requeued,
+            ))
         })?;
+        let (out, requeued) = out;
         self.checkpoint_log()?;
+        for job in &requeued {
+            self.schedule_after(job);
+        }
         Ok(out)
     }
 

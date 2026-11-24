@@ -180,7 +180,7 @@ fn lock_project(t: &mut impl GenericClient, id: &str) -> Result<()> {
 fn terms_json(c: &mut impl GenericClient, id: &str) -> Result<Value> {
     let r = c
         .query_one(
-            "SELECT id, project_id, organization_id, digest, document, status FROM job_terms WHERE id = $1",
+            "SELECT id, project_id, organization_id, digest, document, status, jobs_submitted FROM job_terms WHERE id = $1",
             &[&id],
         )
         .map_err(db_err)?;
@@ -193,15 +193,11 @@ fn terms_json(c: &mut impl GenericClient, id: &str) -> Result<Value> {
         .iter()
         .map(|x| x.get(0))
         .collect();
-    let jobs: i64 = c
-        .query_one("SELECT count(*) FROM jobs WHERE terms_id = $1", &[&id])
-        .map_err(db_err)?
-        .get(0);
     Ok(json!({
         "id": r.get::<_, String>(0), "project": r.get::<_, String>(1),
         "proposed_by": r.get::<_, String>(2), "digest": r.get::<_, String>(3),
         "terms": r.get::<_, Value>(4), "status": r.get::<_, String>(5),
-        "accepted_by": accepted, "jobs": jobs,
+        "accepted_by": accepted, "jobs": r.get::<_, i64>(6),
     }))
 }
 
@@ -210,14 +206,16 @@ fn terms_json(c: &mut impl GenericClient, id: &str) -> Result<Value> {
 /// proposed, is superseded, and the project requires terms from now on.
 /// Both are recorded in the governance log (anchored before the call
 /// returns). Every member sees the activation in its own trail, and the
-/// proposer of a superseded proposal sees that. Expects the project row and
-/// `id` locked.
+/// proposer of a superseded proposal sees that; when an organization
+/// leaving made them complete (`left`), the activation says so. Expects the
+/// project row and `id` locked.
 fn activate_if_complete(
     t: &mut impl GenericClient,
     ctx: &Ctx,
     project: &str,
     members: &[String],
     id: &str,
+    left: Option<&str>,
 ) -> Result<bool> {
     let accepted: Vec<String> = t
         .query(
@@ -287,6 +285,11 @@ fn activate_if_complete(
         if let Some((s, _, _)) = previous {
             d = d.r#ref("superseded", s.clone());
         }
+        if let Some(o) = left {
+            d = d
+                .r#ref("reason", "member_left")
+                .r#ref("member", o.to_owned());
+        }
         audit::append(t, d)?;
     }
     for (old, _, proposer) in sorted.iter().filter(|(_, was, _)| was == "proposed") {
@@ -333,7 +336,7 @@ pub(crate) fn admit(
         .get(0);
     let Some(r) = t
         .query_opt(
-            "SELECT id, document FROM job_terms WHERE project_id = $1 AND status = 'active' FOR UPDATE",
+            "SELECT id, document, jobs_submitted FROM job_terms WHERE project_id = $1 AND status = 'active' FOR UPDATE",
             &[&project],
         )
         .map_err(db_err)?
@@ -353,6 +356,7 @@ pub(crate) fn admit(
     let id: String = r.get(0);
     let d: JobTerms = serde_json::from_value(r.get(1))
         .map_err(|e| db_err(format!("job terms {id} cannot be read: {e}")))?;
+    let n: i64 = r.get(2);
     let accepted: Vec<String> = t
         .query(
             "SELECT organization_id FROM job_terms_acceptances WHERE terms_id = $1",
@@ -373,7 +377,9 @@ pub(crate) fn admit(
     if !d.submitters.iter().any(|s| s == org) || !accepted.iter().any(|s| s == org) {
         return refuse(
             "terms_submitter",
-            format!("{org} is not a submitter that accepted them"),
+            format!(
+                "{org} is not a submitter that accepted them (terms that name it take effect when every member organization has accepted them)"
+            ),
         );
     }
     if at < d.not_before || at >= d.not_after {
@@ -397,10 +403,8 @@ pub(crate) fn admit(
             format!("purpose {purpose:?} is not one they name"),
         );
     }
-    let n: i64 = t
-        .query_one("SELECT count(*) FROM jobs WHERE terms_id = $1", &[&id])
-        .map_err(db_err)?
-        .get(0);
+    // Counted by the database as each job is inserted (schema version 19),
+    // under the row lock held here.
     if n.max(0) as u64 >= d.max_jobs {
         return refuse(
             "terms_limit",
@@ -494,7 +498,7 @@ impl Control {
                 d = d.r#ref("reference", r.clone());
             }
             audit::append(t, d)?;
-            activate_if_complete(t, ctx, project, &p.members, &id)?;
+            activate_if_complete(t, ctx, project, &p.members, &id, None)?;
             terms_json(t, &id)
         })
     }
@@ -537,6 +541,13 @@ impl Control {
                 )
                 .map_err(db_err)?;
             if n == 0 {
+                // Accepted already. Every other member may have accepted
+                // them meanwhile without their taking effect (the last one
+                // to accept left the project before a recovery re-applied
+                // its removal, say): then they take effect now.
+                if activate_if_complete(t, ctx, &project, &p.members, id, None)? {
+                    return terms_json(t, id);
+                }
                 return Err(conflict(format!("{org} has accepted terms {id} already")));
             }
             audit::append(
@@ -545,18 +556,56 @@ impl Control {
                     .org(&org)
                     .project(&project),
             )?;
-            activate_if_complete(t, ctx, &project, &p.members, id)?;
+            activate_if_complete(t, ctx, &project, &p.members, id, None)?;
             terms_json(t, id)
         })
     }
 
-    /// `GET /v1/terms/{id}/jobs`: the jobs submitted under terms `id`, for
-    /// the organizations that accepted them while they are members of the
-    /// project (each can hold the others to them): IDs, submitter, spec,
-    /// program, purpose, state, evaluator, when it was submitted and
-    /// whether its evaluator started it; never a grant or the evaluator's
-    /// URL. An organization that left the project sees none of it.
-    pub fn terms_jobs(&self, ctx: &Ctx, id: &str) -> Result<Value> {
+    /// After organization `left` left `project`: the newest of its proposed
+    /// terms that every remaining member organization has accepted takes
+    /// effect (superseding the others), as it would have on the last
+    /// acceptance, and its activation records that `left` left. Returns its
+    /// ID. The same locks as an acceptance, in the same order (its own
+    /// transaction, after the removal's).
+    pub(crate) fn settle_terms(
+        &self,
+        ctx: &Ctx,
+        project: &str,
+        left: &str,
+    ) -> Result<Option<String>> {
+        self.tx_anchored(|t| {
+            lock_project(t, project)?;
+            let Some(p) = project_row(t, project)? else {
+                return Ok(None);
+            };
+            let ids: Vec<String> = t
+                .query(
+                    "SELECT id FROM job_terms WHERE project_id = $1 AND status = 'proposed'
+                      ORDER BY created_at DESC, id DESC FOR UPDATE",
+                    &[&project],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            for id in ids {
+                if activate_if_complete(t, ctx, project, &p.members, &id, Some(left))? {
+                    return Ok(Some(id));
+                }
+            }
+            Ok(None)
+        })
+    }
+
+    /// `GET /v1/terms/{id}/jobs?after=&limit=`: the jobs submitted under
+    /// terms `id`, by their number under them (`seq`, from 1), those after
+    /// `after` and at most `limit` of them; for the organizations that
+    /// accepted them while they are members of the project (each can hold
+    /// the others to them): IDs, submitter, spec, program, purpose, state,
+    /// evaluator, when it was submitted and whether its evaluator started
+    /// it; never a grant or the evaluator's URL. An organization that left
+    /// the project sees none of it.
+    pub fn terms_jobs(&self, ctx: &Ctx, id: &str, after: i64, limit: i64) -> Result<Value> {
         let mut c = self.db.conn()?;
         let project: String = c
             .query_opt("SELECT project_id FROM job_terms WHERE id = $1", &[&id])
@@ -585,9 +634,11 @@ impl Control {
             .query(
                 "SELECT j.id, j.organization_id, j.spec_id, j.program_id, j.purpose, j.state, j.evaluator_id,
                         floor(extract(epoch FROM j.created_at))::bigint,
-                        EXISTS (SELECT 1 FROM job_transitions x WHERE x.job_id = j.id AND x.to_state = 'running')
-                   FROM jobs j WHERE j.terms_id = $1 ORDER BY j.created_at, j.id",
-                &[&id],
+                        EXISTS (SELECT 1 FROM job_transitions x WHERE x.job_id = j.id AND x.to_state = 'running'),
+                        j.terms_seq
+                   FROM jobs j WHERE j.terms_id = $1 AND j.terms_seq > $2
+                  ORDER BY j.terms_seq LIMIT $3",
+                &[&id, &after, &limit],
             )
             .map_err(db_err)?;
         Ok(Value::Array(
@@ -597,7 +648,7 @@ impl Control {
                            "spec_id": r.get::<_, String>(2), "program_id": r.get::<_, String>(3),
                            "purpose": r.get::<_, String>(4), "state": r.get::<_, String>(5),
                            "evaluator": r.get::<_, Option<String>>(6), "created_at": r.get::<_, i64>(7),
-                           "started": r.get::<_, bool>(8)})
+                           "started": r.get::<_, bool>(8), "seq": r.get::<_, i64>(9)})
                 })
                 .collect(),
         ))

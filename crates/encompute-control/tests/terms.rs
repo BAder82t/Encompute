@@ -143,6 +143,13 @@ fn jobs_are_admitted_only_within_terms_every_member_accepted() {
         &[("Idempotency-Key", "not-a-submitter")],
     );
     assert_eq!(s, 403, "{v}");
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap()
+            .contains("take effect when every member organization has accepted them"),
+        "{v}"
+    );
     // The second job is the last the terms allow; a retry of an admitted
     // submission is the same job, not another one.
     assert_eq!(w.job(&exact, &[], "in-2").0, 201);
@@ -175,6 +182,36 @@ fn jobs_are_admitted_only_within_terms_every_member_accepted() {
     assert_eq!(jobs[0]["purpose"], "medical-training");
     assert_eq!(jobs[0]["started"], false);
     assert!(jobs[0]["grant"].is_null() && jobs[0]["evaluator_url"].is_null());
+    // Numbered under the terms, and read in pages.
+    assert_eq!(
+        (jobs[0]["seq"].clone(), jobs[1]["seq"].clone()),
+        (json!(1), json!(2))
+    );
+    let page = w.t.ok(
+        &w.a_admin,
+        "GET",
+        &format!("/v1/terms/{id}/jobs?limit=1"),
+        None,
+    );
+    assert_eq!(page.as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(page[0]["id"], jobs[0]["id"]);
+    let page = w.t.ok(
+        &w.a_admin,
+        "GET",
+        &format!("/v1/terms/{id}/jobs?after=1"),
+        None,
+    );
+    assert_eq!(page.as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(page[0]["id"], jobs[1]["id"]);
+    for bad in ["after=abc", "after=-1", "limit=0", "limit=1001"] {
+        let (s, v) = w.t.call(
+            &w.a_admin,
+            "GET",
+            &format!("/v1/terms/{id}/jobs?{bad}"),
+            None,
+        );
+        assert_eq!(s, 400, "{bad}: {v}");
+    }
     w.t.ok(&w.b_dev, "GET", &format!("/v1/terms/{id}/jobs"), None);
     assert_eq!(
         w.t.call(&w.c_admin, "GET", &format!("/v1/terms/{id}/jobs"), None)
@@ -454,6 +491,18 @@ fn concurrent_submissions_never_exceed_the_terms() {
             .unwrap()
             .get(0);
     assert_eq!(n, 3);
+    // Counted by the database, and numbered 1 to 3.
+    let t = terms_view(&w, &id);
+    assert_eq!(t["jobs"], 3, "{t}");
+    let jobs =
+        w.t.ok(&w.b_dev, "GET", &format!("/v1/terms/{id}/jobs"), None);
+    let seqs: Vec<i64> = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["seq"].as_i64().unwrap())
+        .collect();
+    assert_eq!(seqs, [1, 2, 3], "{jobs}");
 }
 
 /// `signer`'s receipt for [`EXACT`] over these bytes.
@@ -476,15 +525,19 @@ fn receipt(signer: &EvaluatorSigner, request: &[u8], response: &[u8]) -> Value {
     serde_json::to_value(r).unwrap()
 }
 
-fn terms_status(w: &World, id: &str) -> Value {
+fn terms_view(w: &World, id: &str) -> Value {
     let url = format!("/v1/projects/{}/terms", w.project);
     w.t.ok(&w.b_dev, "GET", &url, None)
         .as_array()
         .unwrap()
         .iter()
         .find(|t| t["id"] == id)
-        .unwrap()["status"]
+        .unwrap()
         .clone()
+}
+
+fn terms_status(w: &World, id: &str) -> Value {
+    terms_view(w, id)["status"].clone()
 }
 
 #[test]
@@ -649,7 +702,8 @@ fn a_job_under_terms_runs_only_with_a_receipt_key_they_name() {
     assert!(anchored(&w.t, NegSet::EndedJobs, &running));
 
     // A job queued on the evaluator before it registers again with another
-    // key does not start.
+    // key goes back to be scheduled (on an evaluator the terms name: here
+    // none is left), and does not start where it was.
     w.t.control
         .db
         .conn()
@@ -672,6 +726,78 @@ fn a_job_under_terms_runs_only_with_a_receipt_key_they_name() {
                     "openfhe_version": "1.5.1", "capacity": 4}),
         ),
     );
+    let v =
+        w.t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{waiting}"), None);
+    assert_eq!(v["state"], "authorized", "{v}");
+    assert!(v["evaluator"].is_null() && v["grant"].is_null(), "{v}");
+    let requeued: i64 = w
+        .t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'job.requeued' AND resource_id = $1
+                AND refs->>'reason' = 'receipt_key_not_in_terms'",
+            &[&waiting],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(requeued, 1);
+    let (s, v) = w.t.call(
+        &w.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{waiting}/start"),
+        None,
+    );
+    // Not its job any more.
+    assert_eq!(s, 404, "{v}");
+    // Registered again with the key the terms name: scheduled there again.
+    w.t.ok(
+        &w.evaluator.service,
+        "POST",
+        "/v1/evaluators",
+        Some(
+            json!({"id": "evaluator-1", "url": "http://evaluator-1.internal:8750",
+                    "receipt_key": receipt_key(&w.evaluator),
+                    "backends": ["openfhe", "openfhe-exact"],
+                    "profiles": ["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"],
+                    "openfhe_version": "1.5.1", "capacity": 4}),
+        ),
+    );
+    w.t.control.schedule_pending().unwrap();
+    assert_eq!(state(&waiting), "queued");
+    // Registering again with a key the terms name leaves its jobs queued.
+    w.t.ok(
+        &w.evaluator.service,
+        "POST",
+        "/v1/evaluators",
+        Some(
+            json!({"id": "evaluator-1", "url": "http://evaluator-1.internal:8750",
+                    "receipt_key": receipt_key(&w.evaluator),
+                    "backends": ["openfhe", "openfhe-exact"],
+                    "profiles": ["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"],
+                    "openfhe_version": "1.5.1", "capacity": 4}),
+        ),
+    );
+    let v =
+        w.t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{waiting}"), None);
+    assert_eq!(
+        (v["state"].clone(), v["evaluator"].clone()),
+        (json!("queued"), json!("evaluator-1")),
+        "{v}"
+    );
+    // A key changed some other way than a registration: the job does not
+    // start.
+    w.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE evaluators SET receipt_key = $1 WHERE id = 'evaluator-1'",
+            &[&other.identity().public_key_hex()],
+        )
+        .unwrap();
     let (s, v) = w.t.call(
         &w.evaluator.service,
         "POST",
@@ -841,4 +967,240 @@ fn a_restore_never_lifts_a_projects_requirement_of_terms() {
         "{v}"
     );
     t.restarted();
+}
+
+#[test]
+fn jobs_waiting_for_a_full_evaluator_never_hold_up_the_scheduler() {
+    let Some(w) = world() else { return };
+    let (exact, spec) = plan(&w, EXACT);
+    // Terms naming only evaluator-x, which runs one job at a time: the
+    // first job takes it, and the next hundred (the scheduler's batch)
+    // wait for it.
+    let x = evaluator(
+        &w.t,
+        &w.platform,
+        "evaluator-x",
+        &["openfhe", "openfhe-exact"],
+        &["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"],
+        1,
+    );
+    agree(&w, terms(&[&spec], 101, &[receipt_key(&x)], now() + 3600));
+    for i in 0..101 {
+        let (s, v) = w.job(&exact, &[], &format!("waiting-{i}"));
+        assert_eq!(s, 201, "{v}");
+        assert_eq!(
+            v["state"],
+            if i == 0 { "queued" } else { "authorized" },
+            "{v}"
+        );
+    }
+    // Newer terms name evaluator-1, which is away (draining) when the next
+    // job comes.
+    agree(
+        &w,
+        terms(&[&spec], 1, &[receipt_key(&w.evaluator)], now() + 3600),
+    );
+    let set_status = |status: &str| {
+        w.t.control
+            .db
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE evaluators SET status = $1 WHERE id = 'evaluator-1'",
+                &[&status],
+            )
+            .unwrap();
+    };
+    set_status("draining");
+    let (s, v) = w.job(&exact, &[], "runnable");
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["state"], "authorized", "{v}");
+    let job = v["id"].as_str().unwrap().to_owned();
+    // Back: the scheduler's next pass places it, whatever waits ahead (for
+    // an evaluator that is full, or one their terms do not name).
+    set_status("ready");
+    w.t.control.schedule_pending().unwrap();
+    let v = w.t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{job}"), None);
+    assert_eq!(v["state"], "queued", "{v}");
+    assert_eq!(v["evaluator"], "evaluator-1", "{v}");
+}
+
+#[test]
+fn proposed_terms_take_effect_when_the_last_member_yet_to_accept_leaves() {
+    let Some(w) = world() else { return };
+    let (_, spec) = plan(&w, EXACT);
+    let members = format!("/v1/projects/{}/members", w.project);
+    let invite = || {
+        let body = Some(json!({"organization": "other-co"}));
+        w.t.ok(&w.b_admin, "POST", &members, body.clone());
+        w.t.ok(&w.c_admin, "POST", &members, body);
+    };
+    // modelco proposes, hospital-a accepts; other-co has not.
+    let propose = |max_jobs: u64| -> String {
+        let doc = terms(
+            &[&spec],
+            max_jobs,
+            &[receipt_key(&w.evaluator)],
+            now() + 3600,
+        );
+        let p = w.t.ok(
+            &w.b_admin,
+            "POST",
+            &format!("/v1/projects/{}/terms", w.project),
+            Some(doc),
+        );
+        let id = p["id"].as_str().unwrap().to_owned();
+        let a =
+            w.t.ok(&w.a_admin, "POST", &format!("/v1/terms/{id}/accept"), None);
+        assert_eq!(a["status"], "proposed", "{a}");
+        id
+    };
+    invite();
+    let id = propose(3);
+    // hospital-a accepted already: accepting again changes nothing.
+    assert_eq!(
+        w.t.call(&w.a_admin, "POST", &format!("/v1/terms/{id}/accept"), None)
+            .0,
+        409
+    );
+    // other-co, the only member yet to accept, leaves: they take effect,
+    // and their activation says why.
+    let r = w.t.ok(
+        &w.c_admin,
+        "POST",
+        &format!("{members}/remove"),
+        Some(json!({"organization": "other-co"})),
+    );
+    assert_eq!(r["terms_activated"], json!(id), "{r}");
+    assert_eq!(terms_status(&w, &id), "active");
+    let why: Vec<(String, String)> =
+        w.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query(
+                "SELECT refs->>'reason', refs->>'member' FROM audit_events
+              WHERE action = 'terms.activated' AND resource_id = $1",
+                &[&id],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+    assert_eq!(why.len(), 2, "{why:?}");
+    assert!(
+        why.iter()
+            .all(|w| w == &("member_left".into(), "other-co".into())),
+        "{why:?}"
+    );
+    assert!(anchored(&w.t, NegSet::TermsRequired, &w.project));
+
+    // A removal that did not settle the terms (a recovery re-applying it,
+    // say): accepting them again, by a member that has, makes them take
+    // effect.
+    invite();
+    let next = propose(4);
+    w.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "DELETE FROM project_members WHERE project_id = $1 AND organization_id = 'other-co'",
+            &[&w.project],
+        )
+        .unwrap();
+    assert_eq!(terms_status(&w, &next), "proposed");
+    let a = w.t.ok(
+        &w.a_admin,
+        "POST",
+        &format!("/v1/terms/{next}/accept"),
+        None,
+    );
+    assert_eq!(a["status"], "active", "{a}");
+    assert_eq!(terms_status(&w, &id), "superseded");
+    assert!(anchored(&w.t, NegSet::SupersededTerms, &id));
+}
+
+#[test]
+fn the_database_counts_and_numbers_jobs_under_terms_and_holds_their_limit() {
+    let Some(w) = world() else { return };
+    let (exact, spec) = plan(&w, EXACT);
+    let key = receipt_key(&w.evaluator);
+    let doc = |max_jobs: u64| terms(&[&spec], max_jobs, std::slice::from_ref(&key), now() + 3600);
+    let first = agree(&w, doc(2));
+    let (s, v) = w.job(&exact, &[], "only");
+    assert_eq!(s, 201, "{v}");
+    let job = v["id"].as_str().unwrap().to_owned();
+    let mut c = w.t.control.db.conn().unwrap();
+    // Copies of the job, under `terms`, inserted around the control plane:
+    // the database counts and numbers them, up to the terms' limit.
+    let copy = |c: &mut postgres::Client, id: &str, terms: &str| {
+        c.execute(
+            "INSERT INTO jobs
+             SELECT (jsonb_populate_record(NULL::jobs, to_jsonb(j) || jsonb_build_object(
+                         'id', $2::text, 'idempotency_key', $2::text,
+                         'terms_id', $3::text, 'terms_seq', NULL))).*
+               FROM jobs j WHERE j.id = $1",
+            &[&job, &id, &terms],
+        )
+        .map_err(|e| {
+            e.as_db_error()
+                .map(|d| d.message().to_owned())
+                .unwrap_or_default()
+        })
+    };
+    let seq = |c: &mut postgres::Client, id: &str| -> i64 {
+        c.query_one("SELECT terms_seq FROM jobs WHERE id = $1", &[&id])
+            .unwrap()
+            .get(0)
+    };
+    copy(&mut c, "job-copy-1", &first).unwrap();
+    assert_eq!(seq(&mut c, "job-copy-1"), 2);
+    let refused = copy(&mut c, "job-copy-2", &first).unwrap_err();
+    assert!(refused.contains("every job they allow"), "{refused}");
+    assert_eq!(terms_view(&w, &first)["jobs"], 2);
+    // The count never goes down, and a job's number never changes.
+    assert!(c
+        .execute(
+            "UPDATE job_terms SET jobs_submitted = 0 WHERE id = $1",
+            &[&first]
+        )
+        .is_err());
+    assert!(c
+        .execute("UPDATE jobs SET terms_seq = 7 WHERE id = $1", &[&job])
+        .is_err());
+    // Under superseded terms nothing is inserted, though they would allow
+    // more; under the active ones a job is counted and numbered.
+    let second = agree(&w, doc(5));
+    let third = agree(&w, doc(5));
+    let refused = copy(&mut c, "job-copy-3", &second).unwrap_err();
+    assert!(refused.contains("not active"), "{refused}");
+    // Nor under another project's terms.
+    let other = w.t.ok(
+        &w.b_dev,
+        "POST",
+        "/v1/projects",
+        Some(json!({"organization": "modelco", "name": "elsewhere"})),
+    );
+    let refused = c
+        .execute(
+            "INSERT INTO jobs
+             SELECT (jsonb_populate_record(NULL::jobs, to_jsonb(j) || jsonb_build_object(
+                         'id', 'job-elsewhere', 'idempotency_key', 'elsewhere',
+                         'project_id', $2::text, 'terms_id', $3::text, 'terms_seq', NULL))).*
+               FROM jobs j WHERE j.id = $1",
+            &[&job, &other["id"].as_str().unwrap(), &third],
+        )
+        .unwrap_err();
+    assert!(
+        refused
+            .as_db_error()
+            .unwrap()
+            .message()
+            .contains("not active in the job's project"),
+        "{refused}"
+    );
+    copy(&mut c, "job-copy-4", &third).unwrap();
+    assert_eq!(seq(&mut c, "job-copy-4"), 1);
+    assert_eq!(terms_view(&w, &third)["jobs"], 1);
 }

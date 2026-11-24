@@ -6486,7 +6486,7 @@ fn job_terms_govern_governed_jobs_too() {
     let terms = |spec: String, end: u64| {
         json!({"specs": [spec], "purposes": [PURPOSE], "submitters": [BEN],
                "evaluator_keys": [key], "max_jobs": 1,
-               "not_before": now() - 10, "not_after": end})
+               "not_before": now() - 10, "not_after": end, "reference": "encagr1:governed"})
     };
     // Tax's admin proposes; the admins of benefits and other-co accept.
     let agree = |doc: Value| -> String {
@@ -6577,4 +6577,39 @@ fn job_terms_govern_governed_jobs_too() {
     assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
     assert_eq!(jobs[0]["id"], json!(job));
     assert_eq!(jobs[0]["organization"], BEN);
+    assert_eq!(jobs[0]["seq"], 1);
+    // The project's shared audit view says which terms were proposed
+    // (their digest and reference), which replaced which, and which terms
+    // each job was admitted under.
+    let events = g.t.ok(
+        &g.tax_admin,
+        "GET",
+        &format!("/v1/audit?project={}&limit=1000", g.project),
+        None,
+    );
+    let find = |action: &str, rid: &str| -> Value {
+        events
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["action"] == action && e["resource_id"] == rid)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {action} for {rid}: {events}"))
+    };
+    let proposed = find("terms.proposed", &tid);
+    assert_eq!(
+        proposed["refs"]["reference"], "encagr1:governed",
+        "{proposed}"
+    );
+    assert!(
+        proposed["refs"]["digest"]
+            .as_str()
+            .is_some_and(|d| d.len() == 64),
+        "{proposed}"
+    );
+    assert_eq!(
+        find("terms.activated", &tid)["refs"]["superseded"],
+        json!(first)
+    );
+    assert_eq!(find("job.created", &job)["refs"]["terms"], json!(tid));
 }

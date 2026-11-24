@@ -32,6 +32,10 @@ CREATE TABLE job_terms (
     created_by      TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     activated_at    TIMESTAMPTZ,
+    -- How many jobs were submitted under them, kept by the database as each
+    -- is inserted (below): never more than the document's max_jobs, never
+    -- lower again.
+    jobs_submitted  BIGINT NOT NULL DEFAULT 0 CHECK (jobs_submitted >= 0),
     -- Active terms were activated; proposed ones not yet. Superseded terms
     -- were either (active ones replaced, or proposals that newer terms
     -- overtook before they were accepted).
@@ -56,15 +60,19 @@ CREATE TABLE job_terms_acceptances (
 );
 
 -- The terms a job was admitted under (every job submitted while its
--- project had active terms). Set at submission, never changed.
+-- project had active terms), and its number under them (1 for the first,
+-- up to their max_jobs). Set at submission, never changed.
 ALTER TABLE jobs
-    ADD COLUMN terms_id TEXT REFERENCES job_terms(id);
-CREATE INDEX jobs_terms ON jobs (terms_id) WHERE terms_id IS NOT NULL;
+    ADD COLUMN terms_id TEXT REFERENCES job_terms(id),
+    ADD COLUMN terms_seq BIGINT,
+    ADD CONSTRAINT jobs_terms_seq CHECK ((terms_id IS NULL) = (terms_seq IS NULL));
+CREATE UNIQUE INDEX jobs_terms ON jobs (terms_id, terms_seq) WHERE terms_id IS NOT NULL;
 
 -- Terms are never edited or removed: their document, digest, project and
 -- proposer are fixed, and their status only moves forward: proposed, then
 -- active, then superseded; or proposed, then superseded, when other terms
--- of the project became active first.
+-- of the project became active first. Their count of jobs only goes up, one
+-- at a time, while they are active.
 CREATE FUNCTION encompute_job_terms_guard() RETURNS trigger AS $$
 BEGIN
     IF TG_OP <> 'UPDATE' THEN
@@ -86,6 +94,12 @@ BEGIN
             OR (OLD.status IN ('proposed', 'active') AND NEW.status = 'superseded'
                 AND NEW.activated_at IS NOT DISTINCT FROM OLD.activated_at)) THEN
         RAISE EXCEPTION 'job terms go from proposed to active to superseded, never back'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW.jobs_submitted IS DISTINCT FROM OLD.jobs_submitted
+       AND NOT (NEW.jobs_submitted = OLD.jobs_submitted + 1
+                AND OLD.status = 'active' AND NEW.status = 'active') THEN
+        RAISE EXCEPTION 'the jobs of job terms are counted one at a time while they are active'
             USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
@@ -114,11 +128,43 @@ CREATE TRIGGER job_terms_acceptances_no_truncate
     BEFORE TRUNCATE ON job_terms_acceptances
     FOR EACH STATEMENT EXECUTE FUNCTION encompute_job_terms_acceptances_append_only();
 
+-- A job inserted under terms is counted against them and numbered: only
+-- under its own project's active terms, and never beyond their max_jobs
+-- (the control plane checks both first, under the same row lock, and
+-- audits a refusal; this holds whatever inserts the job).
+CREATE FUNCTION encompute_job_terms_count() RETURNS trigger AS $$
+DECLARE
+    n BIGINT;
+BEGIN
+    IF NEW.terms_id IS NULL THEN
+        IF NEW.terms_seq IS NOT NULL THEN
+            RAISE EXCEPTION 'a job without terms has no number under them'
+                USING ERRCODE = 'check_violation';
+        END IF;
+        RETURN NEW;
+    END IF;
+    UPDATE job_terms SET jobs_submitted = jobs_submitted + 1
+     WHERE id = NEW.terms_id AND project_id = NEW.project_id AND status = 'active'
+       AND jobs_submitted < (document->>'max_jobs')::bigint
+    RETURNING jobs_submitted INTO n;
+    IF n IS NULL THEN
+        RAISE EXCEPTION 'job terms % are not active in the job''s project, or every job they allow was submitted', NEW.terms_id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    NEW.terms_seq := n;
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER jobs_terms_count BEFORE INSERT ON jobs
+    FOR EACH ROW EXECUTE FUNCTION encompute_job_terms_count();
+
 -- A job's terms are fixed at submission, and a project that requires terms
 -- keeps requiring them.
 CREATE FUNCTION encompute_job_terms_id_guard() RETURNS trigger AS $$
 BEGIN
-    IF NEW.terms_id IS DISTINCT FROM OLD.terms_id THEN
+    IF NEW.terms_id IS DISTINCT FROM OLD.terms_id
+       OR NEW.terms_seq IS DISTINCT FROM OLD.terms_seq THEN
         RAISE EXCEPTION 'a job''s terms are immutable'
             USING ERRCODE = 'check_violation';
     END IF;

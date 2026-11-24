@@ -1245,6 +1245,23 @@ impl Control {
             Ok(json!({"project": project, "member": r.organization, "removed": true, "failed_jobs": failed}))
         })?;
         self.checkpoint_log()?;
+        // Proposed job terms that every remaining member has accepted take
+        // effect now, as on a last acceptance (`terms_activated`). The
+        // removal stands either way: a failure is logged and answered as
+        // `terms_settled: false`, and accepting the terms again retries.
+        let mut out = out;
+        match self.settle_terms(ctx, project, &r.organization) {
+            Ok(Some(id)) => out["terms_activated"] = json!(id),
+            Ok(None) => {}
+            Err(e) => {
+                crate::log::LogLine::new(&self.service_id, "terms_settle_failed")
+                    .field("project", project)
+                    .field("code", e.code)
+                    .field("error", &e.message)
+                    .emit();
+                out["terms_settled"] = json!(false);
+            }
+        }
         Ok(out)
     }
 }
