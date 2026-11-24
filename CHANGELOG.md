@@ -29,6 +29,36 @@ The notes in the next section (production mode: native TLS) also ship in
 this unreleased work. Draft notes:
 [docs/release-notes-0.4.0-rc.1.md](docs/release-notes-0.4.0-rc.1.md).
 
+- **Job terms.** A project's member organizations, in a standard or a
+  governed project, can agree which jobs it runs at all: execution spec IDs,
+  purposes, submitting organizations, evaluator receipt keys, a total
+  number of jobs and a `[not_before, not_after)` window
+  (`POST /v1/projects/{id}/terms`, `GET /v1/projects/{id}/terms`,
+  `POST /v1/terms/{id}/accept`, `GET /v1/terms/{id}/jobs`). An organization
+  admin of one member organization proposes them, and they take effect when
+  an organization admin of every member organization has accepted them
+  (people in their own organization, never service accounts or auditors).
+  While they are active, a job outside them is refused (403, audited as
+  `job.denied` with `terms_submitter`, `terms_window`, `terms_spec`,
+  `terms_purpose` or `terms_limit`), after every check a job already
+  passes; the jobs under them are counted under a row lock, so concurrent
+  submissions never exceed the total; a job is scheduled only on an
+  evaluator whose receipt key they name, on top of the scheduler's other
+  constraints and a governed job's placement, with a grant that expires
+  before their end; and a job still unscheduled at the end fails and is
+  anchored as ended. A project created with `terms_required: true` runs
+  nothing until terms are active (`terms_none_active`), and activation makes
+  a project require terms from then on. New terms replace active ones only
+  when every member accepted them too. A job's view shows the terms it was
+  admitted under (`terms`). Schema version 19 (migration 0019): the database
+  refuses edits and deletions of terms, their acceptances, a job's terms and
+  a project's requirement of terms. INV-253.
+- `encompute jobs run` gains `--inputs-file`, `--save-receipt`,
+  `--save-envelopes` (`request.bin`, `response.bin`, and `proof.bin` when
+  there is a proof) and `--save-job` (the job as the control plane reports
+  it after completion, with the signed grant it ran under), so the evidence
+  of a control-plane run can be checked later like that of
+  `encompute run --remote`.
 - A job submission that leaves the job `authorized` (it was not placed on an
   evaluator) now says why in the control plane's log: `schedule_no_candidate`
   (no ready evaluator fits the job: the backend, the profile and the count of

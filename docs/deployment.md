@@ -211,6 +211,23 @@ The control plane never sees inputs or outputs. On restart it keeps every
 job's state. It never replays a security-sensitive step: a running job whose
 evaluator disappears fails, and is not re-run.
 
+**Job terms** (unreleased, `main` only). A project's member organizations
+can agree which jobs it runs at all: execution specs, purposes, submitting
+organizations, evaluator receipt keys, a total number of jobs and a time
+window ([api.md](api.md#job-terms)). Once an organization admin of every
+member organization has accepted them, submission refuses any job outside
+them (step 1), the scheduler places a job only on an evaluator whose
+receipt key they name (step 2), its grant expires before their end, and a
+job still unscheduled at the end fails. Operators: an evaluator that
+re-registers with another receipt key no longer matches terms that name
+its old key, so its jobs wait (and fail at the end) until the members
+agree new terms. `encompute jobs run --save-receipt --save-envelopes
+--save-job` keeps the evidence of a run under terms for later checking.
+**Upgrading.** Migration 0019 (schema version 19) adds the terms tables, a
+job's `terms_id` and a project's `terms_required`; existing projects and
+jobs have no terms and run as before. A control plane that ran it cannot
+be downgraded.
+
 **Draining an evaluator** before an upgrade: an operator sets it to
 `draining` (`POST /v1/evaluators/{id}/status`). The evaluator takes no new
 jobs and its in-flight jobs finish; the operator then replaces it. The
