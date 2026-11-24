@@ -159,6 +159,11 @@ pub struct AnchorArgs {
     /// The weakest plan profile accepted: standard, strong or maximum.
     #[arg(long, default_value = "standard")]
     pub minimum_profile: String,
+    /// Accept a bundle with no evidence of a run (no execution, aggregation
+    /// round or training): the report then vouches only for the program,
+    /// its policy and authorizations.
+    #[arg(long)]
+    pub allow_no_run: bool,
 }
 
 /// The bundle and its trust report under `anchors`.
@@ -228,6 +233,7 @@ pub(crate) fn checked(
         verifier: verifier.as_ref(),
         execution_policy: execution_policy.as_ref(),
         require: a.require.clone(),
+        require_run: !a.allow_no_run,
         plan_floor,
         program_facts: Some(&facts),
         // The bundle carries no proofs: a receipt that claims one stays

@@ -1438,3 +1438,101 @@ fn keys_generate_never_replaces_a_secret_key_without_force() {
     names.sort();
     assert_eq!(names, ["eval.keys", "evaluator.pub", "secret.key"]);
 }
+
+/// `trust report` does not say SATISFIED for a bundle with no evidence of a
+/// run (risk R-04): it requires an execution, aggregation or training run
+/// unless `--allow-no-run`, and it says what it covered.
+#[test]
+fn a_trust_report_requires_evidence_of_a_run() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-coverage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "trust",
+        "init",
+        &p("adult.encompute"),
+        "--bundle",
+        &p("t.json"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+
+    // A bare program: no run, no policy.
+    let (code, out, _) = encompute(&["trust", "report", "--bundle", &p("t.json")]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("Policy                  NOT PRESENT"), "{out}");
+    assert!(out.contains("TRUST REQUIREMENTS NOT SATISFIED"), "{out}");
+    assert!(out.contains("no evidence of a run"), "{out}");
+    let (code, out, _) = encompute(&[
+        "trust",
+        "report",
+        "--bundle",
+        &p("t.json"),
+        "--allow-no-run",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("TRUST REQUIREMENTS SATISFIED"), "{out}");
+    assert!(out.contains("COVERS     Evidence, Program"), "{out}");
+
+    // With an execution receipt against a trusted evaluator key.
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let url = serve();
+    let (code, _, err) = encompute(&[
+        "run",
+        &p("adult.encompute"),
+        "--remote",
+        &url,
+        "--keys",
+        &p("keys"),
+        "--input",
+        "age=30",
+        "--save-receipt",
+        &p("r.json"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&["trust", "add", &p("r.json"), "--bundle", &p("t.json")]);
+    assert_eq!(code, 0, "{err}");
+    let key = std::fs::read_to_string(dir.join("keys/evaluator.pub")).unwrap();
+    let (code, out, _) = encompute(&[
+        "trust",
+        "report",
+        "--bundle",
+        &p("t.json"),
+        "--evaluator-key",
+        key.trim(),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Execution               VERIFIED"), "{out}");
+    assert!(
+        out.contains("COVERS     Evidence, Program, Execution"),
+        "{out}"
+    );
+    let (code, out, _) = encompute(&[
+        "trust",
+        "report",
+        "--bundle",
+        &p("t.json"),
+        "--evaluator-key",
+        key.trim(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["satisfied"], true);
+    assert_eq!(
+        v["covered"],
+        serde_json::json!(["Evidence", "Program", "Execution"])
+    );
+}

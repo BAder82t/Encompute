@@ -33,7 +33,9 @@ pub use governance::{
 };
 pub use graph::{node_id, Edge, EdgeKind, Evidence, Node, NodeKind, TrustGraph};
 pub use ingest::{program_id, Rebuilt};
-pub use report::{Anchors, FactsFn, ProofCheckFn, ReportOptions, Row, Status, TrustReport, ROWS};
+pub use report::{
+    Anchors, FactsFn, ProofCheckFn, ReportOptions, Row, Status, TrustReport, ROWS, RUN_ROWS,
+};
 
 use sha2::{Digest, Sha256};
 
