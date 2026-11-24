@@ -387,7 +387,7 @@ Pins).
 C++ compiler; it is recorded, not pinned. Release Linux builds use the
 `ubuntu-24.04` runner's GCC 13 and CMake 3.28+; the evaluator image uses
 Debian 12's GCC 12 (`rust:1.98.1-bookworm`); macOS builds use Apple clang
-from Xcode on `macos-14` with Homebrew's `libomp`. OpenFHE needs a C++17
+from Xcode on `macos-15` with Homebrew's `libomp`. OpenFHE needs a C++17
 compiler, CMake 3.16 or later and OpenMP. `check-pins.sh` prints the local
 compiler and CMake versions for the record.
 
