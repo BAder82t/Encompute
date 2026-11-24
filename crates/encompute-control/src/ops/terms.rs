@@ -19,15 +19,27 @@
 //! governed job's placement), and gives its grant an expiry before their
 //! end; a job still unscheduled at the end fails, anchored as ended like
 //! any failed job. New terms replace active ones only when every member
-//! accepted them too, so no organization loosens them alone. A project
-//! created with `terms_required` runs nothing until terms are active, and
-//! activation makes a project require terms from then on.
+//! accepted them too, so no organization loosens them alone; when terms
+//! become active, every other set of the project's terms, active or still
+//! proposed, is superseded and can never be accepted again (so an older
+//! proposal cannot replace newer terms later). A project has at most
+//! [`MAX_OPEN_TERMS_PROPOSALS`] proposals awaiting acceptance at once. A
+//! project created with `terms_required` runs nothing until terms are
+//! active, and activation makes a project require terms from then on.
+//!
+//! Both are security-negative transitions of the governance log
+//! ([`govlog::NegSet::TermsRequired`], [`govlog::NegSet::SupersededTerms`]),
+//! written in the same transaction and anchored before the call returns: a
+//! restored database that shows a project no longer requiring terms, or
+//! superseded terms proposed or active again, is refused at startup (TERMS
+//! REQUIREMENT, JOB TERMS STATE ROLLBACK), and recovery applies them again.
 //!
 //! Lock order. A project's row is the first lock of every change to who
 //! takes part in it or what it allows: joining it and changing its
 //! placement take it `FOR UPDATE` before they read the members, and so do
-//! proposing and accepting terms, which then lock terms rows, with the
-//! audit head last ([`audit::append`]). A submission takes, after every
+//! proposing and accepting terms (after checking the caller without any
+//! lock, and again under it), which then lock terms rows, with the
+//! governance and audit heads last ([`audit::append`]). A submission takes, after every
 //! lock it already holds (the source assets and, in a governed project,
 //! the rows of the purpose and the authorizations), the project row `FOR
 //! SHARE` and then the active terms row `FOR UPDATE`, immediately before it
@@ -54,7 +66,11 @@ use crate::authz::{
 };
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
-use crate::model::{bad, check_name, new_id, JobTerms, Role, MAX_TERMS_ENTRIES, MAX_TERMS_JOBS};
+use crate::govlog::{self, NegSet};
+use crate::model::{
+    bad, check_name, new_id, JobTerms, Role, MAX_OPEN_TERMS_PROPOSALS, MAX_TERMS_ENTRIES,
+    MAX_TERMS_JOBS,
+};
 
 /// 32 bytes of lowercase hex: how spec IDs and receipt keys are written.
 fn lower_hex32(s: &str) -> bool {
@@ -190,9 +206,12 @@ fn terms_json(c: &mut impl GenericClient, id: &str) -> Result<Value> {
 }
 
 /// Activates `id` when every active member organization of `project` has
-/// accepted it: the active terms (if any) are superseded and the project
-/// requires terms from now on. Every member sees it in its own trail.
-/// Expects the project row and `id` locked.
+/// accepted it: every other set of the project's terms, active or still
+/// proposed, is superseded, and the project requires terms from now on.
+/// Both are recorded in the governance log (anchored before the call
+/// returns). Every member sees the activation in its own trail, and the
+/// proposer of a superseded proposal sees that. Expects the project row and
+/// `id` locked.
 fn activate_if_complete(
     t: &mut impl GenericClient,
     ctx: &Ctx,
@@ -212,32 +231,72 @@ fn activate_if_complete(
     if !members.iter().all(|m| accepted.contains(m)) {
         return Ok(false);
     }
-    let superseded: Option<String> = t
-        .query_opt(
-            "UPDATE job_terms SET status = 'superseded' WHERE project_id = $1 AND status = 'active' RETURNING id",
-            &[&project],
+    // (id, what it was, who proposed it), by ID.
+    let superseded: Vec<(String, String, String)> = t
+        .query(
+            "WITH old AS (
+                 SELECT id, status FROM job_terms
+                  WHERE project_id = $1 AND id <> $2 AND status IN ('active', 'proposed')
+                  ORDER BY id FOR UPDATE)
+             UPDATE job_terms x SET status = 'superseded' FROM old WHERE x.id = old.id
+             RETURNING x.id, old.status, x.organization_id",
+            &[&project, &id],
         )
         .map_err(db_err)?
-        .map(|r| r.get(0));
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
     t.execute(
         "UPDATE job_terms SET status = 'active', activated_at = now() WHERE id = $1",
         &[&id],
     )
     .map_err(db_err)?;
-    t.execute(
-        "UPDATE projects SET terms_required = true WHERE id = $1",
-        &[&project],
-    )
-    .map_err(db_err)?;
+    let newly_required = t
+        .execute(
+            "UPDATE projects SET terms_required = true WHERE id = $1 AND NOT terms_required",
+            &[&project],
+        )
+        .map_err(db_err)?
+        == 1;
+    let mut sorted = superseded.clone();
+    sorted.sort();
+    for (old, was, _) in &sorted {
+        govlog::append_routed(
+            t,
+            NegSet::SupersededTerms,
+            govlog::kind::TERMS_SUPERSEDED,
+            old,
+            &[("by", id), ("was", was.as_str())],
+        )?;
+    }
+    if newly_required {
+        govlog::append_routed(
+            t,
+            NegSet::TermsRequired,
+            govlog::kind::PROJECT_TERMS_REQUIRED,
+            project,
+            &[("terms", id)],
+        )?;
+    }
+    let previous = sorted.iter().find(|(_, was, _)| was == "active");
     for m in members {
         let mut d = ctx
             .draft("terms.activated", "terms", id, Outcome::Succeeded)
             .org(m)
             .project(project);
-        if let Some(s) = &superseded {
+        if let Some((s, _, _)) = previous {
             d = d.r#ref("superseded", s.clone());
         }
         audit::append(t, d)?;
+    }
+    for (old, _, proposer) in sorted.iter().filter(|(_, was, _)| was == "proposed") {
+        audit::append(
+            t,
+            ctx.draft("terms.superseded", "terms", old, Outcome::Succeeded)
+                .org(proposer)
+                .project(project)
+                .r#ref("by", id.to_owned()),
+        )?;
     }
     Ok(true)
 }
@@ -371,12 +430,28 @@ impl Control {
         let document = serde_json::to_value(&doc).map_err(|e| bad(e.to_string()))?;
         let digest = sha256_hex(&canonical_json(&document)?);
         self.tx_anchored(|t| {
+            // Who asks, before any lock (an outsider locks nothing; an
+            // auditor is refused as such), then again under the project's
+            // lock, then what they propose.
+            let p = project_visible(t, &ctx.principal, project)?;
+            admin_org(ctx, &p, "proposing job terms")?;
             lock_project(t, project)?;
             let p = project_visible(t, &ctx.principal, project)?;
-            // Who asks first (an auditor is refused as such), then what.
             let org = admin_org(ctx, &p, "proposing job terms")?;
             check_form(&doc)?;
             check_members(&doc, &p.members)?;
+            let open: i64 = t
+                .query_one(
+                    "SELECT count(*) FROM job_terms WHERE project_id = $1 AND status = 'proposed'",
+                    &[&project],
+                )
+                .map_err(db_err)?
+                .get(0);
+            if open >= MAX_OPEN_TERMS_PROPOSALS {
+                return Err(conflict(format!(
+                    "project {project} has {open} proposed job terms awaiting acceptance, the most it may have at once: terms that become active supersede them"
+                )));
+            }
             let id = new_id("terms");
             t.execute(
                 "INSERT INTO job_terms (id, project_id, organization_id, digest, document, status, created_by)
@@ -414,6 +489,11 @@ impl Control {
                 .map_err(db_err)?
                 .ok_or_else(|| not_found("terms", id))?
                 .get(0);
+            // Who asks, before any lock, then again under the project's
+            // lock (the lock order above).
+            let p =
+                project_visible(t, &ctx.principal, &project).map_err(|_| not_found("terms", id))?;
+            admin_org(ctx, &p, "accepting job terms")?;
             lock_project(t, &project)?;
             let p =
                 project_visible(t, &ctx.principal, &project).map_err(|_| not_found("terms", id))?;

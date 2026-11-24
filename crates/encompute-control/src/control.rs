@@ -1131,6 +1131,56 @@ impl Control {
                 Ok(())
             })?;
         }
+        // A project that came to require job terms requires them again,
+        // and superseded terms are superseded again. A project left with no
+        // active terms then runs nothing until its members accept terms
+        // again (never the looser ones a restore brought back).
+        for (which, sql, action, rtype, note) in [
+            (
+                NegSet::TermsRequired,
+                "UPDATE projects SET terms_required = true
+                  WHERE id = ANY($1) AND NOT terms_required
+                 RETURNING id, organization_id",
+                "project.terms_required",
+                "project",
+                "its requirement of job terms re-applied",
+            ),
+            (
+                NegSet::SupersededTerms,
+                "UPDATE job_terms x SET status = 'superseded' FROM projects p
+                  WHERE p.id = x.project_id AND x.id = ANY($1) AND x.status <> 'superseded'
+                 RETURNING x.id, p.organization_id",
+                "terms.superseded",
+                "terms",
+                "superseded again",
+            ),
+        ] {
+            let ids = set(which)?;
+            if ids.is_empty() {
+                continue;
+            }
+            self.db.tx(|t| {
+                for r in t.query(sql, &[&ids]).map_err(db_err)? {
+                    let (id, org): (String, String) = (r.get(0), r.get(1));
+                    govlog::append_reapplied(t, which, &id, &[])?;
+                    audit::append(
+                        t,
+                        AuditDraft::new(
+                            operator,
+                            "recovery",
+                            action,
+                            rtype,
+                            &id,
+                            Outcome::Succeeded,
+                        )
+                        .org(&org)
+                        .r#ref("reason", "anchored_terms_reapplied"),
+                    )?;
+                    notes.push(format!("{rtype} {id}: {note}"));
+                }
+                Ok(())
+            })?;
+        }
         // Rows the database lost are recorded as lost in the log (their
         // IDs stay blocked), and audited.
         let lost = {
@@ -1749,6 +1799,8 @@ const PRESENT: &[(govlog::NegSet, &str, &str)] = &[
     (govlog::NegSet::ExpiredAssets, "assets", "t.id = s.x"),
     (govlog::NegSet::RetiredPurposes, "purposes", "t.id = s.x"),
     (govlog::NegSet::RevokedKeys, "governance_keys", "t.id = s.x"),
+    (govlog::NegSet::TermsRequired, "projects", "t.id = s.x"),
+    (govlog::NegSet::SupersededTerms, "job_terms", "t.id = s.x"),
 ];
 
 /// The IDs of the negative sets that the database does not hold, and that
@@ -1836,6 +1888,14 @@ const UNDONE: &[(govlog::NegSet, &str)] = &[
         govlog::NegSet::RevokedKeys,
         "SELECT id, status FROM governance_keys WHERE status <> 'revoked' AND id IN (IDS) ORDER BY 1",
     ),
+    (
+        govlog::NegSet::TermsRequired,
+        "SELECT id, 'not requiring them' FROM projects WHERE NOT terms_required AND id IN (IDS) ORDER BY 1",
+    ),
+    (
+        govlog::NegSet::SupersededTerms,
+        "SELECT id, status FROM job_terms WHERE status <> 'superseded' AND id IN (IDS) ORDER BY 1",
+    ),
 ];
 
 /// The first row that shows a negative set's transition undone: (set,
@@ -1885,6 +1945,12 @@ fn undone_message(set: govlog::NegSet, id: &str, shows: &str) -> String {
         }
         N::RevokedKeys => {
             format!("governance key {id} was revoked, but the database shows it {shows}")
+        }
+        N::TermsRequired => {
+            format!("project {id} came to require job terms, but the database shows it {shows}")
+        }
+        N::SupersededTerms => {
+            format!("job terms {id} were superseded, but the database shows them {shows}")
         }
     }
 }

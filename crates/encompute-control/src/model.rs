@@ -371,6 +371,8 @@ pub struct JobTerms {
 /// Bounds on a terms document's lists and limit.
 pub const MAX_TERMS_ENTRIES: usize = 64;
 pub const MAX_TERMS_JOBS: u64 = 1_000_000;
+/// Proposed job terms a project may have awaiting acceptance at once.
+pub const MAX_OPEN_TERMS_PROPOSALS: i64 = 8;
 
 /// Who holds the keys of a project's sources. In sovereign custody every
 /// source's key is held by a key broker its own organization registered

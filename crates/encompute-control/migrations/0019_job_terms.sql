@@ -12,6 +12,10 @@
 -- requires terms runs nothing until terms are active, and once terms are
 -- active it always requires them. Standard and governed projects alike;
 -- jobs submitted before have no terms and are unchanged.
+--
+-- A project coming to require terms and terms being superseded are also
+-- events of the governance log (security-negative sets): a restored
+-- database that shows them undone is refused at startup.
 
 ALTER TABLE projects
     ADD COLUMN terms_required BOOLEAN NOT NULL DEFAULT false;
@@ -28,7 +32,13 @@ CREATE TABLE job_terms (
     created_by      TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     activated_at    TIMESTAMPTZ,
-    CONSTRAINT job_terms_activation CHECK ((status = 'proposed') = (activated_at IS NULL))
+    -- Active terms were activated; proposed ones not yet. Superseded terms
+    -- were either (active ones replaced, or proposals that newer terms
+    -- overtook before they were accepted).
+    CONSTRAINT job_terms_activation CHECK (
+        (status = 'proposed' AND activated_at IS NULL)
+        OR (status = 'active' AND activated_at IS NOT NULL)
+        OR status = 'superseded')
 );
 -- At most one set of terms governs a project at a time.
 CREATE UNIQUE INDEX job_terms_one_active ON job_terms (project_id) WHERE status = 'active';
@@ -52,8 +62,9 @@ ALTER TABLE jobs
 CREATE INDEX jobs_terms ON jobs (terms_id) WHERE terms_id IS NOT NULL;
 
 -- Terms are never edited or removed: their document, digest, project and
--- proposer are fixed, and their status only moves forward (proposed, then
--- active, then superseded).
+-- proposer are fixed, and their status only moves forward: proposed, then
+-- active, then superseded; or proposed, then superseded, when other terms
+-- of the project became active first.
 CREATE FUNCTION encompute_job_terms_guard() RETURNS trigger AS $$
 BEGIN
     IF TG_OP <> 'UPDATE' THEN
@@ -72,7 +83,7 @@ BEGIN
     END IF;
     IF NOT ((NEW.status = OLD.status AND NEW.activated_at IS NOT DISTINCT FROM OLD.activated_at)
             OR (OLD.status = 'proposed' AND NEW.status = 'active')
-            OR (OLD.status = 'active' AND NEW.status = 'superseded'
+            OR (OLD.status IN ('proposed', 'active') AND NEW.status = 'superseded'
                 AND NEW.activated_at IS NOT DISTINCT FROM OLD.activated_at)) THEN
         RAISE EXCEPTION 'job terms go from proposed to active to superseded, never back'
             USING ERRCODE = 'check_violation';

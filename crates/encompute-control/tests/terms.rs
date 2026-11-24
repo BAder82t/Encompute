@@ -318,6 +318,8 @@ fn a_project_that_requires_terms_runs_nothing_until_they_are_accepted() {
     );
     assert_eq!(p["terms_required"], true);
     let project = p["id"].as_str().unwrap().to_owned();
+    // Requiring terms is anchored from the project's first moment.
+    assert!(anchored(&w.t, NegSet::TermsRequired, &project));
     let pl = w.t.ok(
         &w.b_dev,
         "POST",
@@ -445,4 +447,274 @@ fn concurrent_submissions_never_exceed_the_terms() {
             .unwrap()
             .get(0);
     assert_eq!(n, 3);
+}
+
+fn terms_status(w: &World, id: &str) -> Value {
+    let url = format!("/v1/projects/{}/terms", w.project);
+    w.t.ok(&w.b_dev, "GET", &url, None)
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .unwrap()["status"]
+        .clone()
+}
+
+#[test]
+fn terms_that_take_effect_supersede_every_older_proposal() {
+    let Some(w) = world() else { return };
+    let (_, spec) = plan(&w, EXACT);
+    let url = format!("/v1/projects/{}/terms", w.project);
+    let key = receipt_key(&w.evaluator);
+    // A (loose) and B (strict) are proposed; B is accepted first.
+    let a = w.t.ok(
+        &w.b_admin,
+        "POST",
+        &url,
+        Some(terms(
+            &[&spec],
+            1000,
+            std::slice::from_ref(&key),
+            now() + 3600,
+        )),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let b = agree(
+        &w,
+        terms(&[&spec], 1, std::slice::from_ref(&key), now() + 3600),
+    );
+    assert_eq!(terms_status(&w, &a), "superseded");
+    assert_eq!(terms_status(&w, &b), "active");
+    // A can never be accepted, so never replace B.
+    let (s, v) =
+        w.t.call(&w.a_admin, "POST", &format!("/v1/terms/{a}/accept"), None);
+    assert_eq!(s, 409, "{v}");
+    assert_eq!(terms_status(&w, &b), "active");
+    // Recorded, and anchored, as superseded; the proposer's trail says so.
+    assert!(anchored(&w.t, NegSet::SupersededTerms, &a));
+    let n: i64 = w
+        .t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM audit_events
+              WHERE action = 'terms.superseded' AND resource_id = $1 AND organization_id = 'modelco'",
+            &[&a],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(n, 1);
+
+    // At most eight proposals await acceptance at once.
+    let mut open = vec![];
+    for i in 0..8 {
+        let mut d = terms(&[&spec], 10 + i, std::slice::from_ref(&key), now() + 3600);
+        d["reference"] = json!(format!("p-{i}"));
+        open.push(
+            w.t.ok(&w.b_admin, "POST", &url, Some(d))["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    let (s, v) = w.t.call(
+        &w.b_admin,
+        "POST",
+        &url,
+        Some(terms(
+            &[&spec],
+            99,
+            std::slice::from_ref(&key),
+            now() + 3600,
+        )),
+    );
+    assert_eq!(s, 409, "{v}");
+    // One taking effect supersedes the other seven: room again.
+    w.t.ok(
+        &w.a_admin,
+        "POST",
+        &format!("/v1/terms/{}/accept", open[3]),
+        None,
+    );
+    for (i, id) in open.iter().enumerate() {
+        let want = if i == 3 { "active" } else { "superseded" };
+        assert_eq!(terms_status(&w, id), want, "{id}");
+    }
+    assert_eq!(terms_status(&w, &b), "superseded");
+    w.t.ok(
+        &w.b_admin,
+        "POST",
+        &url,
+        Some(terms(
+            &[&spec],
+            99,
+            std::slice::from_ref(&key),
+            now() + 3600,
+        )),
+    );
+}
+
+/// Stops `t` and backs its database up as `name`: (the stopped harness,
+/// the backup's name).
+fn stop_and_back_up(t: T, name: &str) -> (Env0, String) {
+    let url = t.env0.url.clone();
+    let env0 = t.env0;
+    drop(t.control);
+    let backup = format!("{}_{name}", url.rsplit('/').next().unwrap());
+    backup_database(&url, &backup);
+    (env0, backup)
+}
+
+#[test]
+fn a_restore_never_brings_superseded_terms_back() {
+    let Some(w) = world() else { return };
+    let (exact, spec) = plan(&w, EXACT);
+    let key = receipt_key(&w.evaluator);
+    // Loose terms are active when the backup is taken.
+    let loose = agree(
+        &w,
+        terms(&[&spec], 1000, std::slice::from_ref(&key), now() + 3600),
+    );
+    let World {
+        t,
+        a_admin,
+        b_admin,
+        b_dev,
+        project,
+        ..
+    } = w;
+    let (env0, backup) = stop_and_back_up(t, "trbk");
+    let t = env0.started();
+    // Strict terms replace them, and the replacement is anchored.
+    let strict = {
+        let p = t.ok(
+            &b_admin,
+            "POST",
+            &format!("/v1/projects/{project}/terms"),
+            Some(terms(&[&spec], 1, std::slice::from_ref(&key), now() + 3600)),
+        );
+        let id = p["id"].as_str().unwrap().to_owned();
+        t.ok(&a_admin, "POST", &format!("/v1/terms/{id}/accept"), None);
+        id
+    };
+    assert!(anchored(&t, NegSet::SupersededTerms, &loose));
+    let env0 = t.env0;
+    drop(t.control);
+    // The backup still has the loose terms active.
+    restore_keeping_log(&env0, &backup);
+    let e = env0
+        .start()
+        .err()
+        .expect("a restore brought superseded terms back silently");
+    assert!(e.message.contains("JOB TERMS STATE ROLLBACK"), "{e}");
+    assert!(e.message.contains(&loose), "{e}");
+    let notes = run_recovery(&env0);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains(&loose) && n.contains("superseded again")),
+        "{notes:?}"
+    );
+    // The loose terms stay superseded, the strict ones were lost with the
+    // restore: the project runs nothing until its members agree again.
+    let t = env0.started();
+    let listed = t.ok(
+        &b_dev,
+        "GET",
+        &format!("/v1/projects/{project}/terms"),
+        None,
+    );
+    assert_eq!(listed[0]["id"], json!(loose));
+    assert_eq!(listed[0]["status"], "superseded");
+    assert!(!listed.to_string().contains(&strict), "{listed}");
+    let (s, v) = t.call_with(
+        &b_dev,
+        "POST",
+        "/v1/jobs",
+        Some(
+            json!({"project": project, "plan": exact, "purpose": "medical-training",
+                    "source_assets": [], "requested_output": "out"}),
+        ),
+        &[("Idempotency-Key", "after-restore")],
+    );
+    assert_eq!(s, 403, "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("none are active"),
+        "{v}"
+    );
+    t.restarted();
+}
+
+#[test]
+fn a_restore_never_lifts_a_projects_requirement_of_terms() {
+    let Some(w) = world() else { return };
+    let (exact, spec) = plan(&w, EXACT);
+    let key = receipt_key(&w.evaluator);
+    let World {
+        t,
+        a_admin,
+        b_admin,
+        b_dev,
+        project,
+        ..
+    } = w;
+    // The backup: a project without terms.
+    let (env0, backup) = stop_and_back_up(t, "rqbk");
+    let t = env0.started();
+    // Its first terms take effect: it requires terms from now on.
+    let p = t.ok(
+        &b_admin,
+        "POST",
+        &format!("/v1/projects/{project}/terms"),
+        Some(terms(
+            &[&spec],
+            1000,
+            std::slice::from_ref(&key),
+            now() + 3600,
+        )),
+    );
+    let id = p["id"].as_str().unwrap().to_owned();
+    t.ok(&a_admin, "POST", &format!("/v1/terms/{id}/accept"), None);
+    assert!(anchored(&t, NegSet::TermsRequired, &project));
+    let env0 = t.env0;
+    drop(t.control);
+    restore_keeping_log(&env0, &backup);
+    let e = env0
+        .start()
+        .err()
+        .expect("a restore lifted a project's requirement of terms silently");
+    assert!(
+        e.message.contains("TERMS REQUIREMENT STATE ROLLBACK"),
+        "{e}"
+    );
+    assert!(e.message.contains(&project), "{e}");
+    let notes = run_recovery(&env0);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains(&project) && n.contains("requirement of job terms re-applied")),
+        "{notes:?}"
+    );
+    // It requires terms again; those it had were lost with the restore.
+    let t = env0.started();
+    let (s, v) = t.call_with(
+        &b_dev,
+        "POST",
+        "/v1/jobs",
+        Some(
+            json!({"project": project, "plan": exact, "purpose": "medical-training",
+                    "source_assets": [], "requested_output": "out"}),
+        ),
+        &[("Idempotency-Key", "after-restore")],
+    );
+    assert_eq!(s, 403, "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("none are active"),
+        "{v}"
+    );
+    t.restarted();
 }

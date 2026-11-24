@@ -803,6 +803,16 @@ impl Control {
             }
             if r.terms_required {
                 created = created.r#ref("terms_required", "true");
+                // It requires job terms from its first moment: a
+                // security-negative transition of the governance log, so a
+                // restore never shows it running jobs without them.
+                govlog::append_routed(
+                    t,
+                    govlog::NegSet::TermsRequired,
+                    govlog::kind::PROJECT_TERMS_REQUIRED,
+                    &id,
+                    &[],
+                )?;
             }
             audit::append(t, created)?;
             // Invitations, as `add_project_member` makes them: an unknown

@@ -6511,7 +6511,7 @@ fn job_terms_govern_governed_jobs_too() {
     };
     let request = g.request(&plan, &[&v.asset], &[BEN]);
     // Terms naming another spec: the authorized job is refused.
-    agree(terms("e".repeat(64), now() + 600));
+    let first = agree(terms("e".repeat(64), now() + 600));
     let (s, j) = g.submit(&g.ben_dev, request.clone(), "outside");
     assert_eq!(s, 403, "{j}");
     assert!(
@@ -6538,6 +6538,22 @@ fn job_terms_govern_governed_jobs_too() {
     // Terms naming the plan's spec, for one job, ending in ten minutes.
     let end = now() + 600;
     let tid = agree(terms(base_spec(&p).id().hex(), end));
+    // The first terms are superseded: an event of the project's own
+    // partition of the governance log, anchored.
+    assert!(anchored(&g.t, NegSet::SupersededTerms, &first));
+    let partition: String = g
+        .t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT partition FROM governance_events WHERE kind = 'terms.superseded' AND subject_id = $1",
+            &[&first],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(partition, format!("p:{}", g.project));
     let (s, j) = g.submit(&g.ben_dev, request.clone(), "inside");
     assert_eq!(s, 201, "{j}");
     let job = id(&j);

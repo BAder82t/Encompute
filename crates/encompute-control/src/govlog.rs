@@ -662,10 +662,14 @@ pub enum NegSet {
     RetiredPurposes,
     RevokedKeys,
     FrozenLedgers,
+    /// Projects that came to require job terms.
+    TermsRequired,
+    /// Job terms superseded by newer terms of their project.
+    SupersededTerms,
 }
 
 impl NegSet {
-    pub const ALL: [NegSet; 12] = [
+    pub const ALL: [NegSet; 14] = [
         NegSet::RevokedAssets,
         NegSet::DisabledServices,
         NegSet::DisabledUsers,
@@ -678,6 +682,8 @@ impl NegSet {
         NegSet::RetiredPurposes,
         NegSet::RevokedKeys,
         NegSet::FrozenLedgers,
+        NegSet::TermsRequired,
+        NegSet::SupersededTerms,
     ];
 
     /// Its name: the version-1 anchor's field (`migrated.<name>`).
@@ -695,6 +701,8 @@ impl NegSet {
             NegSet::RetiredPurposes => "retired_purposes",
             NegSet::RevokedKeys => "revoked_governance_keys",
             NegSet::FrozenLedgers => "frozen",
+            NegSet::TermsRequired => "terms_required_projects",
+            NegSet::SupersededTerms => "superseded_terms",
         }
     }
 
@@ -713,6 +721,8 @@ impl NegSet {
             NegSet::RetiredPurposes => "PURPOSE",
             NegSet::RevokedKeys => "GOVERNANCE KEY",
             NegSet::FrozenLedgers => "FREEZE",
+            NegSet::TermsRequired => "TERMS REQUIREMENT",
+            NegSet::SupersededTerms => "JOB TERMS",
         }
     }
 
@@ -737,6 +747,8 @@ impl NegSet {
             NegSet::RetiredPurposes => &[kind::PURPOSE_RETIRED],
             NegSet::RevokedKeys => &[kind::GOVERNANCE_KEY_REVOKED],
             NegSet::FrozenLedgers => &[extra_kind::LEDGER_FROZEN],
+            NegSet::TermsRequired => &[kind::PROJECT_TERMS_REQUIRED],
+            NegSet::SupersededTerms => &[kind::TERMS_SUPERSEDED],
         }
     }
 
@@ -907,6 +919,14 @@ pub fn route(
         NegSet::RevokedKeys => one(
             t,
             "SELECT NULL::text, organization_id FROM governance_keys WHERE id = $1",
+        )?,
+        // Project events: a governed project's partition, otherwise the
+        // project owner's.
+        NegSet::TermsRequired => one(t, "SELECT id, organization_id FROM projects WHERE id = $1")?,
+        NegSet::SupersededTerms => one(
+            t,
+            "SELECT x.project_id, p.organization_id FROM job_terms x
+               JOIN projects p ON p.id = x.project_id WHERE x.id = $1",
         )?,
     };
     Ok(match found {

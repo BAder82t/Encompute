@@ -602,7 +602,10 @@ fn v1_set(v1: &StateAnchorV1, set: NegSet) -> BTreeSet<String> {
         NegSet::RevokedAuthorizations => v1.revoked_authorizations.clone(),
         NegSet::ExpiredAssets => v1.expired_assets.clone(),
         NegSet::FrozenLedgers => v1.frozen.clone(),
-        NegSet::RetiredPurposes | NegSet::RevokedKeys => BTreeSet::new(),
+        NegSet::RetiredPurposes
+        | NegSet::RevokedKeys
+        | NegSet::TermsRequired
+        | NegSet::SupersededTerms => BTreeSet::new(),
     }
 }
 
@@ -698,7 +701,14 @@ fn every_set() -> Option<(T, StateAnchorV1)> {
         &[("authorization", "aut_lost_1"), ("job", "job_lost_1")],
     );
     for set in NegSet::ALL {
-        if !matches!(set, NegSet::RetiredPurposes | NegSet::RevokedKeys) {
+        // (Sets that version 1 never had.)
+        if !matches!(
+            set,
+            NegSet::RetiredPurposes
+                | NegSet::RevokedKeys
+                | NegSet::TermsRequired
+                | NegSet::SupersededTerms
+        ) {
             assert!(!v1_set(&v1, set).is_empty(), "{set:?} is empty");
         }
     }
