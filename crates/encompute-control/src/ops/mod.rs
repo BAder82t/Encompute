@@ -14,6 +14,7 @@ mod project_log;
 mod retention;
 pub(crate) mod revocation_heads;
 mod tenancy;
+pub(crate) mod terms;
 
 pub(crate) use assets::withdraw_grants;
 pub use assets::{

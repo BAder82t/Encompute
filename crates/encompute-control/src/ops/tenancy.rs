@@ -775,9 +775,9 @@ impl Control {
                 }
             }
             t.execute(
-                "INSERT INTO projects (id, organization_id, name, status, governance, custody)
-                 VALUES ($1, $2, $3, 'active', $4, $5)",
-                &[&id, &r.organization, &r.name, &mode.as_str(), &custody.as_str()],
+                "INSERT INTO projects (id, organization_id, name, status, governance, custody, terms_required)
+                 VALUES ($1, $2, $3, 'active', $4, $5, $6)",
+                &[&id, &r.organization, &r.name, &mode.as_str(), &custody.as_str(), &r.terms_required],
             )
             .map_err(|e| {
                 if unique_violation(&e) {
@@ -800,6 +800,9 @@ impl Control {
                 created = created
                     .r#ref("governance", mode.as_str())
                     .r#ref("custody", custody.as_str());
+            }
+            if r.terms_required {
+                created = created.r#ref("terms_required", "true");
             }
             audit::append(t, created)?;
             // Invitations, as `add_project_member` makes them: an unknown
@@ -840,6 +843,10 @@ impl Control {
             }
             if mode == GovernanceMode::Governed {
                 out["custody"] = json!(custody.as_str());
+            }
+            // It runs nothing until its members accept job terms.
+            if r.terms_required {
+                out["terms_required"] = json!(true);
             }
             Ok(out)
         })

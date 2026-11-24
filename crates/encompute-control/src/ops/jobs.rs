@@ -384,6 +384,8 @@ struct JobRow {
     purpose_id: Option<String>,
     governance: Option<JobGovernance>,
     started_at: Option<u64>,
+    /// The job terms it was admitted under.
+    terms: Option<String>,
 }
 
 fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<JobRow>> {
@@ -391,7 +393,7 @@ fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<Jo
         "SELECT id, organization_id, project_id, plan_id, spec_id, program_id, purpose, source_assets,
                 requested_output, scheme, backend, profile, state, evaluator_id, job_grant, receipt,
                 evidence, error, initiated_by, created_at, estimated_gates, estimated_ms,
-                purpose_id, governance, floor(extract(epoch FROM started_at))::bigint
+                purpose_id, governance, floor(extract(epoch FROM started_at))::bigint, terms_id
            FROM jobs WHERE id = $1 {}",
         if lock { "FOR UPDATE" } else { "" }
     );
@@ -430,6 +432,7 @@ fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<Jo
             .transpose()
             .map_err(|e| db_err(format!("stored job governance: {e}")))?,
         started_at: r.get::<_, Option<i64>>(24).map(|v| v.max(0) as u64),
+        terms: r.get(25),
     }))
 }
 
@@ -1030,12 +1033,23 @@ impl Control {
                     }
                 }
             }
+            // The project's job terms, last before the job exists: the
+            // project row, then its active terms (locked, so jobs under them
+            // are counted one at a time).
+            let spec_id: String = plan.get(0);
+            let terms_id = match super::terms::admit(t, &r.project, &org, &[&spec_id], &r.purpose, now())? {
+                Ok(terms) => terms,
+                Err((rtype, rid, why, e)) => {
+                    *denied.borrow_mut() = Some((rtype, rid, org.clone(), why));
+                    return Err(e);
+                }
+            };
             let id = new_id("job");
             t.execute(
                 "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, policy_id, purpose,
                      source_assets, requested_output, scheme, backend, profile, state, initiated_by,
-                     idempotency_key, request_digest, estimated_gates)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17)",
+                     idempotency_key, request_digest, estimated_gates, terms_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17, $18)",
                 &[
                     &id,
                     &org,
@@ -1054,6 +1068,7 @@ impl Control {
                     &key,
                     &digest,
                     &(doc.estimated_gates.min(i64::MAX as u64) as i64),
+                    &terms_id,
                 ],
             )
             .map_err(|e| {
@@ -1072,16 +1087,18 @@ impl Control {
                 JobState::WaitingForApproval
             };
             self.transition_in(t, a, &ctx.request_id, &id, next, None)?;
-            audit::append(
-                t,
-                ctx.draft("job.created", "job", &id, Outcome::Succeeded)
-                    .org(&org)
-                    .project(&r.project)
-                    .r#ref("plan", r.plan.clone())
-                    .r#ref("plan_id", doc.plan_id.clone())
-                    .r#ref("spec", plan.get::<_, String>(0))
-                    .r#ref("state", next.as_str()),
-            )?;
+            let mut created = ctx
+                .draft("job.created", "job", &id, Outcome::Succeeded)
+                .org(&org)
+                .project(&r.project)
+                .r#ref("plan", r.plan.clone())
+                .r#ref("plan_id", doc.plan_id.clone())
+                .r#ref("spec", spec_id)
+                .r#ref("state", next.as_str());
+            if let Some(terms) = &terms_id {
+                created = created.r#ref("terms", terms.clone());
+            }
+            audit::append(t, created)?;
             Ok((json!({"id": id}), true))
         });
         if let (Err(_), Some((rtype, rid, org, why))) = (&out, denied.into_inner()) {
@@ -1580,6 +1597,9 @@ impl Control {
                 super::placement::placement_refused(&admitted),
             ));
         }
+        // The plan's spec ID (before the binding): what the members see of
+        // a plan, so job terms may name it.
+        let plan_spec_id = spec.id().hex();
         let spec = spec.governed(&binding);
         let spec_id = spec.id().hex();
         // An authorization pinned to execution specs covers only those.
@@ -1623,12 +1643,27 @@ impl Control {
             authorizations,
             source_keys,
         };
+        // The project's job terms, after every check above and last before
+        // the job exists: the project row, then its active terms (locked,
+        // so jobs under them are counted one at a time). They may name the
+        // plan's spec or the job's spec under its binding.
+        let terms_id = match super::terms::admit(
+            t,
+            &r.project,
+            org,
+            &[&plan_spec_id, &spec_id],
+            &r.purpose,
+            at,
+        )? {
+            Ok(terms) => terms,
+            Err((rtype, rid, why, e)) => return Err(deny(rtype, &rid, why, e)),
+        };
         let id = new_id("job");
         t.execute(
             "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, policy_id, purpose,
                  source_assets, requested_output, scheme, backend, profile, state, initiated_by,
-                 idempotency_key, request_digest, estimated_gates, purpose_id, governance)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17, $18, $19)",
+                 idempotency_key, request_digest, estimated_gates, purpose_id, governance, terms_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17, $18, $19, $20)",
             &[
                 &id,
                 &org,
@@ -1649,6 +1684,7 @@ impl Control {
                 &(s.doc.estimated_gates.min(i64::MAX as u64) as i64),
                 purpose_id,
                 &serde_json::to_value(&governance).expect("serializable"),
+                &terms_id,
             ],
         )
         .map_err(|e| {
@@ -1677,19 +1713,21 @@ impl Control {
         for to in [JobState::Planning, JobState::Planned, next] {
             self.transition_in(t, actor, &ctx.request_id, &id, to, None)?;
         }
-        audit::append(
-            t,
-            ctx.draft("job.created", "job", &id, Outcome::Succeeded)
-                .org(org)
-                .project(&r.project)
-                .r#ref("plan", r.plan.clone())
-                .r#ref("plan_id", s.doc.plan_id.clone())
-                .r#ref("spec", spec_id)
-                .r#ref("purpose", purpose_id.clone())
-                .r#ref("governance", governance.governance_id.clone())
-                .r#ref("authorization_set", governance.authorization_set_id.clone())
-                .r#ref("state", next.as_str()),
-        )?;
+        let mut created = ctx
+            .draft("job.created", "job", &id, Outcome::Succeeded)
+            .org(org)
+            .project(&r.project)
+            .r#ref("plan", r.plan.clone())
+            .r#ref("plan_id", s.doc.plan_id.clone())
+            .r#ref("spec", spec_id)
+            .r#ref("purpose", purpose_id.clone())
+            .r#ref("governance", governance.governance_id.clone())
+            .r#ref("authorization_set", governance.authorization_set_id.clone())
+            .r#ref("state", next.as_str());
+        if let Some(terms) = &terms_id {
+            created = created.r#ref("terms", terms.clone());
+        }
+        audit::append(t, created)?;
         Ok((json!({"id": id}), true))
     }
 
@@ -2271,6 +2309,7 @@ impl Control {
             governance_id: j.governance.map(|g| g.governance_id),
             placement,
             placement_waiting,
+            terms: j.terms,
         };
         Ok(serde_json::to_value(v).expect("serializable"))
     }
@@ -2698,11 +2737,41 @@ impl Control {
     /// count (ENC2707: an approver disabled, homed elsewhere or without the
     /// role now) is not failed but waits for approval again; once
     /// scheduled, start refuses and fails it instead.
+    ///
+    /// A job admitted under job terms (either kind of project) is placed
+    /// only on an evaluator whose receipt key the terms name, on top of
+    /// everything above, with a grant that expires before the terms end;
+    /// once they have ended it fails (anchored as ended).
     pub fn schedule_job(&self, id: &str) -> Result<bool> {
         let (placed, ended) = self.tx_anchored(|t| {
             let Some(j) = job_row(t, id, true)? else { return Ok((false, false)) };
             if j.state != JobState::Authorized {
                 return Ok((false, false));
+            }
+            // A job admitted under job terms runs only on an evaluator they
+            // name, and only before they end: one still unscheduled at the
+            // end fails (anchored as ended).
+            let terms = match &j.terms {
+                Some(tid) => Some(super::terms::document(t, tid)?),
+                None => None,
+            };
+            if terms.as_ref().is_some_and(|d| now() >= d.not_after) {
+                self.transition_in(
+                    t,
+                    &self.service_id,
+                    "scheduler",
+                    id,
+                    JobState::Failed,
+                    Some("its job terms ended before it was scheduled"),
+                )?;
+                audit::append(
+                    t,
+                    audit::AuditDraft::new(&self.service_id, "scheduler", "job.failed", "job", id, Outcome::Failed)
+                        .org(&j.organization)
+                        .project(&j.project)
+                        .r#ref("reason", "terms_ended"),
+                )?;
+                return Ok((false, true));
             }
             let governed = match &j.governance {
                 None => None,
@@ -2752,7 +2821,7 @@ impl Control {
                             (SELECT count(*) FROM jobs x WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running', 'verifying')),
                             (SELECT COALESCE(sum(GREATEST(x.estimated_gates, 1)), 0)::bigint FROM jobs x
                               WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running')),
-                            e.logical_cores, e.max_parallel_gates
+                            e.logical_cores, e.max_parallel_gates, e.receipt_key
                        FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
                       WHERE e.status = 'ready' AND s.status = 'active'
                         -- An operator's own evaluator runs only the governed
@@ -2771,6 +2840,14 @@ impl Control {
                     admitted
                         .as_ref()
                         .is_none_or(|a| a.iter().any(|x| x.id == r.get::<_, String>(0)))
+                })
+                // Under job terms: only an evaluator whose registered
+                // receipt key they name.
+                .filter(|r| {
+                    terms.as_ref().is_none_or(|d| {
+                        d.evaluator_keys
+                            .contains(&r.get::<_, String>(6).to_ascii_lowercase())
+                    })
                 })
                 .map(|r| {
                     let est = estimated_ms(
@@ -2791,10 +2868,15 @@ impl Control {
                     .field("profile", &j.profile)
                     .field("ready_evaluators", candidates.len())
                     .field("governed", governed.is_some())
+                    .field("terms", terms.is_some())
                     .emit();
                 return Ok((false, false));
             };
             let t0 = now();
+            // The terms ended meanwhile: not granted (the next pass fails it).
+            if terms.as_ref().is_some_and(|d| t0 >= d.not_after) {
+                return Ok((false, false));
+            }
             let (version, governance, expires_at) = match governed {
                 None => (JOB_GRANT_VERSION, None, t0 + JOB_GRANT_TTL_SECS),
                 Some((g, not_after)) => (
@@ -2815,6 +2897,11 @@ impl Control {
                     }),
                     (t0 + JOB_GRANT_TTL_SECS).min(not_after),
                 ),
+            };
+            // Never beyond the job terms' end.
+            let expires_at = match &terms {
+                Some(d) => expires_at.min(d.not_after - 1),
+                None => expires_at,
             };
             let mut g = JobGrant {
                 governance,

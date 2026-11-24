@@ -108,6 +108,9 @@ struct W {
     /// active scope of it.
     population: String,
     scope: String,
+    /// Job terms tax's admin proposed in the project (not yet accepted by
+    /// the other members, so they govern nothing).
+    terms: String,
 }
 
 fn broker_account(t: &T, admin: &As, org: &str, id: &str, seed: u8) {
@@ -139,6 +142,13 @@ fn purpose_body(org: &str, recipients: &[&str]) -> Value {
     json!({"organization": org, "name": PURPOSE, "description": "Eligibility for housing benefit",
            "modes": ["aggregate"], "allowed_release_classes": ["boolean-only"],
            "recipients": recipients, "valid_from": now() - 60, "valid_until": now() + 10_000})
+}
+
+/// Job terms for benefits' jobs on `evaluator_key`.
+fn terms_body(evaluator_key: &str) -> Value {
+    json!({"specs": ["e".repeat(64)], "purposes": [PURPOSE], "submitters": [BEN],
+           "evaluator_keys": [evaluator_key], "max_jobs": 10,
+           "not_before": now() - 10, "not_after": now() + 3600})
 }
 
 fn request(project: &str, plan: &str, purpose: &str, asset: &str, recipients: &[&str]) -> Value {
@@ -431,6 +441,12 @@ fn world() -> Option<W> {
         &format!("/v1/privacy/scopes/{scope}/approve"),
         None,
     );
+    let terms = id(&t.ok(
+        &tax_admin,
+        "POST",
+        &format!("/v1/projects/{project}/terms"),
+        Some(terms_body(&evaluator.receipt.identity().public_key_hex())),
+    ));
     Some(W {
         t,
         platform,
@@ -466,6 +482,7 @@ fn world() -> Option<W> {
         ben_user,
         population,
         scope,
+        terms,
     })
 }
 
@@ -623,6 +640,13 @@ impl W {
                 Some(json!({"retention_days": 7})),
             ),
             "/v1/policies/{}/approve" => (format!("/v1/policies/{}/approve", self.policy), None),
+            "/v1/projects/{}/terms" => (
+                format!("/v1/projects/{p}/terms"),
+                Some(terms_body(
+                    &self.evaluator.receipt.identity().public_key_hex(),
+                )),
+            ),
+            "/v1/terms/{}/accept" => (format!("/v1/terms/{}/accept", self.terms), None),
             "/v1/assets" => (
                 s(pattern),
                 Some(
@@ -783,6 +807,8 @@ impl W {
             }
             "/v1/projects/{}/purposes" => vec![format!("/v1/projects/{p}/purposes")],
             "/v1/projects/{}/placement" => vec![format!("/v1/projects/{p}/placement")],
+            "/v1/projects/{}/terms" => vec![format!("/v1/projects/{p}/terms")],
+            "/v1/terms/{}/jobs" => vec![format!("/v1/terms/{}/jobs", self.terms)],
             "/v1/projects/{}/audit" => vec![
                 format!("/v1/projects/{p}/audit"),
                 format!("/v1/projects/{p}/audit?after=1&limit=2"),

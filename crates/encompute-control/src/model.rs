@@ -334,7 +334,43 @@ pub struct CreateProject {
     /// (`standard` is refused), `standard` for a standard one.
     #[serde(default)]
     pub custody: Option<Custody>,
+    /// The project runs no job until its members have accepted job terms
+    /// ([`JobTerms`]).
+    #[serde(default)]
+    pub terms_required: bool,
 }
+
+/// Job terms: what every job of a project must be, once every member
+/// organization has accepted them. The control plane refuses a job outside
+/// them and schedules a job only on an evaluator they name, with a grant
+/// that expires before `not_after`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobTerms {
+    /// Execution spec IDs (they bind the program, backend, parameter
+    /// profile and policy). In a governed project a job is within them by
+    /// its plan's spec ID or by its spec ID under its governance binding.
+    pub specs: Vec<String>,
+    pub purposes: Vec<String>,
+    /// Member organizations that may submit jobs under these terms.
+    pub submitters: Vec<String>,
+    /// Receipt keys (hex) of the evaluators a job may be scheduled on.
+    pub evaluator_keys: Vec<String>,
+    /// Jobs submitted under these terms, at most (every submitted job
+    /// counts, whatever became of it).
+    pub max_jobs: u64,
+    /// Unix seconds: jobs are submitted at or after `not_before`, and run
+    /// (their grants expire) before `not_after`.
+    pub not_before: u64,
+    pub not_after: u64,
+    /// What the terms come from (an agreement's ID, say). Informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+/// Bounds on a terms document's lists and limit.
+pub const MAX_TERMS_ENTRIES: usize = 64;
+pub const MAX_TERMS_JOBS: u64 = 1_000_000;
 
 /// Who holds the keys of a project's sources. In sovereign custody every
 /// source's key is held by a key broker its own organization registered
@@ -856,4 +892,8 @@ pub struct JobView {
     /// when no evaluator is admissible for it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placement_waiting: Option<String>,
+    /// The job terms it was admitted under, if its project had active
+    /// terms when it was submitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terms: Option<String>,
 }

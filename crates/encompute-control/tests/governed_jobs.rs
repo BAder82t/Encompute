@@ -6467,3 +6467,98 @@ fn a_dataset_version_stays_what_it_was_through_a_governed_job() {
         "d".repeat(64)
     );
 }
+
+// --- job terms -----------------------------------------------------------------------
+
+/// Job terms govern a governed project's jobs too, on top of every
+/// governance check: a job its owners authorized but outside the terms is
+/// refused (and audited), one within them is bound to them, placed only on
+/// an evaluator they name with a grant that expires before their end, and
+/// every job submitted under them counts.
+#[test]
+fn job_terms_govern_governed_jobs_too() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    let key = g.evaluator.receipt.identity().public_key_hex();
+    let terms = |spec: String, end: u64| {
+        json!({"specs": [spec], "purposes": [PURPOSE], "submitters": [BEN],
+               "evaluator_keys": [key], "max_jobs": 1,
+               "not_before": now() - 10, "not_after": end})
+    };
+    // Tax's admin proposes; the admins of benefits and other-co accept.
+    let agree = |doc: Value| -> String {
+        let t = g.t.ok(
+            &g.tax_admin,
+            "POST",
+            &format!("/v1/projects/{}/terms", g.project),
+            Some(doc),
+        );
+        let tid = id(&t);
+        let mut last = Value::Null;
+        for admin in ["b-admin", "o-admin"] {
+            last = g.t.ok(
+                &As::User(admin.into()),
+                "POST",
+                &format!("/v1/terms/{tid}/accept"),
+                None,
+            );
+        }
+        assert_eq!(last["status"], "active", "{last}");
+        tid
+    };
+    let request = g.request(&plan, &[&v.asset], &[BEN]);
+    // Terms naming another spec: the authorized job is refused.
+    agree(terms("e".repeat(64), now() + 600));
+    let (s, j) = g.submit(&g.ben_dev, request.clone(), "outside");
+    assert_eq!(s, 403, "{j}");
+    assert!(
+        j["message"]
+            .as_str()
+            .unwrap()
+            .contains("outside the project's job terms"),
+        "{j}"
+    );
+    let reasons: Vec<String> =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query(
+                "SELECT refs->>'reason' FROM audit_events WHERE action = 'job.denied'",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+    assert!(reasons.contains(&"terms_spec".to_owned()), "{reasons:?}");
+    // Terms naming the plan's spec, for one job, ending in ten minutes.
+    let end = now() + 600;
+    let tid = agree(terms(base_spec(&p).id().hex(), end));
+    let (s, j) = g.submit(&g.ben_dev, request.clone(), "inside");
+    assert_eq!(s, 201, "{j}");
+    let job = id(&j);
+    let view = g.view(&job);
+    assert_eq!(view["state"], "queued", "{view}");
+    assert_eq!(view["terms"], json!(tid));
+    let grant = g.grant(&job);
+    assert_eq!(grant.evaluator, g.evaluator.id);
+    assert_eq!(grant.expires_at, end - 1);
+    assert!(grant.governance.unwrap().not_after > grant.expires_at);
+    // The terms allow one job.
+    let (s, j) = g.submit(&g.ben_dev, request, "second");
+    assert_eq!(s, 403, "{j}");
+    assert!(
+        j["message"].as_str().unwrap().contains("allow 1 job(s)"),
+        "{j}"
+    );
+    // Every organization that accepted them sees the job under them.
+    let jobs =
+        g.t.ok(&g.tax_admin, "GET", &format!("/v1/terms/{tid}/jobs"), None);
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
+    assert_eq!(jobs[0]["id"], json!(job));
+    assert_eq!(jobs[0]["organization"], BEN);
+}
