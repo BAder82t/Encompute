@@ -220,8 +220,14 @@ them (step 1), the scheduler places a job only on an evaluator whose
 receipt key they name (step 2), its grant expires before their end, and a
 job still unscheduled at the end fails. Operators: an evaluator that
 re-registers with another receipt key no longer matches terms that name
-its old key, so its jobs wait (and fail at the end) until the members
-agree new terms. `encompute jobs run --save-receipt --save-envelopes
+its old key: its jobs under them do not start (and fail at the end) until
+the members agree new terms, and a receipt under the new key fails the
+job. A project coming to require terms and superseded terms are anchored
+like the other security-negative transitions (below): a restore that
+undoes either is refused at startup (TERMS REQUIREMENT or JOB TERMS STATE
+ROLLBACK), and `encompute-control recover` requires and supersedes them
+again; a project whose later terms the restore lost then runs nothing
+until its members agree terms again. `encompute jobs run --save-receipt --save-envelopes
 --save-job` keeps the evidence of a run under terms for later checking.
 **Upgrading.** Migration 0019 (schema version 19) adds the terms tables, a
 job's `terms_id` and a project's `terms_required`; existing projects and
@@ -632,7 +638,8 @@ The control plane signs into the **state anchor**:
   organization lost by leaving a project), removed project memberships,
   organization roles removed from a user or service account, revoked
   owner authorizations of governed projects, retired purposes, revoked
-  governance keys and expired assets. Each is an event of the log,
+  governance keys, expired assets, projects that came to require job
+  terms and superseded job terms. Each is an event of the log,
   written in the same transaction; the anchor holds only where the log
   stands. A key broker is told of a revocation or an expiry only once its
   event is anchored.

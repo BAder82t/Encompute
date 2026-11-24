@@ -144,9 +144,9 @@ held in another organization than their own (403).
 
 | | |
 |---|---|
-| `POST /v1/projects/{id}/terms` | a person homed in a member organization who is its organization admin. A terms document (below); `201` with the terms (`status: proposed`, the proposer's organization in `accepted_by`). In a project of one member organization they are active at once. Refused: a malformed document or a submitter that is not a member (400), anyone else (403; 404 outside the project) |
+| `POST /v1/projects/{id}/terms` | a person homed in a member organization who is its organization admin. A terms document (below); `201` with the terms (`status: proposed`, the proposer's organization in `accepted_by`). In a project of one member organization they are active at once. Refused: a malformed document or a submitter that is not a member (400), a project with 8 proposals awaiting acceptance already (409), anyone else (403; 404 outside the project) |
 | `GET /v1/projects/{id}/terms` | members and auditor organizations: every set of terms of the project, oldest first, each `{id, project, proposed_by, digest, terms, status, accepted_by, jobs}`. `status` is `proposed`, `active` or `superseded`; `digest` is the SHA-256 of the document's canonical JSON; `jobs` counts the jobs submitted under them |
-| `POST /v1/terms/{id}/accept` | an organization admin of another member organization (a person homed there), for that organization. When every active member organization has accepted, they become `active`: the project's active terms (if any) become `superseded`, and the project requires terms from then on. Each member's trail records `terms.activated`. Accepting twice, or terms that are not `proposed`, is 409 |
+| `POST /v1/terms/{id}/accept` | an organization admin of another member organization (a person homed there), for that organization. When every active member organization has accepted, they become `active`: every other set of the project's terms, the active one and every proposal still awaiting acceptance, becomes `superseded` (and can never be accepted), and the project requires terms from then on. Each member's trail records `terms.activated`, and a superseded proposal's proposer `terms.superseded`. Accepting twice, or terms that are not `proposed`, is 409 |
 | `GET /v1/terms/{id}/jobs` | the organizations that accepted the terms, while they are members of the project: the jobs submitted under them, each `{id, organization, spec_id, program_id, purpose, state, evaluator, created_at, started}` (`started`: the job reached `running`). Never a grant or an evaluator's URL. Anyone else: 404 |
 
 A terms document is `{specs, purposes, submitters, evaluator_keys, max_jobs,
@@ -181,10 +181,24 @@ Lists hold 1 to 64 entries, each once. While a project has active terms:
   placement included), and its grant's `expires_at` is at most
   `not_after - 1`. A job not yet scheduled when the terms end fails
   (`job.failed`, reason `terms_ended`) and is anchored as ended.
+- The evaluator's receipt key is checked again: `POST /v1/jobs/{id}/start`
+  is refused (403) and so is the evaluator's `POST /v1/jobs/{id}/receipt`
+  when the key it has registered now is not one the terms name (it
+  registered again with another key), and the client's
+  `POST /v1/jobs/{id}/complete` with a receipt under such a key fails the
+  job.
 - New terms replace the active ones only once every member organization has
   accepted them too. Terms, their acceptances, a job's terms and a project's
   requirement of terms are never changed or removed (the database refuses
   it).
+- A project coming to require terms (created with `terms_required`, or its
+  first terms taking effect) and terms being superseded are events of the
+  governance log (`project.terms_required`, `terms.superseded`: a governed
+  project's partition, otherwise the project owner's), anchored before the
+  call returns. A restored database that shows such a project not requiring
+  terms, or superseded terms proposed or active again, is refused at startup
+  (ENC2202 TERMS REQUIREMENT or JOB TERMS STATE ROLLBACK); `encompute-control
+  recover` requires and supersedes them again.
 
 ### Evaluators
 

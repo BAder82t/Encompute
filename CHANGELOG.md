@@ -45,14 +45,22 @@ this unreleased work. Draft notes:
   submissions never exceed the total; a job is scheduled only on an
   evaluator whose receipt key they name, on top of the scheduler's other
   constraints and a governed job's placement, with a grant that expires
-  before their end; and a job still unscheduled at the end fails and is
-  anchored as ended. A project created with `terms_required: true` runs
-  nothing until terms are active (`terms_none_active`), and activation makes
-  a project require terms from then on. New terms replace active ones only
-  when every member accepted them too. A job's view shows the terms it was
-  admitted under (`terms`). Schema version 19 (migration 0019): the database
-  refuses edits and deletions of terms, their acceptances, a job's terms and
-  a project's requirement of terms. INV-253.
+  before their end; it starts only while that evaluator's registered key is
+  still one they name, and a receipt under another key fails it; and a job
+  still unscheduled at the end fails and is anchored as ended. A project
+  created with `terms_required: true` runs nothing until terms are active
+  (`terms_none_active`), and activation makes a project require terms from
+  then on. New terms replace active ones only when every member accepted
+  them too, and when terms take effect every other proposal of the project
+  is superseded and can no longer be accepted (at most 8 proposals await
+  acceptance at once). A project coming to require terms and superseded
+  terms are security-negative events of the governance log, anchored before
+  the call returns: a restore that undoes either is refused at startup
+  (TERMS REQUIREMENT, JOB TERMS STATE ROLLBACK) and recovery applies them
+  again. A job's view shows the terms it was admitted under (`terms`).
+  Schema version 19 (migration 0019): the database refuses edits and
+  deletions of terms, their acceptances, a job's terms and a project's
+  requirement of terms. INV-253.
 - `encompute jobs run` gains `--inputs-file`, `--save-receipt`,
   `--save-envelopes` (`request.bin`, `response.bin`, and `proof.bin` when
   there is a proof) and `--save-job` (the job as the control plane reports
