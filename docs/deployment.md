@@ -220,9 +220,9 @@ them (step 1), the scheduler places a job only on an evaluator whose
 receipt key they name (step 2), its grant expires before their end, and a
 job still unscheduled at the end fails. Operators: an evaluator that
 re-registers with another receipt key no longer matches terms that name
-its old key: its jobs under them do not start (and fail at the end) until
-the members agree new terms, and a receipt under the new key fails the
-job. A project coming to require terms and superseded terms are anchored
+its old key: its queued jobs under them go back to the scheduler, to run
+on an evaluator the terms name (or fail at their end), and a receipt under
+the new key fails the job. A project coming to require terms and superseded terms are anchored
 like the other security-negative transitions (below): a restore that
 undoes either is refused at startup (TERMS REQUIREMENT or JOB TERMS STATE
 ROLLBACK), and `encompute-control recover` requires and supersedes them
@@ -230,7 +230,8 @@ again; a project whose later terms the restore lost then runs nothing
 until its members agree terms again. `encompute jobs run --save-receipt --save-envelopes
 --save-job` keeps the evidence of a run under terms for later checking.
 **Upgrading.** Migration 0019 (schema version 19) adds the terms tables, a
-job's `terms_id` and a project's `terms_required`; existing projects and
+job's `terms_id` and its number under them (`terms_seq`, kept by the
+database with the terms' count) and a project's `terms_required`; existing projects and
 jobs have no terms and run as before. A control plane that ran it cannot
 be downgraded.
 

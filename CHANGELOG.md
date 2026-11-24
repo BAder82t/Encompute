@@ -42,18 +42,26 @@ this unreleased work. Draft notes:
   `job.denied` with `terms_submitter`, `terms_window`, `terms_spec`,
   `terms_purpose` or `terms_limit`), after every check a job already
   passes; the jobs under them are counted under a row lock, so concurrent
-  submissions never exceed the total; a job is scheduled only on an
-  evaluator whose receipt key they name, on top of the scheduler's other
-  constraints and a governed job's placement, with a grant that expires
-  before their end; it starts only while that evaluator's registered key is
-  still one they name, and a receipt under another key fails it; and a job
-  still unscheduled at the end fails and is anchored as ended. A project
+  submissions never exceed the total, and the database keeps the count and
+  numbers each job (refusing one beyond the total or under terms that are
+  not active); a job is scheduled only on an evaluator whose receipt key
+  they name, on top of the scheduler's other constraints and a governed
+  job's placement, with a grant that expires before their end, and jobs
+  waiting for such an evaluator never hold up the scheduler's others; an
+  evaluator that registers again with a key they do not name has its
+  queued jobs under them scheduled again; a job starts only while its
+  evaluator's registered key is still one they name, and a receipt under
+  another key fails it; and a job still unscheduled at the end fails and
+  is anchored as ended. A project
   created with `terms_required: true` runs nothing until terms are active
   (`terms_none_active`), and activation makes a project require terms from
   then on. New terms replace active ones only when every member accepted
   them too, and when terms take effect every other proposal of the project
   is superseded and can no longer be accepted (at most 8 proposals await
-  acceptance at once). A project coming to require terms and superseded
+  acceptance at once). When an organization leaves, a proposal every
+  remaining member has accepted takes effect. `GET /v1/terms/{id}/jobs`
+  pages by each job's number under the terms (`seq`), and a governed
+  project's shared audit view shows the terms' digest and reference. A project coming to require terms and superseded
   terms are security-negative events of the governance log, anchored before
   the call returns: a restore that undoes either is refused at startup
   (TERMS REQUIREMENT, JOB TERMS STATE ROLLBACK) and recovery applies them

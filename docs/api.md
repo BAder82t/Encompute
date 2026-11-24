@@ -145,9 +145,9 @@ held in another organization than their own (403).
 | | |
 |---|---|
 | `POST /v1/projects/{id}/terms` | a person homed in a member organization who is its organization admin. A terms document (below); `201` with the terms (`status: proposed`, the proposer's organization in `accepted_by`). In a project of one member organization they are active at once. Refused: a malformed document or a submitter that is not a member (400), a project with 8 proposals awaiting acceptance already (409), anyone else (403; 404 outside the project) |
-| `GET /v1/projects/{id}/terms` | members and auditor organizations: every set of terms of the project, oldest first, each `{id, project, proposed_by, digest, terms, status, accepted_by, jobs}`. `status` is `proposed`, `active` or `superseded`; `digest` is the SHA-256 of the document's canonical JSON; `jobs` counts the jobs submitted under them |
-| `POST /v1/terms/{id}/accept` | an organization admin of another member organization (a person homed there), for that organization. When every active member organization has accepted, they become `active`: every other set of the project's terms, the active one and every proposal still awaiting acceptance, becomes `superseded` (and can never be accepted), and the project requires terms from then on. Each member's trail records `terms.activated`, and a superseded proposal's proposer `terms.superseded`. Accepting twice, or terms that are not `proposed`, is 409 |
-| `GET /v1/terms/{id}/jobs` | the organizations that accepted the terms, while they are members of the project: the jobs submitted under them, each `{id, organization, spec_id, program_id, purpose, state, evaluator, created_at, started}` (`started`: the job reached `running`). Never a grant or an evaluator's URL. Anyone else: 404 |
+| `GET /v1/projects/{id}/terms` | members and auditor organizations: every set of terms of the project, oldest first, each `{id, project, proposed_by, digest, terms, status, accepted_by, jobs}`. `status` is `proposed`, `active` or `superseded`; `digest` is the SHA-256 of the document's canonical JSON; `jobs` counts the jobs submitted under them (kept by the database as each is inserted) |
+| `POST /v1/terms/{id}/accept` | an organization admin of another member organization (a person homed there), for that organization. When every active member organization has accepted, they become `active`: every other set of the project's terms, the active one and every proposal still awaiting acceptance, becomes `superseded` (and can never be accepted), and the project requires terms from then on. Each member's trail records `terms.activated`, and a superseded proposal's proposer `terms.superseded`. Terms that are not `proposed` are 409, and so is accepting twice, unless every active member organization has accepted them meanwhile without their taking effect: they then take effect. When an organization leaves the project (`POST /v1/projects/{id}/members/remove`), the newest proposal that every remaining member organization has accepted takes effect the same way: the removal's reply names it (`terms_activated`), and `terms.activated` records `reason: member_left` and the `member`; should that fail, the removal stands and its reply says `terms_settled: false` (accepting the terms again retries). An acceptance stands while the terms are proposed, including across its organization leaving the project and joining it again |
+| `GET /v1/terms/{id}/jobs?after=&limit=` | the organizations that accepted the terms, while they are members of the project: the jobs submitted under them, each `{seq, id, organization, spec_id, program_id, purpose, state, evaluator, created_at, started}` (`seq`: its number under the terms, from 1; `started`: the job reached `running`), in order of `seq`: those after `after` (default 0), at most `limit` (1 to 1000, default 1000; read the next page with the last `seq` as `after`; any other value is 400). Never a grant or an evaluator's URL. Anyone else: 404 |
 
 A terms document is `{specs, purposes, submitters, evaluator_keys, max_jobs,
 not_before, not_after, reference?}` (unknown fields are refused):
@@ -157,7 +157,10 @@ not_before, not_after, reference?}` (unknown fields are refused):
   its plan's spec ID or by its spec ID under its governance binding.
 - `purposes`: the job's `purpose`.
 - `submitters`: member organizations whose jobs the terms admit (each must
-  also have accepted the terms).
+  also have accepted the terms). An organization that joins the project
+  later submits under terms only once terms that name it take effect
+  (every member organization, it included, accepting them): active terms
+  never admit an organization they do not name.
 - `evaluator_keys`: Ed25519 receipt keys (lowercase hex) of the evaluators
   a job may be scheduled on.
 - `max_jobs`: how many jobs may be submitted under the terms (1 to
@@ -175,22 +178,34 @@ Lists hold 1 to 64 entries, each once. While a project has active terms:
   `terms_purpose` or `terms_limit`; a project that requires terms and has
   none active refuses every job (`terms_none_active`). The jobs admitted
   under one set of terms are counted one submission at a time, so
-  concurrent submissions never exceed `max_jobs`.
+  concurrent submissions never exceed `max_jobs`. The database keeps the
+  count and numbers each job (`seq`) as it is inserted, and refuses a job
+  under terms that are not its project's active terms or beyond
+  `max_jobs`.
 - The scheduler places a job only on an evaluator whose registered receipt
   key the terms name, on top of its other constraints (a governed job's
   placement included), and its grant's `expires_at` is at most
   `not_after - 1`. A job not yet scheduled when the terms end fails
-  (`job.failed`, reason `terms_ended`) and is anchored as ended.
-- The evaluator's receipt key is checked again: `POST /v1/jobs/{id}/start`
-  is refused (403) and so is the evaluator's `POST /v1/jobs/{id}/receipt`
-  when the key it has registered now is not one the terms name (it
-  registered again with another key), and the client's
+  (`job.failed`, reason `terms_ended`) and is anchored as ended. Jobs
+  waiting for an evaluator the terms name that is away or full never hold
+  up the scheduler's other jobs.
+- An evaluator that registers again with a receipt key the terms do not
+  name: its jobs under them that are `queued` and not started go back to
+  `authorized` (`job.requeued`, reason `receipt_key_not_in_terms`) and are
+  scheduled again on an evaluator they name. The key is also checked
+  later: `POST /v1/jobs/{id}/start` is refused (403) and so is the
+  evaluator's `POST /v1/jobs/{id}/receipt` when the key it has registered
+  now is not one the terms name, and the client's
   `POST /v1/jobs/{id}/complete` with a receipt under such a key fails the
   job.
 - New terms replace the active ones only once every member organization has
   accepted them too. Terms, their acceptances, a job's terms and a project's
   requirement of terms are never changed or removed (the database refuses
   it).
+- In a governed project's shared audit view (`GET /v1/audit?project=`),
+  the terms' events show the document's `digest` and `reference` and which
+  terms replaced which (`superseded`, `by`), and `job.created` the job's
+  `terms`.
 - A project coming to require terms (created with `terms_required`, or its
   first terms taking effect) and terms being superseded are events of the
   governance log (`project.terms_required`, `terms.superseded`: a governed
