@@ -222,18 +222,29 @@ job still unscheduled at the end fails. Operators: an evaluator that
 re-registers with another receipt key no longer matches terms that name
 its old key: its queued jobs under them go back to the scheduler, to run
 on an evaluator the terms name (or fail at their end), and a receipt under
-the new key fails the job. A project coming to require terms and superseded terms are anchored
-like the other security-negative transitions (below): a restore that
-undoes either is refused at startup (TERMS REQUIREMENT or JOB TERMS STATE
-ROLLBACK), and `encompute-control recover` requires and supersedes them
-again; a project whose later terms the restore lost then runs nothing
-until its members agree terms again. `encompute jobs run --save-receipt --save-envelopes
+the new key fails the job. A project coming to require terms, superseded terms
+and each job admitted under terms are anchored like the other
+security-negative transitions (below): a restore that undoes the first two
+is refused at startup (TERMS REQUIREMENT or JOB TERMS STATE ROLLBACK), and
+so is one whose terms count fewer jobs than were admitted under them (JOB
+TERMS COUNT STATE ROLLBACK). `encompute-control recover` requires and
+supersedes them again and raises each count to the jobs admitted, so terms
+never admit more jobs than they allow (the jobs the restore lost leave a
+gap in the numbers); a project whose later terms the restore lost then
+runs nothing until its members agree terms again. An organization that
+joins a project after its terms took effect accepts them before its data is
+used under them. Should proposed terms that an organization's departure
+completed not take effect at once, the control plane's periodic pass
+settles them. `encompute jobs run --save-receipt --save-envelopes
 --save-job` keeps the evidence of a run under terms for later checking.
 **Upgrading.** Migration 0019 (schema version 19) adds the terms tables, a
-job's `terms_id` and its number under them (`terms_seq`, kept by the
-database with the terms' count) and a project's `terms_required`; existing projects and
-jobs have no terms and run as before. A control plane that ran it cannot
-be downgraded.
+job's `terms_id` and a project's `terms_required`; existing projects and
+jobs have no terms and run as before. Migration 0020 (schema version 20)
+adds each set of terms' count of jobs (`jobs_submitted`) and each job's
+number under them (`terms_seq`), both kept by the database as jobs are
+inserted; on a database that ran 0019 it counts the jobs already under
+each set of terms and numbers them in the order they were submitted. A
+control plane that ran either cannot be downgraded.
 
 **Draining an evaluator** before an upgrade: an operator sets it to
 `draining` (`POST /v1/evaluators/{id}/status`). The evaluator takes no new
@@ -772,8 +783,9 @@ success only after the mirror and the anchor are durable, and a failed
 checkpoint fails the call. The change may already be committed to the
 database, which enforces it; retrying the call is idempotent and anchors
 it, and the background task anchors it otherwise. Ordinary events are
-batched by the background checkpoint; a privacy spend checkpoints
-synchronously, like a deny event (concurrent spends share one checkpoint).
+batched by the background checkpoint; a privacy spend and a job admitted
+under job terms checkpoint synchronously, like a deny event (concurrent
+spends share one checkpoint).
 
 Size and pruning: about 300 bytes per event, so 100,000 events are about
 30 MB in about 200 segments. Every privacy spend is one event, so a

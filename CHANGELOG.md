@@ -39,36 +39,55 @@ this unreleased work. Draft notes:
   an organization admin of every member organization has accepted them
   (people in their own organization, never service accounts or auditors).
   While they are active, a job outside them is refused (403, audited as
-  `job.denied` with `terms_submitter`, `terms_window`, `terms_spec`,
-  `terms_purpose` or `terms_limit`), after every check a job already
-  passes; the jobs under them are counted under a row lock, so concurrent
-  submissions never exceed the total, and the database keeps the count and
-  numbers each job (refusing one beyond the total or under terms that are
-  not active); a job is scheduled only on an evaluator whose receipt key
-  they name, on top of the scheduler's other constraints and a governed
-  job's placement, with a grant that expires before their end, and jobs
-  waiting for such an evaluator never hold up the scheduler's others; an
-  evaluator that registers again with a key they do not name has its
-  queued jobs under them scheduled again; a job starts only while its
-  evaluator's registered key is still one they name, and a receipt under
-  another key fails it; and a job still unscheduled at the end fails and
-  is anchored as ended. A project
-  created with `terms_required: true` runs nothing until terms are active
-  (`terms_none_active`), and activation makes a project require terms from
-  then on. New terms replace active ones only when every member accepted
-  them too, and when terms take effect every other proposal of the project
-  is superseded and can no longer be accepted (each member organization has at most 8 of
-  its own proposals awaiting acceptance at once). When an organization leaves, a proposal every
-  remaining member has accepted takes effect. `GET /v1/terms/{id}/jobs`
-  pages by each job's number under the terms (`seq`), and a governed
-  project's shared audit view shows the terms' digest and reference. A project coming to require terms and superseded
-  terms are security-negative events of the governance log, anchored before
-  the call returns: a restore that undoes either is refused at startup
-  (TERMS REQUIREMENT, JOB TERMS STATE ROLLBACK) and recovery applies them
-  again. A job's view shows the terms it was admitted under (`terms`).
-  Schema version 19 (migration 0019): the database refuses edits and
-  deletions of terms, their acceptances, a job's terms and a project's
-  requirement of terms. INV-253.
+  `job.denied` with `terms_submitter`, `terms_owner`, `terms_window`,
+  `terms_spec`, `terms_purpose` or `terms_limit`), after every check a job
+  already passes; an organization that joins the project after they took
+  effect accepts the active terms (which changes nothing else) before a job
+  under them may use its assets (`terms_owner` until then); the jobs under
+  them are counted under a row lock, so concurrent submissions never exceed
+  the total, and the database keeps the count and numbers each job
+  (refusing one beyond the total or under terms that are not active); a
+  job is scheduled only on an evaluator whose receipt key they name, on top
+  of the scheduler's other constraints and a governed job's placement, with
+  a grant that expires before their end, and jobs waiting for such an
+  evaluator never hold up the scheduler's others; an evaluator that
+  registers again with a key they do not name has its queued jobs under
+  them scheduled again (ordered against a concurrent start, so none is left
+  running on the old process); a job starts only while its evaluator's
+  registered key is still one they name, and a receipt under another key
+  fails it; and a job still unscheduled at the end fails and is anchored as
+  ended. A project created with `terms_required: true` runs nothing until
+  terms are active (`terms_none_active`), and activation makes a project
+  require terms from then on. New terms replace active ones only when every
+  member accepted them too, and when terms take effect every other proposal
+  of the project is superseded and can no longer be accepted (each member
+  organization has at most 8 of its own proposals awaiting acceptance at
+  once). Accepting active terms again (a retry after the control plane
+  failed to anchor the acceptance) succeeds once it is anchored. When an
+  organization leaves, a proposal every remaining member has accepted takes
+  effect; should that fail, the control plane's periodic pass settles it
+  (`reason: settled`). `GET /v1/terms/{id}/jobs` pages by each job's number
+  under the terms (`seq`), and a governed project's shared audit view shows
+  the terms' digest and reference. A project coming to require terms,
+  superseded terms and each job admitted under terms (`terms.job_admitted`)
+  are events of the governance log, anchored before the call returns: a
+  restore that undoes the first two, or whose terms count fewer jobs than
+  were admitted under them, is refused at startup (TERMS REQUIREMENT, JOB
+  TERMS, JOB TERMS COUNT STATE ROLLBACK) and recovery applies them again,
+  raising a count to the jobs admitted. A job's view shows the terms it was
+  admitted under (`terms`). A submission takes its project's row `FOR KEY
+  SHARE`, so it no longer holds up ordinary updates of the project. The
+  scheduler's periodic pass now takes up to 100 authorized jobs after the
+  last one it tried, wrapping round, so jobs that cannot be placed never
+  keep a newer one waiting. A submission takes the project row FOR KEY
+  SHARE after a per-project advisory lock, which queues a waiting change of
+  terms ahead of later submissions, so a stream of submissions cannot hold
+  it off. Schema version 19 (migration 0019): the
+  database refuses edits and deletions of terms, their acceptances, a
+  job's terms and a project's requirement of terms. Schema version 20
+  (migration 0020): the database counts the jobs under each set of terms
+  and numbers them, the count never going down; a database that ran 0019
+  is counted and numbered from the jobs it holds. INV-253.
 - `encompute jobs run` gains `--inputs-file`, `--save-receipt`,
   `--save-envelopes` (`request.bin`, `response.bin`, and `proof.bin` when
   there is a proof) and `--save-job` (the job as the control plane reports
