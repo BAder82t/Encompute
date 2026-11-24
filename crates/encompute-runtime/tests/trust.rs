@@ -412,15 +412,34 @@ fn execution_receipts_join_the_graph() {
         .out(&e, encompute_runtime::trust::EdgeKind::Runs)
         .next()
         .is_some());
+    // The evaluator here is the mock backend (test infrastructure): a
+    // receipt from it fails unless the caller allows mock explicitly.
+    let execution = |a: Anchors, allow_mock: bool| {
+        g.report(&ReportOptions {
+            anchors: a,
+            now: Some(T0 + 100),
+            allow_mock,
+            ..Default::default()
+        })
+        .unwrap()
+        .rows
+        .into_iter()
+        .find(|x| x.name == "Execution")
+        .unwrap()
+        .status
+    };
+    assert_eq!(status(&g, "Execution"), Status::Failed);
     // An evaluator the verifier does not trust (nor has seen attested) is
     // unchecked; once trusted, verified.
-    assert_eq!(status(&g, "Execution"), Status::Unchecked);
+    assert_eq!(execution(anchors(), true), Status::Unchecked);
     let mut a = anchors();
     a.evaluators
         .insert(run.receipt.evaluator_public_key.clone());
+    assert_eq!(execution(a.clone(), false), Status::Failed);
     let r = g
         .report(&ReportOptions {
             anchors: a,
+            allow_mock: true,
             ..Default::default()
         })
         .unwrap();

@@ -164,6 +164,10 @@ pub struct AnchorArgs {
     /// its policy and authorizations.
     #[arg(long)]
     pub allow_no_run: bool,
+    /// Accept execution receipts from the mock backend, which encrypts
+    /// nothing (development and tests only).
+    #[arg(long)]
+    pub allow_mock: bool,
 }
 
 /// The bundle and its trust report under `anchors`.
@@ -234,6 +238,7 @@ pub(crate) fn checked(
         execution_policy: execution_policy.as_ref(),
         require: a.require.clone(),
         require_run: !a.allow_no_run,
+        allow_mock: a.allow_mock,
         plan_floor,
         program_facts: Some(&facts),
         // The bundle carries no proofs: a receipt that claims one stays

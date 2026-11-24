@@ -140,6 +140,10 @@ pub struct ReportOptions<'a> {
     /// report, which then vouches for no execution at all. The CLI sets it
     /// unless `--allow-no-run`.
     pub require_run: bool,
+    /// Accept execution receipts from the mock backend, which encrypts
+    /// nothing (development and tests only). Off: such a receipt fails the
+    /// Execution row, so it is never evidence of a confidential run.
+    pub allow_mock: bool,
     /// Time for authorization expiry (default: now).
     pub now: Option<u64>,
     /// The weakest plan the caller accepts. A plan's context (profile,
@@ -683,6 +687,18 @@ impl TrustGraph {
             );
             if own.and_then(|k| r.verify_signature(&k)).is_err() {
                 ex.fail(format!("{id}: invalid receipt signature"));
+            }
+            if r.receipt.backend == "mock" {
+                if opts.allow_mock {
+                    ex.note(format!(
+                        "{id}: mock backend: the inputs were not encrypted (allowed)"
+                    ));
+                } else {
+                    ex.fail(format!(
+                        "{id}: a receipt for the mock backend, which encrypts nothing \
+                         (--allow-mock accepts it for development and tests)"
+                    ));
+                }
             }
             for x in g.out(id, EdgeKind::AttestedBy) {
                 if let Some(Evidence::Attestation(rec)) =

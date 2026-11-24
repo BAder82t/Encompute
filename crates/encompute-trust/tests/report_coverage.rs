@@ -78,3 +78,85 @@ fn requiring_a_run_refuses_a_report_with_no_execution_aggregation_or_training() 
             .satisfied
     );
 }
+
+/// A receipt from the mock backend, which encrypts nothing, signed by a
+/// trusted evaluator key (risk R-11).
+fn mock_execution() -> (TrustGraph, String) {
+    use encompute_verification::{
+        EvaluatorSigner, ExecutionReceipt, VerificationEvidence, RECEIPT_VERSION,
+    };
+    use sha2::{Digest, Sha256};
+    let text = encompute_ir::parse(PLAIN).unwrap().to_string();
+    let program_id: String = Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let s = EvaluatorSigner::from_seed(&[5; 32]);
+    let h = |c: char| c.to_string().repeat(64);
+    let receipt = ExecutionReceipt {
+        version: RECEIPT_VERSION,
+        execution_id: "00000000-0000-4000-8000-000000000001".into(),
+        spec_id: h('1'),
+        program_id,
+        plan_id: h('2'),
+        parameter_set_id: h('3'),
+        key_id: h('4'),
+        request_commitment: h('5'),
+        output_commitment: h('6'),
+        scheme: "BinFHE".into(),
+        backend: "mock".into(),
+        backend_version: "0".into(),
+        transcript_hash: None,
+        evaluator_id: s.identity().evaluator_id(),
+        evidence: VerificationEvidence::None,
+        attestation: None,
+        grant_digest: None,
+    }
+    .sign(&s)
+    .unwrap();
+    let mut g = graph(PLAIN);
+    g.add_execution_receipt(receipt).unwrap();
+    (g, s.identity().public_key_hex())
+}
+
+#[test]
+fn a_mock_backend_execution_is_not_verified_evidence_unless_allowed() {
+    let (g, key) = mock_execution();
+    let anchors = encompute_trust::Anchors {
+        evaluators: [key].into_iter().collect(),
+        ..Default::default()
+    };
+    // Default: the row fails, and it does not count as a run.
+    let r = g
+        .report(&ReportOptions {
+            anchors: anchors.clone(),
+            require_run: true,
+            ..ReportOptions::default()
+        })
+        .unwrap();
+    assert_eq!(status(&r, "Execution"), Status::Failed, "{r}");
+    assert!(!r.satisfied);
+    let row = r.rows.iter().find(|x| x.name == "Execution").unwrap();
+    assert!(
+        row.details.iter().any(|d| d.contains("mock backend")),
+        "{:?}",
+        row.details
+    );
+    // Allowed explicitly (development, tests): verified, with a note.
+    let r = g
+        .report(&ReportOptions {
+            anchors,
+            require_run: true,
+            allow_mock: true,
+            ..ReportOptions::default()
+        })
+        .unwrap();
+    assert_eq!(status(&r, "Execution"), Status::Verified, "{r}");
+    assert!(r.satisfied, "{r}");
+    let row = r.rows.iter().find(|x| x.name == "Execution").unwrap();
+    assert!(
+        row.details.iter().any(|d| d.contains("not encrypted")),
+        "{:?}",
+        row.details
+    );
+}

@@ -1524,6 +1524,8 @@ fn a_trust_report_requires_evidence_of_a_run() {
     let (code, _, err) = encompute(&["trust", "add", &p("r.json"), "--bundle", &p("t.json")]);
     assert_eq!(code, 0, "{err}");
     let key = std::fs::read_to_string(dir.join("keys/evaluator.pub")).unwrap();
+    // A mock-backend execution encrypted nothing: not evidence of a run
+    // unless allowed explicitly.
     let (code, out, _) = encompute(&[
         "trust",
         "report",
@@ -1531,6 +1533,18 @@ fn a_trust_report_requires_evidence_of_a_run() {
         &p("t.json"),
         "--evaluator-key",
         key.trim(),
+    ]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("Execution               FAILED"), "{out}");
+    assert!(out.contains("mock backend"), "{out}");
+    let (code, out, _) = encompute(&[
+        "trust",
+        "report",
+        "--bundle",
+        &p("t.json"),
+        "--evaluator-key",
+        key.trim(),
+        "--allow-mock",
     ]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Execution               VERIFIED"), "{out}");
@@ -1545,6 +1559,7 @@ fn a_trust_report_requires_evidence_of_a_run() {
         &p("t.json"),
         "--evaluator-key",
         key.trim(),
+        "--allow-mock",
         "--json",
     ]);
     assert_eq!(code, 0, "{out}");
