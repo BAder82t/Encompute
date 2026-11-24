@@ -596,9 +596,12 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
                 },
             )?;
             let mut client = ClientSession::restore(m.ids(), m.compiled(), &secret)?;
-            let eval_keys = read("eval.keys").ok();
-            if let Some(k) = &eval_keys {
-                client.attach_evaluation_keys(k)?;
+            // Evaluation keys are read now only to verify an execution proof;
+            // otherwise only if the evaluator lacks them.
+            if m.compiled().proof_required() {
+                if let Ok(k) = read("eval.keys") {
+                    client.attach_evaluation_keys(&k)?;
+                }
             }
             // Programs and keys go up with upload grants the control plane
             // issues to this job's initiator, one per upload.
@@ -609,10 +612,10 @@ pub fn jobs(cmd: JobsCmd, load: impl Fn(&Path) -> Result<Model>) -> Result<()> {
             let run = Remote::new(&url)
                 .with_grant(&grant)
                 .with_upload_grants(uploads)
-                .run_scheduled(
+                .run_scheduled_with_keys_file(
                     &client,
                     m.program(),
-                    eval_keys.as_deref(),
+                    &keys.join("eval.keys"),
                     &inputs,
                     receipt_key,
                     trusted.as_ref(),

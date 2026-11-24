@@ -586,10 +586,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         },
                     )?;
                     let mut client = ClientSession::restore(m.ids(), m.compiled(), &secret)?;
-                    let eval_keys = read("eval.keys").ok();
-                    // Needed to verify execution proofs by re-execution.
-                    if let Some(k) = &eval_keys {
-                        client.attach_evaluation_keys(k)?;
+                    // Evaluation keys (about 525 MiB for exact programs) are
+                    // read now only to verify an execution proof by
+                    // re-execution; otherwise only if the evaluator lacks
+                    // them (run_with_keys_file).
+                    if m.compiled().proof_required() {
+                        if let Ok(k) = read("eval.keys") {
+                            client.attach_evaluation_keys(&k)?;
+                        }
                     }
                     let remote = Remote::new(&url);
                     let trusted = trusted_evaluator(&remote, &dir, trust_evaluator.as_deref())?;
@@ -610,10 +614,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             ),
                         ));
                     }
-                    let run = remote.run(
+                    let run = remote.run_with_keys_file(
                         &client,
                         m.program(),
-                        eval_keys.as_deref(),
+                        &dir.join("eval.keys"),
                         &inputs,
                         &trusted,
                     )?;

@@ -210,11 +210,14 @@ impl Model {
                 let mut c =
                     encompute_runtime::ClientSession::restore(m.ids(), m.compiled(), &secret)
                         .map_err(err)?;
-                let k = read("eval.keys").ok();
-                if let Some(k) = &k {
-                    c.attach_evaluation_keys(k).map_err(err)?;
+                // Read now only to verify an execution proof; otherwise
+                // only if the evaluator lacks the keys.
+                if m.compiled().proof_required() {
+                    if let Ok(k) = read("eval.keys") {
+                        c.attach_evaluation_keys(&k).map_err(err)?;
+                    }
                 }
-                (c, k)
+                (c, Some(d.join("eval.keys")))
             }
             None => (m.new_client(Mode::Encrypted).map_err(err)?, None),
         };
@@ -222,16 +225,25 @@ impl Model {
         if let Some(callback) = upload_grant {
             remote = remote.with_upload_grants(std::sync::Arc::new(PythonUploads(callback)));
         }
-        let run = remote
-            .run_scheduled(
+        let run = match &eval_keys {
+            Some(file) => remote.run_scheduled_with_keys_file(
                 &client,
                 m.program(),
-                eval_keys.as_deref(),
+                file,
                 &inputs,
                 receipt_key,
                 trusted.as_ref(),
-            )
-            .map_err(err)?;
+            ),
+            None => remote.run_scheduled(
+                &client,
+                m.program(),
+                None,
+                &inputs,
+                receipt_key,
+                trusted.as_ref(),
+            ),
+        }
+        .map_err(err)?;
         Ok(serde_json::json!({
             "outputs": m.outputs_json(&run.outputs),
             "raw_outputs": run.outputs,

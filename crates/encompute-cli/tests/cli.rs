@@ -1570,3 +1570,68 @@ fn a_trust_report_requires_evidence_of_a_run() {
         serde_json::json!(["Evidence", "Program", "Execution"])
     );
 }
+
+/// `run --remote` reads `eval.keys` (about 525 MiB for exact programs) only
+/// when the evaluator lacks the keys, not on every run.
+#[test]
+fn evaluation_keys_are_read_only_when_the_evaluator_lacks_them() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-lazykeys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let key_of = |url: &str| -> String {
+        let info: serde_json::Value = ureq::get(&format!("{url}/v1/info"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        info["evaluator"]["public_key"].as_str().unwrap().to_owned()
+    };
+    let run = |url: &str| {
+        let key = key_of(url);
+        encompute(&[
+            "run",
+            &p("adult.encompute"),
+            "--remote",
+            url,
+            "--keys",
+            &p("keys"),
+            "--trust-evaluator",
+            &key,
+            "--input",
+            "age=30",
+        ])
+    };
+    let url = serve();
+    let (code, _, err) = run(&url);
+    assert_eq!(code, 0, "{err}");
+    let good = std::fs::read(dir.join("keys/eval.keys")).unwrap();
+
+    // The evaluator holds the keys now: the file is not read at all, so
+    // even a corrupt one does not matter.
+    std::fs::write(dir.join("keys/eval.keys"), b"not an envelope").unwrap();
+    let (code, out, err) = run(&url);
+    assert_eq!(code, 0, "eval.keys was read although not needed: {err}");
+    assert_eq!(out.trim(), "{\n  \"adult\": true\n}");
+
+    // A fresh evaluator lacks them: the file is read (and here refused).
+    let fresh = serve();
+    let (code, _, err) = run(&fresh);
+    assert_ne!(code, 0, "{err}");
+    std::fs::write(dir.join("keys/eval.keys"), &good).unwrap();
+    let (code, _, err) = run(&fresh);
+    assert_eq!(code, 0, "{err}");
+}
