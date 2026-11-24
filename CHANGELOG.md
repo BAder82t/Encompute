@@ -57,8 +57,8 @@ this unreleased work. Draft notes:
   (`terms_none_active`), and activation makes a project require terms from
   then on. New terms replace active ones only when every member accepted
   them too, and when terms take effect every other proposal of the project
-  is superseded and can no longer be accepted (at most 8 proposals await
-  acceptance at once). When an organization leaves, a proposal every
+  is superseded and can no longer be accepted (each member organization has at most 8 of
+  its own proposals awaiting acceptance at once). When an organization leaves, a proposal every
   remaining member has accepted takes effect. `GET /v1/terms/{id}/jobs`
   pages by each job's number under the terms (`seq`), and a governed
   project's shared audit view shows the terms' digest and reference. A project coming to require terms and superseded
