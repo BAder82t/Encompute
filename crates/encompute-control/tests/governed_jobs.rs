@@ -6613,3 +6613,103 @@ fn job_terms_govern_governed_jobs_too() {
     );
     assert_eq!(find("job.created", &job)["refs"]["terms"], json!(tid));
 }
+
+/// A governed job under job terms, queued on an evaluator that registers
+/// again with a receipt key the terms do not name, goes back to the
+/// scheduler and is placed again on another evaluator they name (its
+/// placement admitting it), which starts it.
+#[test]
+fn a_governed_job_under_terms_moves_to_a_named_evaluator_when_its_evaluator_changes_key() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    let profiles = ["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"];
+    let second = common::evaluator(
+        &g.t,
+        &As::User("platform-admin".into()),
+        "evaluator-2",
+        &["openfhe", "openfhe-exact"],
+        &profiles,
+        4,
+    );
+    let keys = [
+        g.evaluator.receipt.identity().public_key_hex(),
+        second.receipt.identity().public_key_hex(),
+    ];
+    let t = g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/projects/{}/terms", g.project),
+        Some(
+            json!({"specs": [base_spec(&p).id().hex()], "purposes": [PURPOSE], "submitters": [BEN],
+                    "evaluator_keys": keys, "max_jobs": 2,
+                    "not_before": now() - 10, "not_after": now() + 600}),
+        ),
+    );
+    let tid = id(&t);
+    for admin in ["b-admin", "o-admin"] {
+        g.t.ok(
+            &As::User(admin.into()),
+            "POST",
+            &format!("/v1/terms/{tid}/accept"),
+            None,
+        );
+    }
+    let (s, j) = g.submit(
+        &g.ben_dev,
+        g.request(&plan, &[&v.asset], &[BEN]),
+        "requeued",
+    );
+    assert_eq!(s, 201, "{j}");
+    let job = id(&j);
+    // Both evaluators are named; the tie goes to the lower ID.
+    let view = g.view(&job);
+    assert_eq!(view["state"], "queued", "{view}");
+    assert_eq!(view["evaluator"], g.evaluator.id, "{view}");
+    // evaluator-1 registers again with a key the terms do not name.
+    let other = encompute_verification::EvaluatorSigner::from_seed(&[93; 32]);
+    g.t.ok(
+        &g.evaluator.service,
+        "POST",
+        "/v1/evaluators",
+        Some(
+            json!({"id": g.evaluator.id, "url": "http://evaluator-1.internal:8750",
+                    "receipt_key": other.identity().public_key_hex(),
+                    "backends": ["openfhe", "openfhe-exact"], "profiles": profiles,
+                    "openfhe_version": "1.5.1", "capacity": 4}),
+        ),
+    );
+    let view = g.view(&job);
+    assert_eq!(view["state"], "queued", "{view}");
+    assert_eq!(view["evaluator"], "evaluator-2", "{view}");
+    assert_eq!(view["terms"], json!(tid));
+    let grant = g.grant(&job);
+    assert_eq!(grant.evaluator, "evaluator-2");
+    assert!(grant.governance.is_some());
+    let requeued: i64 = g
+        .t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'job.requeued' AND resource_id = $1
+                AND refs->>'reason' = 'receipt_key_not_in_terms'",
+            &[&job],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(requeued, 1);
+    // Not evaluator-1's any more; evaluator-2 starts it.
+    assert_eq!(g.start(&job).0, 404);
+    let (s, v) = g.t.call(
+        &second.service,
+        "POST",
+        &format!("/v1/jobs/{job}/start"),
+        None,
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(g.view(&job)["state"], "running");
+}

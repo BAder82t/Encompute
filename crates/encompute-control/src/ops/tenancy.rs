@@ -1248,9 +1248,14 @@ impl Control {
         // Proposed job terms that every remaining member has accepted take
         // effect now, as on a last acceptance (`terms_activated`). The
         // removal stands either way: a failure is logged and answered as
-        // `terms_settled: false`, and accepting the terms again retries.
+        // `terms_settled: false`, and the control plane's periodic pass
+        // retries it (`Control::settle_pending_terms`).
         let mut out = out;
-        match self.settle_terms(ctx, project, &r.organization) {
+        match self.settle_terms(
+            (ctx.actor(), &ctx.request_id),
+            project,
+            crate::ops::terms::Settled::MemberLeft(&r.organization),
+        ) {
             Ok(Some(id)) => out["terms_activated"] = json!(id),
             Ok(None) => {}
             Err(e) => {

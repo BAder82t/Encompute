@@ -106,6 +106,10 @@ pub mod kind {
     /// Job terms were superseded when newer terms of their project became
     /// active (active or still proposed): they never govern again.
     pub const TERMS_SUPERSEDED: &str = "terms.superseded";
+    /// A job was admitted under job terms (`refs.terms`, and `refs.seq`:
+    /// its number under them, the count of jobs they had then): the count
+    /// never goes back below it.
+    pub const TERMS_JOB_ADMITTED: &str = "terms.job_admitted";
 
     /// The transitions an owner's revocation head covers.
     pub const REVOCATIONS: &[&str] = &[
@@ -135,6 +139,7 @@ pub mod kind {
         REVOCATION_HEAD_SIGNED,
         PROJECT_TERMS_REQUIRED,
         TERMS_SUPERSEDED,
+        TERMS_JOB_ADMITTED,
     ];
 }
 

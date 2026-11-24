@@ -13,19 +13,25 @@
 //!
 //! While terms are active the control plane admits a job of the project
 //! only within them, on top of every check it already makes (refusals are
-//! audited as `job.denied` with their reason), counts every job submitted
-//! under them, schedules a job only on an evaluator whose registered
-//! receipt key they name (on top of the scheduler's own candidates and a
-//! governed job's placement), and gives its grant an expiry before their
-//! end; a job still unscheduled at the end fails, anchored as ended like
-//! any failed job. New terms replace active ones only when every member
-//! accepted them too, so no organization loosens them alone; when terms
-//! become active, every other set of the project's terms, active or still
-//! proposed, is superseded and can never be accepted again (so an older
-//! proposal cannot replace newer terms later). Each member organization has
-//! at most [`MAX_OPEN_TERMS_PROPOSALS`] of its own proposals awaiting
-//! acceptance in a project at once, so none keeps the others from
-//! proposing. A
+//! audited as `job.denied` with their reason): submitted by an organization
+//! they name that accepted them, over sources whose owner organizations
+//! each accepted them too (a member that joined after they took effect
+//! accepts the active terms before its data is used under them; that
+//! acceptance changes nothing else). It counts every job submitted under
+//! them, schedules a job only on an evaluator whose registered receipt key
+//! they name (on top of the scheduler's own candidates and a governed job's
+//! placement), and gives its grant an expiry before their end; a job still
+//! unscheduled at the end fails, anchored as ended like any failed job. New
+//! terms replace active ones only when every member accepted them too, so
+//! no organization loosens them alone; when terms become active, every
+//! other set of the project's terms, active or still proposed, is
+//! superseded and can never be accepted again (so an older proposal cannot
+//! replace newer terms later). Each member organization has at most
+//! [`MAX_OPEN_TERMS_PROPOSALS`] of its own proposals awaiting acceptance in
+//! a project at once, so none keeps the others from proposing. When an
+//! organization leaves, the newest proposal every remaining member accepted
+//! takes effect ([`Control::settle_terms`]); should that fail, the control
+//! plane's periodic pass settles it ([`Control::settle_pending_terms`]). A
 //! project created with `terms_required` runs nothing until terms are
 //! active, and activation makes a project require terms from then on.
 //!
@@ -35,23 +41,44 @@
 //! restored database that shows a project no longer requiring terms, or
 //! superseded terms proposed or active again, is refused at startup (TERMS
 //! REQUIREMENT, JOB TERMS STATE ROLLBACK), and recovery applies them again.
+//! So is each job admitted under terms (`terms.job_admitted`, with its
+//! number under them, [`record_admission`]): a restored database whose
+//! terms count fewer jobs than the log recorded admitting is refused at
+//! startup (JOB TERMS COUNT STATE ROLLBACK), and recovery raises the count
+//! again, so terms never admit more jobs than they allow.
+//!
+//! Fairness. Every change of terms takes the project's terms advisory
+//! lock exclusively just before the project's row, and a submission takes
+//! it shared just before the row (`terms_lock_shared`): a waiting change
+//! of terms is queued ahead of later submissions, so a stream of
+//! submissions cannot hold it off. The advisory lock sits at the project
+//! row's place in the lock order below.
 //!
 //! Lock order. A project's row is the first lock of every change to who
 //! takes part in it or what it allows: joining it and changing its
 //! placement take it `FOR UPDATE` before they read the members, and so do
-//! proposing and accepting terms (after checking the caller without any
-//! lock, and again under it), which then lock terms rows, with the
-//! governance and audit heads last ([`audit::append`]). A submission takes, after every
-//! lock it already holds (the source assets and, in a governed project,
-//! the rows of the purpose and the authorizations), the project row `FOR
-//! SHARE` and then the active terms row `FOR UPDATE`, immediately before it
-//! inserts the job ([`admit`]): concurrent submissions under one set of
-//! terms are counted one at a time, and none is counted against terms that
-//! a concurrent acceptance is replacing. No transaction that holds a
-//! project row `FOR UPDATE` waits for an asset, authorization or job row,
-//! so the two orders never meet. Scheduling reads a job's terms without a
-//! lock: a terms document never changes (the database refuses it, schema
-//! version 19).
+//! proposing and accepting terms and settling them (after checking the
+//! caller without any lock, and again under it), which then lock terms
+//! rows, with the governance and audit heads last ([`audit::append`]).
+//! Every change of a project's terms goes through [`lock_project`] first;
+//! none relies on the lock an `UPDATE` of the row takes. A submission
+//! takes, after every lock it already holds (the source assets and, in a
+//! governed project, the rows of the purpose and the authorizations), the
+//! project row `FOR KEY SHARE` and then the active terms row `FOR UPDATE`,
+//! immediately before it inserts the job ([`admit`]), and the governance
+//! and audit heads last: concurrent submissions under one set of terms are
+//! counted one at a time, and none is counted against terms that a
+//! concurrent acceptance is replacing (`FOR KEY SHARE` conflicts with the
+//! `FOR UPDATE` of a change of terms or a join, not with an ordinary update
+//! of the project's row, which it does not hold up). No transaction that
+//! holds a project row `FOR UPDATE` waits for an asset, authorization or
+//! job row, so the two orders never meet. A removal takes no lock on the
+//! project row (it fails the project's unstarted jobs, so it waits for job
+//! rows): an acceptance that read the members before the removal committed
+//! needs the leaving organization's acceptance too, which is stricter, and
+//! the settle after the removal takes the lock in its own transaction.
+//! Scheduling reads a job's terms without a lock: a terms document never
+//! changes (the database refuses it, schema version 19).
 
 use postgres::GenericClient;
 use serde_json::{json, Value};
@@ -61,7 +88,7 @@ use encompute_verification::canonical::canonical_json;
 use encompute_verification::service::sha256_hex;
 use encompute_verification::EvaluatorIdentity;
 
-use crate::audit::{self, Outcome};
+use crate::audit::{self, AuditDraft, Outcome};
 use crate::authz::{
     conflict, deny_auditor, forbidden, not_found, project_row, project_visible, require_human,
     ProjectRow,
@@ -69,6 +96,7 @@ use crate::authz::{
 use crate::control::{Control, Ctx};
 use crate::db::db_err;
 use crate::govlog::{self, NegSet};
+use crate::log::LogLine;
 use crate::model::{
     bad, check_name, new_id, JobTerms, Role, MAX_OPEN_TERMS_PROPOSALS, MAX_TERMS_ENTRIES,
     MAX_TERMS_JOBS,
@@ -174,8 +202,37 @@ fn admin_org(ctx: &Ctx, project: &ProjectRow, action: &str) -> Result<String> {
 /// Locks project `id`'s row for a change of its terms (the first lock: see
 /// the lock order above).
 fn lock_project(t: &mut impl GenericClient, id: &str) -> Result<()> {
+    // The project's terms lock, exclusive, then its row: see
+    // [`terms_lock_shared`].
+    t.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, $2))",
+        &[&id, &TERMS_LOCK_SALT],
+    )
+    .map_err(db_err)?;
     t.query_opt("SELECT 1 FROM projects WHERE id = $1 FOR UPDATE", &[&id])
         .map_err(db_err)?;
+    Ok(())
+}
+
+/// Salt of the per-project advisory lock that orders submissions and
+/// changes of terms (a constant: every control plane of a database uses
+/// the same one).
+const TERMS_LOCK_SALT: i64 = 0x7465_726d_735f_6c6b;
+
+/// A submission's side of the project's terms lock, shared, taken just
+/// before the project's row. Row locks alone let a stream of overlapping
+/// submissions (each holding the row `FOR KEY SHARE`) keep a change of
+/// terms waiting for its `FOR UPDATE` indefinitely: PostgreSQL grants a
+/// row lock that does not conflict with its holders even when a conflicting
+/// request waits. Its lock manager queues an advisory lock request behind a
+/// waiting conflicting one, so once a change of terms waits for the
+/// exclusive lock, later submissions wait behind it.
+fn terms_lock_shared(t: &mut impl GenericClient, project: &str) -> Result<()> {
+    t.execute(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, $2))",
+        &[&project, &TERMS_LOCK_SALT],
+    )
+    .map_err(db_err)?;
     Ok(())
 }
 
@@ -203,21 +260,43 @@ fn terms_json(c: &mut impl GenericClient, id: &str) -> Result<Value> {
     }))
 }
 
+/// Who records a change of terms: (actor, request ID). A caller's, or the
+/// control plane's own service identity for its periodic pass.
+pub(crate) type By<'a> = (&'a str, &'a str);
+
+fn caller(ctx: &Ctx) -> By<'_> {
+    (ctx.actor(), &ctx.request_id)
+}
+
+fn draft(by: By<'_>, action: &'static str, id: &str) -> AuditDraft {
+    AuditDraft::new(by.0, by.1, action, "terms", id, Outcome::Succeeded)
+}
+
+/// Why proposed terms took effect other than on their last acceptance.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Settled<'a> {
+    /// An organization leaving the project made them complete.
+    MemberLeft(&'a str),
+    /// The control plane's periodic pass found them complete (a settle
+    /// after a removal that failed, retried).
+    Pass,
+}
+
 /// Activates `id` when every active member organization of `project` has
 /// accepted it: every other set of the project's terms, active or still
 /// proposed, is superseded, and the project requires terms from now on.
 /// Both are recorded in the governance log (anchored before the call
 /// returns). Every member sees the activation in its own trail, and the
-/// proposer of a superseded proposal sees that; when an organization
-/// leaving made them complete (`left`), the activation says so. Expects the
-/// project row and `id` locked.
+/// proposer of a superseded proposal sees that; when they took effect
+/// other than on their last acceptance (`settled`), the activation says
+/// why. Expects the project row and `id` locked.
 fn activate_if_complete(
     t: &mut impl GenericClient,
-    ctx: &Ctx,
+    by: By<'_>,
     project: &str,
     members: &[String],
     id: &str,
-    left: Option<&str>,
+    settled: Option<Settled<'_>>,
 ) -> Result<bool> {
     let accepted: Vec<String> = t
         .query(
@@ -228,7 +307,8 @@ fn activate_if_complete(
         .iter()
         .map(|r| r.get(0))
         .collect();
-    if !members.iter().all(|m| accepted.contains(m)) {
+    // A project with no active member has nobody to agree terms for it.
+    if members.is_empty() || !members.iter().all(|m| accepted.contains(m)) {
         return Ok(false);
     }
     // (id, what it was, who proposed it), by ID.
@@ -280,24 +360,25 @@ fn activate_if_complete(
     }
     let previous = sorted.iter().find(|(_, was, _)| was == "active");
     for m in members {
-        let mut d = ctx
-            .draft("terms.activated", "terms", id, Outcome::Succeeded)
-            .org(m)
-            .project(project);
+        let mut d = draft(by, "terms.activated", id).org(m).project(project);
         if let Some((s, _, _)) = previous {
             d = d.r#ref("superseded", s.clone());
         }
-        if let Some(o) = left {
-            d = d
-                .r#ref("reason", "member_left")
-                .r#ref("member", o.to_owned());
+        match settled {
+            Some(Settled::MemberLeft(o)) => {
+                d = d
+                    .r#ref("reason", "member_left")
+                    .r#ref("member", o.to_owned());
+            }
+            Some(Settled::Pass) => d = d.r#ref("reason", "settled"),
+            None => {}
         }
         audit::append(t, d)?;
     }
     for (old, _, proposer) in sorted.iter().filter(|(_, was, _)| was == "proposed") {
         audit::append(
             t,
-            ctx.draft("terms.superseded", "terms", old, Outcome::Succeeded)
+            draft(by, "terms.superseded", old)
                 .org(proposer)
                 .project(project)
                 .r#ref("by", id.to_owned()),
@@ -314,23 +395,31 @@ pub(crate) type Refusal = (&'static str, String, &'static str, Error);
 /// is admitted under: `Ok(None)` when the project has no active terms and
 /// does not require them, `Ok(Some(id))` within the active terms, or the
 /// refusal. `specs` are the job's spec IDs the terms may name (the plan's;
-/// a governed job's under its binding too).
+/// a governed job's under its binding too); `sources` are its source
+/// assets, whose owner organizations must each have accepted the terms.
 ///
 /// Called last before the job is inserted, in the submission's
-/// transaction: it share-locks the project row and locks the active terms
-/// row for update (the lock order above), so the jobs already submitted
-/// under them are counted one submission at a time.
+/// transaction: it key-share-locks the project row and locks the active
+/// terms row for update (the lock order above), so the jobs already
+/// submitted under them are counted one submission at a time, and the
+/// acceptances it reads cannot change until it commits.
 pub(crate) fn admit(
     t: &mut impl GenericClient,
     project: &str,
     org: &str,
     specs: &[&str],
     purpose: &str,
+    sources: &[String],
     at: u64,
 ) -> Result<std::result::Result<Option<String>, Refusal>> {
+    // FOR KEY SHARE: it conflicts with the FOR UPDATE that every change of
+    // the project's terms (and a join) takes first, so a submission and
+    // such a change are ordered, but not with an ordinary update of the
+    // row.
+    terms_lock_shared(t, project)?;
     let required: bool = t
         .query_opt(
-            "SELECT terms_required FROM projects WHERE id = $1 FOR SHARE",
+            "SELECT terms_required FROM projects WHERE id = $1 FOR KEY SHARE",
             &[&project],
         )
         .map_err(db_err)?
@@ -384,6 +473,28 @@ pub(crate) fn admit(
             ),
         );
     }
+    // The owner of each source accepted them too: an organization that
+    // joined after they took effect consents to them before its data is
+    // used under them. (The control plane never changes an asset's owner,
+    // and no acceptance of these terms commits while the project row is
+    // key-share-locked here.)
+    let owners: Vec<String> = t
+        .query(
+            "SELECT DISTINCT organization_id FROM assets WHERE id = ANY($1) ORDER BY 1",
+            &[&sources],
+        )
+        .map_err(db_err)?
+        .iter()
+        .map(|x| x.get(0))
+        .collect();
+    if let Some(o) = owners.iter().find(|o| !accepted.contains(o)) {
+        return refuse(
+            "terms_owner",
+            format!(
+                "{o} owns a source of the job and has not accepted them: {o} must accept the terms before its data is used under them"
+            ),
+        );
+    }
     if at < d.not_before || at >= d.not_after {
         return refuse(
             "terms_window",
@@ -405,7 +516,7 @@ pub(crate) fn admit(
             format!("purpose {purpose:?} is not one they name"),
         );
     }
-    // Counted by the database as each job is inserted (schema version 19),
+    // Counted by the database as each job is inserted (schema version 20),
     // under the row lock held here.
     if n.max(0) as u64 >= d.max_jobs {
         return refuse(
@@ -417,6 +528,29 @@ pub(crate) fn admit(
         );
     }
     Ok(Ok(Some(id)))
+}
+
+/// Records in the governance log that job `job`, submitted by `org`, was
+/// admitted under terms `terms` of `project`, with the number the database
+/// gave it under them ([`govlog::append_terms_admission`]). In the
+/// submission's transaction, after the job's row and last before its
+/// audit event (the governance head immediately before the audit head),
+/// while the terms row is still locked: the submission is then anchored
+/// before it is acknowledged (`Control::tx_anchored`), so a restored
+/// database cannot count fewer jobs under the terms than were admitted.
+pub(crate) fn record_admission(
+    t: &mut impl GenericClient,
+    project: &str,
+    org: &str,
+    terms: &str,
+    job: &str,
+) -> Result<()> {
+    let seq: i64 = t
+        .query_one("SELECT terms_seq FROM jobs WHERE id = $1", &[&job])
+        .map_err(db_err)?
+        .get(0);
+    govlog::append_terms_admission(t, project, org, terms, job, seq)?;
+    Ok(())
 }
 
 /// Whether terms `d` name `key`, an evaluator's registered receipt key.
@@ -501,16 +635,24 @@ impl Control {
                 d = d.r#ref("reference", r.clone());
             }
             audit::append(t, d)?;
-            activate_if_complete(t, ctx, project, &p.members, &id, None)?;
+            activate_if_complete(t, caller(ctx), project, &p.members, &id, None)?;
             terms_json(t, &id)
         })
     }
 
     /// `POST /v1/terms/{id}/accept`: an organization admin of another
     /// member organization accepts proposed terms for it; the last
-    /// acceptance activates them.
+    /// acceptance activates them. A member organization that has not
+    /// accepted the active terms (one that joined after they took effect)
+    /// accepts them the same way: its acceptance is recorded and nothing
+    /// else changes, and from then on jobs under them may use its assets.
+    /// Accepting active terms again succeeds once the anchor holds what
+    /// the first acceptance committed (it may have committed when
+    /// anchoring failed); superseded terms are never accepted.
     pub fn accept_terms(&self, ctx: &Ctx, id: &str) -> Result<Value> {
-        self.tx_anchored(|t| {
+        let again = std::cell::Cell::new(false);
+        let out = self.tx_anchored(|t| {
+            again.set(false);
             // Terms never move to another project (schema version 19).
             let project: String = t
                 .query_opt("SELECT project_id FROM job_terms WHERE id = $1", &[&id])
@@ -533,7 +675,7 @@ impl Control {
                 )
                 .map_err(db_err)?
                 .get(0);
-            if status != "proposed" {
+            if status == "superseded" {
                 return Err(conflict(format!("terms {id} are {status}")));
             }
             let n = t
@@ -543,12 +685,30 @@ impl Control {
                     &[&id, &org, &ctx.actor()],
                 )
                 .map_err(db_err)?;
+            if status == "active" {
+                // Accepted already: the acceptance that activated them (or
+                // this organization's own) committed, perhaps without being
+                // anchored; the anchor is caught up below.
+                if n == 0 {
+                    again.set(true);
+                    return terms_json(t, id);
+                }
+                // A member that joined after they took effect consents to
+                // them: nothing is activated or superseded.
+                audit::append(
+                    t,
+                    ctx.draft("terms.accepted", "terms", id, Outcome::Succeeded)
+                        .org(&org)
+                        .project(&project),
+                )?;
+                return terms_json(t, id);
+            }
             if n == 0 {
                 // Accepted already. Every other member may have accepted
                 // them meanwhile without their taking effect (the last one
                 // to accept left the project before a recovery re-applied
                 // its removal, say): then they take effect now.
-                if activate_if_complete(t, ctx, &project, &p.members, id, None)? {
+                if activate_if_complete(t, caller(ctx), &project, &p.members, id, None)? {
                     return terms_json(t, id);
                 }
                 return Err(conflict(format!("{org} has accepted terms {id} already")));
@@ -559,22 +719,29 @@ impl Control {
                     .org(&org)
                     .project(&project),
             )?;
-            activate_if_complete(t, ctx, &project, &p.members, id, None)?;
+            activate_if_complete(t, caller(ctx), &project, &p.members, id, None)?;
             terms_json(t, id)
-        })
+        })?;
+        if again.get() {
+            // Whatever the first acceptance committed (the activation, the
+            // superseded terms, the project's requirement) is anchored
+            // before this answers.
+            self.checkpoint_log()?;
+        }
+        Ok(out)
     }
 
-    /// After organization `left` left `project`: the newest of its proposed
-    /// terms that every remaining member organization has accepted takes
-    /// effect (superseding the others), as it would have on the last
-    /// acceptance, and its activation records that `left` left. Returns its
-    /// ID. The same locks as an acceptance, in the same order (its own
-    /// transaction, after the removal's).
+    /// The newest of `project`'s proposed terms that every current member
+    /// organization has accepted takes effect (superseding the others), as
+    /// it would have on the last acceptance, and its activation records
+    /// why (`settled`: an organization left, or the periodic pass found
+    /// it). Returns its ID. The same locks as an acceptance, in the same
+    /// order (its own transaction: after a removal's, or the pass's).
     pub(crate) fn settle_terms(
         &self,
-        ctx: &Ctx,
+        by: By<'_>,
         project: &str,
-        left: &str,
+        settled: Settled<'_>,
     ) -> Result<Option<String>> {
         self.tx_anchored(|t| {
             lock_project(t, project)?;
@@ -592,12 +759,60 @@ impl Control {
                 .map(|r| r.get(0))
                 .collect();
             for id in ids {
-                if activate_if_complete(t, ctx, project, &p.members, &id, Some(left))? {
+                if activate_if_complete(t, by, project, &p.members, &id, Some(settled))? {
                     return Ok(Some(id));
                 }
             }
             Ok(None)
         })
+    }
+
+    /// The periodic pass: proposed terms that every current member
+    /// organization of their project has accepted take effect
+    /// ([`Self::settle_terms`], recorded by the control plane's own
+    /// service identity with `reason: settled`). Only a settle that failed
+    /// after a removal leaves such terms (an acceptance that completes them
+    /// activates them in its own transaction), so this retries it. A
+    /// project that fails is logged; the others are still settled.
+    pub fn settle_pending_terms(&self) -> Result<()> {
+        let projects: Vec<String> = self
+            .db
+            .conn()?
+            .query(
+                "SELECT DISTINCT x.project_id FROM job_terms x
+                  WHERE x.status = 'proposed'
+                    AND EXISTS (
+                        SELECT 1 FROM project_members m
+                         WHERE m.project_id = x.project_id AND m.status = 'active'
+                           AND m.participation = 'member')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM project_members m
+                         WHERE m.project_id = x.project_id AND m.status = 'active'
+                           AND m.participation = 'member'
+                           AND NOT EXISTS (SELECT 1 FROM job_terms_acceptances a
+                                            WHERE a.terms_id = x.id AND a.organization_id = m.organization_id))
+                  ORDER BY 1",
+                &[],
+            )
+            .map_err(db_err)?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        for project in projects {
+            match self.settle_terms((&self.service_id, "scheduler"), &project, Settled::Pass) {
+                Ok(Some(id)) => LogLine::new(&self.service_id, "terms_settled")
+                    .field("project", &project)
+                    .field("terms", &id)
+                    .emit(),
+                Ok(None) => {}
+                Err(e) => LogLine::new(&self.service_id, "terms_settle_failed")
+                    .field("project", &project)
+                    .field("code", e.code)
+                    .field("error", &e.message)
+                    .emit(),
+            }
+        }
+        Ok(())
     }
 
     /// `GET /v1/terms/{id}/jobs?after=&limit=`: the jobs submitted under

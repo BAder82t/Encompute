@@ -300,8 +300,24 @@ fn terms_are_agreed_by_people_in_every_member_organization() {
     assert_eq!(w.t.call(&w.c_admin, "POST", &accept, None).0, 404);
     let a = w.t.ok(&w.a_admin, "POST", &accept, None);
     assert_eq!(a["status"], "active");
-    // Active terms are not accepted again.
-    assert_eq!(w.t.call(&w.a_admin, "POST", &accept, None).0, 409);
+    // Accepting active terms again (a retry) answers them as they are and
+    // records nothing new.
+    let accepted = |w: &World| -> i64 {
+        w.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT count(*) FROM audit_events WHERE action = 'terms.accepted' AND resource_id = $1",
+                &[&id],
+            )
+            .unwrap()
+            .get(0)
+    };
+    let before = accepted(&w);
+    let again = w.t.ok(&w.a_admin, "POST", &accept, None);
+    assert_eq!(again, a);
+    assert_eq!(accepted(&w), before);
 
     // New terms replace them only once every member accepted those too.
     let mut looser = doc.clone();
@@ -323,6 +339,9 @@ fn terms_are_agreed_by_people_in_every_member_organization() {
     let listed = w.t.ok(&w.b_admin, "GET", &url, None);
     assert_eq!(status(&listed, &id), "superseded");
     assert_eq!(status(&listed, &id2), "active");
+    // Superseded terms are never accepted, not even again.
+    assert_eq!(w.t.call(&w.a_admin, "POST", &accept, None).0, 409);
+    assert_eq!(w.t.call(&w.b_admin, "POST", &accept, None).0, 409);
     // The database keeps them as they were agreed.
     let mut c = w.t.control.db.conn().unwrap();
     assert!(c
@@ -1185,6 +1204,22 @@ fn the_database_counts_and_numbers_jobs_under_terms_and_holds_their_limit() {
     assert!(c
         .execute("UPDATE jobs SET terms_seq = 7 WHERE id = $1", &[&job])
         .is_err());
+    // Nor beyond max_jobs (recovery raises it only to an anchored count,
+    // which never is).
+    let raised = c
+        .execute(
+            "UPDATE job_terms SET jobs_submitted = jobs_submitted + 5 WHERE id = $1",
+            &[&first],
+        )
+        .unwrap_err();
+    assert!(
+        raised
+            .as_db_error()
+            .unwrap()
+            .message()
+            .contains("never exceeds"),
+        "{raised}"
+    );
     // Under superseded terms nothing is inserted, though they would allow
     // more; under the active ones a job is counted and numbered.
     let second = agree(&w, doc(5));
@@ -1238,4 +1273,682 @@ fn the_database_counts_and_numbers_jobs_under_terms_and_holds_their_limit() {
             .contains("runs jobs only under job terms"),
         "{refused}"
     );
+}
+
+/// The audit events of `action` about `id`: (actor, reason, member).
+fn audited(w: &World, action: &str, id: &str) -> Vec<(String, Option<String>, Option<String>)> {
+    w.t.control
+        .db
+        .conn()
+        .unwrap()
+        .query(
+            "SELECT actor, refs->>'reason', refs->>'member' FROM audit_events
+              WHERE action = $1 AND resource_id = $2 ORDER BY seq",
+            &[&action, &id],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect()
+}
+
+/// other-co joins the project (modelco invites, other-co's admin accepts).
+fn other_co_joins(w: &World) {
+    let members = format!("/v1/projects/{}/members", w.project);
+    let body = Some(json!({"organization": "other-co"}));
+    w.t.ok(&w.b_admin, "POST", &members, body.clone());
+    w.t.ok(&w.c_admin, "POST", &members, body);
+}
+
+/// An organization that joins the project after its terms took effect
+/// consents to them before its data is used under them: a job over its
+/// asset is refused (`terms_owner`) until it accepts the active terms,
+/// which records its acceptance and changes nothing else; then the job is
+/// admitted, and the organization sees the jobs under them.
+#[test]
+fn an_organization_that_joins_later_accepts_the_terms_before_its_data_is_used() {
+    let Some(w) = world() else { return };
+    let c_owner = user(&w.t, &w.c_admin, "other-co", "c-owner", &["data_owner"]);
+    let d = w.t.ok(
+        &c_owner,
+        "POST",
+        "/v1/assets",
+        Some(
+            json!({"organization": "other-co", "kind": "dataset", "name": "claims-2026",
+                    "digest": "c".repeat(64), "privacy_budget": budget(3.0)}),
+        ),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (over, spec) = plan(
+        &w,
+        &exact_over(&d, "other-co", "dataset", "medical-training"),
+    );
+    // modelco and hospital-a agree terms naming that program's spec.
+    let id = agree(
+        &w,
+        terms(&[&spec], 5, &[receipt_key(&w.evaluator)], now() + 3600),
+    );
+    let activated_at = |w: &World| -> String {
+        w.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query_one(
+                "SELECT activated_at::text FROM job_terms WHERE id = $1",
+                &[&id],
+            )
+            .unwrap()
+            .get(0)
+    };
+    let before = (activated_at(&w), audited(&w, "terms.activated", &id).len());
+    // other-co joins later and approves its dataset for modelco.
+    other_co_joins(&w);
+    w.t.ok(
+        &c_owner,
+        "POST",
+        &format!("/v1/assets/{d}/approvals"),
+        Some(json!({"project": w.project, "purpose": "medical-training"})),
+    );
+    // Its data is not used under terms it has not accepted.
+    let (s, v) = w.job(&over, &[&d], "before-consent");
+    assert_eq!(s, 403, "{v}");
+    let m = v["message"].as_str().unwrap();
+    assert!(
+        m.contains("other-co") && m.contains("must accept the terms"),
+        "{v}"
+    );
+    assert!(denied_reasons(&w).contains(&"terms_owner".to_owned()));
+    let jobs = format!("/v1/terms/{id}/jobs");
+    assert_eq!(w.t.call(&w.c_admin, "GET", &jobs, None).0, 404);
+    // It accepts the active terms: recorded, nothing else changes.
+    let a =
+        w.t.ok(&w.c_admin, "POST", &format!("/v1/terms/{id}/accept"), None);
+    assert_eq!(a["status"], "active", "{a}");
+    assert_eq!(
+        a["accepted_by"],
+        json!(["hospital-a", "modelco", "other-co"])
+    );
+    assert_eq!(audited(&w, "terms.accepted", &id).len(), 2);
+    assert_eq!(
+        (activated_at(&w), audited(&w, "terms.activated", &id).len()),
+        before
+    );
+    assert_eq!(terms_status(&w, &id), "active");
+    // Now the job is admitted under them, and other-co sees it.
+    let (s, v) = w.job(&over, &[&d], "after-consent");
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["terms"], json!(id));
+    let listed = w.t.ok(&w.c_admin, "GET", &jobs, None);
+    assert_eq!(listed[0]["id"], v["id"], "{listed}");
+    // Accepting again answers the terms as they are.
+    let again =
+        w.t.ok(&w.c_admin, "POST", &format!("/v1/terms/{id}/accept"), None);
+    assert_eq!(again["accepted_by"], a["accepted_by"]);
+    assert_eq!(audited(&w, "terms.accepted", &id).len(), 2);
+}
+
+/// An acceptance that activated terms committed, but anchoring what it
+/// committed failed: the client got an error. Accepting them again
+/// succeeds once the anchor holds the activation (on another thread than
+/// the failed call, which keeps no obligation to retry there).
+#[test]
+fn accepting_terms_again_after_their_anchoring_failed_anchors_them() {
+    let Some(w) = world() else { return };
+    let (_, spec) = plan(&w, EXACT);
+    let doc = terms(&[&spec], 5, &[receipt_key(&w.evaluator)], now() + 3600);
+    let World {
+        t,
+        a_admin,
+        b_admin,
+        project,
+        ..
+    } = w;
+    let env0 = t.env0;
+    drop(t.control);
+    let (t, fail) = env0.start_flaky();
+    let p = t.ok(
+        &b_admin,
+        "POST",
+        &format!("/v1/projects/{project}/terms"),
+        Some(doc),
+    );
+    let id = p["id"].as_str().unwrap().to_owned();
+    let accept = format!("/v1/terms/{id}/accept");
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (s, v) = t.call(&a_admin, "POST", &accept, None);
+    assert_ne!(s, 200, "{v}");
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    let status: String = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one("SELECT status FROM job_terms WHERE id = $1", &[&id])
+        .unwrap()
+        .get(0);
+    assert_eq!(status, "active", "the acceptance committed");
+    assert!(!anchored(&t, NegSet::TermsRequired, &project));
+    let (s, v) = std::thread::scope(|scope| {
+        scope
+            .spawn(|| t.call(&a_admin, "POST", &accept, None))
+            .join()
+            .unwrap()
+    });
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["status"], "active", "{v}");
+    assert!(anchored(&t, NegSet::TermsRequired, &project));
+}
+
+/// A settle after a removal that did not happen (it failed; here the
+/// removal's row is deleted directly) is retried by the control plane's
+/// periodic pass: the terms every remaining member accepted take effect,
+/// recorded by the control plane with `reason: settled`.
+#[test]
+fn the_periodic_pass_settles_terms_a_removal_left_complete() {
+    let Some(w) = world() else { return };
+    let (_, spec) = plan(&w, EXACT);
+    other_co_joins(&w);
+    let p = w.t.ok(
+        &w.b_admin,
+        "POST",
+        &format!("/v1/projects/{}/terms", w.project),
+        Some(terms(
+            &[&spec],
+            3,
+            &[receipt_key(&w.evaluator)],
+            now() + 3600,
+        )),
+    );
+    let id = p["id"].as_str().unwrap().to_owned();
+    let a =
+        w.t.ok(&w.a_admin, "POST", &format!("/v1/terms/{id}/accept"), None);
+    assert_eq!(a["status"], "proposed", "{a}");
+    // A pass while other-co is a member settles nothing.
+    w.t.control.tick();
+    assert_eq!(terms_status(&w, &id), "proposed");
+    w.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "DELETE FROM project_members WHERE project_id = $1 AND organization_id = 'other-co'",
+            &[&w.project],
+        )
+        .unwrap();
+    assert_eq!(terms_status(&w, &id), "proposed");
+    w.t.control.tick();
+    assert_eq!(terms_status(&w, &id), "active");
+    let why = audited(&w, "terms.activated", &id);
+    assert_eq!(why.len(), 2, "{why:?}");
+    assert!(
+        why.iter()
+            .all(|x| x == &("control-plane".into(), Some("settled".into()), None)),
+        "{why:?}"
+    );
+    assert!(anchored(&w.t, NegSet::TermsRequired, &w.project));
+    // Settled once.
+    w.t.control.tick();
+    assert_eq!(audited(&w, "terms.activated", &id).len(), 2);
+    // A project with no active member has nobody to agree terms for it: a
+    // proposal left there is never settled.
+    let mut c = w.t.control.db.conn().unwrap();
+    c.execute(
+        "INSERT INTO job_terms (id, project_id, organization_id, digest, document, status, created_by)
+         SELECT 'terms-orphan', project_id, organization_id, digest, document, 'proposed', created_by
+           FROM job_terms WHERE id = $1",
+        &[&id],
+    )
+    .unwrap();
+    c.execute(
+        "DELETE FROM project_members WHERE project_id = $1",
+        &[&w.project],
+    )
+    .unwrap();
+    w.t.control.tick();
+    let status: String = c
+        .query_one(
+            "SELECT status FROM job_terms WHERE id = 'terms-orphan'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(status, "proposed");
+}
+
+/// Whether the governance log's admission of `job` under job terms is
+/// anchored.
+fn admission_anchored(t: &T, job: &str) -> bool {
+    let size = t.control.anchor.snapshot().glog_size;
+    t.control
+        .db
+        .conn()
+        .unwrap()
+        .query_opt(
+            "SELECT gseq FROM governance_events WHERE kind = 'terms.job_admitted' AND subject_id = $1",
+            &[&job],
+        )
+        .unwrap()
+        .is_some_and(|r| r.get::<_, i64>(0) <= size)
+}
+
+#[test]
+fn a_restore_never_lowers_the_count_of_jobs_under_terms() {
+    let Some(w) = world() else { return };
+    let (exact, spec) = plan(&w, EXACT);
+    let key = receipt_key(&w.evaluator);
+    let id = agree(
+        &w,
+        terms(&[&spec], 3, std::slice::from_ref(&key), now() + 3600),
+    );
+    let (s, v) = w.job(&exact, &[], "first");
+    assert_eq!(s, 201, "{v}");
+    let World {
+        t, b_dev, project, ..
+    } = w;
+    let submit = |t: &T, key: &str| {
+        t.call_with(
+            &b_dev,
+            "POST",
+            "/v1/jobs",
+            Some(
+                json!({"project": project, "plan": exact, "purpose": "medical-training",
+                        "source_assets": [], "requested_output": "out"}),
+            ),
+            &[("Idempotency-Key", key)],
+        )
+    };
+    // The backup counts one job under the terms.
+    let (env0, backup) = stop_and_back_up(t, "tcbk");
+    let t = env0.started();
+    // The other two they allow, each anchored before it is acknowledged.
+    for key in ["second", "third"] {
+        let (s, v) = submit(&t, key);
+        assert_eq!(s, 201, "{v}");
+        assert!(admission_anchored(&t, v["id"].as_str().unwrap()), "{v}");
+    }
+    let env0 = t.env0;
+    drop(t.control);
+    // Restored (the governance log put back): the database counts one.
+    restore_keeping_log(&env0, &backup);
+    let e = env0
+        .start()
+        .err()
+        .expect("a restore lowered the count of jobs under terms silently");
+    assert!(e.message.contains("JOB TERMS COUNT STATE ROLLBACK"), "{e}");
+    assert!(e.message.contains(&id), "{e}");
+    let notes = run_recovery(&env0);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains(&id) && n.contains("raised from 1 to 3")),
+        "{notes:?}"
+    );
+    // Recovery again changes nothing.
+    let size = |env0: &Env0| -> i64 {
+        let mut c = postgres::Client::connect(&env0.url, postgres::NoTls).unwrap();
+        c.query_one("SELECT gseq FROM governance_head WHERE id", &[])
+            .unwrap()
+            .get(0)
+    };
+    let log = size(&env0);
+    let again = run_recovery(&env0);
+    assert!(again.is_empty(), "{again:?}");
+    assert_eq!(size(&env0), log);
+    let t = env0.started();
+    let restored: i64 = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'terms.count_restored' AND resource_id = $1",
+            &[&id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(restored, 1);
+    // The terms still allow three jobs in all: none more is admitted.
+    let listed = t.ok(
+        &b_dev,
+        "GET",
+        &format!("/v1/projects/{project}/terms"),
+        None,
+    );
+    assert_eq!(listed[0]["jobs"], 3, "{listed}");
+    let (s, v) = submit(&t, "fourth");
+    assert_eq!(s, 403, "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("allow 3 job(s)"),
+        "{v}"
+    );
+    t.restarted();
+}
+
+/// A submission admitted under terms whose anchoring failed (the client
+/// got an error, the job committed) is anchored before a retry with the
+/// same `Idempotency-Key` acknowledges it (on another thread than the
+/// failed call, which keeps no obligation to retry there).
+#[test]
+fn a_retried_submission_under_terms_is_anchored_before_it_is_acknowledged() {
+    let Some(w) = world() else { return };
+    let (exact, spec) = plan(&w, EXACT);
+    agree(
+        &w,
+        terms(&[&spec], 3, &[receipt_key(&w.evaluator)], now() + 3600),
+    );
+    let World {
+        t, b_dev, project, ..
+    } = w;
+    let env0 = t.env0;
+    drop(t.control);
+    let (t, fail) = env0.start_flaky();
+    let submit = || {
+        t.call_with(
+            &b_dev,
+            "POST",
+            "/v1/jobs",
+            Some(
+                json!({"project": project, "plan": exact, "purpose": "medical-training",
+                        "source_assets": [], "requested_output": "out"}),
+            ),
+            &[("Idempotency-Key", "flaky")],
+        )
+    };
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (s, v) = submit();
+    assert_ne!(s, 201, "{v}");
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    let job: String = t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one("SELECT id FROM jobs WHERE idempotency_key = 'flaky'", &[])
+        .unwrap()
+        .get(0);
+    assert!(
+        !admission_anchored(&t, &job),
+        "the admission committed unanchored"
+    );
+    let (s, v) = std::thread::scope(|scope| scope.spawn(submit).join().unwrap());
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["id"], json!(job));
+    assert!(admission_anchored(&t, &job));
+}
+
+/// The scheduler's periodic pass rotates: more than its batch of older
+/// authorized jobs that cannot be placed (a profile no evaluator
+/// registers) keep a newer job that can waiting for at most two passes.
+#[test]
+fn jobs_that_cannot_be_placed_never_keep_a_newer_job_waiting() {
+    let Some(w) = world() else { return };
+    let (exact, _) = plan(&w, EXACT);
+    let (s, v) = w.job(&exact, &[], "model");
+    assert_eq!(s, 201, "{v}");
+    let model = v["id"].as_str().unwrap().to_owned();
+    let mut c = w.t.control.db.conn().unwrap();
+    // 150 older copies of it, authorized, for a profile nobody runs.
+    let n = c
+        .execute(
+            "INSERT INTO jobs
+             SELECT (jsonb_populate_record(NULL::jobs, to_jsonb(j) || jsonb_build_object(
+                         'id', 'job-stuck-' || n, 'idempotency_key', 'stuck-' || n,
+                         'state', 'authorized', 'profile', 'NO_EVALUATOR_RUNS_THIS',
+                         'evaluator_id', NULL, 'job_grant', NULL, 'estimated_ms', NULL,
+                         'created_at', now() - interval '1 hour' + n * interval '1 second'))).*
+               FROM jobs j, generate_series(1, 150) AS n WHERE j.id = $1",
+            &[&model],
+        )
+        .unwrap();
+    assert_eq!(n, 150);
+    let set_status = |c: &mut postgres::Client, status: &str| {
+        c.execute(
+            "UPDATE evaluators SET status = $1 WHERE id = 'evaluator-1'",
+            &[&status],
+        )
+        .unwrap();
+    };
+    // A newer job, submitted while its evaluator is away.
+    set_status(&mut c, "draining");
+    let (s, v) = w.job(&exact, &[], "newer");
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["state"], "authorized", "{v}");
+    let job = v["id"].as_str().unwrap().to_owned();
+    set_status(&mut c, "ready");
+    let state = || w.t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{job}"), None)["state"].clone();
+    // The first pass tries the hundred oldest; the second the rest, and
+    // the newer job.
+    w.t.control.schedule_pending().unwrap();
+    assert_eq!(state(), "authorized");
+    w.t.control.schedule_pending().unwrap();
+    assert_eq!(state(), "queued");
+    // The others still wait, and the next passes go round them again.
+    let stuck: i64 = c
+        .query_one(
+            "SELECT count(*) FROM jobs WHERE profile = 'NO_EVALUATOR_RUNS_THIS' AND state = 'authorized'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(stuck, 150);
+    w.t.control.schedule_pending().unwrap();
+    w.t.control.schedule_pending().unwrap();
+}
+
+/// Submissions racing an acceptance that replaces the active terms: each
+/// job is admitted under the terms that were active when it committed
+/// (none under the superseded terms after their replacement), and each set
+/// of terms counts and numbers exactly its jobs.
+#[test]
+fn concurrent_acceptance_and_submissions_count_exactly() {
+    let Some(w) = world() else { return };
+    let (exact, spec) = plan(&w, EXACT);
+    let key = receipt_key(&w.evaluator);
+    let doc = || terms(&[&spec], 1000, std::slice::from_ref(&key), now() + 3600);
+    let first = agree(&w, doc());
+    let p = w.t.ok(
+        &w.b_admin,
+        "POST",
+        &format!("/v1/projects/{}/terms", w.project),
+        Some(doc()),
+    );
+    let next = p["id"].as_str().unwrap().to_owned();
+    let w = Arc::new(w);
+    // Eight submitters keep submitting while the acceptance runs: it starts
+    // once some jobs exist under the first terms, and each submitter sends
+    // one more after it returned, so jobs land on both sides of it and
+    // others race it.
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+    let made = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+    let mut handles = vec![];
+    for i in 0..8 {
+        let (w, exact, made, done) = (w.clone(), exact.clone(), made.clone(), done.clone());
+        handles.push(std::thread::spawn(move || {
+            let mut out = vec![];
+            for k in 0.. {
+                let last = done.load(SeqCst);
+                out.push(w.job(&exact, &[], &format!("race-{i}-{k}")).0);
+                made.fetch_add(1, SeqCst);
+                if last {
+                    break;
+                }
+            }
+            out
+        }));
+    }
+    let accept = {
+        let (w, next, made, done) = (w.clone(), next.clone(), made.clone(), done.clone());
+        std::thread::spawn(move || {
+            while made.load(SeqCst) < 4 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let a = w.t.ok(
+                &w.a_admin,
+                "POST",
+                &format!("/v1/terms/{next}/accept"),
+                None,
+            );
+            done.store(true, SeqCst);
+            a
+        })
+    };
+    let statuses: Vec<u16> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    assert_eq!(accept.join().unwrap()["status"], "active");
+    assert!(statuses.iter().all(|s| *s == 201), "{statuses:?}");
+    let mut c = w.t.control.db.conn().unwrap();
+    // The activation's audit position: every job under the first terms
+    // committed before it, every job under the next after it.
+    let activated: i64 = c
+        .query_one(
+            "SELECT min(seq) FROM audit_events WHERE action = 'terms.activated' AND resource_id = $1",
+            &[&next],
+        )
+        .unwrap()
+        .get(0);
+    let mut total = 0;
+    for (terms, before) in [(&first, true), (&next, false)] {
+        let created: Vec<i64> = c
+            .query(
+                "SELECT seq FROM audit_events WHERE action = 'job.created' AND refs->>'terms' = $1",
+                &[terms],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        // Jobs on both sides of the activation, none on the wrong one.
+        assert!(!created.is_empty(), "{terms}: no job under them");
+        assert!(
+            created.iter().all(|s| (*s < activated) == before),
+            "{terms}: {created:?} around {activated}"
+        );
+        let seqs: Vec<i64> = c
+            .query(
+                "SELECT terms_seq FROM jobs WHERE terms_id = $1 ORDER BY terms_seq",
+                &[terms],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(seqs, (1..=seqs.len() as i64).collect::<Vec<_>>());
+        assert_eq!(seqs.len(), created.len());
+        assert_eq!(terms_view(&w, terms)["jobs"], json!(seqs.len()));
+        // And the governance log recorded each admission with its number.
+        let logged: Vec<i64> = c
+            .query(
+                "SELECT (body #>> '{refs,seq}')::bigint FROM governance_events
+                  WHERE kind = 'terms.job_admitted' AND body #>> '{refs,terms}' = $1 ORDER BY gseq",
+                &[terms],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(logged, seqs);
+        total += seqs.len();
+    }
+    assert_eq!(total, statuses.len());
+}
+
+/// A database that ran schema version 19 (jobs under terms, neither
+/// counted nor numbered) gets each set of terms' count of jobs and each
+/// job's number under them, in the order the jobs were submitted, and the
+/// database counts from there.
+#[test]
+fn migration_20_counts_and_numbers_the_jobs_of_a_version_19_database() {
+    let Some(url) = unmigrated_database() else {
+        return;
+    };
+    let db = encompute_control::db::Db::connect(&url).unwrap();
+    assert_eq!(db.migrate_to(19).unwrap(), 19);
+    let digest = "d".repeat(64);
+    let doc = json!({"max_jobs": 5}).to_string();
+    let mut c = db.conn().unwrap();
+    c.batch_execute(&format!(
+        "INSERT INTO organizations (id, display_name, status, policy_namespace) VALUES ('o', 'o', 'active', 'o');
+         INSERT INTO projects (id, organization_id, name, status) VALUES ('p', 'o', 'p', 'active');
+         INSERT INTO plans (id, organization_id, project_id, program_id, spec_id, program, document, created_by)
+              VALUES ('pl', 'o', 'p', 'x', 'y', '', '{{}}', 'u');
+         INSERT INTO job_terms (id, project_id, organization_id, digest, document, status, created_by, activated_at)
+              VALUES ('terms-old', 'p', 'o', '{digest}', '{doc}', 'superseded', 'u', now()),
+                     ('terms-now', 'p', 'o', '{digest}', '{doc}', 'active', 'u', now());"
+    ))
+    .unwrap();
+    for (id, terms, ago) in [
+        ("j-b", Some("terms-now"), 30),
+        ("j-a", Some("terms-now"), 30),
+        ("j-c", Some("terms-now"), 10),
+        ("j-z", Some("terms-old"), 60),
+        ("j-none", None, 20),
+    ] {
+        c.execute(
+            "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, purpose, source_assets,
+                               requested_output, scheme, backend, profile, state, initiated_by, idempotency_key,
+                               request_digest, terms_id, created_at)
+             VALUES ($1, 'o', 'p', 'pl', 'y', 'x', 'p', '[]', 'out', 'exact', 'openfhe-exact', 'P', 'authorized',
+                     'u', $1, 'd', $2, '2026-11-01 12:00:00+00'::timestamptz - make_interval(secs => $3))",
+            &[&id, &terms, &(ago as f64)],
+        )
+        .unwrap();
+    }
+    drop(c);
+    assert_eq!(db.migrate().unwrap(), 20);
+    let mut c = db.conn().unwrap();
+    let seq = |c: &mut postgres::Client, id: &str| -> Option<i64> {
+        c.query_one("SELECT terms_seq FROM jobs WHERE id = $1", &[&id])
+            .unwrap()
+            .get(0)
+    };
+    let count = |c: &mut postgres::Client, id: &str| -> i64 {
+        c.query_one("SELECT jobs_submitted FROM job_terms WHERE id = $1", &[&id])
+            .unwrap()
+            .get(0)
+    };
+    // In order of submission, ties by ID.
+    assert_eq!(seq(&mut c, "j-a"), Some(1));
+    assert_eq!(seq(&mut c, "j-b"), Some(2));
+    assert_eq!(seq(&mut c, "j-c"), Some(3));
+    assert_eq!(seq(&mut c, "j-z"), Some(1));
+    assert_eq!(seq(&mut c, "j-none"), None);
+    assert_eq!(count(&mut c, "terms-now"), 3);
+    assert_eq!(count(&mut c, "terms-old"), 1);
+    // The next job under the active terms is counted and numbered by the
+    // database; the count never goes down, and numbers never change.
+    c.execute(
+        "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, purpose, source_assets,
+                           requested_output, scheme, backend, profile, state, initiated_by, idempotency_key,
+                           request_digest, terms_id)
+         VALUES ('j-d', 'o', 'p', 'pl', 'y', 'x', 'p', '[]', 'out', 'exact', 'openfhe-exact', 'P', 'authorized',
+                 'u', 'j-d', 'd', 'terms-now')",
+        &[],
+    )
+    .unwrap();
+    assert_eq!(seq(&mut c, "j-d"), Some(4));
+    assert_eq!(count(&mut c, "terms-now"), 4);
+    assert!(c
+        .execute(
+            "UPDATE job_terms SET jobs_submitted = 3 WHERE id = 'terms-now'",
+            &[]
+        )
+        .is_err());
+    assert!(c
+        .execute("UPDATE jobs SET terms_seq = 9 WHERE id = 'j-a'", &[])
+        .is_err());
+    assert!(c
+        .execute(
+            "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, purpose, source_assets,
+                               requested_output, scheme, backend, profile, state, initiated_by, idempotency_key,
+                               request_digest, terms_id)
+             VALUES ('j-e', 'o', 'p', 'pl', 'y', 'x', 'p', '[]', 'out', 'exact', 'openfhe-exact', 'P', 'authorized',
+                     'u', 'j-e', 'd', 'terms-old')",
+            &[],
+        )
+        .is_err());
 }

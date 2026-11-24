@@ -897,7 +897,13 @@ impl Control {
         digest: &str,
     ) -> Result<(Value, bool)> {
         let denied: Denied = RefCell::new(None);
+        // A retry of a submission admitted under job terms: its admission
+        // may have committed without being anchored (the anchor store
+        // failed after the commit), so it is anchored before it is
+        // acknowledged again.
+        let under_terms = std::cell::Cell::new(false);
         let out = self.tx_anchored(|t| {
+            under_terms.set(false);
             let project = project_visible(t, &ctx.principal, &r.project)?;
             deny_auditor(&ctx.principal, &project)?;
             let orgs = project_role_orgs(&ctx.principal, &project, &[Role::MlDeveloper]);
@@ -913,7 +919,7 @@ impl Control {
             }
             if let Some(row) = t
                 .query_opt(
-                    "SELECT id, request_digest FROM jobs WHERE organization_id = $1 AND idempotency_key = $2",
+                    "SELECT id, request_digest, terms_id IS NOT NULL FROM jobs WHERE organization_id = $1 AND idempotency_key = $2",
                     &[&org, &key],
                 )
                 .map_err(db_err)?
@@ -922,6 +928,7 @@ impl Control {
                 if d != digest {
                     return Err(conflict("this Idempotency-Key was used for a different request"));
                 }
+                under_terms.set(row.get(2));
                 return Ok((json!({"id": id}), false));
             }
             let plan = t
@@ -1037,7 +1044,7 @@ impl Control {
             // project row, then its active terms (locked, so jobs under them
             // are counted one at a time).
             let spec_id: String = plan.get(0);
-            let terms_id = match super::terms::admit(t, &r.project, &org, &[&spec_id], &r.purpose, now())? {
+            let terms_id = match super::terms::admit(t, &r.project, &org, &[&spec_id], &r.purpose, &sources, now())? {
                 Ok(terms) => terms,
                 Err((rtype, rid, why, e)) => {
                     *denied.borrow_mut() = Some((rtype, rid, org.clone(), why));
@@ -1097,6 +1104,7 @@ impl Control {
                 .r#ref("state", next.as_str());
             if let Some(terms) = &terms_id {
                 created = created.r#ref("terms", terms.clone());
+                super::terms::record_admission(t, &r.project, &org, terms, &id)?;
             }
             audit::append(t, created)?;
             Ok((json!({"id": id}), true))
@@ -1109,6 +1117,9 @@ impl Control {
                     .project(&r.project)
                     .r#ref("reason", why),
             );
+        }
+        if matches!(out, Ok((_, false))) && under_terms.get() {
+            self.checkpoint_log()?;
         }
         out
     }
@@ -1653,6 +1664,7 @@ impl Control {
             org,
             &[&plan_spec_id, &spec_id],
             &r.purpose,
+            &sources,
             at,
         )? {
             Ok(terms) => terms,
@@ -1726,6 +1738,7 @@ impl Control {
             .r#ref("state", next.as_str());
         if let Some(terms) = &terms_id {
             created = created.r#ref("terms", terms.clone());
+            super::terms::record_admission(t, &r.project, org, terms, &id)?;
         }
         audit::append(t, created)?;
         Ok((json!({"id": id}), true))
@@ -2688,18 +2701,31 @@ impl Control {
 
     // --- scheduling ---------------------------------------------------------------
 
-    /// Places authorized jobs on compatible, ready evaluators, oldest first.
+    /// Places authorized jobs on compatible, ready evaluators: up to 100 a
+    /// pass, in order of submission (`created_at`, then ID), starting after
+    /// the last job the previous pass tried and wrapping round to the
+    /// oldest at the end ([`Control::schedule_cursor`], kept in memory: a
+    /// restart starts with the oldest). Jobs that cannot be placed (no
+    /// evaluator has their backend or profile, or a governed job's
+    /// placement admits none) never keep a newer job waiting: with `n`
+    /// authorized jobs, every one is tried within `ceil(n / 100)` passes.
     ///
     /// A job under job terms is taken only while a ready evaluator that
     /// could run it, with room for it, has a receipt key they name, or once
     /// they have ended (it then fails): jobs waiting for an evaluator that
     /// is away or full never fill the batch ahead of jobs that can run.
     pub fn schedule_pending(&self) -> Result<()> {
-        let ids: Vec<String> = self
+        let cursor = || {
+            self.schedule_cursor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        };
+        let (after_at, after_id) = cursor().clone().unzip();
+        let jobs: Vec<(String, std::time::SystemTime)> = self
             .db
             .conn()?
             .query(
-                "SELECT j.id FROM jobs j LEFT JOIN job_terms x ON x.id = j.terms_id
+                "SELECT j.id, j.created_at FROM jobs j LEFT JOIN job_terms x ON x.id = j.terms_id
                   WHERE j.state = 'authorized'
                     AND (j.terms_id IS NULL
                          OR (x.document->>'not_after')::bigint <= $1
@@ -2712,18 +2738,27 @@ impl Control {
                                 AND x.document->'evaluator_keys' ? lower(e.receipt_key)
                                 AND (SELECT count(*) FROM jobs y WHERE y.evaluator_id = e.id
                                         AND y.state IN ('queued', 'running', 'verifying')) < e.capacity))
-                  ORDER BY j.created_at, j.id LIMIT 100",
+                  -- After the cursor first, then from the oldest again.
+                  ORDER BY ($3::timestamptz IS NOT NULL AND (j.created_at, j.id) <= ($3::timestamptz, $4::text)),
+                           j.created_at, j.id
+                  LIMIT 100",
                 &[
                     &(now().min(i64::MAX as u64) as i64),
                     &(HEARTBEAT_TIMEOUT_SECS as f64),
+                    &after_at,
+                    &after_id,
                 ],
             )
             .map_err(db_err)?
             .iter()
-            .map(|r| r.get(0))
+            .map(|r| (r.get(0), r.get(1)))
             .collect();
-        for id in ids {
-            self.schedule_job(&id)?;
+        for (id, at) in jobs {
+            let placed = self.schedule_job(&id);
+            // Past this job whatever came of it: one that fails to schedule
+            // does not hold the next pass up either.
+            *cursor() = Some((at, id));
+            placed?;
         }
         Ok(())
     }
@@ -3716,6 +3751,28 @@ impl Control {
                 .unwrap_or_else(|| PLATFORM_ORG.to_owned());
             self.endpoint_changed(t, ctx, &r.id, &operator, endpoint_before.clone())?;
             self.register_location(t, ctx, &r.id, &operator, r.location.as_ref())?;
+            // Jobs queued on it under job terms that do not name the receipt
+            // key it registers now (requeued below), locked first: before
+            // the running jobs are read. A start of one of them that
+            // commits first leaves it running, and the read of the running
+            // jobs below then finds (and fails) it; a start that comes
+            // later waits for this lock and then finds the job authorized
+            // and no longer its evaluator's. Read the other way round, a
+            // start committing between the two reads would leave its job in
+            // neither set: running on a process that is gone.
+            let requeued: Vec<(String, String, String)> = t
+                .query(
+                    "SELECT j.id, j.organization_id, j.project_id
+                       FROM jobs j JOIN job_terms x ON x.id = j.terms_id
+                      WHERE j.evaluator_id = $1 AND j.state = 'queued'
+                        AND NOT (x.document->'evaluator_keys' ? lower($2))
+                      ORDER BY j.id FOR UPDATE OF j",
+                    &[&r.id, &r.receipt_key],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|x| (x.get(0), x.get(1), x.get(2)))
+                .collect();
             // An evaluator registers when its process starts: a job it was
             // running and never reported died with the old process. It
             // fails now (never replayed) rather than staying "running"
@@ -3750,21 +3807,9 @@ impl Control {
                 )?;
             }
             // Jobs queued on it under job terms that do not name the receipt
-            // key it registers now go back to be scheduled, on an evaluator
-            // they name, instead of waiting for a start it would be refused.
-            let requeued: Vec<(String, String, String)> = t
-                .query(
-                    "SELECT j.id, j.organization_id, j.project_id
-                       FROM jobs j JOIN job_terms x ON x.id = j.terms_id
-                      WHERE j.evaluator_id = $1 AND j.state = 'queued'
-                        AND NOT (x.document->'evaluator_keys' ? lower($2))
-                      ORDER BY j.id FOR UPDATE OF j",
-                    &[&r.id, &r.receipt_key],
-                )
-                .map_err(db_err)?
-                .iter()
-                .map(|x| (x.get(0), x.get(1), x.get(2)))
-                .collect();
+            // key it registers now go back to be scheduled (below), on an
+            // evaluator they name, instead of waiting for a start it would
+            // be refused.
             for (job, org, project) in &requeued {
                 t.execute(
                     "UPDATE jobs SET evaluator_id = NULL, job_grant = NULL, estimated_ms = NULL WHERE id = $1",

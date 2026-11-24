@@ -2028,6 +2028,11 @@ fn only_a_security_deny_event_forces_a_synchronous_checkpoint() {
             true,
         ),
         ("placement.changed", vec![("change", "tighten")], true),
+        (
+            "terms.job_admitted",
+            vec![("terms", "terms_1"), ("seq", "1")],
+            true,
+        ),
         ("placement.changed", vec![("change", "loosen")], false),
         ("evaluator.location_declared", vec![], false),
         ("privacy.population_created", vec![], false),
