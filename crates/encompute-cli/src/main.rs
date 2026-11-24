@@ -125,6 +125,10 @@ enum Cmd {
         /// The attestation policy the workload must satisfy.
         #[arg(long)]
         attestation_policy: Option<PathBuf>,
+        /// Accept a receipt for the mock backend, which encrypts nothing
+        /// (development and tests only). Refused by default.
+        #[arg(long)]
+        allow_mock: bool,
         #[command(flatten)]
         trust: attest::TrustArgs,
     },
@@ -921,6 +925,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             evaluation_keys,
             attestation,
             attestation_policy,
+            allow_mock,
             trust,
         } => verify(
             &receipt,
@@ -936,6 +941,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 policy: attestation_policy.as_deref(),
                 trust: &trust,
             },
+            allow_mock,
         ),
         Cmd::Attest { cmd } => attest::attest(cmd),
         Cmd::Aggregate { cmd } => aggregate::aggregate(*cmd),
@@ -1340,6 +1346,7 @@ fn verify(
     proof: Option<&Path>,
     evaluation_keys: Option<&Path>,
     attested: Attested<'_>,
+    allow_mock: bool,
 ) -> Result<ExitCode> {
     let read = |p: &Path| {
         std::fs::read(p).map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", p.display())))
@@ -1638,10 +1645,19 @@ fn verify(
         }
         None => {}
     }
-    section("Receipt");
     // The mock backend encrypts nothing. A valid receipt for a mock run is
-    // still only a mock run: say so, whoever supplied the request.
-    if r.backend == "mock" {
+    // still only a mock run, and the expected backend may come from a
+    // request envelope someone else made: refused unless asked for.
+    let mock = r.backend == "mock" || kind == Some(BackendKind::Mock);
+    if mock && !allow_mock && result.is_ok() {
+        result = Err(Error::new(
+            Code::Receipt,
+            "the receipt is for the mock backend, which encrypts nothing: pass --allow-mock to \
+             accept it (development and tests only)",
+        ));
+    }
+    section("Receipt");
+    if mock {
         println!("MOCK BACKEND: the inputs were NOT encrypted (development and tests only)");
     }
     if matches!(attestation, Some(Ok(_))) && result.is_ok() {

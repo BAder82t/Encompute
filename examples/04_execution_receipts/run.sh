@@ -37,7 +37,9 @@ ls exchange
 
 step "anyone with the files: verify the receipt and every binding"
 TRUST="$(cat keys/evaluator.pub)"
-verify() { "$E" verify "$@" --model adult.encompute --trust-evaluator "$TRUST"; }
+# The mock evaluator encrypts nothing, so verify accepts its receipts only
+# with --allow-mock (each attack below checks one binding, not that).
+verify() { "$E" verify "$@" --model adult.encompute --trust-evaluator "$TRUST" --allow-mock; }
 verify receipt.json --request exchange/request.bin --response exchange/response.bin |
   sed -n '/^Evaluator/,$p' | grep -Ev '^─|^  ID'
 
@@ -58,9 +60,12 @@ reject "claim a different backend than the one requested" \
   verify receipt.json --request exchange/request.bin --response exchange/response.bin --backend openfhe-exact
 reject "trust a different evaluator key" \
   "$E" verify receipt.json --model adult.encompute --request exchange/request.bin \
-  --response exchange/response.bin --trust-evaluator "$(printf '11%.0s' $(seq 32))"
+  --response exchange/response.bin --trust-evaluator "$(printf '11%.0s' $(seq 32))" --allow-mock
 reject "check only the signature (bindings not checked is not success)" \
-  "$E" verify receipt.json
+  "$E" verify receipt.json --allow-mock
+reject "accept a mock-backend receipt as a real one (no --allow-mock)" \
+  "$E" verify receipt.json --model adult.encompute --request exchange/request.bin \
+  --response exchange/response.bin --trust-evaluator "$TRUST"
 PORT2="$(free_port)"
 "$EVAL" serve --listen "127.0.0.1:$PORT2" --backend mock 2>/dev/null &
 ready "http://127.0.0.1:$PORT2/v1/info"

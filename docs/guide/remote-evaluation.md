@@ -18,7 +18,9 @@ evaluator key, the artifact, the backend, the transcript, the evidence
 kind, the key ID, the request and the response) and any proof the receipt
 names was verified; 3 when some bindings were not supplied or a named
 proof was not checked (a `NOT CHECKED:` line lists them); 1 when any
-check fails; and 2 on an error such as a missing file or a bad argument. An attestation the receipt binds is checked only with
+check fails; and 2 on an error such as a missing file or a bad argument. A
+receipt for the mock backend, which encrypts nothing, fails (exit 1) unless
+`--allow-mock` is given. An attestation the receipt binds is checked only with
 `--attestation` and `--attestation-policy`, and exit 0 does not require
 it. The evaluator speaks plain HTTP: keep it on `127.0.0.1` or a private
 network behind a TLS proxy, as above. `--listen 0.0.0.0:…` exposes it

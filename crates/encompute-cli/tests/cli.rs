@@ -200,8 +200,10 @@ fn remote_receipts_and_verify() {
     }
 
     let receipt = p("result.receipt.json");
+    // The evaluator here is the mock backend (test infrastructure): these
+    // checks are about the bindings, so they accept mock explicitly.
     let verify = |extra: &[&str]| {
-        let mut args = vec!["verify", receipt.as_str()];
+        let mut args = vec!["verify", receipt.as_str(), "--allow-mock"];
         args.extend_from_slice(extra);
         encompute(&args)
     };
@@ -223,6 +225,22 @@ fn remote_receipts_and_verify() {
     );
     assert!(!out.contains("EXECUTION VERIFIED"));
     assert!(out.contains("TRANSCRIPT AVAILABLE"), "{out}");
+    // Without --allow-mock the same receipt is refused: the mock backend
+    // encrypts nothing, whoever made the request.
+    let mut strict = vec!["verify", receipt.as_str()];
+    strict.extend_from_slice(&full);
+    let (code, out, _) = encompute(&strict);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("INVALID: the receipt is for the mock backend, which encrypts nothing"),
+        "{out}"
+    );
+    assert!(!out.contains("RECEIPT VERIFIED"), "{out}");
+    let (code, out, _) = encompute(&["verify", receipt.as_str()]);
+    assert_eq!(
+        code, 1,
+        "a partial check of a mock receipt is refused too: {out}"
+    );
 
     // The transcript command prints the semantic program, never values.
     let (code, out, err) = encompute(&["transcript", &p("adult.encompute"), "--backend", "mock"]);
@@ -299,14 +317,14 @@ fn remote_receipts_and_verify() {
         let forged = p("forged.receipt.json");
         std::fs::write(&forged, r.sign(&signer).unwrap().to_bytes().unwrap()).unwrap();
         let key = signer.identity().public_key_hex();
-        let mut args = vec!["verify", forged.as_str()];
+        let mut args = vec!["verify", forged.as_str(), "--allow-mock"];
         args.extend_from_slice(&full[..6]);
         args.extend_from_slice(&["--trust-evaluator", &key]);
         let (code, out, _) = encompute(&args);
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("receipt evidence does not match"), "{out}");
         assert!(out.contains("execution proof (reexec v1"), "{out}");
-        let (code, out, _) = encompute(&["verify", &forged]);
+        let (code, out, _) = encompute(&["verify", &forged, "--allow-mock"]);
         assert_eq!(code, 3, "{out}");
         assert!(
             out.contains("EXECUTION PROOF NAMED BUT NOT CHECKED"),
@@ -425,6 +443,7 @@ fn evaluator_trust_is_checked_before_sending_and_a_bad_pin_fails_closed() {
     let (code, out, _) = encompute(&[
         "verify",
         &p("r.json"),
+        "--allow-mock",
         "--trust-evaluator",
         pinned.trim(),
         "--model",
