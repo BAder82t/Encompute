@@ -82,6 +82,22 @@ fn every_route_authenticates_authorizes_and_isolates() {
         Some(json!({"id": "secagg-9", "kind": "secagg",
                     "public_key": ServiceSigner::from_seed("secagg-9", &[12; 32]).unwrap().public_key_hex()})),
     );
+    // Job terms modelco's admin proposed (hospital-a accepts them below).
+    let terms_doc = |max_jobs: u64| {
+        json!({"specs": ["e".repeat(64)], "purposes": ["medical-training"],
+               "submitters": ["modelco"],
+               "evaluator_keys": [w.evaluator.receipt.identity().public_key_hex()],
+               "max_jobs": max_jobs, "not_before": 0, "not_after": 4_000_000_000u64})
+    };
+    let terms = t.ok(
+        &w.b_admin,
+        "POST",
+        &format!("/v1/projects/{p}/terms"),
+        Some(terms_doc(5)),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let rows = vec![
         Row {
@@ -426,6 +442,48 @@ fn every_route_authenticates_authorizes_and_isolates() {
             ok: w.platform.clone(),
             wrong_role: None,
             wrong_tenant: w.a_admin.clone(),
+            headers: vec![],
+        },
+        // (Job terms last: once hospital-a accepts them, they govern the
+        // project's jobs.)
+        Row {
+            name: "propose job terms",
+            method: "POST",
+            path: format!("/v1/projects/{p}/terms"),
+            body: Some(terms_doc(6)),
+            ok: w.b_admin.clone(),
+            wrong_role: Some(w.b_dev.clone()),
+            wrong_tenant: w.c_admin.clone(),
+            headers: vec![],
+        },
+        Row {
+            name: "list job terms",
+            method: "GET",
+            path: format!("/v1/projects/{p}/terms"),
+            body: None,
+            ok: w.b_dev.clone(),
+            wrong_role: None,
+            wrong_tenant: w.c_admin.clone(),
+            headers: vec![],
+        },
+        Row {
+            name: "accept job terms",
+            method: "POST",
+            path: format!("/v1/terms/{terms}/accept"),
+            body: None,
+            ok: w.a_admin.clone(),
+            wrong_role: Some(w.a_dev.clone()),
+            wrong_tenant: w.c_admin.clone(),
+            headers: vec![],
+        },
+        Row {
+            name: "jobs under job terms",
+            method: "GET",
+            path: format!("/v1/terms/{terms}/jobs"),
+            body: None,
+            ok: w.a_admin.clone(),
+            wrong_role: None,
+            wrong_tenant: w.c_admin.clone(),
             headers: vec![],
         },
     ];
