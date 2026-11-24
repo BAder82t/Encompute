@@ -29,6 +29,15 @@ The notes in the next section (production mode: native TLS) also ship in
 this unreleased work. Draft notes:
 [docs/release-notes-0.4.0-rc.1.md](docs/release-notes-0.4.0-rc.1.md).
 
+- **Dependency advisories.** `url` 2.5.9 (RUSTSEC-2026-0592),
+  `rustls-webpki` 0.103.17 (RUSTSEC-2026-0382), `webpki-roots` 1.0.12
+  (RUSTSEC-2026-0381) and `ctutils` 0.4.8 (RUSTSEC-2026-0385); jsonwebtoken
+  12, which brings `crypto-bigint` 0.7.11 (RUSTSEC-2026-0387), `p256`/`p384`
+  0.14 and `rsa` 0.10. `rsa` 0.10 is not affected by RUSTSEC-2023-0071
+  (Marvin), so `deny.toml` and `security/exceptions.toml` no longer carry
+  that exception. With jsonwebtoken 12 an empty HMAC secret is refused when
+  development tokens are signed or checked, and tokens with unknown critical
+  header extensions are rejected.
 - **Job terms.** A project's member organizations, in a standard or a
   governed project, can agree which jobs it runs at all: execution spec IDs,
   purposes, submitting organizations, evaluator receipt keys, a total

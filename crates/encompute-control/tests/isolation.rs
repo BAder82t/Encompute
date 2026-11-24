@@ -742,7 +742,7 @@ fn credentials_are_checked() {
         encode(
             &Header::new(Algorithm::HS256),
             &json!({"iss": DEV_ISSUER, "sub": "a-dev", "aud": "encompute", "exp": 1_000_000}),
-            &EncodingKey::from_secret(SECRET.as_bytes()),
+            &EncodingKey::from_secret(SECRET.as_bytes()).unwrap(),
         )
         .unwrap()
     };
@@ -827,13 +827,13 @@ struct Idp {
 impl Idp {
     fn new(kid: &'static str) -> Self {
         Self {
-            key: p256::SecretKey::random(&mut rand_core::OsRng),
+            key: random_p256(),
             kid,
         }
     }
 
     fn jwk(&self) -> Value {
-        let mut j: Value = serde_json::from_str(&self.key.public_key().to_jwk_string()).unwrap();
+        let mut j: Value = p256_jwk(&self.key);
         j["kid"] = json!(self.kid);
         j["alg"] = json!("ES256");
         j["use"] = json!("sig");
@@ -909,7 +909,7 @@ fn oidc_tokens_and_production_refusals() {
             encode(
                 &h,
                 &json!({"iss": issuer, "sub": "alice", "aud": "encompute", "exp": exp}),
-                &EncodingKey::from_secret(idp.jwk()["x"].as_str().unwrap().as_bytes()),
+                &EncodingKey::from_secret(idp.jwk()["x"].as_str().unwrap().as_bytes()).unwrap(),
             )
             .unwrap()
         };
@@ -1031,4 +1031,26 @@ fn collaborators_see_no_private_metadata() {
         .all(|x| x["actor"] == "modelco/user"));
     let mine = t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{job}"), None);
     assert_eq!(mine["initiated_by"], b_dev_id.as_str());
+}
+
+/// A random P-256 key from the operating system's randomness.
+fn random_p256() -> p256::SecretKey {
+    use rand_core::RngCore;
+    loop {
+        let mut b = [0u8; 32];
+        rand_core::OsRng.fill_bytes(&mut b);
+        if let Ok(k) = p256::SecretKey::from_slice(&b) {
+            return k;
+        }
+    }
+}
+
+/// The public JWK of a P-256 key (`kty`, `crv`, `x`, `y`).
+#[allow(dead_code)]
+fn p256_jwk(key: &p256::SecretKey) -> Value {
+    use base64::Engine;
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    let p = key.public_key().to_sec1_point(false);
+    let b = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+    json!({"kty": "EC", "crv": "P-256", "x": b(p.x().unwrap()), "y": b(p.y().unwrap())})
 }

@@ -546,7 +546,7 @@ fn confidential_space_rejections() {
     e.evidence = jsonwebtoken::encode(
         &Header::new(jsonwebtoken::Algorithm::HS256),
         &cs_claims(&w.binding().nonce().unwrap()),
-        &EncodingKey::from_secret(b"k"),
+        &EncodingKey::from_secret(b"k").unwrap(),
     )
     .unwrap();
     assert_eq!(cs_code(&w, &e), Code::Attestation);

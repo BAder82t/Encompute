@@ -22,14 +22,9 @@ features = [
 # expiry, in security/exceptions.toml (docs/release-process.md).
 unmaintained = "workspace"
 yanked = "deny"
-ignore = [
-    # Marvin (RSA private-key timing side channel). `rsa` comes in through
-    # jsonwebtoken, used in production only to *verify* RS256 Confidential
-    # Space tokens with Google's public keys; only tests sign, locally. No
-    # private-key operation is exposed to an attacker. Revisit when a fixed
-    # `rsa` release exists.
-    { id = "RUSTSEC-2023-0071", reason = "public-key verification only; no attacker-observable private-key operation" },
-]
+# No advisory is ignored. (RUSTSEC-2023-0071, Marvin in `rsa`, was until
+# jsonwebtoken 12 brought `rsa` 0.10, which it does not affect.)
+ignore = []
 
 [bans]
 multiple-versions = "allow"

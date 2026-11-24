@@ -274,8 +274,10 @@ distribution** is reported, not blocking; there is nothing to upgrade to.
 Fixed ones block like everything else and are resolved by refreshing the
 base-image digest. Every RC re-pulls and re-pins the digests.
 
-`deny.toml` also ignores `RUSTSEC-2023-0071` (`rsa`, public-key use only); the
-same advisory has an entry in `security/exceptions.toml` so it expires.
+`deny.toml` ignores no advisory. It ignored `RUSTSEC-2023-0071` (`rsa`,
+public-key use only) until jsonwebtoken 12 brought `rsa` 0.10, which the
+advisory does not affect; its entry in `security/exceptions.toml` went with
+it.
 
 ### OpenFHE
 

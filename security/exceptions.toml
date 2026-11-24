@@ -34,22 +34,8 @@ approved_on = "2026-09-27"  # YYYY-MM-DD
 
 # --- Rust ---------------------------------------------------------------------
 
-[[exception]]
-id = "RUSTSEC-2023-0071"
-package = "rsa"
-version = "0.9.10"
-severity = "medium"
-status = "not_affected"
-justification = "vulnerable_code_not_in_execute_path"
-reason = "Marvin timing side channel in RSA private-key operations. `rsa` comes in through jsonwebtoken, which production uses only to verify RS256 tokens with public keys (Google's for Confidential Space, the identity provider's for OIDC). No fixed release exists. Also ignored in deny.toml."
-compensating_controls = [
-  "RS256 is only verified in production (crates/encompute-attestation/src/gcp.rs, crates/encompute-control/src/authn.rs; the control plane's own session tokens are HMAC-signed)",
-  "the one RSA signer is the development-only launcher simulator (crates/encompute-cli/src/launcher_sim.rs), with an operator-supplied test key whose tokens a real deployment never accepts",
-  "deny.toml records the same advisory with the same reason, so cargo-deny and this file agree",
-]
-tracking = "https://rustsec.org/advisories/RUSTSEC-2023-0071.html"
-added = 2026-09-27
-expires = 2026-12-31
+# (No Rust exception: RUSTSEC-2023-0071, Marvin in `rsa`, no longer applies
+# since jsonwebtoken 12 brought `rsa` 0.10.)
 
 # --- Python: PyTorch 2.3.1 (pinned by the confidential training image) --------
 
