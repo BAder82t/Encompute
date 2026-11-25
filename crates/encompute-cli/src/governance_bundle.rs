@@ -394,10 +394,24 @@ fn statement_for(
     })
 }
 
+/// An organization's governance key: a 32-byte seed in a file accessible to
+/// its owner only, as `governance keygen` writes it (ENC2605 otherwise).
 fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
-    let seed: [u8; 32] = read_bounded(p, 64)?
-        .try_into()
-        .map_err(|_| err("a governance key file is a 32-byte seed"))?;
+    let len = std::fs::metadata(p).map_err(|e| io(p, e))?.len();
+    if len > 64 {
+        return Err(Error::new(
+            Code::GovernanceBundleLimit,
+            format!("{} is over 64 bytes", p.display()),
+        ));
+    }
+    let seed: [u8; 32] = encompute_verification::read_secret_file(
+        p,
+        encompute_verification::SecretFile::Private,
+        |e| io(p, e),
+    )?
+    .as_slice()
+    .try_into()
+    .map_err(|_| err("a governance key file is a 32-byte seed"))?;
     Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
 }
 

@@ -137,6 +137,46 @@ fn an_organization_signs_its_authorization_with_its_own_key_file() {
     assert!(out.is_empty());
 }
 
+/// A governance key the group or others can read is refused before it
+/// signs anything, like a client's `secret.key` or a party key.
+#[cfg(unix)]
+#[test]
+fn a_governance_key_readable_by_others_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("key-mode");
+    let key = d.join("governance.key");
+    let key_s = key.to_str().unwrap();
+    let (c, _, err) = encompute(&["governance", "keygen", "--out", key_s]);
+    assert_eq!(c, 0, "{err}");
+    let response = d.join("authorization.json");
+    std::fs::write(&response, serde_json::to_vec(&body()).unwrap()).unwrap();
+    let sign = || {
+        encompute(&[
+            "governance",
+            "sign",
+            "--key",
+            key_s,
+            response.to_str().unwrap(),
+        ])
+    };
+    let (c, _, err) = sign();
+    assert_eq!(c, 0, "{err}");
+
+    for mode in [0o644, 0o640, 0o604] {
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (c, out, err) = sign();
+        assert_ne!(c, 0, "a governance key at {mode:o} signed: {out}");
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            err.contains("ENC2605") && err.contains("chmod 600"),
+            "{err}"
+        );
+    }
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (c, _, err) = sign();
+    assert_eq!(c, 0, "{err}");
+}
+
 #[test]
 fn acceptances_and_revocations_are_signed_too() {
     let d = dir("kinds");

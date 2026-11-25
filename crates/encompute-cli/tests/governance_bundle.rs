@@ -151,9 +151,15 @@ fn run(d: &Path, args: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// A governance key as `governance keygen` writes it: owner only.
 fn key_file(d: &Path, name: &str, seed: u8) -> String {
     let p = d.join(name);
     std::fs::write(&p, [seed; 32]).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     p.to_str().unwrap().to_owned()
 }
 
@@ -766,6 +772,53 @@ fn explain_governance_in_words_from_verified_evidence_only() {
     assert_eq!(code, 2, "{e}");
     let (code, _, _) = explain(&d, &["model.encompute", "--governance", "--bundle", f]);
     assert_eq!(code, 2);
+}
+
+/// A countersigning key the group or others can read is refused before it
+/// signs, and the bundle is left as it was.
+#[cfg(unix)]
+#[test]
+fn a_countersign_key_readable_by_others_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("countersign-key-mode");
+    let fx = Fixture::build();
+    let b = shared(&fx);
+    let path = d.join("b.encgov.json");
+    std::fs::write(&path, b.to_bytes().unwrap()).unwrap();
+    let f = path.to_str().unwrap();
+    let p = write_json(&d, "pins.json", &pins(&fx));
+    let disc = disclosures(&d, &fx);
+    let k = key_file(&d, "tax.key", 1);
+    let countersign = || {
+        run(
+            &d,
+            &[
+                "countersign",
+                f,
+                "--key",
+                &k,
+                "--organization",
+                TAX,
+                "--pins",
+                &p,
+                "--disclosure",
+                &disc,
+                "--allow-unchecked",
+                "--i-accept-unchecked",
+            ],
+        )
+    };
+    let before = std::fs::read(&path).unwrap();
+    for mode in [0o644, 0o640, 0o604] {
+        std::fs::set_permissions(&k, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (code, so, e) = countersign();
+        assert_ne!(code, 0, "a countersign key at {mode:o} signed: {so}");
+        assert!(e.contains("ENC2605") && e.contains("chmod 600"), "{e}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the bundle changed");
+    }
+    std::fs::set_permissions(&k, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (code, so, e) = countersign();
+    assert_eq!(code, 0, "{so}{e}");
 }
 
 #[test]

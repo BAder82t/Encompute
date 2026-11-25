@@ -234,11 +234,17 @@ fn io(p: &Path, e: std::io::Error) -> Error {
     Error::new(Code::Artifact, format!("{}: {e}", p.display()))
 }
 
+/// An organization's governance key: a 32-byte seed in a file accessible to
+/// its owner only, as `governance keygen` writes it (ENC2605 otherwise).
 fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
-    let seed: [u8; 32] = std::fs::read(p)
-        .map_err(|e| io(p, e))?
-        .try_into()
-        .map_err(|_| err("a governance key file is a 32-byte seed"))?;
+    let seed: [u8; 32] = encompute_verification::read_secret_file(
+        p,
+        encompute_verification::SecretFile::Private,
+        |e| io(p, e),
+    )?
+    .as_slice()
+    .try_into()
+    .map_err(|_| err("a governance key file is a 32-byte seed"))?;
     Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
 }
 
