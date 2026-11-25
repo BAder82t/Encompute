@@ -306,6 +306,34 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-control/tests/governed_jobs.rs::a_database_failure_at_submission_is_not_echoed"),
         (Adversarial, "test:crates/encompute-control/tests/governed_jobs.rs::a_job_failed_by_a_database_failure_stores_no_database_text"),
     ]),
+    // Client-side key and evidence checks.
+    inv!("INV-302", "receipts", "A client with a pinned evaluator key (keys/evaluator.pub or --trust-evaluator) sends no program, evaluation key or ciphertext to an evaluator that announces another identity (ENC1606); the receipt check after execution stays the binding one, since the announcement is not authenticated. Only a missing pin file means first use: one that exists but cannot be read is refused, never replaced.", [
+        (Adversarial, "test:crates/encompute-cli/tests/cli.rs::evaluator_trust_is_checked_before_sending_and_a_bad_pin_fails_closed"),
+        (EndToEnd, "script:examples/04_execution_receipts/run.sh"),
+    ]),
+    inv!("INV-303", "leakage", "The CLI checks a secret key file before using its key: the secret.key of run --remote, a party identity key (aggregate identity, trust authorize) and an organization's governance key (governance sign, governance countersign) must be accessible to their owner only, and a service key read from a mounted secret must be a regular file that the group and others cannot write; otherwise ENC2605.", [
+        (Positive, "test:crates/encompute-verification/src/secret_file.rs::private_files_are_owner_only"),
+        (Negative, "test:crates/encompute-verification/src/secret_file.rs::mounted_secrets_may_be_readable_but_never_writable_by_others"),
+        (Negative, "test:crates/encompute-verification/src/secret_file.rs::only_regular_files_and_io_errors_keep_the_callers_code"),
+        (Adversarial, "test:crates/encompute-cli/tests/cli.rs::secret_key_files_readable_by_others_are_refused"),
+        (Adversarial, "test:crates/encompute-cli/tests/governance.rs::a_governance_key_readable_by_others_is_refused"),
+        (Adversarial, "test:crates/encompute-cli/tests/governance_bundle.rs::a_countersign_key_readable_by_others_is_refused"),
+    ]),
+    inv!("INV-304", "keys", "keys generate never replaces an existing secret key without --force: it refuses (ENC1605) before generating anything, and a key replaced with --force is owner only.", [
+        (Positive, "test:crates/encompute-cli/tests/cli.rs::keys_and_audit"),
+        (Adversarial, "test:crates/encompute-cli/tests/cli.rs::keys_generate_never_replaces_a_secret_key_without_force"),
+    ]),
+    inv!("INV-305", "trust", "The CLI's trust report, lineage and export are satisfied only with evidence of a run (an execution, an aggregation round or training) unless --allow-no-run is given; a program without confidentiality declarations has Policy NOT PRESENT; and a satisfied report lists the rows its evidence covers and the rows with none.", [
+        (Positive, "test:crates/encompute-trust/tests/report_coverage.rs::a_report_lists_what_it_covered_and_what_was_not_present"),
+        (Negative, "test:crates/encompute-trust/tests/report_coverage.rs::a_program_without_declarations_has_no_policy_to_verify"),
+        (Negative, "test:crates/encompute-trust/tests/report_coverage.rs::requiring_a_run_refuses_a_report_with_no_execution_aggregation_or_training"),
+        (Adversarial, "test:crates/encompute-cli/tests/cli.rs::a_trust_report_requires_evidence_of_a_run"),
+    ]),
+    inv!("INV-306", "receipts", "A receipt from the mock backend, which encrypts nothing, is not evidence of a confidential run unless the caller allows mock (--allow-mock, ReportOptions::allow_mock): encompute verify reports it INVALID (exit 1), also when only its signature is checked, and a trust report fails its Execution row and does not count it as a run.", [
+        (Negative, "test:crates/encompute-cli/tests/cli.rs::remote_receipts_and_verify"),
+        (Adversarial, "test:crates/encompute-trust/tests/report_coverage.rs::a_mock_backend_execution_is_not_verified_evidence_unless_allowed"),
+        (EndToEnd, "script:examples/04_execution_receipts/run.sh"),
+    ]),
     // Trust graph.
     inv!("INV-100", "trust", "The trust report checks every signature against keys the verifier supplies; evidence without an anchor is never reported as trusted.", [
         (Positive, "test:crates/encompute-runtime/tests/trust.rs::a_whole_collaboration_verifies"),
