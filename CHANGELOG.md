@@ -36,6 +36,15 @@ this unreleased work. Draft notes:
   job fails at its first upload (401). `ENCOMPUTE_EVALUATOR_IMAGE` is now
   required, like the control plane and services images, and `lab-up.sh` with
   `LAB_BUILD_IMAGES=1` builds it from the checkout.
+- **Database errors are not echoed.** A database failure answered 500
+  ENC1701 with PostgreSQL's own message (relation and constraint names, the
+  SQLSTATE). The answer is now a generic message naming the request (its
+  `X-Request-Id`, or the ID the control plane gave it), and the database's
+  message goes to the control plane's log under that ID (event
+  `database_error`); the same holds for a database failure inside a trust
+  report check, an authorization's `unusable` reason or the reason a
+  governed job is failed with, which is stored and shown with the job. Every
+  other error keeps its own message. INV-301.
 - **Dependency advisories.** `url` 2.5.9 (RUSTSEC-2026-0592),
   `rustls-webpki` 0.103.17 (RUSTSEC-2026-0382), `webpki-roots` 1.0.12
   (RUSTSEC-2026-0381) and `ctutils` 0.4.8 (RUSTSEC-2026-0385); jsonwebtoken

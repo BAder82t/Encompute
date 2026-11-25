@@ -82,7 +82,7 @@ use std::time::Instant;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
-use encompute_ir::{Code, Error, Result};
+use encompute_ir::{Cause, Code, Error, Result};
 use encompute_verification::http;
 use encompute_verification::service::{sha256_hex, ServiceHeaders};
 
@@ -177,11 +177,28 @@ pub fn status_of(code: Code) -> u16 {
     }
 }
 
-fn error_response(e: &Error) -> Response {
+fn error_response(control: &Control, rid: &str, e: &Error) -> Response {
     json_response(
         status_of(e.code),
-        &json!({"code": e.code.as_str(), "message": e.message}),
+        &json!({"code": e.code.as_str(),
+                "message": client_message(&control.service_id, rid, e)}),
     )
+}
+
+/// The message an API caller sees for `e`. A database failure's own text
+/// (relation and constraint names, the SQLSTATE) goes to the control plane's
+/// log under the request's ID, and the caller gets a generic message naming
+/// that request; every other error's message is its own.
+pub fn client_message(service_id: &str, request_id: &str, e: &Error) -> String {
+    if e.cause != Cause::Database {
+        return e.message.clone();
+    }
+    LogLine::new(service_id, "database_error")
+        .id("request_id", Some(request_id))
+        .field("code", e.code.as_str())
+        .field("error", &e.message)
+        .emit();
+    format!("a database error; the control plane's log has the details (request {request_id})")
 }
 
 fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
@@ -274,10 +291,11 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
             };
             if !allowed {
                 return (
-                    error_response(&Error::new(
-                        Code::Unauthenticated,
-                        "metrics need the metrics token",
-                    )),
+                    error_response(
+                        control,
+                        rid,
+                        &Error::new(Code::Unauthenticated, "metrics need the metrics token"),
+                    ),
                     None,
                 );
             }
@@ -304,18 +322,25 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
         _ => {}
     }
     if r.body.len() > MAX_BODY {
-        return (error_response(&bad("request body too large")), None);
+        return (
+            error_response(control, rid, &bad("request body too large")),
+            None,
+        );
     }
     if duplicate_query_key(&r.url) {
         return (
-            error_response(&bad("a query parameter appears more than once")),
+            error_response(
+                control,
+                rid,
+                &bad("a query parameter appears more than once"),
+            ),
             None,
         );
     }
     // Authenticate.
     let service = match ServiceHeaders::from_lookup(|h| r.header(h)) {
         Ok(s) => s,
-        Err(e) => return (error_response(&e), None),
+        Err(e) => return (error_response(control, rid, &e), None),
     };
     let authorization = r.header("Authorization");
     let principal = control.db.conn().and_then(|mut c| {
@@ -333,7 +358,7 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
     });
     let principal = match principal {
         Ok(p) => p,
-        Err(e) => return (error_response(&e), None),
+        Err(e) => return (error_response(control, rid, &e), None),
     };
     let ctx = Ctx {
         principal,
@@ -343,7 +368,7 @@ fn dispatch(control: &Control, r: &Request, path: &str, rid: &str) -> (Response,
     let out = route(control, &ctx, r, path);
     let resp = match out {
         Ok((status, v)) => json_response(status, &v),
-        Err(e) => error_response(&e),
+        Err(e) => error_response(control, rid, &e),
     };
     (resp, who)
 }

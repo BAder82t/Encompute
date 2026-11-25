@@ -46,7 +46,7 @@ Errors are JSON `{"code": "ENCnnnn", "message": "..."}`:
 | 404 | ENC2603 not found, including other tenants' resources |
 | 409 | ENC2604 conflict (state, idempotency key, revoked asset); ENC2201 privacy budget exceeded, or ledger frozen; ENC2717 a revocation head and ENC2718 a checkpoint witness refused; ENC2720 a privacy population or scope allocation refused; ENC2724 a project's placement constraints not changed |
 | 422 | ENC2401 PLANNING FAILED; ENC2402 a plan that does not satisfy its program or the control plane's floor; ENC2727-ENC2730 a governance evidence bundle that is malformed, unverifiable, carries plaintext or is over its limits |
-| 500 | ENC2605 insecure configuration; ENC2202 PRIVACY or AUDIT STATE ROLLBACK (the database no longer extends the state anchor) |
+| 500 | ENC2605 insecure configuration; ENC2202 PRIVACY or AUDIT STATE ROLLBACK (the database no longer extends the state anchor); ENC1701 a database or other internal failure. A database failure's message is generic and names the request (its `X-Request-Id`, or the ID the control plane gave it); the database's own message is in the control plane's log under that ID (event `database_error`) |
 
 ## Idempotency
 

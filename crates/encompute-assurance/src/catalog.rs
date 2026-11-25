@@ -301,6 +301,11 @@ pub const INVARIANTS: &[Invariant] = &[
         (Positive, "test:crates/encompute-keybroker/tests/release.rs::state_round_trips_without_printing_keys"),
         (Negative, "test:crates/encompute-cli/tests/cli.rs::keys_and_audit"),
     ]),
+    inv!("INV-301", "leakage", "An API answer carries no database text. A database failure answers ENC1701 with a generic message that names the request (its X-Request-Id, or the ID the control plane gave it); the database's own message (relation and constraint names, the SQLSTATE) goes to the control plane's log under that ID (event `database_error`), and so does a database failure inside a trust report check, an authorization's `unusable` reason or the reason a governed job is failed with (stored and shown with the job), also when the failing query is wrapped with the source it checked. Every other error keeps its own message.", [
+        (Adversarial, "test:crates/encompute-control/tests/request_hardening.rs::database_errors_are_not_echoed"),
+        (Adversarial, "test:crates/encompute-control/tests/governed_jobs.rs::a_database_failure_at_submission_is_not_echoed"),
+        (Adversarial, "test:crates/encompute-control/tests/governed_jobs.rs::a_job_failed_by_a_database_failure_stores_no_database_text"),
+    ]),
     // Trust graph.
     inv!("INV-100", "trust", "The trust report checks every signature against keys the verifier supplies; evidence without an anchor is never reported as trusted.", [
         (Positive, "test:crates/encompute-runtime/tests/trust.rs::a_whole_collaboration_verifies"),

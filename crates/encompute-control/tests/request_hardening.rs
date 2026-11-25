@@ -134,6 +134,49 @@ fn identity_provider_errors_are_not_echoed() {
     assert!(!e.message.contains("secret-location"), "{e}");
 }
 
+/// A database failure answers 500 ENC1701 with a generic message that names
+/// the request; PostgreSQL's own text (the relation, the SQLSTATE) is for the
+/// control plane's log, never for the caller.
+#[test]
+fn database_errors_are_not_echoed() {
+    let Some(w) = world() else { return };
+    let (s, _) = w.t.call(&w.a_admin, "GET", "/v1/projects", None);
+    assert_eq!(s, 200);
+    // Any other error keeps its own message.
+    let (s, v) = w.t.call(&w.a_admin, "GET", "/v1/projects/prj_absent", None);
+    assert_eq!((s, v["code"].as_str()), (404, Some("ENC2603")), "{v}");
+    assert!(v["message"].as_str().unwrap().contains("prj_absent"), "{v}");
+    w.t.control
+        .db
+        .conn()
+        .unwrap()
+        .batch_execute("ALTER TABLE projects RENAME TO projects_moved")
+        .unwrap();
+    let (s, v) = w.t.call_with(
+        &w.a_admin,
+        "GET",
+        "/v1/projects",
+        None,
+        &[("X-Request-Id", "req-db-error-1")],
+    );
+    assert_eq!((s, v["code"].as_str()), (500, Some("ENC1701")), "{v}");
+    let m = v["message"].as_str().unwrap();
+    for leak in [
+        "projects",
+        "SQLSTATE",
+        "42P01",
+        "relation",
+        "does not exist",
+    ] {
+        assert!(!m.contains(leak), "{leak:?} in {m:?}");
+    }
+    assert!(m.contains("database"), "{m}");
+    assert!(
+        m.contains("req-db-error-1"),
+        "the message names the request: {m}"
+    );
+}
+
 /// Review finding CP-A-7 (ENC-SF-2026-059): a used nonce is kept past the end of the window
 /// in which its request could be accepted (its own time plus the skew),
 /// with a margin; on rc.3 retention ended exactly there for a request
