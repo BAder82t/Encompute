@@ -460,6 +460,11 @@ pub enum Cause {
     /// first (or changed meanwhile): the checkpoint that wanted it can be
     /// recomputed from what the mirror holds now and tried again.
     MirrorConflict,
+    /// A database failure. Its message carries the database's own text
+    /// (relation and constraint names, the SQLSTATE), which is for the
+    /// operator's log: an API answer replaces it with a generic message
+    /// naming the request.
+    Database,
 }
 
 impl Error {
