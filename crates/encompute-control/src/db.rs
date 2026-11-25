@@ -7,7 +7,7 @@ use r2d2_postgres::PostgresConnectionManager;
 use sha2::{Digest, Sha256};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
-use encompute_ir::{Code, Error, Result};
+use encompute_ir::{Cause, Code, Error, Result};
 use encompute_verification::hex;
 
 pub type Pool = r2d2::Pool<PostgresConnectionManager<MakeRustlsConnect>>;
@@ -117,7 +117,14 @@ pub const MIGRATIONS: &[(i32, &str, &str)] = &[
 const MIGRATION_LOCK: i64 = 0x656e_636f_6d70_7574; // "encomput"
 
 /// A database error, with PostgreSQL's message and SQLSTATE when there is one.
+/// It is classified [`Cause::Database`]: the message is for the operator's
+/// log, and an API answer carries a generic one instead
+/// ([`crate::api::client_message`]).
 pub fn db_err<E: std::fmt::Display + 'static>(e: E) -> Error {
+    db_error(e).caused_by(Cause::Database)
+}
+
+fn db_error<E: std::fmt::Display + 'static>(e: E) -> Error {
     let any: &dyn std::any::Any = &e;
     if let Some(pe) = any.downcast_ref::<postgres::Error>() {
         if let Some(d) = pe.as_db_error() {

@@ -41,6 +41,7 @@ use encompute_verification::{
     verify_receipt, EvaluatorIdentity, ExecutionSpec, ExpectedExecution, SignedExecutionReceipt,
 };
 
+use crate::api::client_message;
 use crate::audit::{self, Outcome};
 use crate::authn::PrincipalKind;
 use crate::authz::{
@@ -234,8 +235,9 @@ impl SourceBinding {
                 .get::<_, Option<Value>>(1)
                 .and_then(|k| serde_json::from_value::<KeyRef>(k).ok())
                 .map(|k| k.broker);
-            super::require_own_broker(c, &organization, broker.as_deref())
-                .map_err(|e| Error::new(e.code, format!("source {a}: {}", e.message)))?;
+            super::require_own_broker(c, &organization, broker.as_deref()).map_err(|e| {
+                Error::new(e.code, format!("source {a}: {}", e.message)).caused_by(e.cause)
+            })?;
             out.push(SourceCustody {
                 asset: a.clone(),
                 organization,
@@ -1917,8 +1919,9 @@ impl Control {
             let key = r
                 .get::<_, Option<Value>>(6)
                 .and_then(|k| serde_json::from_value::<KeyRef>(k).ok());
-            super::require_own_broker(t, &owner, key.as_ref().map(|k| k.broker.as_str()))
-                .map_err(|e| Error::new(e.code, format!("source {a}: {}", e.message)))?;
+            super::require_own_broker(t, &owner, key.as_ref().map(|k| k.broker.as_str())).map_err(
+                |e| Error::new(e.code, format!("source {a}: {}", e.message)).caused_by(e.cause),
+            )?;
             let key = key.expect("checked above");
             if g.source_keys.get(&v).is_some_and(|k| *k != key.key_ref) {
                 return Err(gov(
@@ -2169,14 +2172,10 @@ impl Control {
         stage: GovernedStage,
         e: &Error,
     ) -> Result<()> {
-        self.transition_in(
-            t,
-            actor,
-            request_id,
-            &j.id,
-            JobState::Failed,
-            Some(&e.message),
-        )?;
+        // The reason is stored and shown with the job: never a database's
+        // own text (INV-301).
+        let reason = client_message(&self.service_id, request_id, e);
+        self.transition_in(t, actor, request_id, &j.id, JobState::Failed, Some(&reason))?;
         audit::append(
             t,
             audit::AuditDraft::new(
@@ -3475,7 +3474,8 @@ impl Control {
             Ok(d) => checks.push(json!({"check": name, "status": "VERIFIED", "detail": d})),
             Err(e) => {
                 ok = false;
-                checks.push(json!({"check": name, "status": "FAILED", "detail": e.message}));
+                let detail = client_message(&self.service_id, &ctx.request_id, &e);
+                checks.push(json!({"check": name, "status": "FAILED", "detail": detail}));
             }
         };
         let (program, compiled, spec, doc) = self.load_plan(&mut *c, &j.plan)?;
@@ -3651,7 +3651,8 @@ impl Control {
                     "now": current})),
                 Err(e) => {
                     ok = false;
-                    checks.push(json!({"check": "governance", "status": "FAILED", "detail": e.message}));
+                    let detail = client_message(&self.service_id, &ctx.request_id, &e);
+                    checks.push(json!({"check": "governance", "status": "FAILED", "detail": detail}));
                 }
             }
         }

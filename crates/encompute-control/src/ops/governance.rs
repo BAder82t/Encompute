@@ -46,6 +46,7 @@ use encompute_trust::authz::{
 use encompute_verification::governance::{Purpose, ReleaseClass, PURPOSE_VERSION};
 use encompute_verification::service::now;
 
+use crate::api::client_message;
 use crate::audit::{self, Outcome};
 use crate::authn::PrincipalKind;
 use crate::authz::{
@@ -1069,7 +1070,8 @@ impl Control {
                 Ok(()) => v["usable"] = json!(true),
                 Err(e) => {
                     v["usable"] = json!(false);
-                    v["unusable"] = json!({"code": e.code.as_str(), "message": e.message});
+                    v["unusable"] = json!({"code": e.code.as_str(),
+                        "message": client_message(&self.service_id, &ctx.request_id, &e)});
                 }
             }
             Ok(v)

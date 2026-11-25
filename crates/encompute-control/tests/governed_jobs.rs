@@ -1026,6 +1026,89 @@ fn grant_capped_at_not_after() {
     assert_eq!(s, 400);
 }
 
+/// No database text in an answer (INV-301), also when the failing query is
+/// one the custody check makes and wraps with the source it was checking.
+#[test]
+fn a_database_failure_at_submission_is_not_echoed() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let program = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &program));
+    let plan = g.plan(&g.ben_dev, &program);
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .batch_execute("ALTER TABLE key_brokers RENAME TO key_brokers_moved")
+        .unwrap();
+    let (s, j) = g.t.call_with(
+        &g.ben_dev,
+        "POST",
+        "/v1/jobs",
+        Some(g.request(&plan, &[&v.asset], &[BEN])),
+        &[
+            ("Idempotency-Key", "k-db"),
+            ("X-Request-Id", "req-submit-db"),
+        ],
+    );
+    assert_eq!((s, code(&j)), (500, "ENC1701"), "{j}");
+    let m = j["message"].as_str().unwrap();
+    for leak in ["key_brokers", "SQLSTATE", "42P01", "relation"] {
+        assert!(!m.contains(leak), "{leak:?} in {m:?}");
+    }
+    assert!(m.contains("req-submit-db"), "{m}");
+}
+
+/// A governed job that a database failure fails keeps no database text
+/// either: its error and its transition's reason name the request, and the
+/// database's message is only in the control plane's log (INV-301).
+#[test]
+fn a_job_failed_by_a_database_failure_stores_no_database_text() {
+    let Some(g) = world() else { return };
+    let (_, _, _, j) = g.job("2026-q1", |_| {});
+    let job = id(&j);
+    // The stored plan no longer decodes: a database failure that leaves the
+    // transaction usable, so the job is failed with it.
+    g.t.control
+        .db
+        .conn()
+        .unwrap()
+        .execute(
+            "UPDATE plans SET document = '{\"not\": \"a plan\"}'::jsonb
+              WHERE id = (SELECT plan_id FROM jobs WHERE id = $1)",
+            &[&job],
+        )
+        .unwrap();
+    let (s, v) = g.t.call_with(
+        &g.evaluator.service,
+        "POST",
+        &format!("/v1/jobs/{job}/start"),
+        None,
+        &[("X-Request-Id", "req-start-db")],
+    );
+    assert_eq!((s, code(&v)), (500, "ENC1701"), "{v}");
+    let view = g.view(&job);
+    assert_eq!(view["state"], "failed", "{view}");
+    let stored: Vec<String> = std::iter::once(view["error"].as_str().unwrap_or("").to_owned())
+        .chain(
+            view["transitions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["reason"].as_str().unwrap_or("").to_owned()),
+        )
+        .collect();
+    for text in &stored {
+        for leak in ["missing field", "unknown field", "database:", "plan_id"] {
+            assert!(!text.contains(leak), "{leak:?} in {text:?}");
+        }
+    }
+    assert!(
+        view["error"].as_str().unwrap().contains("req-start-db"),
+        "{view}"
+    );
+}
+
 #[test]
 fn start_after_valid_until_fails_and_is_anchored_2705() {
     let Some(g) = world() else { return };
