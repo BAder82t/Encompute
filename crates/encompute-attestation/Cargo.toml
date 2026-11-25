@@ -18,10 +18,10 @@ ed25519-dalek = "2.2"
 getrandom = "0.2"
 zeroize = "1.8"
 hpke = { version = "0.14.1", default-features = false, features = ["x25519", "chacha", "hkdfsha2", "getrandom", "alloc"] }
-jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["rust_crypto"] }
 
 [dev-dependencies]
-jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["rust_crypto", "use_pem"] }
 
 [lints]
 workspace = true

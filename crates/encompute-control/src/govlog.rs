@@ -198,14 +198,17 @@ thread_local! {
 /// a kind added later is not forced into a synchronous checkpoint unless it
 /// is listed. Every transition of a negative set and its re-application
 /// (recovery's too), a row recovery recorded as lost, a project's placement
-/// tightening and an evaluator's location evidence lost are; so is nothing
-/// that grants or merely records (an issued authorization, a member added,
-/// a head signed, a ledger checkpoint, a population or scope allocated, a
-/// declared location, a loosened placement, the migration's events).
+/// tightening, an evaluator's location evidence lost and a job admitted
+/// under job terms (the count of jobs they allow can only be spent once)
+/// are; so is nothing that grants or merely records (an issued
+/// authorization, a member added, a head signed, a ledger checkpoint, a
+/// population or scope allocated, a declared location, a loosened
+/// placement, the migration's events).
 pub fn is_deny(kind: &str, refs: &BTreeMap<String, String>) -> bool {
     NegSet::ALL
         .iter()
         .any(|s| s.transition_kinds().contains(&kind) || s.reapplied_kind() == kind)
+        || kind == kind::TERMS_JOB_ADMITTED
         || kind == extra_kind::ROW_LOST
         || kind == crate::ops::placement::kind::EVALUATOR_LOCATION_CHANGED
         || (kind == crate::ops::placement::PLACEMENT_CHANGED
@@ -662,10 +665,14 @@ pub enum NegSet {
     RetiredPurposes,
     RevokedKeys,
     FrozenLedgers,
+    /// Projects that came to require job terms.
+    TermsRequired,
+    /// Job terms superseded by newer terms of their project.
+    SupersededTerms,
 }
 
 impl NegSet {
-    pub const ALL: [NegSet; 12] = [
+    pub const ALL: [NegSet; 14] = [
         NegSet::RevokedAssets,
         NegSet::DisabledServices,
         NegSet::DisabledUsers,
@@ -678,6 +685,8 @@ impl NegSet {
         NegSet::RetiredPurposes,
         NegSet::RevokedKeys,
         NegSet::FrozenLedgers,
+        NegSet::TermsRequired,
+        NegSet::SupersededTerms,
     ];
 
     /// Its name: the version-1 anchor's field (`migrated.<name>`).
@@ -695,6 +704,8 @@ impl NegSet {
             NegSet::RetiredPurposes => "retired_purposes",
             NegSet::RevokedKeys => "revoked_governance_keys",
             NegSet::FrozenLedgers => "frozen",
+            NegSet::TermsRequired => "terms_required_projects",
+            NegSet::SupersededTerms => "superseded_terms",
         }
     }
 
@@ -713,6 +724,8 @@ impl NegSet {
             NegSet::RetiredPurposes => "PURPOSE",
             NegSet::RevokedKeys => "GOVERNANCE KEY",
             NegSet::FrozenLedgers => "FREEZE",
+            NegSet::TermsRequired => "TERMS REQUIREMENT",
+            NegSet::SupersededTerms => "JOB TERMS",
         }
     }
 
@@ -737,6 +750,8 @@ impl NegSet {
             NegSet::RetiredPurposes => &[kind::PURPOSE_RETIRED],
             NegSet::RevokedKeys => &[kind::GOVERNANCE_KEY_REVOKED],
             NegSet::FrozenLedgers => &[extra_kind::LEDGER_FROZEN],
+            NegSet::TermsRequired => &[kind::PROJECT_TERMS_REQUIRED],
+            NegSet::SupersededTerms => &[kind::TERMS_SUPERSEDED],
         }
     }
 
@@ -907,6 +922,14 @@ pub fn route(
         NegSet::RevokedKeys => one(
             t,
             "SELECT NULL::text, organization_id FROM governance_keys WHERE id = $1",
+        )?,
+        // Project events: a governed project's partition, otherwise the
+        // project owner's.
+        NegSet::TermsRequired => one(t, "SELECT id, organization_id FROM projects WHERE id = $1")?,
+        NegSet::SupersededTerms => one(
+            t,
+            "SELECT x.project_id, p.organization_id FROM job_terms x
+               JOIN projects p ON p.id = x.project_id WHERE x.id = $1",
         )?,
     };
     Ok(match found {
@@ -1446,6 +1469,58 @@ impl Importer {
         self.flush(t)?;
         Ok(self.added)
     }
+}
+
+// --- the counts of job terms ------------------------------------------------------
+
+/// Records that `job` of `project`, submitted by `org`, was admitted under
+/// job terms `terms` as their `seq`th job (in the submission's
+/// transaction; the caller anchors it before acknowledging the job): the
+/// project's partition (a governed project's own, otherwise its owner's).
+pub fn append_terms_admission(
+    t: &mut impl GenericClient,
+    project: &str,
+    org: &str,
+    terms: &str,
+    job: &str,
+    seq: i64,
+) -> Result<Recorded> {
+    let partition = for_project(t, project, None)?;
+    append(
+        t,
+        Draft::new(partition, kind::TERMS_JOB_ADMITTED, job)
+            .org(org)
+            .r#ref("project", project)
+            .r#ref("terms", terms)
+            .r#ref("seq", seq.to_string()),
+    )
+}
+
+/// The sets of job terms whose count of jobs the database holds lower than
+/// the log recorded admitting: (terms ID, the count the log records, the
+/// database's), in order of ID. The log's count of a set of terms is the
+/// number of its latest `terms.job_admitted` event (admissions under one
+/// set of terms are serialized by its row lock until they commit, so their
+/// events follow their numbers): one probe of the partial index per set of
+/// terms the database holds. Terms the database does not hold admit no job
+/// (a job references its terms), so they are not behind.
+pub fn terms_counts_behind(c: &mut impl GenericClient) -> Result<Vec<(String, i64, i64)>> {
+    Ok(c.query(
+        &format!(
+            "SELECT x.id, l.seq, x.jobs_submitted FROM job_terms x
+               CROSS JOIN LATERAL (SELECT (e.body #>> '{{refs,seq}}')::bigint AS seq FROM governance_events e
+                                    WHERE e.kind = '{}' AND e.body #>> '{{refs,terms}}' = x.id
+                                    ORDER BY e.gseq DESC LIMIT 1) l
+              WHERE x.jobs_submitted < l.seq
+              ORDER BY x.id",
+            kind::TERMS_JOB_ADMITTED
+        ),
+        &[],
+    )
+    .map_err(db_err)?
+    .iter()
+    .map(|r| (r.get(0), r.get(1), r.get(2)))
+    .collect())
 }
 
 // --- privacy ledger checkpoints ---------------------------------------------------

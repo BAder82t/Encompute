@@ -237,7 +237,8 @@ pub fn dev_token(secret: &str, subject: &str, ttl_secs: u64) -> Result<String> {
             c: &c,
             aud: DEV_AUDIENCE,
         },
-        &EncodingKey::from_secret(secret.as_bytes()),
+        // (An empty secret is refused.)
+        &EncodingKey::from_secret(secret.as_bytes()).map_err(|e| unauth(format!("token: {e}")))?,
     )
     .map_err(|e| unauth(format!("token: {e}")))
 }
@@ -297,7 +298,11 @@ impl Authenticator {
             }
             let mut v = Validation::new(Algorithm::HS256);
             v.set_audience(&[DEV_AUDIENCE]);
-            (DecodingKey::from_secret(secret.as_bytes()), v)
+            (
+                DecodingKey::from_secret(secret.as_bytes())
+                    .map_err(|e| unauth(format!("token rejected: {e}")))?,
+                v,
+            )
         } else {
             let issuer = self
                 .issuers

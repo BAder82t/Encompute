@@ -86,6 +86,9 @@ pub struct Control {
     pub bundle_slots: std::sync::atomic::AtomicUsize,
     /// Privacy population and scope allocations per caller a minute.
     pub scope_limit: crate::ops::RateLimit,
+    /// Where the scheduler's periodic pass resumes: the (created_at, ID)
+    /// of the last authorized job it tried (`schedule_pending`).
+    pub schedule_cursor: std::sync::Mutex<Option<(std::time::SystemTime, String)>>,
 }
 
 pub fn rollback(what: &str, detail: impl std::fmt::Display) -> Error {
@@ -248,6 +251,7 @@ impl Control {
             bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
             bundle_slots: 0.into(),
             scope_limit: crate::ops::RateLimit::new("privacy scope", crate::ops::SCOPE_RATE),
+            schedule_cursor: std::sync::Mutex::new(None),
         };
         c.ensure_self_registered()?;
         let existed = match opened {
@@ -427,6 +431,7 @@ impl Control {
             bundle_max_events: crate::ops::MAX_BUNDLE_EVENTS.into(),
             bundle_slots: 0.into(),
             scope_limit: crate::ops::RateLimit::new("privacy scope", crate::ops::SCOPE_RATE),
+            schedule_cursor: std::sync::Mutex::new(None),
         })
     }
 
@@ -464,13 +469,15 @@ impl Control {
     }
 
     /// The database must extend the anchor: nothing anchored may be
-    /// missing, and no security-negative transition the governance log
+    /// missing, no security-negative transition the governance log
     /// records (freeze, revocation, disable, cancellation, approval
     /// withdrawal, membership or role removal, authorization revocation,
-    /// asset expiry, purpose retirement, governance-key revocation) may be
-    /// undone. The log itself must verify and contain the anchored head at
-    /// the anchored size, and each partition's latest signed checkpoint
-    /// must still be its root.
+    /// asset expiry, purpose retirement, governance-key revocation, a
+    /// project coming to require job terms, superseded terms) may be
+    /// undone, and no set of job terms may count fewer jobs than the log
+    /// recorded admitting under it. The log itself must verify and contain
+    /// the anchored head at the anchored size, and each partition's latest
+    /// signed checkpoint must still be its root.
     pub fn verify_state(&self, anchor_existed: bool) -> Result<()> {
         let a = self.anchor.snapshot();
         let mut c = self.db.conn()?;
@@ -544,6 +551,19 @@ impl Control {
         if let Some((set, id, shows)) = undone(&mut *c)? {
             return Err(rollback(set.state(), undone_message(set, &id, &shows)));
         }
+        // Job terms count at least the jobs the log recorded admitting
+        // under them: a count the restore lowered would let terms admit
+        // more jobs than they allow.
+        if let Some((terms, logged, held)) =
+            govlog::terms_counts_behind(&mut *c)?.into_iter().next()
+        {
+            return Err(rollback(
+                "JOB TERMS COUNT",
+                format!(
+                    "job terms {terms} admitted {logged} job(s), but the database counts {held}"
+                ),
+            ));
+        }
         // A project's placement tightenings and an evaluator's location
         // evidence are events of the log too.
         if let Some(loss) = crate::ops::placement::placement_losses(&mut *c)?
@@ -589,13 +609,17 @@ impl Control {
     /// records and the database forgot is applied again: revocations,
     /// disables, job cancellations, approval withdrawals, membership and
     /// role removals, authorization revocations, asset expiries, purpose
-    /// retirements and governance-key revocations (a revocation or expiry
-    /// re-applied is recorded at the time of recovery, and its key brokers
-    /// are told again; a retirement or key revocation keeps its original
-    /// time). Each is recorded in the log (`<kind>.reapplied`, or the
-    /// transition's own kind where the usual path re-applies it), rows the
-    /// database lost as `row.lost` (their IDs stay blocked). All of it is
-    /// audited, then the log is checkpointed and the anchor re-signed.
+    /// retirements, governance-key revocations, projects coming to require
+    /// job terms and superseded terms (a revocation or expiry re-applied is
+    /// recorded at the time of recovery, and its key brokers are told
+    /// again; a retirement or key revocation keeps its original time). Job
+    /// terms whose count of jobs the database holds lower than the log
+    /// recorded admitting are counted to that number again (audited as
+    /// `terms.count_restored`). Each re-application is recorded in the log
+    /// (`<kind>.reapplied`, or the transition's own kind where the usual
+    /// path re-applies it), rows the database lost as `row.lost` (their IDs
+    /// stay blocked). All of it is audited, then the log is checkpointed
+    /// and the anchor re-signed.
     pub fn recover_importing(
         &self,
         operator: &str,
@@ -1131,6 +1155,100 @@ impl Control {
                 Ok(())
             })?;
         }
+        // A project that came to require job terms requires them again,
+        // and superseded terms are superseded again. A project left with no
+        // active terms then runs nothing until its members accept terms
+        // again (never the looser ones a restore brought back).
+        for (which, sql, action, rtype, note) in [
+            (
+                NegSet::TermsRequired,
+                "UPDATE projects SET terms_required = true
+                  WHERE id = ANY($1) AND NOT terms_required
+                 RETURNING id, organization_id",
+                "project.terms_required",
+                "project",
+                "its requirement of job terms re-applied",
+            ),
+            (
+                NegSet::SupersededTerms,
+                "UPDATE job_terms x SET status = 'superseded' FROM projects p
+                  WHERE p.id = x.project_id AND x.id = ANY($1) AND x.status <> 'superseded'
+                 RETURNING x.id, p.organization_id",
+                "terms.superseded",
+                "terms",
+                "superseded again",
+            ),
+        ] {
+            let ids = set(which)?;
+            if ids.is_empty() {
+                continue;
+            }
+            self.db.tx(|t| {
+                for r in t.query(sql, &[&ids]).map_err(db_err)? {
+                    let (id, org): (String, String) = (r.get(0), r.get(1));
+                    govlog::append_reapplied(t, which, &id, &[])?;
+                    audit::append(
+                        t,
+                        AuditDraft::new(
+                            operator,
+                            "recovery",
+                            action,
+                            rtype,
+                            &id,
+                            Outcome::Succeeded,
+                        )
+                        .org(&org)
+                        .r#ref("reason", "anchored_terms_reapplied"),
+                    )?;
+                    notes.push(format!("{rtype} {id}: {note}"));
+                }
+                Ok(())
+            })?;
+        }
+        // Job terms whose count the restore lowered count again every job
+        // the log recorded admitting under them: they never admit more
+        // than they allow, and the next job's number follows the last one
+        // admitted (the jobs the restore lost leave a gap).
+        let behind = {
+            let mut c = self.db.conn()?;
+            govlog::terms_counts_behind(&mut *c)?
+        };
+        if !behind.is_empty() {
+            self.db.tx(|t| {
+                for (id, logged, held) in &behind {
+                    let Some(org) = t
+                        .query_opt(
+                            "UPDATE job_terms x SET jobs_submitted = $2 FROM projects p
+                              WHERE p.id = x.project_id AND x.id = $1 AND x.jobs_submitted < $2
+                             RETURNING p.organization_id",
+                            &[id, logged],
+                        )
+                        .map_err(db_err)?
+                    else {
+                        continue;
+                    };
+                    audit::append(
+                        t,
+                        AuditDraft::new(
+                            operator,
+                            "recovery",
+                            "terms.count_restored",
+                            "terms",
+                            id,
+                            Outcome::Succeeded,
+                        )
+                        .org(&org.get::<_, String>(0))
+                        .r#ref("reason", "anchored_count_reapplied")
+                        .r#ref("jobs", logged.to_string())
+                        .r#ref("database_jobs", held.to_string()),
+                    )?;
+                    notes.push(format!(
+                        "terms {id}: count of jobs raised from {held} to {logged}, the jobs the governance log recorded admitting under them"
+                    ));
+                }
+                Ok(())
+            })?;
+        }
         // Rows the database lost are recorded as lost in the log (their
         // IDs stay blocked), and audited.
         let lost = {
@@ -1544,9 +1662,10 @@ impl Control {
         let _ = self.db.tx(|t| audit::append(t, draft.clone()).map(|_| ()));
     }
 
-    /// Periodic work: scheduling, retention (expiring versions past their
-    /// deletion date), message delivery, evaluator health, nonce cleanup,
-    /// audit checkpoints. Runs until the process exits.
+    /// Periodic work: scheduling, settling job terms, retention (expiring
+    /// versions past their deletion date), message delivery, evaluator
+    /// health, nonce cleanup, audit checkpoints. Runs until the process
+    /// exits.
     pub fn run_background(self: &std::sync::Arc<Self>) {
         let me = self.clone();
         std::thread::spawn(move || loop {
@@ -1565,6 +1684,8 @@ impl Control {
             }
         };
         report("health", self.expire_evaluators());
+        // Job terms a removal left complete (its settle failed) take effect.
+        report("terms", self.settle_pending_terms());
         report("schedule", self.schedule_pending());
         report("retention", self.expire_assets().map(|_| ()));
         report("anchor", self.checkpoint_log());
@@ -1749,6 +1870,8 @@ const PRESENT: &[(govlog::NegSet, &str, &str)] = &[
     (govlog::NegSet::ExpiredAssets, "assets", "t.id = s.x"),
     (govlog::NegSet::RetiredPurposes, "purposes", "t.id = s.x"),
     (govlog::NegSet::RevokedKeys, "governance_keys", "t.id = s.x"),
+    (govlog::NegSet::TermsRequired, "projects", "t.id = s.x"),
+    (govlog::NegSet::SupersededTerms, "job_terms", "t.id = s.x"),
 ];
 
 /// The IDs of the negative sets that the database does not hold, and that
@@ -1836,6 +1959,14 @@ const UNDONE: &[(govlog::NegSet, &str)] = &[
         govlog::NegSet::RevokedKeys,
         "SELECT id, status FROM governance_keys WHERE status <> 'revoked' AND id IN (IDS) ORDER BY 1",
     ),
+    (
+        govlog::NegSet::TermsRequired,
+        "SELECT id, 'not requiring them' FROM projects WHERE NOT terms_required AND id IN (IDS) ORDER BY 1",
+    ),
+    (
+        govlog::NegSet::SupersededTerms,
+        "SELECT id, status FROM job_terms WHERE status <> 'superseded' AND id IN (IDS) ORDER BY 1",
+    ),
 ];
 
 /// The first row that shows a negative set's transition undone: (set,
@@ -1885,6 +2016,12 @@ fn undone_message(set: govlog::NegSet, id: &str, shows: &str) -> String {
         }
         N::RevokedKeys => {
             format!("governance key {id} was revoked, but the database shows it {shows}")
+        }
+        N::TermsRequired => {
+            format!("project {id} came to require job terms, but the database shows it {shows}")
+        }
+        N::SupersededTerms => {
+            format!("job terms {id} were superseded, but the database shows them {shows}")
         }
     }
 }

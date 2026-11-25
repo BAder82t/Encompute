@@ -775,9 +775,9 @@ impl Control {
                 }
             }
             t.execute(
-                "INSERT INTO projects (id, organization_id, name, status, governance, custody)
-                 VALUES ($1, $2, $3, 'active', $4, $5)",
-                &[&id, &r.organization, &r.name, &mode.as_str(), &custody.as_str()],
+                "INSERT INTO projects (id, organization_id, name, status, governance, custody, terms_required)
+                 VALUES ($1, $2, $3, 'active', $4, $5, $6)",
+                &[&id, &r.organization, &r.name, &mode.as_str(), &custody.as_str(), &r.terms_required],
             )
             .map_err(|e| {
                 if unique_violation(&e) {
@@ -800,6 +800,19 @@ impl Control {
                 created = created
                     .r#ref("governance", mode.as_str())
                     .r#ref("custody", custody.as_str());
+            }
+            if r.terms_required {
+                created = created.r#ref("terms_required", "true");
+                // It requires job terms from its first moment: a
+                // security-negative transition of the governance log, so a
+                // restore never shows it running jobs without them.
+                govlog::append_routed(
+                    t,
+                    govlog::NegSet::TermsRequired,
+                    govlog::kind::PROJECT_TERMS_REQUIRED,
+                    &id,
+                    &[],
+                )?;
             }
             audit::append(t, created)?;
             // Invitations, as `add_project_member` makes them: an unknown
@@ -840,6 +853,10 @@ impl Control {
             }
             if mode == GovernanceMode::Governed {
                 out["custody"] = json!(custody.as_str());
+            }
+            // It runs nothing until its members accept job terms.
+            if r.terms_required {
+                out["terms_required"] = json!(true);
             }
             Ok(out)
         })
@@ -1228,6 +1245,28 @@ impl Control {
             Ok(json!({"project": project, "member": r.organization, "removed": true, "failed_jobs": failed}))
         })?;
         self.checkpoint_log()?;
+        // Proposed job terms that every remaining member has accepted take
+        // effect now, as on a last acceptance (`terms_activated`). The
+        // removal stands either way: a failure is logged and answered as
+        // `terms_settled: false`, and the control plane's periodic pass
+        // retries it (`Control::settle_pending_terms`).
+        let mut out = out;
+        match self.settle_terms(
+            (ctx.actor(), &ctx.request_id),
+            project,
+            crate::ops::terms::Settled::MemberLeft(&r.organization),
+        ) {
+            Ok(Some(id)) => out["terms_activated"] = json!(id),
+            Ok(None) => {}
+            Err(e) => {
+                crate::log::LogLine::new(&self.service_id, "terms_settle_failed")
+                    .field("project", project)
+                    .field("code", e.code)
+                    .field("error", &e.message)
+                    .emit();
+                out["terms_settled"] = json!(false);
+            }
+        }
         Ok(out)
     }
 }

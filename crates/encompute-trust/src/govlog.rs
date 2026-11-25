@@ -99,6 +99,17 @@ pub mod kind {
     /// An owner's signed revocation head was accepted (not a deny event:
     /// it states what is already in the log).
     pub const REVOCATION_HEAD_SIGNED: &str = "revocation_head.signed";
+    /// A project came to require job terms (created so, or its first terms
+    /// became active): it never runs a job outside terms its members
+    /// accepted again.
+    pub const PROJECT_TERMS_REQUIRED: &str = "project.terms_required";
+    /// Job terms were superseded when newer terms of their project became
+    /// active (active or still proposed): they never govern again.
+    pub const TERMS_SUPERSEDED: &str = "terms.superseded";
+    /// A job was admitted under job terms (`refs.terms`, and `refs.seq`:
+    /// its number under them, the count of jobs they had then): the count
+    /// never goes back below it.
+    pub const TERMS_JOB_ADMITTED: &str = "terms.job_admitted";
 
     /// The transitions an owner's revocation head covers.
     pub const REVOCATIONS: &[&str] = &[
@@ -126,6 +137,9 @@ pub mod kind {
         PURPOSE_RETIRED,
         GOVERNANCE_KEY_REVOKED,
         REVOCATION_HEAD_SIGNED,
+        PROJECT_TERMS_REQUIRED,
+        TERMS_SUPERSEDED,
+        TERMS_JOB_ADMITTED,
     ];
 }
 

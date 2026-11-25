@@ -45,13 +45,13 @@ struct Idp {
 impl Idp {
     fn new(kid: &'static str) -> Self {
         Self {
-            key: p256::SecretKey::random(&mut rand_core::OsRng),
+            key: random_p256(),
             kid,
         }
     }
 
     fn jwk(&self) -> Value {
-        let mut j: Value = serde_json::from_str(&self.key.public_key().to_jwk_string()).unwrap();
+        let mut j: Value = p256_jwk(&self.key);
         j["kid"] = json!(self.kid);
         j["alg"] = json!("ES256");
         j
@@ -163,7 +163,7 @@ fn invalid_authentication_is_refused_over_the_wire() {
         encode(
             &h,
             &json!({"iss": issuer, "sub": "alice", "aud": "encompute", "exp": exp}),
-            &EncodingKey::from_secret(idp.jwk()["x"].as_str().unwrap().as_bytes()),
+            &EncodingKey::from_secret(idp.jwk()["x"].as_str().unwrap().as_bytes()).unwrap(),
         )
         .unwrap()
     };
@@ -1087,4 +1087,26 @@ fn evaluator_runs_only_granted_jobs_once() {
     let g3: JobGrant = serde_json::from_value(v["grant"].clone()).unwrap();
     let (s, v) = run(&orphan, &pid, Some(g3.to_header()));
     assert_eq!((s, v["code"].as_str()), (503, Some("ENC2606")), "{v}");
+}
+
+/// A random P-256 key from the operating system's randomness.
+fn random_p256() -> p256::SecretKey {
+    use rand_core::RngCore;
+    loop {
+        let mut b = [0u8; 32];
+        rand_core::OsRng.fill_bytes(&mut b);
+        if let Ok(k) = p256::SecretKey::from_slice(&b) {
+            return k;
+        }
+    }
+}
+
+/// The public JWK of a P-256 key (`kty`, `crv`, `x`, `y`).
+#[allow(dead_code)]
+fn p256_jwk(key: &p256::SecretKey) -> Value {
+    use base64::Engine;
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    let p = key.public_key().to_sec1_point(false);
+    let b = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+    json!({"kty": "EC", "crv": "P-256", "x": b(p.x().unwrap()), "y": b(p.y().unwrap())})
 }

@@ -21,7 +21,7 @@ fn hs256(claims: Value) -> String {
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(SECRET.as_bytes()),
+        &EncodingKey::from_secret(SECRET.as_bytes()).unwrap(),
     )
     .unwrap()
 }
@@ -111,7 +111,7 @@ fn identity_provider_errors_are_not_echoed() {
     let tok = {
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
         use p256::pkcs8::EncodePrivateKey;
-        let k = p256::SecretKey::random(&mut rand_core::OsRng);
+        let k = random_p256();
         let pem = k.to_pkcs8_pem(p256::pkcs8::LineEnding::LF).unwrap();
         let mut h = Header::new(Algorithm::ES256);
         h.kid = Some("k1".into());
@@ -341,4 +341,26 @@ fn governance_codes_have_their_own_statuses() {
     ] {
         assert_eq!(status_of(code), status, "{code}");
     }
+}
+
+/// A random P-256 key from the operating system's randomness.
+fn random_p256() -> p256::SecretKey {
+    use rand_core::RngCore;
+    loop {
+        let mut b = [0u8; 32];
+        rand_core::OsRng.fill_bytes(&mut b);
+        if let Ok(k) = p256::SecretKey::from_slice(&b) {
+            return k;
+        }
+    }
+}
+
+/// The public JWK of a P-256 key (`kty`, `crv`, `x`, `y`).
+#[allow(dead_code)]
+fn p256_jwk(key: &p256::SecretKey) -> Value {
+    use base64::Engine;
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    let p = key.public_key().to_sec1_point(false);
+    let b = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+    json!({"kty": "EC", "crv": "P-256", "x": b(p.x().unwrap()), "y": b(p.y().unwrap())})
 }

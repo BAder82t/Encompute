@@ -23,6 +23,9 @@
 //! | POST | `/v1/projects/{id}/members` | owners invite, the invited organization accepts |
 //! | POST | `/v1/projects/{id}/members/remove`, `/v1/projects/{id}/policies` | |
 //! | POST | `/v1/policies/{id}/approve` | |
+//! | POST, GET | `/v1/projects/{id}/terms` | job terms: a member's organization admin proposes; members and auditor organizations list them |
+//! | POST | `/v1/terms/{id}/accept` | every member's organization admin accepts; then they govern the project's jobs |
+//! | GET | `/v1/terms/{id}/jobs?after=&limit=` | the jobs submitted under them, by their number under them (pages of at most 1000), for the organizations that accepted them |
 //! | POST, GET | `/v1/assets` | |
 //! | GET | `/v1/assets/{id}`, `/v1/assets/{id}/lineage` | |
 //! | POST | `/v1/assets/{id}/approvals`, `/v1/assets/{id}/approvals/withdraw`, `/v1/assets/{id}/revoke` | |
@@ -502,6 +505,27 @@ fn route(control: &Control, ctx: &Ctx, r: &Request, path: &str) -> Result<(u16, 
             created(control.propose_policy(ctx, id, parse(&r.body)?)?)
         }
         ("POST", ["v1", "policies", id, "approve"]) => ok(control.approve_policy(ctx, id)?),
+        ("POST", ["v1", "projects", id, "terms"]) => {
+            created(control.propose_terms(ctx, id, parse(&r.body)?)?)
+        }
+        ("GET", ["v1", "projects", id, "terms"]) => ok(control.list_terms(ctx, id)?),
+        ("POST", ["v1", "terms", id, "accept"]) => ok(control.accept_terms(ctx, id)?),
+        ("GET", ["v1", "terms", id, "jobs"]) => {
+            let q = query(&r.url);
+            // A pager that sends a bad cursor is told so, not handed the
+            // first page again.
+            let num = |k: &str, default: i64, range: std::ops::RangeInclusive<i64>| {
+                q.get(k).map_or(Ok(default), |v| {
+                    v.parse::<i64>()
+                        .ok()
+                        .filter(|n| range.contains(n))
+                        .ok_or_else(|| bad(format!("{k} must be a number in {range:?}")))
+                })
+            };
+            let after = num("after", 0, 0..=i64::MAX)?;
+            let limit = num("limit", 1000, 1..=1000)?;
+            ok(control.terms_jobs(ctx, id, after, limit)?)
+        }
 
         ("POST", ["v1", "assets"]) => created(control.register_asset(ctx, parse(&r.body)?)?),
         ("GET", ["v1", "assets"]) => ok(control.list_assets(ctx)?),
@@ -758,6 +782,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/organizations/{}/key-brokers"),
     ("POST", "/v1/projects/{}/policies"),
     ("POST", "/v1/policies/{}/approve"),
+    ("POST", "/v1/projects/{}/terms"),
+    ("GET", "/v1/projects/{}/terms"),
+    ("POST", "/v1/terms/{}/accept"),
+    ("GET", "/v1/terms/{}/jobs"),
     ("POST", "/v1/assets"),
     ("GET", "/v1/assets"),
     ("GET", "/v1/assets/{}"),

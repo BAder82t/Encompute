@@ -261,7 +261,7 @@ pub fn shared_approval(
 /// the project's own records. Anything else (broker names and key
 /// references, message IDs, principals, roles granted) stays with the
 /// organization that wrote it.
-const SHARED_AUDIT_REFS: [&str; 26] = [
+const SHARED_AUDIT_REFS: [&str; 27] = [
     "approval",
     "asset",
     "asset_version",
@@ -288,7 +288,19 @@ const SHARED_AUDIT_REFS: [&str; 26] = [
     "spec",
     "stage",
     "state",
+    "terms",
 ];
+
+/// And for job terms' own events (`terms.*`): which document (its digest
+/// and reference) and which terms replaced which. Every member and auditor
+/// organization reads the terms themselves (`GET /v1/projects/{id}/terms`);
+/// elsewhere a digest can be an asset's and stays unshared.
+const SHARED_TERMS_REFS: [&str; 4] = ["by", "digest", "reference", "superseded"];
+
+fn shared_ref(action: &str, key: &str) -> bool {
+    SHARED_AUDIT_REFS.contains(&key)
+        || (action.starts_with("terms.") && SHARED_TERMS_REFS.contains(&key))
+}
 
 /// An audit event of the project as every participant sees it: no request
 /// ID or chain hashes, actors labelled, only the shared references.
@@ -300,7 +312,7 @@ pub fn shared_audit_event(
     let refs: BTreeMap<&String, &String> = e
         .refs
         .iter()
-        .filter(|(k, _)| SHARED_AUDIT_REFS.contains(&k.as_str()))
+        .filter(|(k, _)| shared_ref(&e.action, k))
         .collect();
     Ok(json!({
         "seq": e.seq, "at_us": e.at_us, "organization": e.organization,
@@ -313,6 +325,17 @@ pub fn shared_audit_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terms_references_are_shared_only_for_terms_events() {
+        for k in ["digest", "reference", "by", "superseded"] {
+            assert!(shared_ref("terms.proposed", k), "{k}");
+            assert!(!shared_ref("asset.registered", k), "{k}");
+            assert!(!shared_ref("project.placement_set", k), "{k}");
+        }
+        assert!(shared_ref("job.created", "terms"));
+        assert!(!shared_ref("terms.proposed", "message_id"));
+    }
 
     #[test]
     fn every_row_is_in_the_table_once() {

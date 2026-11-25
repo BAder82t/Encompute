@@ -145,7 +145,7 @@ See [public-sector.md](public-sector.md).
 |---|---|---|
 | Linux x86_64 (Ubuntu 24.04) | **Supported** | CI: every job, including OpenFHE, the control plane and the enterprise golden path. |
 | Linux x86_64 containers (Debian bookworm) | **Supported** | `Dockerfile.control`, `Dockerfile.evaluator`, `Dockerfile.services`; the two-machine demo and the Compose smoke test. |
-| macOS arm64 (Apple Silicon, macOS 14 or later) | **Supported** | CI: the OpenFHE job (`macos-14`). All published benchmarks were measured here. Needs `brew install libomp`. |
+| macOS arm64 (Apple Silicon, macOS 14 or later) | **Supported** | CI: the OpenFHE job (`macos-15`; GitHub no longer runs its `macos-14` image). All published benchmarks were measured here. Needs `brew install libomp`. |
 | Linux arm64 | **Experimental** | The Confidential Space training image was built and run on Linux arm64 locally. Not in CI. |
 | macOS x86_64 | **Unsupported** | Not tested. |
 | Windows | **Unsupported** | Not built or tested. Use Linux containers or WSL at your own risk. |

@@ -6467,3 +6467,249 @@ fn a_dataset_version_stays_what_it_was_through_a_governed_job() {
         "d".repeat(64)
     );
 }
+
+// --- job terms -----------------------------------------------------------------------
+
+/// Job terms govern a governed project's jobs too, on top of every
+/// governance check: a job its owners authorized but outside the terms is
+/// refused (and audited), one within them is bound to them, placed only on
+/// an evaluator they name with a grant that expires before their end, and
+/// every job submitted under them counts.
+#[test]
+fn job_terms_govern_governed_jobs_too() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    let key = g.evaluator.receipt.identity().public_key_hex();
+    let terms = |spec: String, end: u64| {
+        json!({"specs": [spec], "purposes": [PURPOSE], "submitters": [BEN],
+               "evaluator_keys": [key], "max_jobs": 1,
+               "not_before": now() - 10, "not_after": end, "reference": "encagr1:governed"})
+    };
+    // Tax's admin proposes; the admins of benefits and other-co accept.
+    let agree = |doc: Value| -> String {
+        let t = g.t.ok(
+            &g.tax_admin,
+            "POST",
+            &format!("/v1/projects/{}/terms", g.project),
+            Some(doc),
+        );
+        let tid = id(&t);
+        let mut last = Value::Null;
+        for admin in ["b-admin", "o-admin"] {
+            last = g.t.ok(
+                &As::User(admin.into()),
+                "POST",
+                &format!("/v1/terms/{tid}/accept"),
+                None,
+            );
+        }
+        assert_eq!(last["status"], "active", "{last}");
+        tid
+    };
+    let request = g.request(&plan, &[&v.asset], &[BEN]);
+    // Terms naming another spec: the authorized job is refused.
+    let first = agree(terms("e".repeat(64), now() + 600));
+    let (s, j) = g.submit(&g.ben_dev, request.clone(), "outside");
+    assert_eq!(s, 403, "{j}");
+    assert!(
+        j["message"]
+            .as_str()
+            .unwrap()
+            .contains("outside the project's job terms"),
+        "{j}"
+    );
+    let reasons: Vec<String> =
+        g.t.control
+            .db
+            .conn()
+            .unwrap()
+            .query(
+                "SELECT refs->>'reason' FROM audit_events WHERE action = 'job.denied'",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+    assert!(reasons.contains(&"terms_spec".to_owned()), "{reasons:?}");
+    // Terms naming the plan's spec, for one job, ending in ten minutes.
+    let end = now() + 600;
+    let tid = agree(terms(base_spec(&p).id().hex(), end));
+    // The first terms are superseded: an event of the project's own
+    // partition of the governance log, anchored.
+    assert!(anchored(&g.t, NegSet::SupersededTerms, &first));
+    let partition: String = g
+        .t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT partition FROM governance_events WHERE kind = 'terms.superseded' AND subject_id = $1",
+            &[&first],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(partition, format!("p:{}", g.project));
+    let (s, j) = g.submit(&g.ben_dev, request.clone(), "inside");
+    assert_eq!(s, 201, "{j}");
+    let job = id(&j);
+    let view = g.view(&job);
+    assert_eq!(view["state"], "queued", "{view}");
+    assert_eq!(view["terms"], json!(tid));
+    let grant = g.grant(&job);
+    assert_eq!(grant.evaluator, g.evaluator.id);
+    assert_eq!(grant.expires_at, end - 1);
+    assert!(grant.governance.unwrap().not_after > grant.expires_at);
+    // The terms allow one job.
+    let (s, j) = g.submit(&g.ben_dev, request, "second");
+    assert_eq!(s, 403, "{j}");
+    assert!(
+        j["message"].as_str().unwrap().contains("allow 1 job(s)"),
+        "{j}"
+    );
+    // Every organization that accepted them sees the job under them.
+    let jobs =
+        g.t.ok(&g.tax_admin, "GET", &format!("/v1/terms/{tid}/jobs"), None);
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
+    assert_eq!(jobs[0]["id"], json!(job));
+    assert_eq!(jobs[0]["organization"], BEN);
+    assert_eq!(jobs[0]["seq"], 1);
+    // The project's shared audit view says which terms were proposed
+    // (their digest and reference), which replaced which, and which terms
+    // each job was admitted under.
+    let events = g.t.ok(
+        &g.tax_admin,
+        "GET",
+        &format!("/v1/audit?project={}&limit=1000", g.project),
+        None,
+    );
+    let find = |action: &str, rid: &str| -> Value {
+        events
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["action"] == action && e["resource_id"] == rid)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {action} for {rid}: {events}"))
+    };
+    let proposed = find("terms.proposed", &tid);
+    assert_eq!(
+        proposed["refs"]["reference"], "encagr1:governed",
+        "{proposed}"
+    );
+    assert!(
+        proposed["refs"]["digest"]
+            .as_str()
+            .is_some_and(|d| d.len() == 64),
+        "{proposed}"
+    );
+    assert_eq!(
+        find("terms.activated", &tid)["refs"]["superseded"],
+        json!(first)
+    );
+    assert_eq!(find("job.created", &job)["refs"]["terms"], json!(tid));
+}
+
+/// A governed job under job terms, queued on an evaluator that registers
+/// again with a receipt key the terms do not name, goes back to the
+/// scheduler and is placed again on another evaluator they name (its
+/// placement admitting it), which starts it.
+#[test]
+fn a_governed_job_under_terms_moves_to_a_named_evaluator_when_its_evaluator_changes_key() {
+    let Some(g) = world() else { return };
+    let v = g.version("2026-q1", json!({}));
+    let p = program(&[&v.asset], PURPOSE, BEN);
+    g.authorize(g.body(&v, &p));
+    let plan = g.plan(&g.ben_dev, &p);
+    let profiles = ["BINFHE_STD128_GINX_BITS_V1", "OPENFHE_CKKS_HE_STD128_V1"];
+    let second = common::evaluator(
+        &g.t,
+        &As::User("platform-admin".into()),
+        "evaluator-2",
+        &["openfhe", "openfhe-exact"],
+        &profiles,
+        4,
+    );
+    let keys = [
+        g.evaluator.receipt.identity().public_key_hex(),
+        second.receipt.identity().public_key_hex(),
+    ];
+    let t = g.t.ok(
+        &g.tax_admin,
+        "POST",
+        &format!("/v1/projects/{}/terms", g.project),
+        Some(
+            json!({"specs": [base_spec(&p).id().hex()], "purposes": [PURPOSE], "submitters": [BEN],
+                    "evaluator_keys": keys, "max_jobs": 2,
+                    "not_before": now() - 10, "not_after": now() + 600}),
+        ),
+    );
+    let tid = id(&t);
+    for admin in ["b-admin", "o-admin"] {
+        g.t.ok(
+            &As::User(admin.into()),
+            "POST",
+            &format!("/v1/terms/{tid}/accept"),
+            None,
+        );
+    }
+    let (s, j) = g.submit(
+        &g.ben_dev,
+        g.request(&plan, &[&v.asset], &[BEN]),
+        "requeued",
+    );
+    assert_eq!(s, 201, "{j}");
+    let job = id(&j);
+    // Both evaluators are named; the tie goes to the lower ID.
+    let view = g.view(&job);
+    assert_eq!(view["state"], "queued", "{view}");
+    assert_eq!(view["evaluator"], g.evaluator.id, "{view}");
+    // evaluator-1 registers again with a key the terms do not name.
+    let other = encompute_verification::EvaluatorSigner::from_seed(&[93; 32]);
+    g.t.ok(
+        &g.evaluator.service,
+        "POST",
+        "/v1/evaluators",
+        Some(
+            json!({"id": g.evaluator.id, "url": "http://evaluator-1.internal:8750",
+                    "receipt_key": other.identity().public_key_hex(),
+                    "backends": ["openfhe", "openfhe-exact"], "profiles": profiles,
+                    "openfhe_version": "1.5.1", "capacity": 4}),
+        ),
+    );
+    let view = g.view(&job);
+    assert_eq!(view["state"], "queued", "{view}");
+    assert_eq!(view["evaluator"], "evaluator-2", "{view}");
+    assert_eq!(view["terms"], json!(tid));
+    let grant = g.grant(&job);
+    assert_eq!(grant.evaluator, "evaluator-2");
+    assert!(grant.governance.is_some());
+    let requeued: i64 = g
+        .t
+        .control
+        .db
+        .conn()
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM audit_events WHERE action = 'job.requeued' AND resource_id = $1
+                AND refs->>'reason' = 'receipt_key_not_in_terms'",
+            &[&job],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(requeued, 1);
+    // Not evaluator-1's any more; evaluator-2 starts it.
+    assert_eq!(g.start(&job).0, 404);
+    let (s, v) = g.t.call(
+        &second.service,
+        "POST",
+        &format!("/v1/jobs/{job}/start"),
+        None,
+    );
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(g.view(&job)["state"], "running");
+}

@@ -284,6 +284,22 @@ impl Control {
                 )?,
             ),
             (NegSet::FrozenLedgers, v1.frozen.clone()),
+            (
+                NegSet::TermsRequired,
+                ids(
+                    c,
+                    "SELECT id FROM projects WHERE terms_required",
+                    &BTreeSet::new(),
+                )?,
+            ),
+            (
+                NegSet::SupersededTerms,
+                ids(
+                    c,
+                    "SELECT id FROM job_terms WHERE status = 'superseded'",
+                    &BTreeSet::new(),
+                )?,
+            ),
         ])
     }
 

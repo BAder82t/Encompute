@@ -384,6 +384,8 @@ struct JobRow {
     purpose_id: Option<String>,
     governance: Option<JobGovernance>,
     started_at: Option<u64>,
+    /// The job terms it was admitted under.
+    terms: Option<String>,
 }
 
 fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<JobRow>> {
@@ -391,7 +393,7 @@ fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<Jo
         "SELECT id, organization_id, project_id, plan_id, spec_id, program_id, purpose, source_assets,
                 requested_output, scheme, backend, profile, state, evaluator_id, job_grant, receipt,
                 evidence, error, initiated_by, created_at, estimated_gates, estimated_ms,
-                purpose_id, governance, floor(extract(epoch FROM started_at))::bigint
+                purpose_id, governance, floor(extract(epoch FROM started_at))::bigint, terms_id
            FROM jobs WHERE id = $1 {}",
         if lock { "FOR UPDATE" } else { "" }
     );
@@ -430,6 +432,7 @@ fn job_row(c: &mut impl GenericClient, id: &str, lock: bool) -> Result<Option<Jo
             .transpose()
             .map_err(|e| db_err(format!("stored job governance: {e}")))?,
         started_at: r.get::<_, Option<i64>>(24).map(|v| v.max(0) as u64),
+        terms: r.get(25),
     }))
 }
 
@@ -894,7 +897,13 @@ impl Control {
         digest: &str,
     ) -> Result<(Value, bool)> {
         let denied: Denied = RefCell::new(None);
+        // A retry of a submission admitted under job terms: its admission
+        // may have committed without being anchored (the anchor store
+        // failed after the commit), so it is anchored before it is
+        // acknowledged again.
+        let under_terms = std::cell::Cell::new(false);
         let out = self.tx_anchored(|t| {
+            under_terms.set(false);
             let project = project_visible(t, &ctx.principal, &r.project)?;
             deny_auditor(&ctx.principal, &project)?;
             let orgs = project_role_orgs(&ctx.principal, &project, &[Role::MlDeveloper]);
@@ -910,7 +919,7 @@ impl Control {
             }
             if let Some(row) = t
                 .query_opt(
-                    "SELECT id, request_digest FROM jobs WHERE organization_id = $1 AND idempotency_key = $2",
+                    "SELECT id, request_digest, terms_id IS NOT NULL FROM jobs WHERE organization_id = $1 AND idempotency_key = $2",
                     &[&org, &key],
                 )
                 .map_err(db_err)?
@@ -919,6 +928,7 @@ impl Control {
                 if d != digest {
                     return Err(conflict("this Idempotency-Key was used for a different request"));
                 }
+                under_terms.set(row.get(2));
                 return Ok((json!({"id": id}), false));
             }
             let plan = t
@@ -1030,12 +1040,23 @@ impl Control {
                     }
                 }
             }
+            // The project's job terms, last before the job exists: the
+            // project row, then its active terms (locked, so jobs under them
+            // are counted one at a time).
+            let spec_id: String = plan.get(0);
+            let terms_id = match super::terms::admit(t, &r.project, &org, &[&spec_id], &r.purpose, &sources, now())? {
+                Ok(terms) => terms,
+                Err((rtype, rid, why, e)) => {
+                    *denied.borrow_mut() = Some((rtype, rid, org.clone(), why));
+                    return Err(e);
+                }
+            };
             let id = new_id("job");
             t.execute(
                 "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, policy_id, purpose,
                      source_assets, requested_output, scheme, backend, profile, state, initiated_by,
-                     idempotency_key, request_digest, estimated_gates)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17)",
+                     idempotency_key, request_digest, estimated_gates, terms_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17, $18)",
                 &[
                     &id,
                     &org,
@@ -1054,6 +1075,7 @@ impl Control {
                     &key,
                     &digest,
                     &(doc.estimated_gates.min(i64::MAX as u64) as i64),
+                    &terms_id,
                 ],
             )
             .map_err(|e| {
@@ -1072,16 +1094,19 @@ impl Control {
                 JobState::WaitingForApproval
             };
             self.transition_in(t, a, &ctx.request_id, &id, next, None)?;
-            audit::append(
-                t,
-                ctx.draft("job.created", "job", &id, Outcome::Succeeded)
-                    .org(&org)
-                    .project(&r.project)
-                    .r#ref("plan", r.plan.clone())
-                    .r#ref("plan_id", doc.plan_id.clone())
-                    .r#ref("spec", plan.get::<_, String>(0))
-                    .r#ref("state", next.as_str()),
-            )?;
+            let mut created = ctx
+                .draft("job.created", "job", &id, Outcome::Succeeded)
+                .org(&org)
+                .project(&r.project)
+                .r#ref("plan", r.plan.clone())
+                .r#ref("plan_id", doc.plan_id.clone())
+                .r#ref("spec", spec_id)
+                .r#ref("state", next.as_str());
+            if let Some(terms) = &terms_id {
+                created = created.r#ref("terms", terms.clone());
+                super::terms::record_admission(t, &r.project, &org, terms, &id)?;
+            }
+            audit::append(t, created)?;
             Ok((json!({"id": id}), true))
         });
         if let (Err(_), Some((rtype, rid, org, why))) = (&out, denied.into_inner()) {
@@ -1092,6 +1117,9 @@ impl Control {
                     .project(&r.project)
                     .r#ref("reason", why),
             );
+        }
+        if matches!(out, Ok((_, false))) && under_terms.get() {
+            self.checkpoint_log()?;
         }
         out
     }
@@ -1580,6 +1608,9 @@ impl Control {
                 super::placement::placement_refused(&admitted),
             ));
         }
+        // The plan's spec ID (before the binding): what the members see of
+        // a plan, so job terms may name it.
+        let plan_spec_id = spec.id().hex();
         let spec = spec.governed(&binding);
         let spec_id = spec.id().hex();
         // An authorization pinned to execution specs covers only those.
@@ -1623,12 +1654,28 @@ impl Control {
             authorizations,
             source_keys,
         };
+        // The project's job terms, after every check above and last before
+        // the job exists: the project row, then its active terms (locked,
+        // so jobs under them are counted one at a time). They may name the
+        // plan's spec or the job's spec under its binding.
+        let terms_id = match super::terms::admit(
+            t,
+            &r.project,
+            org,
+            &[&plan_spec_id, &spec_id],
+            &r.purpose,
+            &sources,
+            at,
+        )? {
+            Ok(terms) => terms,
+            Err((rtype, rid, why, e)) => return Err(deny(rtype, &rid, why, e)),
+        };
         let id = new_id("job");
         t.execute(
             "INSERT INTO jobs (id, organization_id, project_id, plan_id, spec_id, program_id, policy_id, purpose,
                  source_assets, requested_output, scheme, backend, profile, state, initiated_by,
-                 idempotency_key, request_digest, estimated_gates, purpose_id, governance)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17, $18, $19)",
+                 idempotency_key, request_digest, estimated_gates, purpose_id, governance, terms_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'created', $14, $15, $16, $17, $18, $19, $20)",
             &[
                 &id,
                 &org,
@@ -1649,6 +1696,7 @@ impl Control {
                 &(s.doc.estimated_gates.min(i64::MAX as u64) as i64),
                 purpose_id,
                 &serde_json::to_value(&governance).expect("serializable"),
+                &terms_id,
             ],
         )
         .map_err(|e| {
@@ -1677,19 +1725,22 @@ impl Control {
         for to in [JobState::Planning, JobState::Planned, next] {
             self.transition_in(t, actor, &ctx.request_id, &id, to, None)?;
         }
-        audit::append(
-            t,
-            ctx.draft("job.created", "job", &id, Outcome::Succeeded)
-                .org(org)
-                .project(&r.project)
-                .r#ref("plan", r.plan.clone())
-                .r#ref("plan_id", s.doc.plan_id.clone())
-                .r#ref("spec", spec_id)
-                .r#ref("purpose", purpose_id.clone())
-                .r#ref("governance", governance.governance_id.clone())
-                .r#ref("authorization_set", governance.authorization_set_id.clone())
-                .r#ref("state", next.as_str()),
-        )?;
+        let mut created = ctx
+            .draft("job.created", "job", &id, Outcome::Succeeded)
+            .org(org)
+            .project(&r.project)
+            .r#ref("plan", r.plan.clone())
+            .r#ref("plan_id", s.doc.plan_id.clone())
+            .r#ref("spec", spec_id)
+            .r#ref("purpose", purpose_id.clone())
+            .r#ref("governance", governance.governance_id.clone())
+            .r#ref("authorization_set", governance.authorization_set_id.clone())
+            .r#ref("state", next.as_str());
+        if let Some(terms) = &terms_id {
+            created = created.r#ref("terms", terms.clone());
+            super::terms::record_admission(t, &r.project, org, terms, &id)?;
+        }
+        audit::append(t, created)?;
         Ok((json!({"id": id}), true))
     }
 
@@ -2271,6 +2322,7 @@ impl Control {
             governance_id: j.governance.map(|g| g.governance_id),
             placement,
             placement_waiting,
+            terms: j.terms,
         };
         Ok(serde_json::to_value(v).expect("serializable"))
     }
@@ -2649,21 +2701,64 @@ impl Control {
 
     // --- scheduling ---------------------------------------------------------------
 
-    /// Places authorized jobs on compatible, ready evaluators.
+    /// Places authorized jobs on compatible, ready evaluators: up to 100 a
+    /// pass, in order of submission (`created_at`, then ID), starting after
+    /// the last job the previous pass tried and wrapping round to the
+    /// oldest at the end ([`Control::schedule_cursor`], kept in memory: a
+    /// restart starts with the oldest). Jobs that cannot be placed (no
+    /// evaluator has their backend or profile, or a governed job's
+    /// placement admits none) never keep a newer job waiting: with `n`
+    /// authorized jobs, every one is tried within `ceil(n / 100)` passes.
+    ///
+    /// A job under job terms is taken only while a ready evaluator that
+    /// could run it, with room for it, has a receipt key they name, or once
+    /// they have ended (it then fails): jobs waiting for an evaluator that
+    /// is away or full never fill the batch ahead of jobs that can run.
     pub fn schedule_pending(&self) -> Result<()> {
-        let ids: Vec<String> = self
+        let cursor = || {
+            self.schedule_cursor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        };
+        let (after_at, after_id) = cursor().clone().unzip();
+        let jobs: Vec<(String, std::time::SystemTime)> = self
             .db
             .conn()?
             .query(
-                "SELECT id FROM jobs WHERE state = 'authorized' ORDER BY created_at LIMIT 100",
-                &[],
+                "SELECT j.id, j.created_at FROM jobs j LEFT JOIN job_terms x ON x.id = j.terms_id
+                  WHERE j.state = 'authorized'
+                    AND (j.terms_id IS NULL
+                         OR (x.document->>'not_after')::bigint <= $1
+                         OR EXISTS (
+                             SELECT 1 FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
+                              WHERE e.status = 'ready' AND s.status = 'active'
+                                AND (j.governance IS NOT NULL OR s.organization_id IS NULL)
+                                AND e.backends ? j.backend AND e.profiles ? j.profile
+                                AND e.last_heartbeat > now() - make_interval(secs => $2)
+                                AND x.document->'evaluator_keys' ? lower(e.receipt_key)
+                                AND (SELECT count(*) FROM jobs y WHERE y.evaluator_id = e.id
+                                        AND y.state IN ('queued', 'running', 'verifying')) < e.capacity))
+                  -- After the cursor first, then from the oldest again.
+                  ORDER BY ($3::timestamptz IS NOT NULL AND (j.created_at, j.id) <= ($3::timestamptz, $4::text)),
+                           j.created_at, j.id
+                  LIMIT 100",
+                &[
+                    &(now().min(i64::MAX as u64) as i64),
+                    &(HEARTBEAT_TIMEOUT_SECS as f64),
+                    &after_at,
+                    &after_id,
+                ],
             )
             .map_err(db_err)?
             .iter()
-            .map(|r| r.get(0))
+            .map(|r| (r.get(0), r.get(1)))
             .collect();
-        for id in ids {
-            self.schedule_job(&id)?;
+        for (id, at) in jobs {
+            let placed = self.schedule_job(&id);
+            // Past this job whatever came of it: one that fails to schedule
+            // does not hold the next pass up either.
+            *cursor() = Some((at, id));
+            placed?;
         }
         Ok(())
     }
@@ -2698,11 +2793,41 @@ impl Control {
     /// count (ENC2707: an approver disabled, homed elsewhere or without the
     /// role now) is not failed but waits for approval again; once
     /// scheduled, start refuses and fails it instead.
+    ///
+    /// A job admitted under job terms (either kind of project) is placed
+    /// only on an evaluator whose receipt key the terms name, on top of
+    /// everything above, with a grant that expires before the terms end;
+    /// once they have ended it fails (anchored as ended).
     pub fn schedule_job(&self, id: &str) -> Result<bool> {
         let (placed, ended) = self.tx_anchored(|t| {
             let Some(j) = job_row(t, id, true)? else { return Ok((false, false)) };
             if j.state != JobState::Authorized {
                 return Ok((false, false));
+            }
+            // A job admitted under job terms runs only on an evaluator they
+            // name, and only before they end: one still unscheduled at the
+            // end fails (anchored as ended).
+            let terms = match &j.terms {
+                Some(tid) => Some(super::terms::document(t, tid)?),
+                None => None,
+            };
+            if terms.as_ref().is_some_and(|d| now() >= d.not_after) {
+                self.transition_in(
+                    t,
+                    &self.service_id,
+                    "scheduler",
+                    id,
+                    JobState::Failed,
+                    Some("its job terms ended before it was scheduled"),
+                )?;
+                audit::append(
+                    t,
+                    audit::AuditDraft::new(&self.service_id, "scheduler", "job.failed", "job", id, Outcome::Failed)
+                        .org(&j.organization)
+                        .project(&j.project)
+                        .r#ref("reason", "terms_ended"),
+                )?;
+                return Ok((false, true));
             }
             let governed = match &j.governance {
                 None => None,
@@ -2752,7 +2877,7 @@ impl Control {
                             (SELECT count(*) FROM jobs x WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running', 'verifying')),
                             (SELECT COALESCE(sum(GREATEST(x.estimated_gates, 1)), 0)::bigint FROM jobs x
                               WHERE x.evaluator_id = e.id AND x.state IN ('queued', 'running')),
-                            e.logical_cores, e.max_parallel_gates
+                            e.logical_cores, e.max_parallel_gates, e.receipt_key
                        FROM evaluators e JOIN service_accounts s ON s.id = e.service_account
                       WHERE e.status = 'ready' AND s.status = 'active'
                         -- An operator's own evaluator runs only the governed
@@ -2771,6 +2896,13 @@ impl Control {
                     admitted
                         .as_ref()
                         .is_none_or(|a| a.iter().any(|x| x.id == r.get::<_, String>(0)))
+                })
+                // Under job terms: only an evaluator whose registered
+                // receipt key they name.
+                .filter(|r| {
+                    terms
+                        .as_ref()
+                        .is_none_or(|d| super::terms::names_key(d, r.get(6)))
                 })
                 .map(|r| {
                     let est = estimated_ms(
@@ -2791,10 +2923,15 @@ impl Control {
                     .field("profile", &j.profile)
                     .field("ready_evaluators", candidates.len())
                     .field("governed", governed.is_some())
+                    .field("terms", terms.is_some())
                     .emit();
                 return Ok((false, false));
             };
             let t0 = now();
+            // The terms ended meanwhile: not granted (the next pass fails it).
+            if terms.as_ref().is_some_and(|d| t0 >= d.not_after) {
+                return Ok((false, false));
+            }
             let (version, governance, expires_at) = match governed {
                 None => (JOB_GRANT_VERSION, None, t0 + JOB_GRANT_TTL_SECS),
                 Some((g, not_after)) => (
@@ -2815,6 +2952,11 @@ impl Control {
                     }),
                     (t0 + JOB_GRANT_TTL_SECS).min(not_after),
                 ),
+            };
+            // Never beyond the job terms' end.
+            let expires_at = match &terms {
+                Some(d) => expires_at.min(d.not_after - 1),
+                None => expires_at,
             };
             let mut g = JobGrant {
                 governance,
@@ -2905,6 +3047,18 @@ impl Control {
                 )));
             }
             let g = j.grant.clone().ok_or_else(|| conflict("no grant"))?;
+            // A job under job terms starts only while its evaluator's
+            // registered receipt key is one they name (it may have
+            // registered again with another key since it was scheduled).
+            if let Some(tid) = &j.terms {
+                let d = super::terms::document(t, tid)?;
+                if !super::terms::names_evaluator(t, &d, ctx.actor())? {
+                    return Err(forbidden(format!(
+                        "job {id} runs under job terms {tid}, which do not name the receipt key {} has registered now",
+                        ctx.actor()
+                    )));
+                }
+            }
             // A governed job starts only while everything it runs under is
             // still valid, strictly, on the control plane's clock; otherwise
             // it fails and is anchored as ended.
@@ -3078,6 +3232,14 @@ impl Control {
                 )
                 .map_err(db_err)?
                 .get(0);
+            // Under job terms, only a receipt key they name counts.
+            if let Some(tid) = &j.terms {
+                if !super::terms::names_key(&super::terms::document(t, tid)?, &key) {
+                    return Err(forbidden(format!(
+                        "job {id} runs under job terms {tid}, which do not name the receipt key {evaluator} has registered now"
+                    )));
+                }
+            }
             let ident = EvaluatorIdentity::from_public_key_hex(&key)?;
             signed.verify_signature(&ident)?;
             if signed.receipt.spec_id != j.spec_id || signed.receipt.program_id != j.program_id {
@@ -3161,6 +3323,10 @@ impl Control {
                 )
                 .map_err(db_err)?
                 .get(0);
+            let terms = match &j.terms {
+                Some(tid) => Some((tid.clone(), super::terms::document(t, tid)?)),
+                None => None,
+            };
             let (_, compiled, spec, doc) = self.load_plan(t, &j.plan)?;
             // A governed job's spec is its plan's under its binding (and
             // its transcript is the one for that spec).
@@ -3185,6 +3351,18 @@ impl Control {
             .and_then(|v| {
                 if j.governance.is_some() {
                     governed_receipt(&j, &signed)?;
+                }
+                // Under job terms the receipt key must be one they name: a
+                // receipt under another key fails the job.
+                if let Some((tid, d)) = &terms {
+                    if !super::terms::names_key(d, &key) {
+                        return Err(Error::new(
+                            Code::Receipt,
+                            format!(
+                                "the receipt key {evaluator} has registered is not one the job's terms {tid} name"
+                            ),
+                        ));
+                    }
                 }
                 Ok(v)
             });
@@ -3573,6 +3751,28 @@ impl Control {
                 .unwrap_or_else(|| PLATFORM_ORG.to_owned());
             self.endpoint_changed(t, ctx, &r.id, &operator, endpoint_before.clone())?;
             self.register_location(t, ctx, &r.id, &operator, r.location.as_ref())?;
+            // Jobs queued on it under job terms that do not name the receipt
+            // key it registers now (requeued below), locked first: before
+            // the running jobs are read. A start of one of them that
+            // commits first leaves it running, and the read of the running
+            // jobs below then finds (and fails) it; a start that comes
+            // later waits for this lock and then finds the job authorized
+            // and no longer its evaluator's. Read the other way round, a
+            // start committing between the two reads would leave its job in
+            // neither set: running on a process that is gone.
+            let requeued: Vec<(String, String, String)> = t
+                .query(
+                    "SELECT j.id, j.organization_id, j.project_id
+                       FROM jobs j JOIN job_terms x ON x.id = j.terms_id
+                      WHERE j.evaluator_id = $1 AND j.state = 'queued'
+                        AND NOT (x.document->'evaluator_keys' ? lower($2))
+                      ORDER BY j.id FOR UPDATE OF j",
+                    &[&r.id, &r.receipt_key],
+                )
+                .map_err(db_err)?
+                .iter()
+                .map(|x| (x.get(0), x.get(1), x.get(2)))
+                .collect();
             // An evaluator registers when its process starts: a job it was
             // running and never reported died with the old process. It
             // fails now (never replayed) rather than staying "running"
@@ -3606,6 +3806,33 @@ impl Control {
                         .r#ref("reason", "evaluator_restarted"),
                 )?;
             }
+            // Jobs queued on it under job terms that do not name the receipt
+            // key it registers now go back to be scheduled (below), on an
+            // evaluator they name, instead of waiting for a start it would
+            // be refused.
+            for (job, org, project) in &requeued {
+                t.execute(
+                    "UPDATE jobs SET evaluator_id = NULL, job_grant = NULL, estimated_ms = NULL WHERE id = $1",
+                    &[job],
+                )
+                .map_err(db_err)?;
+                self.transition_in(
+                    t,
+                    ctx.actor(),
+                    &ctx.request_id,
+                    job,
+                    JobState::Authorized,
+                    Some("its evaluator registered a receipt key its job terms do not name"),
+                )?;
+                audit::append(
+                    t,
+                    ctx.draft("job.requeued", "job", job, Outcome::Denied)
+                        .org(org)
+                        .project(project)
+                        .r#ref("reason", "receipt_key_not_in_terms")
+                        .r#ref("evaluator", r.id.clone()),
+                )?;
+            }
             let mut d = ctx
                 .draft("evaluator.registered", "evaluator", &r.id, Outcome::Succeeded)
                 .org(&operator)
@@ -3618,9 +3845,17 @@ impl Control {
                 d = d.r#ref("benchmark_profile", p.clone());
             }
             audit::append(t, d)?;
-            Ok(json!({"id": r.id, "status": status, "control_public_key": self.signer.public_key_hex()}))
+            let requeued: Vec<String> = requeued.into_iter().map(|(job, ..)| job).collect();
+            Ok((
+                json!({"id": r.id, "status": status, "control_public_key": self.signer.public_key_hex()}),
+                requeued,
+            ))
         })?;
+        let (out, requeued) = out;
         self.checkpoint_log()?;
+        for job in &requeued {
+            self.schedule_after(job);
+        }
         Ok(out)
     }
 

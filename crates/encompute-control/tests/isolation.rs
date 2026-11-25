@@ -82,6 +82,22 @@ fn every_route_authenticates_authorizes_and_isolates() {
         Some(json!({"id": "secagg-9", "kind": "secagg",
                     "public_key": ServiceSigner::from_seed("secagg-9", &[12; 32]).unwrap().public_key_hex()})),
     );
+    // Job terms modelco's admin proposed (hospital-a accepts them below).
+    let terms_doc = |max_jobs: u64| {
+        json!({"specs": ["e".repeat(64)], "purposes": ["medical-training"],
+               "submitters": ["modelco"],
+               "evaluator_keys": [w.evaluator.receipt.identity().public_key_hex()],
+               "max_jobs": max_jobs, "not_before": 0, "not_after": 4_000_000_000u64})
+    };
+    let terms = t.ok(
+        &w.b_admin,
+        "POST",
+        &format!("/v1/projects/{p}/terms"),
+        Some(terms_doc(5)),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let rows = vec![
         Row {
@@ -428,6 +444,48 @@ fn every_route_authenticates_authorizes_and_isolates() {
             wrong_tenant: w.a_admin.clone(),
             headers: vec![],
         },
+        // (Job terms last: once hospital-a accepts them, they govern the
+        // project's jobs.)
+        Row {
+            name: "propose job terms",
+            method: "POST",
+            path: format!("/v1/projects/{p}/terms"),
+            body: Some(terms_doc(6)),
+            ok: w.b_admin.clone(),
+            wrong_role: Some(w.b_dev.clone()),
+            wrong_tenant: w.c_admin.clone(),
+            headers: vec![],
+        },
+        Row {
+            name: "list job terms",
+            method: "GET",
+            path: format!("/v1/projects/{p}/terms"),
+            body: None,
+            ok: w.b_dev.clone(),
+            wrong_role: None,
+            wrong_tenant: w.c_admin.clone(),
+            headers: vec![],
+        },
+        Row {
+            name: "accept job terms",
+            method: "POST",
+            path: format!("/v1/terms/{terms}/accept"),
+            body: None,
+            ok: w.a_admin.clone(),
+            wrong_role: Some(w.a_dev.clone()),
+            wrong_tenant: w.c_admin.clone(),
+            headers: vec![],
+        },
+        Row {
+            name: "jobs under job terms",
+            method: "GET",
+            path: format!("/v1/terms/{terms}/jobs"),
+            body: None,
+            ok: w.a_admin.clone(),
+            wrong_role: None,
+            wrong_tenant: w.c_admin.clone(),
+            headers: vec![],
+        },
     ];
     let mut report = vec![];
     for r in &rows {
@@ -684,7 +742,7 @@ fn credentials_are_checked() {
         encode(
             &Header::new(Algorithm::HS256),
             &json!({"iss": DEV_ISSUER, "sub": "a-dev", "aud": "encompute", "exp": 1_000_000}),
-            &EncodingKey::from_secret(SECRET.as_bytes()),
+            &EncodingKey::from_secret(SECRET.as_bytes()).unwrap(),
         )
         .unwrap()
     };
@@ -769,13 +827,13 @@ struct Idp {
 impl Idp {
     fn new(kid: &'static str) -> Self {
         Self {
-            key: p256::SecretKey::random(&mut rand_core::OsRng),
+            key: random_p256(),
             kid,
         }
     }
 
     fn jwk(&self) -> Value {
-        let mut j: Value = serde_json::from_str(&self.key.public_key().to_jwk_string()).unwrap();
+        let mut j: Value = p256_jwk(&self.key);
         j["kid"] = json!(self.kid);
         j["alg"] = json!("ES256");
         j["use"] = json!("sig");
@@ -851,7 +909,7 @@ fn oidc_tokens_and_production_refusals() {
             encode(
                 &h,
                 &json!({"iss": issuer, "sub": "alice", "aud": "encompute", "exp": exp}),
-                &EncodingKey::from_secret(idp.jwk()["x"].as_str().unwrap().as_bytes()),
+                &EncodingKey::from_secret(idp.jwk()["x"].as_str().unwrap().as_bytes()).unwrap(),
             )
             .unwrap()
         };
@@ -973,4 +1031,26 @@ fn collaborators_see_no_private_metadata() {
         .all(|x| x["actor"] == "modelco/user"));
     let mine = t.ok(&w.b_dev, "GET", &format!("/v1/jobs/{job}"), None);
     assert_eq!(mine["initiated_by"], b_dev_id.as_str());
+}
+
+/// A random P-256 key from the operating system's randomness.
+fn random_p256() -> p256::SecretKey {
+    use rand_core::RngCore;
+    loop {
+        let mut b = [0u8; 32];
+        rand_core::OsRng.fill_bytes(&mut b);
+        if let Ok(k) = p256::SecretKey::from_slice(&b) {
+            return k;
+        }
+    }
+}
+
+/// The public JWK of a P-256 key (`kty`, `crv`, `x`, `y`).
+#[allow(dead_code)]
+fn p256_jwk(key: &p256::SecretKey) -> Value {
+    use base64::Engine;
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    let p = key.public_key().to_sec1_point(false);
+    let b = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+    json!({"kty": "EC", "crv": "P-256", "x": b(p.x().unwrap()), "y": b(p.y().unwrap())})
 }

@@ -305,6 +305,47 @@ fn a_pinned_key_proceeds_to_the_evaluator() {
     assert!(!sent.lock().unwrap().is_empty(), "{err}");
 }
 
+/// `--inputs-file` is read with the program's other inputs, before anything
+/// is planned or submitted: an unreadable file stops the run there.
+#[test]
+fn an_inputs_file_is_read_before_anything_is_submitted() {
+    let s = setup("inputs-file");
+    let (evaluator, sent) = stub(|_, _| (500, "{}".into()));
+    let (control, log) = control_plane(&evaluator, TRUSTED);
+    let missing = s.dir.join("missing-inputs.json").display().to_string();
+    let (code, err) = jobs_run(
+        &s,
+        &control,
+        &["--trust-evaluator", TRUSTED, "--inputs-file", &missing],
+        &[],
+    );
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("missing-inputs.json"), "{err}");
+    assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+    assert!(sent.lock().unwrap().is_empty());
+    // A readable one is used: the run goes on to the control plane.
+    let file = s.dir.join("inputs.json");
+    std::fs::write(&file, r#"{"x": [0.1, 0.2, 0.3]}"#).unwrap();
+    let (code, err) = jobs_run(
+        &s,
+        &control,
+        &[
+            "--trust-evaluator",
+            TRUSTED,
+            "--inputs-file",
+            &file.display().to_string(),
+        ],
+        &[],
+    );
+    // The stub evaluator then fails the run, after the job was submitted.
+    assert_ne!(code, 0, "{err}");
+    assert!(
+        log.lock().unwrap().iter().any(|l| l == "POST /v1/jobs"),
+        "{err} {:?}",
+        log.lock().unwrap()
+    );
+}
+
 // --- the client's own placement constraints (INV-233) ------------------------------
 
 /// A control plane that records `placement` for the job it schedules.

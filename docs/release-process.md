@@ -274,8 +274,10 @@ distribution** is reported, not blocking; there is nothing to upgrade to.
 Fixed ones block like everything else and are resolved by refreshing the
 base-image digest. Every RC re-pulls and re-pins the digests.
 
-`deny.toml` also ignores `RUSTSEC-2023-0071` (`rsa`, public-key use only); the
-same advisory has an entry in `security/exceptions.toml` so it expires.
+`deny.toml` ignores no advisory. It ignored `RUSTSEC-2023-0071` (`rsa`,
+public-key use only) until jsonwebtoken 12 brought `rsa` 0.10, which the
+advisory does not affect; its entry in `security/exceptions.toml` went with
+it.
 
 ### OpenFHE
 
@@ -385,7 +387,7 @@ Pins).
 C++ compiler; it is recorded, not pinned. Release Linux builds use the
 `ubuntu-24.04` runner's GCC 13 and CMake 3.28+; the evaluator image uses
 Debian 12's GCC 12 (`rust:1.98.1-bookworm`); macOS builds use Apple clang
-from Xcode on `macos-14` with Homebrew's `libomp`. OpenFHE needs a C++17
+from Xcode on `macos-15` with Homebrew's `libomp`. OpenFHE needs a C++17
 compiler, CMake 3.16 or later and OpenMP. `check-pins.sh` prints the local
 compiler and CMake versions for the record.
 
