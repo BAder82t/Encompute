@@ -66,8 +66,9 @@ services:
   control:
     <<: *service
     # Native TLS (the database connection below) is in images built from this
-    # source and in the first release that contains it; the v0.3.0 images
-    # predate it. Name the image, by digest, in .env or the environment.
+    # source and in the first release that contains it; the released images,
+    # up to v0.3.3, predate it. Name the image, by digest, in .env or the
+    # environment.
     image: ${ENCOMPUTE_CONTROL_IMAGE:?set ENCOMPUTE_CONTROL_IMAGE to the control plane image by digest - it must contain native TLS, see docs/production-deployment.md}
     depends_on:
       postgres: {condition: service_healthy}
@@ -105,7 +106,12 @@ services:
   # --- Evaluator ----------------------------------------------------------------
   evaluator:
     <<: *service
-    image: ${ENCOMPUTE_EVALUATOR_IMAGE:-ghcr.io/bader82t/encompute-evaluator@sha256:2f27867700b2a86bba2d671be35a443b86aac008c2b726a83970fb3bf3c517ec}
+    # Built from the same source as the control plane: a client uploads its
+    # program and keys with the control plane's one-time upload grant, which
+    # the released evaluators, up to v0.3.3, refuse (they register and stay
+    # healthy, but every job fails at its first upload). Name the image, by
+    # digest, in .env or the environment.
+    image: ${ENCOMPUTE_EVALUATOR_IMAGE:?set ENCOMPUTE_EVALUATOR_IMAGE to the evaluator image by digest - it must be built from the same source as the control plane, see docs/production-deployment.md}
     depends_on:
       control: {condition: service_healthy}
     environment:
@@ -136,7 +142,7 @@ services:
   keybroker:
     <<: *service
     # As for the control plane: native TLS for the provider connection is not
-    # in the v0.3.0 images.
+    # in the released images, up to v0.3.3.
     image: ${ENCOMPUTE_SERVICES_IMAGE:?set ENCOMPUTE_SERVICES_IMAGE to the services image by digest - it must contain native TLS, see docs/production-deployment.md}
     depends_on:
       control: {condition: service_healthy}

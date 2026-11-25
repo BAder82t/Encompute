@@ -98,9 +98,14 @@ those images the control plane cannot parse `sslmode=verify-full` and the
 broker cannot trust your CA. `compose.yaml` therefore has no default image for
 the control plane and the services: `ENCOMPUTE_CONTROL_IMAGE` and
 `ENCOMPUTE_SERVICES_IMAGE` are required, and Compose stops with a message when
-they are unset. When the release that contains native TLS is published, put its
-digests here (and in your `.env`); until then build the images from the
-checkout (`lab-up.sh` with `LAB_BUILD_IMAGES=1` does).
+they are unset. The evaluator image is required too
+(`ENCOMPUTE_EVALUATOR_IMAGE`), for another reason: a client uploads its
+program and keys to the evaluator with the control plane's one-time upload
+grant, and the released evaluators, up to v0.3.3, refuse it. They register and
+report healthy, but every job fails at its first upload. Build all three from
+the same source. When a release that contains native TLS and upload grants is
+published, put its digests here (and in your `.env`); until then build the
+images from the checkout (`lab-up.sh` with `LAB_BUILD_IMAGES=1` does).
 
 ## What each component protects, and what it trusts
 
@@ -154,13 +159,8 @@ the certificate and vault steps with its own.
 7. **The rest.** `docker compose up -d`.
 8. **Validate.** `./validate.sh` (below).
 
-Images are pinned by digest. The evaluator image in `compose.yaml` still
-defaults to a digest published with v0.3.0, which is unsupported. Before you
-start the topology set `ENCOMPUTE_EVALUATOR_IMAGE` to the
-`encompute-evaluator@sha256:...` line of the signed
-`encompute-0.3.3-images.txt` of the supported release (verify it as
-[verify-release.md](verify-release.md) describes). The control plane and services images have no
-default, as explained above; name them by digest (or, in a laboratory, by
+Images are pinned by digest. The control plane, services and evaluator
+images have no default, as explained above; name them by digest (or, in a laboratory, by
 image ID: the validator accepts both as pinned). The release images are
 `linux/amd64`.
 
