@@ -29,6 +29,13 @@ The notes in the next section (production mode: native TLS) also ship in
 this unreleased work. Draft notes:
 [docs/release-notes-0.4.0-rc.1.md](docs/release-notes-0.4.0-rc.1.md).
 
+- **Production topology: the evaluator image is required.**
+  `deploy/production/compose.yaml` defaulted the evaluator to an image
+  published with v0.3.0. No released evaluator, up to v0.3.3, accepts the
+  control plane's upload grants: it registers and reports healthy, but every
+  job fails at its first upload (401). `ENCOMPUTE_EVALUATOR_IMAGE` is now
+  required, like the control plane and services images, and `lab-up.sh` with
+  `LAB_BUILD_IMAGES=1` builds it from the checkout.
 - **Dependency advisories.** `url` 2.5.9 (RUSTSEC-2026-0592),
   `rustls-webpki` 0.103.17 (RUSTSEC-2026-0382), `webpki-roots` 1.0.12
   (RUSTSEC-2026-0381) and `ctutils` 0.4.8 (RUSTSEC-2026-0385); jsonwebtoken

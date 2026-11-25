@@ -20,7 +20,7 @@ security properties.
 
 | File | |
 |---|---|
-| `compose.yaml` | the topology (images pinned by digest; the control plane and services images are required variables, see below) |
+| `compose.yaml` | the topology (images pinned by digest; the control plane, services and evaluator images are required variables, see below) |
 | `compose.openbao.yaml`, `config/openbao.hcl` | a reference OpenBao to try it with; yours is external |
 | `init-secrets.sh`, `bootstrap-openbao.sh`, `bao-token.sh`, `protect-asset.sh` | secrets, vault policy and AppRole, the broker's token, the first protected asset |
 | `backup.sh`, `restore.sh` | backup, `--verify`, restore |
@@ -28,9 +28,12 @@ security properties.
 | `lab-up.sh`, `gen-test-certs.sh` | laboratory only: the whole runbook with throwaway certificates (`lab-up.sh down` removes it) |
 
 The control plane and the key broker need images that contain native TLS: the
-published 0.3.x images, including v0.3.3, predate it. This directory is unreleased development on `main`. Set `ENCOMPUTE_CONTROL_IMAGE` and
-`ENCOMPUTE_SERVICES_IMAGE`, or let the laboratory build them from this checkout
-with `LAB_BUILD_IMAGES=1` (heavy).
+published 0.3.x images, including v0.3.3, predate it. The evaluator must accept
+the control plane's upload grants, which the published evaluators, including
+v0.3.3, refuse. This directory is unreleased development on `main`. Set
+`ENCOMPUTE_CONTROL_IMAGE`, `ENCOMPUTE_SERVICES_IMAGE` and
+`ENCOMPUTE_EVALUATOR_IMAGE` to images built from this source, or let the
+laboratory build them from this checkout with `LAB_BUILD_IMAGES=1` (heavy).
 
 ```sh
 LAB_BUILD_IMAGES=1 ./lab-up.sh                         # a laptop with Docker: throwaway certs, identity provider and OpenBao
