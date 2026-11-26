@@ -633,7 +633,7 @@ fn a_restarted_evaluator_accepts_no_earlier_grant() {
         );
         assert_eq!(
             (s, v["code"].as_str()),
-            (401, Some("ENC2607")),
+            (401, Some("ENC2609")),
             "{what}: {v}"
         );
         assert!(

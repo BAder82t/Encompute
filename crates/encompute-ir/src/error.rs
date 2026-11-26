@@ -162,6 +162,12 @@ pub enum Code {
     /// succeeded (or while one with it is still running): each grant admits
     /// exactly one upload (ENC2608).
     UploadGrantReplayed,
+    /// An evaluator upload grant was issued before the evaluator started,
+    /// or in the second it started in: a restart forgets which grants were
+    /// spent, so it accepts only grants issued after its start. A client
+    /// refused this way asks the control plane once more for a new grant
+    /// (ENC2609).
+    UploadGrantBeforeStart,
     /// A governed project's source has no active owner-signed authorization, or an authorization's owner signature does not verify against the organization's active governance key (ENC2701).
     GovernanceAuthorizationMissing,
     /// The purpose of a governed job, program or authorization differs from the governed purpose, or the purpose is not active or not accepted (ENC2702).
@@ -289,6 +295,7 @@ impl Code {
             Code::Scheduling => "ENC2606",
             Code::ServiceAuthentication => "ENC2607",
             Code::UploadGrantReplayed => "ENC2608",
+            Code::UploadGrantBeforeStart => "ENC2609",
             Code::GovernanceAuthorizationMissing => "ENC2701",
             Code::GovernancePurposeMismatch => "ENC2702",
             Code::GovernanceProgramNotAuthorized => "ENC2703",
@@ -325,7 +332,7 @@ impl Code {
 
 impl Code {
     /// Every code, for parsing codes received over the network.
-    pub const ALL: [Code; 92] = [
+    pub const ALL: [Code; 93] = [
         Code::SecretControlFlow,
         Code::SecretDivision,
         Code::SecretComparison,
@@ -388,6 +395,7 @@ impl Code {
         Code::Scheduling,
         Code::ServiceAuthentication,
         Code::UploadGrantReplayed,
+        Code::UploadGrantBeforeStart,
         Code::GovernanceAuthorizationMissing,
         Code::GovernancePurposeMismatch,
         Code::GovernanceProgramNotAuthorized,

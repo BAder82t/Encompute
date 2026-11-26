@@ -330,7 +330,8 @@ fn the_governance_codes_are_the_2701_block() {
 }
 
 /// The service block from ENC2601: contiguous, with the evaluator upload
-/// grant's replay code (ENC2608) in it and documented in docs/errors.md.
+/// grant's replay code (ENC2608) and restart code (ENC2609) in it, and
+/// documented in docs/errors.md.
 #[test]
 fn the_service_codes_are_the_2601_block() {
     let block: Vec<&str> = Code::ALL
@@ -338,7 +339,7 @@ fn the_service_codes_are_the_2601_block() {
         .map(|c| c.as_str())
         .filter(|s| s.starts_with("ENC26"))
         .collect();
-    let expected: Vec<String> = (2601..=2608).map(|n| format!("ENC{n}")).collect();
+    let expected: Vec<String> = (2601..=2609).map(|n| format!("ENC{n}")).collect();
     assert_eq!(block, expected);
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/errors.md"),
@@ -351,6 +352,7 @@ fn the_service_codes_are_the_2601_block() {
         );
     }
     assert_eq!(Code::UploadGrantReplayed.as_str(), "ENC2608");
+    assert_eq!(Code::UploadGrantBeforeStart.as_str(), "ENC2609");
 }
 
 fn with_forms(forms: &str) -> String {
