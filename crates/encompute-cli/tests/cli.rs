@@ -744,6 +744,104 @@ fn attestation_and_key_release() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A mock root seed and a workload's evaluator identity are secret key
+/// files: one the group or others can access is refused (ENC2605) before
+/// it signs anything or any broker is asked, as `encompute-evaluator
+/// serve` refuses the identity.
+#[cfg(unix)]
+#[test]
+fn mock_seeds_and_workload_identities_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("encompute-cli-seeds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    let chmod = |f: &str, mode: u32| {
+        std::fs::set_permissions(p(f), std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    std::fs::write(
+        p("m.eir"),
+        "encompute 0.1\nprogram m precision 0.01\n%0 = input \"x\" [-1.0, 1.0] : secret scalar\n\
+         output \"y\" = %0\n",
+    )
+    .unwrap();
+    let (code, _, err) = encompute(&["compile", &p("m.eir"), "-o", &p("m.encompute")]);
+    assert_eq!(code, 0, "{err}");
+
+    // `attest mock-root` writes the seed owner only and reads it back.
+    let (code, root, err) = encompute(&["attest", "mock-root", &p("hw.seed")]);
+    assert_eq!(code, 0, "{err}");
+    let mode = std::fs::metadata(p("hw.seed"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let (code, again, err) = encompute(&["attest", "mock-root", &p("hw.seed")]);
+    assert_eq!((code, &again), (0, &root), "{err}");
+    let refused = |args: &[&str], file: &str| {
+        let (code, out, err) = encompute(args);
+        assert_ne!(code, 0, "{args:?}: {out}{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(
+            err.contains("ENC2605") && err.contains(&p(file)) && err.contains("chmod 600"),
+            "{err}"
+        );
+    };
+    for mode in [0o644, 0o640, 0o604] {
+        chmod("hw.seed", mode);
+        refused(&["attest", "mock-root", &p("hw.seed")], "hw.seed");
+    }
+
+    // Port 9 (discard): nothing answers, so a refusal is the workload's
+    // own, before any request.
+    let workload = [
+        "workload",
+        "keys",
+        &p("m.encompute"),
+        "--backend",
+        "mock",
+        "--key",
+        "weights@http://127.0.0.1:9",
+        "--identity",
+        &p("eval.id"),
+        "--attester",
+        "mock",
+        "--mock-seed",
+        &p("hw.seed"),
+        "--mock-image",
+        &format!("sha256:{}", "7".repeat(64)),
+        "--record",
+        &p("attestation.json"),
+    ];
+    refused(&workload, "hw.seed");
+    chmod("hw.seed", 0o600);
+    std::fs::write(p("eval.id"), [5u8; 32]).unwrap();
+    for mode in [0o644, 0o640, 0o604] {
+        chmod("eval.id", mode);
+        refused(&workload, "eval.id");
+    }
+    // Owner only, both files are used: the run gets as far as asking the
+    // broker, which does not answer.
+    chmod("eval.id", 0o600);
+    let (code, _, err) = encompute(&workload);
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("127.0.0.1:9") && !err.contains("ENC2605") && !err.contains("chmod"),
+        "{err}"
+    );
+    // A seed of the wrong length keeps its own error.
+    std::fs::write(p("short.seed"), [1u8; 16]).unwrap();
+    chmod("short.seed", 0o600);
+    let (code, _, err) = encompute(&["attest", "mock-root", &p("short.seed")]);
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("32 bytes") && !err.contains("ENC2605"),
+        "{err}"
+    );
+    assert!(!dir.join("attestation.json").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn secure_aggregation_round() {
     let dir = std::env::temp_dir().join(format!("encompute-cli-secagg-{}", std::process::id()));

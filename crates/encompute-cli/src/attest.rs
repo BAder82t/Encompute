@@ -32,6 +32,21 @@ fn read(p: &Path) -> Result<Vec<u8>> {
     std::fs::read(p).map_err(|e| io(p, e))
 }
 
+/// A 32-byte seed file (a mock root seed, an evaluator identity),
+/// accessible to its owner only like the other secret key files:
+/// ENC2605 otherwise, before it is used. `what` names the wrong-length
+/// error.
+fn read_seed(p: &Path, code: Code, what: &str) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+    let bytes = encompute_verification::read_secret_file(
+        p,
+        encompute_verification::SecretFile::Private,
+        |e| io(p, e),
+    )?;
+    <[u8; 32]>::try_from(bytes.as_slice())
+        .map(zeroize::Zeroizing::new)
+        .map_err(|_| Error::new(code, what))
+}
+
 fn section(t: &str) {
     println!("\n{t}\n{}", "─".repeat(40));
 }
@@ -379,9 +394,7 @@ fn write_private(p: &Path, bytes: &[u8]) -> Result<()> {
 
 fn mock_hardware(seed: &Path) -> Result<MockHardware> {
     if seed.exists() {
-        let b: [u8; 32] = read(seed)?
-            .try_into()
-            .map_err(|_| Error::new(Code::Attestation, "a mock root seed file is 32 bytes"))?;
+        let b = read_seed(seed, Code::Attestation, "a mock root seed file is 32 bytes")?;
         return Ok(MockHardware::from_seed(&b));
     }
     let signer = EvaluatorSigner::generate()?;
@@ -1511,7 +1524,8 @@ pub struct AttesterArgs {
     /// confidential-space, or mock (development only).
     #[arg(long, default_value = "confidential-space")]
     attester: String,
-    /// Mock root seed (mock attester).
+    /// Mock root seed (mock attester), as `attest mock-root` writes it:
+    /// accessible to its owner only.
     #[arg(long)]
     mock_seed: Option<PathBuf>,
     /// Mock attester: the image digest to claim.
@@ -1558,8 +1572,9 @@ pub enum WorkloadCmd {
         /// refused. `ASSET@URL` without a key: development (mock) only.
         #[arg(long = "key", required = true)]
         keys: Vec<String>,
-        /// The evaluator identity (created if missing), shared with
-        /// `encompute-evaluator serve --identity`.
+        /// The evaluator identity (created 0600 if missing), shared with
+        /// `encompute-evaluator serve --identity`: accessible to its owner
+        /// only.
         #[arg(long)]
         identity: PathBuf,
         #[command(flatten)]
@@ -1590,9 +1605,11 @@ pub enum WorkloadCmd {
 
 fn identity(path: &Path) -> Result<EvaluatorSigner> {
     if path.exists() {
-        let seed: [u8; 32] = read(path)?
-            .try_into()
-            .map_err(|_| Error::new(Code::Receipt, "an evaluator identity file is 32 bytes"))?;
+        let seed = read_seed(
+            path,
+            Code::Receipt,
+            "an evaluator identity file is 32 bytes",
+        )?;
         return Ok(EvaluatorSigner::from_seed(&seed));
     }
     let s = EvaluatorSigner::generate()?;
