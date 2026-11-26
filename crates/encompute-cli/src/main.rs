@@ -1798,6 +1798,20 @@ fn write_keys(dir: &Path, client: &ClientSession) -> Result<()> {
 }
 
 fn write_key_pair(dir: &Path, keys: &[u8], envelope: &[u8]) -> Result<()> {
+    write_key_pair_as(dir, keys, envelope, &temp_suffix()?)
+}
+
+/// A random suffix for this run's temporary files. A temporary file left
+/// by a killed run (`kill -9`, power loss) never takes the name of a later
+/// run's, as one named by process ID could once that ID is reused.
+fn temp_suffix() -> Result<String> {
+    let mut b = [0u8; 8];
+    getrandom::getrandom(&mut b)
+        .map_err(|e| Error::new(Code::Artifact, format!("no randomness: {e}")))?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+fn write_key_pair_as(dir: &Path, keys: &[u8], envelope: &[u8], suffix: &str) -> Result<()> {
     let io =
         |p: &Path, e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", p.display()));
     std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
@@ -1808,9 +1822,10 @@ fn write_key_pair(dir: &Path, keys: &[u8], envelope: &[u8]) -> Result<()> {
     // it, beside the new evaluation keys, which are refused before any
     // upload (`run --remote`, `jobs run`, the Python SDK) and replaced by
     // running `keys generate --force` again.
-    let eval = Staged::write(&dir.join("eval.keys"), keys, false).map_err(|(p, e)| io(&p, e))?;
-    let secret =
-        Staged::write(&dir.join("secret.key"), envelope, true).map_err(|(p, e)| io(&p, e))?;
+    let eval =
+        Staged::write(&dir.join("eval.keys"), keys, false, suffix).map_err(|(p, e)| io(&p, e))?;
+    let secret = Staged::write(&dir.join("secret.key"), envelope, true, suffix)
+        .map_err(|(p, e)| io(&p, e))?;
     eval.commit().map_err(|(p, e)| io(&p, e))?;
     secret.commit().map_err(|(p, e)| {
         Error::new(
@@ -1827,8 +1842,9 @@ fn write_key_pair(dir: &Path, keys: &[u8], envelope: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// A file written and synced under a temporary name in its directory,
-/// renamed over its path by [`Staged::commit`]; removed if never committed.
+/// A file written and synced under a temporary name in its directory
+/// (`.NAME.tmp-SUFFIX`, created new), renamed over its path by
+/// [`Staged::commit`]; removed if never committed.
 struct Staged {
     tmp: PathBuf,
     path: PathBuf,
@@ -1840,6 +1856,7 @@ impl Staged {
         path: &Path,
         bytes: &[u8],
         secret: bool,
+        suffix: &str,
     ) -> std::result::Result<Self, (PathBuf, std::io::Error)> {
         use std::io::Write;
         let name = path
@@ -1847,7 +1864,7 @@ impl Staged {
             .map_or_else(Default::default, |n| n.to_owned());
         let mut tmp_name = std::ffi::OsString::from(".");
         tmp_name.push(&name);
-        tmp_name.push(format!(".tmp-{}", std::process::id()));
+        tmp_name.push(format!(".tmp-{suffix}"));
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -1965,9 +1982,9 @@ mod tests {
         }
 
         // The secret key's temporary name is taken: it cannot be written.
-        let blocked = dir.join(format!(".secret.key.tmp-{}", std::process::id()));
+        let blocked = dir.join(".secret.key.tmp-blocked");
         std::fs::create_dir(&blocked).unwrap();
-        assert!(super::write_key_pair(&dir, b"eval 2", b"secret 2").is_err());
+        assert!(super::write_key_pair_as(&dir, b"eval 2", b"secret 2", "blocked").is_err());
         let read = |f: &str| std::fs::read(dir.join(f)).unwrap();
         assert_eq!(read("eval.keys"), b"eval 1");
         assert_eq!(read("secret.key"), b"secret 1");
@@ -2005,6 +2022,50 @@ mod tests {
         left.sort();
         assert_eq!(left, ["eval.keys", "secret.key"]);
         let _ = std::fs::remove_dir_all(&other);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_killed_runs_temporary_files_do_not_block_keys_generate() {
+        // What an earlier run killed mid-write leaves, under the names a
+        // run with this process ID used to choose.
+        let dir =
+            std::env::temp_dir().join(format!("encompute-keypair-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = [
+            format!(".eval.keys.tmp-{}", std::process::id()),
+            format!(".secret.key.tmp-{}", std::process::id()),
+        ];
+        for f in &stale {
+            std::fs::write(dir.join(f), b"stale").unwrap();
+        }
+        super::write_key_pair(&dir, b"eval 1", b"secret 1").unwrap();
+        super::write_key_pair(&dir, b"eval 2", b"secret 2").unwrap();
+        let read = |f: &str| std::fs::read(dir.join(f)).unwrap();
+        assert_eq!(read("eval.keys"), b"eval 2");
+        assert_eq!(read("secret.key"), b"secret 2");
+        // Neither run took or removed another run's files, and neither
+        // left its own.
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut want = vec!["eval.keys".to_owned(), "secret.key".to_owned()];
+        want.extend(stale.iter().cloned());
+        want.sort();
+        assert_eq!(left, want);
+        for f in &stale {
+            assert_eq!(read(f), b"stale");
+        }
+        // Each run picks its own suffix.
+        let (a, b) = (super::temp_suffix().unwrap(), super::temp_suffix().unwrap());
+        assert_ne!(a, b);
+        assert!(
+            a.len() == 16 && a.bytes().all(|c| c.is_ascii_hexdigit()),
+            "{a}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -50,18 +50,23 @@ this unreleased work. Draft notes:
   training bindings (`acquire_training_keys`, `acquire_session_keys`,
   `attest_contribution`, `sign_adapter_record`) read a party's or the
   coordinator's key and a mock attestation seed under the same owner-only
-  rule. Service keys read
-  from mounted secrets (`ENCOMPUTE_SERVICE_KEY_FILE`,
+  rule, and so does the CLI for its mock root seed (`attest mock-root`,
+  `--attester mock --mock-seed`) and a workload's evaluator identity
+  (`workload keys`, `workload attest`; `encompute-evaluator serve
+  --identity` already refused that file unless owner only). Service keys
+  read from mounted secrets (`ENCOMPUTE_SERVICE_KEY_FILE`,
   `ENCOMPUTE_SIGNING_KEY_FILE`) may stay readable through the mount (0644,
   as `deploy/docker-compose/init.sh` writes them) but must be regular files
   that nobody else can write, the rule the OpenBao token file already
   followed. **Upgrade note:** a `secret.key`, party key or governance key
-  with group or other access is now refused, and so is a training key or
-  seed file written by hand with the default umask; `chmod 600` it (a key
+  with group or other access is now refused, and so is a training key,
+  mock root seed or workload identity written by hand with the default
+  umask; `chmod 600` it (a key
   mounted from a secret store needs an owner-only mode, such as
   Kubernetes `defaultMode: 0400`). Files
-  made by `keys generate`, `aggregate identity`, `attest mock-root` and
-  `governance keygen` are already 0600. INV-303.
+  made by `keys generate`, `aggregate identity`, `attest mock-root`,
+  `workload keys`, `encompute-evaluator serve` and `governance keygen` are
+  already 0600. INV-303.
 - **`keys generate` no longer replaces an existing secret key.** If the
   output directory already holds a `secret.key`, it refuses (ENC1605)
   before generating anything; `--force` replaces it. Every result encrypted
@@ -69,7 +74,10 @@ this unreleased work. Draft notes:
   Both files are now written in full to temporary files before either is
   renamed into place (evaluation keys first, the secret key last), so a
   failed write leaves the previous pair as it was and an interrupted run
-  never leaves a truncated or empty `secret.key`. A crash between the two
+  never leaves a truncated or empty `secret.key`. The temporary files are
+  named at random per run, so one left by a killed run (`kill -9`, power
+  loss) never blocks a later run, as it could while they were named by
+  process ID and that ID was reused. A crash between the two
   renames leaves the previous secret key beside the new evaluation keys:
   `run --remote`, `jobs run` and the Python SDK now refuse such an
   `eval.keys` (ENC1605, saying to run `keys generate --force` again) before

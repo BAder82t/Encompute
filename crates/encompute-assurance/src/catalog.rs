@@ -311,20 +311,22 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::evaluator_trust_is_checked_before_sending_and_a_bad_pin_fails_closed"),
         (EndToEnd, "script:examples/04_execution_receipts/run.sh"),
     ]),
-    inv!("INV-303", "leakage", "The CLI checks a secret key file before using its key: the secret.key of run --remote, a party identity key (aggregate identity, trust authorize) and an organization's governance key (governance sign, governance countersign) must be accessible to their owner only, and a service key read from a mounted secret must be a regular file that the group and others cannot write; otherwise ENC2605. The Python SDK's training bindings read their key and seed files (a party's or the coordinator's key, a mock attestation seed) under the same owner-only rule.", [
+    inv!("INV-303", "leakage", "The CLI checks a secret key file before using its key: the secret.key of run --remote, a party identity key (aggregate identity, trust authorize), an organization's governance key (governance sign, governance countersign), a mock root seed (attest mock-root, --attester mock --mock-seed) and a workload's evaluator identity (workload keys, workload attest) must be accessible to their owner only, and a service key read from a mounted secret must be a regular file that the group and others cannot write; otherwise ENC2605. The Python SDK's training bindings read their key and seed files (a party's or the coordinator's key, a mock attestation seed) under the same owner-only rule.", [
         (Positive, "test:crates/encompute-verification/src/secret_file.rs::private_files_are_owner_only"),
         (Positive, "test:python/tests/test_key_files.py::test_owner_only_key_files_are_used"),
         (Negative, "test:crates/encompute-verification/src/secret_file.rs::mounted_secrets_may_be_readable_but_never_writable_by_others"),
         (Negative, "test:crates/encompute-verification/src/secret_file.rs::only_regular_files_and_io_errors_keep_the_callers_code"),
         (Negative, "test:python/tests/test_key_files.py::test_a_missing_or_wrong_length_file_keeps_its_error"),
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::secret_key_files_readable_by_others_are_refused"),
+        (Adversarial, "test:crates/encompute-cli/tests/cli.rs::mock_seeds_and_workload_identities_are_owner_only"),
         (Adversarial, "test:crates/encompute-cli/tests/governance.rs::a_governance_key_readable_by_others_is_refused"),
         (Adversarial, "test:crates/encompute-cli/tests/governance_bundle.rs::a_countersign_key_readable_by_others_is_refused"),
         (Adversarial, "test:python/tests/test_key_files.py::test_a_key_file_others_can_read_is_refused"),
     ]),
-    inv!("INV-304", "keys", "keys generate never replaces an existing secret key without --force: it refuses (ENC1605) before generating anything, and a key replaced with --force is owner only. Both files of a pair are written before either replaces anything, so a failed write leaves the previous pair as it was; evaluation keys of another key pair, as a crash between the two renames leaves beside the previous secret key, are refused (ENC1605) before run --remote uploads them, and the evaluator never receives them.", [
+    inv!("INV-304", "keys", "keys generate never replaces an existing secret key without --force: it refuses (ENC1605) before generating anything, and a key replaced with --force is owner only. Both files of a pair are written before either replaces anything, so a failed write leaves the previous pair as it was, and their temporary files are named at random per run, so one a killed run leaves never blocks a later run; evaluation keys of another key pair, as a crash between the two renames leaves beside the previous secret key, are refused (ENC1605) before run --remote uploads them, and the evaluator never receives them.", [
         (Positive, "test:crates/encompute-cli/tests/cli.rs::keys_and_audit"),
         (Negative, "test:crates/encompute-cli/src/main.rs::a_key_pair_is_written_whole_or_not_at_all"),
+        (Negative, "test:crates/encompute-cli/src/main.rs::a_killed_runs_temporary_files_do_not_block_keys_generate"),
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::keys_generate_never_replaces_a_secret_key_without_force"),
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::a_mismatched_key_pair_is_refused_before_upload"),
     ]),
