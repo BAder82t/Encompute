@@ -138,6 +138,17 @@ this unreleased work. Draft notes:
   report check, an authorization's `unusable` reason or the reason a
   governed job is failed with, which is stored and shown with the job. Every
   other error keeps its own message. INV-301.
+- **A client asks again for an upload grant that a restarted evaluator
+  refused.** A restarted evaluator forgets which upload grants were used,
+  so it accepts no grant issued before it started, nor one issued in the
+  second it started in. A job started right after an evaluator restart
+  could get such a grant and fail with 401: the enterprise golden path did
+  at its restart step. The refusal now has its own code, ENC2609 (it was
+  ENC2607). On it, the CLI and the Python SDK ask the control plane for a
+  new grant once, two seconds later, which also covers a control plane
+  clock up to a second behind the evaluator's. The evaluator checks the new
+  grant like the first, and the client retries no other refusal. INV-248
+  (amended).
 - **Dependency advisories.** `url` 2.5.9 (RUSTSEC-2026-0592),
   `rustls-webpki` 0.103.17 (RUSTSEC-2026-0382), `webpki-roots` 1.0.12
   (RUSTSEC-2026-0381) and `ctutils` 0.4.8 (RUSTSEC-2026-0385); jsonwebtoken

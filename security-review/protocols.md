@@ -256,10 +256,12 @@ header:   Encompute-Upload-Grant: hex(JSON grant)
    fails frees it. Reads (`GET /v1/info`, the key lookup) check the grant
    but spend nothing.
 4. Spent grants are kept in memory (one node). A restart forgets them, so the
-   evaluator refuses any grant issued at or before its start: a spent grant
-   is never valid again while unexpired. This assumes the control plane's
-   clock is not ahead of the evaluator's by more than the time between a
-   grant's use and the restart.
+   evaluator refuses any grant issued at or before its start (ENC2609): a
+   spent grant is never valid again while unexpired. This assumes the control
+   plane's clock is not ahead of the evaluator's by more than the time
+   between a grant's use and the restart. A client refused with ENC2609 asks
+   the control plane for a new grant once, two seconds later
+   (`crates/encompute-runtime/src/remote.rs`); it retries no other refusal.
 
 `GET /v1/info` lists only the program a presented upload grant names
 (`crates/encompute-evaluator/src/server.rs`). The control plane returns the
