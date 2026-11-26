@@ -2481,6 +2481,8 @@ mod tests {
             revoked: Default::default(),
             unmet: vec![],
             satisfied: true,
+            covered: vec![],
+            not_present: vec![],
         }
     }
 

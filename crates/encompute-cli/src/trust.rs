@@ -159,6 +159,15 @@ pub struct AnchorArgs {
     /// The weakest plan profile accepted: standard, strong or maximum.
     #[arg(long, default_value = "standard")]
     pub minimum_profile: String,
+    /// Accept a bundle with no evidence of a run (no execution, aggregation
+    /// round or training): the report then vouches only for the program,
+    /// its policy and authorizations.
+    #[arg(long)]
+    pub allow_no_run: bool,
+    /// Accept execution receipts from the mock backend, which encrypts
+    /// nothing (development and tests only).
+    #[arg(long)]
+    pub allow_mock: bool,
 }
 
 /// The bundle and its trust report under `anchors`.
@@ -228,6 +237,8 @@ pub(crate) fn checked(
         verifier: verifier.as_ref(),
         execution_policy: execution_policy.as_ref(),
         require: a.require.clone(),
+        require_run: !a.allow_no_run,
+        allow_mock: a.allow_mock,
         plan_floor,
         program_facts: Some(&facts),
         // The bundle carries no proofs: a receipt that claims one stays
@@ -305,10 +316,16 @@ pub fn export(adapter: &str, bundle: &Path, a: &AnchorArgs, trust: &TrustArgs) -
     }
 }
 
+/// A party identity key: 32 bytes, accessible to its owner only.
 fn key_file(p: &Path) -> Result<ed25519_dalek::SigningKey> {
-    let seed: [u8; 32] = read(p)?
-        .try_into()
-        .map_err(|_| Error::new(Code::TrustAuthorization, "a key file is 32 bytes"))?;
+    let seed: [u8; 32] = encompute_verification::read_secret_file(
+        p,
+        encompute_verification::SecretFile::Private,
+        |e| io(p, e),
+    )?
+    .as_slice()
+    .try_into()
+    .map_err(|_| Error::new(Code::TrustAuthorization, "a key file is 32 bytes"))?;
     Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
 }
 

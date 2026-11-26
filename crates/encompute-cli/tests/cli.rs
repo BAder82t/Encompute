@@ -96,9 +96,10 @@ fn keys_and_audit() {
         let (code, out, _) = encompute(&["audit", a, "--keys", k]);
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("FAIL  keys.secret_permissions"));
-        // Generating keys over a secret.key with a wider mode makes it
-        // owner-only again (not only when the file is created).
-        let (code, _, err) = encompute(&["keys", "generate", a, "-o", k, "--mode", "mock"]);
+        // Replacing a secret.key with a wider mode (--force) leaves an
+        // owner-only one.
+        let (code, _, err) =
+            encompute(&["keys", "generate", a, "-o", k, "--mode", "mock", "--force"]);
         assert_eq!(code, 0, "{err}");
         let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "secret.key is {mode:o}");
@@ -199,8 +200,10 @@ fn remote_receipts_and_verify() {
     }
 
     let receipt = p("result.receipt.json");
+    // The evaluator here is the mock backend (test infrastructure): these
+    // checks are about the bindings, so they accept mock explicitly.
     let verify = |extra: &[&str]| {
-        let mut args = vec!["verify", receipt.as_str()];
+        let mut args = vec!["verify", receipt.as_str(), "--allow-mock"];
         args.extend_from_slice(extra);
         encompute(&args)
     };
@@ -222,6 +225,22 @@ fn remote_receipts_and_verify() {
     );
     assert!(!out.contains("EXECUTION VERIFIED"));
     assert!(out.contains("TRANSCRIPT AVAILABLE"), "{out}");
+    // Without --allow-mock the same receipt is refused: the mock backend
+    // encrypts nothing, whoever made the request.
+    let mut strict = vec!["verify", receipt.as_str()];
+    strict.extend_from_slice(&full);
+    let (code, out, _) = encompute(&strict);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("INVALID: the receipt is for the mock backend, which encrypts nothing"),
+        "{out}"
+    );
+    assert!(!out.contains("RECEIPT VERIFIED"), "{out}");
+    let (code, out, _) = encompute(&["verify", receipt.as_str()]);
+    assert_eq!(
+        code, 1,
+        "a partial check of a mock receipt is refused too: {out}"
+    );
 
     // The transcript command prints the semantic program, never values.
     let (code, out, err) = encompute(&["transcript", &p("adult.encompute"), "--backend", "mock"]);
@@ -298,14 +317,14 @@ fn remote_receipts_and_verify() {
         let forged = p("forged.receipt.json");
         std::fs::write(&forged, r.sign(&signer).unwrap().to_bytes().unwrap()).unwrap();
         let key = signer.identity().public_key_hex();
-        let mut args = vec!["verify", forged.as_str()];
+        let mut args = vec!["verify", forged.as_str(), "--allow-mock"];
         args.extend_from_slice(&full[..6]);
         args.extend_from_slice(&["--trust-evaluator", &key]);
         let (code, out, _) = encompute(&args);
         assert_eq!(code, 1, "{out}");
         assert!(out.contains("receipt evidence does not match"), "{out}");
         assert!(out.contains("execution proof (reexec v1"), "{out}");
-        let (code, out, _) = encompute(&["verify", &forged]);
+        let (code, out, _) = encompute(&["verify", &forged, "--allow-mock"]);
         assert_eq!(code, 3, "{out}");
         assert!(
             out.contains("EXECUTION PROOF NAMED BUT NOT CHECKED"),
@@ -358,6 +377,120 @@ fn remote_receipts_and_verify() {
     let (code, _, err) = run(&serve(), "30");
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("ENC1606"), "{err}");
+}
+
+/// The trusted evaluator key (pinned, or given with `--trust-evaluator`) is
+/// compared with the evaluator's announced identity before the program,
+/// evaluation keys or ciphertexts are sent; and a pin file that cannot be
+/// read is refused, never silently replaced by trust on first use.
+#[test]
+fn evaluator_trust_is_checked_before_sending_and_a_bad_pin_fails_closed() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-pin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let run = |url: &str, extra: &[&str]| {
+        let mut args = vec![
+            "run",
+            p("adult.encompute").leak(),
+            "--remote",
+            url,
+            "--keys",
+            p("keys").leak(),
+            "--input",
+            "age=30",
+        ];
+        args.extend_from_slice(extra);
+        encompute(&args)
+    };
+    let programs = |url: &str| -> usize {
+        let info: serde_json::Value = ureq::get(&format!("{url}/v1/info"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        info["programs"].as_array().map_or(0, Vec::len)
+    };
+
+    let trusted = serve();
+    let (code, _, err) = run(
+        &trusted,
+        &[
+            "--save-receipt",
+            p("r.json").leak(),
+            "--save-envelopes",
+            p("x").leak(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    // A mock run and its receipt say plainly that nothing was encrypted.
+    assert!(err.contains("mock: the inputs were NOT encrypted"), "{err}");
+    let pin = dir.join("keys/evaluator.pub");
+    let pinned = std::fs::read_to_string(&pin).unwrap();
+    let (code, out, _) = encompute(&[
+        "verify",
+        &p("r.json"),
+        "--allow-mock",
+        "--trust-evaluator",
+        pinned.trim(),
+        "--model",
+        &p("adult.encompute"),
+        "--request",
+        &p("x/request.bin"),
+        "--response",
+        &p("x/response.bin"),
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("MOCK BACKEND: the inputs were NOT encrypted"),
+        "{out}"
+    );
+
+    // Another evaluator: refused before anything is uploaded to it.
+    let other = serve();
+    let (code, _, err) = run(&other, &[]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("ENC1606"), "{err}");
+    assert_eq!(
+        programs(&other),
+        0,
+        "the program was sent to an untrusted evaluator"
+    );
+    let key = pinned.trim().to_owned();
+    let (code, _, err) = run(&other, &["--trust-evaluator", &key]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("ENC1606"), "{err}");
+    assert_eq!(
+        programs(&other),
+        0,
+        "the program was sent to an untrusted evaluator"
+    );
+
+    // A corrupt pin file is refused and kept, not re-pinned.
+    std::fs::write(&pin, [0xff, 0xfe, 0x00, 0x80]).unwrap();
+    let (code, _, err) = run(&other, &[]);
+    assert_ne!(
+        code, 0,
+        "a corrupt pin was replaced by trust on first use: {err}"
+    );
+    assert_eq!(std::fs::read(&pin).unwrap(), [0xff, 0xfe, 0x00, 0x80]);
+    assert_eq!(programs(&other), 0);
+    std::fs::write(&pin, &pinned).unwrap();
+    let (code, _, err) = run(&trusted, &[]);
+    assert_eq!(code, 0, "{err}");
 }
 
 #[test]
@@ -1128,4 +1261,377 @@ fn plan_check_and_explain_deep() {
     .unwrap();
     let (code, _, _) = encompute(&["plan", s, "--infrastructure", i, "--profile", "maximum"]);
     assert_eq!(code, 1);
+}
+
+/// Secret key files another user can read are refused (ENC2605): a
+/// client's `secret.key` and a party identity key must be 0600.
+#[cfg(unix)]
+#[test]
+fn secret_key_files_readable_by_others_are_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("encompute-cli-modes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    let chmod = |f: &str, mode: u32| {
+        std::fs::set_permissions(dir.join(f), std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let url = serve();
+    let run = || {
+        encompute(&[
+            "run",
+            &p("adult.encompute"),
+            "--remote",
+            &url,
+            "--keys",
+            &p("keys"),
+            "--input",
+            "age=30",
+        ])
+    };
+    let (code, _, err) = run();
+    assert_eq!(code, 0, "{err}");
+
+    for mode in [0o644, 0o640, 0o604] {
+        chmod("keys/secret.key", mode);
+        let (code, _, err) = run();
+        assert_ne!(code, 0, "secret.key at {mode:o} was used: {err}");
+        assert!(
+            err.contains("ENC2605") && err.contains("chmod 600"),
+            "{err}"
+        );
+    }
+    chmod("keys/secret.key", 0o600);
+    let (code, _, err) = run();
+    assert_eq!(code, 0, "{err}");
+
+    // A party identity key, reused by `aggregate identity` and signing.
+    let (code, _, err) = encompute(&[
+        "aggregate",
+        "identity",
+        "--party",
+        "p",
+        "--key",
+        &p("p.key"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    chmod("p.key", 0o644);
+    let (code, _, err) = encompute(&[
+        "aggregate",
+        "identity",
+        "--party",
+        "p",
+        "--key",
+        &p("p.key"),
+    ]);
+    assert_ne!(code, 0, "a 0644 party key was used: {err}");
+    assert!(err.contains("ENC2605"), "{err}");
+    chmod("p.key", 0o600);
+    let (code, identity, err) = encompute(&[
+        "aggregate",
+        "identity",
+        "--party",
+        "p",
+        "--key",
+        &p("p.key"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    std::fs::write(dir.join("parties.json"), format!("[{}]", identity.trim())).unwrap();
+
+    // The same key signing an owner authorization in a trust bundle.
+    std::fs::write(
+        dir.join("owned.eir"),
+        "encompute 0.1\nprogram owned precision 0.001 purpose \"x\"\nparty \"p\" \"P\"\n\
+         asset \"a\" dataset owners [\"p\"] readers [\"p\"] purposes [\"x\"] release owner_only\n\
+         %0 = input \"v\" [0.0, 10.0] asset \"a\" : secret u8\n%1 = const [3.0] : public u8\n\
+         %2 = ge %0, %1 : secret bool\noutput \"y\" = %2 to \"p\"\n",
+    )
+    .unwrap();
+    let (code, _, err) = encompute(&["compile", &p("owned.eir"), "-o", &p("owned.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "trust",
+        "init",
+        &p("owned.encompute"),
+        "--parties",
+        &p("parties.json"),
+        "--bundle",
+        &p("t.json"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let authorize = || {
+        encompute(&[
+            "trust",
+            "authorize",
+            "--party",
+            "p",
+            "--key",
+            &p("p.key"),
+            "--bundle",
+            &p("t.json"),
+        ])
+    };
+    chmod("p.key", 0o644);
+    let (code, _, err) = authorize();
+    assert_ne!(code, 0, "a 0644 party key signed an authorization: {err}");
+    assert!(err.contains("ENC2605"), "{err}");
+    chmod("p.key", 0o600);
+    let (code, _, err) = authorize();
+    assert_eq!(code, 0, "{err}");
+}
+
+/// `keys generate` never replaces an existing secret key unless asked
+/// (`--force`): results encrypted under it would become undecryptable. A
+/// replacement is written to temporary files and renamed into place, so a
+/// failure leaves the old keys whole.
+#[test]
+fn keys_generate_never_replaces_a_secret_key_without_force() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-regen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let generate = |extra: &[&str]| {
+        let mut args = vec![
+            "keys".to_owned(),
+            "generate".to_owned(),
+            p("adult.encompute"),
+            "-o".to_owned(),
+            p("keys"),
+            "--mode".to_owned(),
+            "mock".to_owned(),
+        ];
+        args.extend(extra.iter().map(|s| (*s).to_owned()));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        encompute(&args)
+    };
+    let read = |f: &str| std::fs::read(dir.join("keys").join(f)).unwrap();
+    let (code, _, err) = generate(&[]);
+    assert_eq!(code, 0, "{err}");
+    let (secret, eval) = (read("secret.key"), read("eval.keys"));
+    std::fs::write(dir.join("keys/evaluator.pub"), "pinned\n").unwrap();
+
+    // Without --force: refused, nothing changed.
+    let (code, _, err) = generate(&[]);
+    assert_ne!(code, 0, "a secret key was replaced without --force");
+    assert!(err.contains("ENC1605") && err.contains("--force"), "{err}");
+    assert_eq!(read("secret.key"), secret);
+    assert_eq!(read("eval.keys"), eval);
+
+    // With --force: a new key pair, owner-only, the evaluator pin kept, no
+    // temporary files left behind.
+    let (code, _, err) = generate(&["--force"]);
+    assert_eq!(code, 0, "{err}");
+    assert_ne!(read("secret.key"), secret);
+    assert_ne!(read("eval.keys"), eval);
+    assert_eq!(read("evaluator.pub"), b"pinned\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("keys/secret.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "secret.key is {mode:o}");
+    }
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("keys"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["eval.keys", "evaluator.pub", "secret.key"]);
+}
+
+/// `trust report` does not say SATISFIED for a bundle with no evidence of a
+/// run (risk R-04): it requires an execution, aggregation or training run
+/// unless `--allow-no-run`, and it says what it covered.
+#[test]
+fn a_trust_report_requires_evidence_of_a_run() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-coverage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "trust",
+        "init",
+        &p("adult.encompute"),
+        "--bundle",
+        &p("t.json"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+
+    // A bare program: no run, no policy.
+    let (code, out, _) = encompute(&["trust", "report", "--bundle", &p("t.json")]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("Policy                  NOT PRESENT"), "{out}");
+    assert!(out.contains("TRUST REQUIREMENTS NOT SATISFIED"), "{out}");
+    assert!(out.contains("no evidence of a run"), "{out}");
+    let (code, out, _) = encompute(&[
+        "trust",
+        "report",
+        "--bundle",
+        &p("t.json"),
+        "--allow-no-run",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("TRUST REQUIREMENTS SATISFIED"), "{out}");
+    assert!(out.contains("COVERS     Evidence, Program"), "{out}");
+
+    // With an execution receipt against a trusted evaluator key.
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let url = serve();
+    let (code, _, err) = encompute(&[
+        "run",
+        &p("adult.encompute"),
+        "--remote",
+        &url,
+        "--keys",
+        &p("keys"),
+        "--input",
+        "age=30",
+        "--save-receipt",
+        &p("r.json"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&["trust", "add", &p("r.json"), "--bundle", &p("t.json")]);
+    assert_eq!(code, 0, "{err}");
+    let key = std::fs::read_to_string(dir.join("keys/evaluator.pub")).unwrap();
+    // A mock-backend execution encrypted nothing: not evidence of a run
+    // unless allowed explicitly.
+    let (code, out, _) = encompute(&[
+        "trust",
+        "report",
+        "--bundle",
+        &p("t.json"),
+        "--evaluator-key",
+        key.trim(),
+    ]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("Execution               FAILED"), "{out}");
+    assert!(out.contains("mock backend"), "{out}");
+    let (code, out, _) = encompute(&[
+        "trust",
+        "report",
+        "--bundle",
+        &p("t.json"),
+        "--evaluator-key",
+        key.trim(),
+        "--allow-mock",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Execution               VERIFIED"), "{out}");
+    assert!(
+        out.contains("COVERS     Evidence, Program, Execution"),
+        "{out}"
+    );
+    let (code, out, _) = encompute(&[
+        "trust",
+        "report",
+        "--bundle",
+        &p("t.json"),
+        "--evaluator-key",
+        key.trim(),
+        "--allow-mock",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["satisfied"], true);
+    assert_eq!(
+        v["covered"],
+        serde_json::json!(["Evidence", "Program", "Execution"])
+    );
+}
+
+/// `run --remote` reads `eval.keys` (about 525 MiB for exact programs) only
+/// when the evaluator lacks the keys, not on every run.
+#[test]
+fn evaluation_keys_are_read_only_when_the_evaluator_lacks_them() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-lazykeys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = encompute(&[
+        "keys",
+        "generate",
+        &p("adult.encompute"),
+        "-o",
+        &p("keys"),
+        "--mode",
+        "mock",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let key_of = |url: &str| -> String {
+        let info: serde_json::Value = ureq::get(&format!("{url}/v1/info"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        info["evaluator"]["public_key"].as_str().unwrap().to_owned()
+    };
+    let run = |url: &str| {
+        let key = key_of(url);
+        encompute(&[
+            "run",
+            &p("adult.encompute"),
+            "--remote",
+            url,
+            "--keys",
+            &p("keys"),
+            "--trust-evaluator",
+            &key,
+            "--input",
+            "age=30",
+        ])
+    };
+    let url = serve();
+    let (code, _, err) = run(&url);
+    assert_eq!(code, 0, "{err}");
+    let good = std::fs::read(dir.join("keys/eval.keys")).unwrap();
+
+    // The evaluator holds the keys now: the file is not read at all, so
+    // even a corrupt one does not matter.
+    std::fs::write(dir.join("keys/eval.keys"), b"not an envelope").unwrap();
+    let (code, out, err) = run(&url);
+    assert_eq!(code, 0, "eval.keys was read although not needed: {err}");
+    assert_eq!(out.trim(), "{\n  \"adult\": true\n}");
+
+    // A fresh evaluator lacks them: the file is read (and here refused).
+    let fresh = serve();
+    let (code, _, err) = run(&fresh);
+    assert_ne!(code, 0, "{err}");
+    std::fs::write(dir.join("keys/eval.keys"), &good).unwrap();
+    let (code, _, err) = run(&fresh);
+    assert_eq!(code, 0, "{err}");
 }

@@ -82,7 +82,8 @@ EXECUTION PROOF NOT PRESENT
 | verify expecting another backend (`--backend openfhe-exact`) | exit 1, `INVALID: receipt spec ID does not match` |
 | trust a different evaluator key | exit 1, `INVALID: receipt was signed by an untrusted evaluator key` |
 | `encompute verify receipt.json` alone | exit 3, `RECEIPT SIGNATURE VALID (some bindings not checked)`: a partial check is not success |
-| run against a new evaluator (new identity) | exit 2, ENC1606: the pinned key does not match |
+| verify the mock receipt without `--allow-mock` | exit 1, `INVALID: the receipt is for the mock backend, which encrypts nothing`: the example's other checks pass `--allow-mock` because its evaluator is the mock |
+| run against a new evaluator (new identity) | exit 2, ENC1606: the evaluator announces another identity than the pinned one; refused before the program, keys or inputs are sent |
 
 The expected backend comes from the request the client made, never from the
 receipt, so an evaluator cannot quietly run a different backend.

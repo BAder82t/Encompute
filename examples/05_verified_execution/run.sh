@@ -50,7 +50,7 @@ if ! has verified-execution; then
     --save-receipt mock.receipt.json --save-envelopes mock 2>run.log >/dev/null
   grep -E "^(Evaluator receipt|Execution proof|Encrypted result)" run.log
   "$E" verify mock.receipt.json --model precheck.encompute --request mock/request.bin \
-    --response mock/response.bin --trust-evaluator "$(cat mockkeys/evaluator.pub)" |
+    --response mock/response.bin --trust-evaluator "$(cat mockkeys/evaluator.pub)" --allow-mock |
     grep -E "^(RECEIPT|EXECUTION|TRANSCRIPT)"
 fi
 

@@ -125,6 +125,10 @@ enum Cmd {
         /// The attestation policy the workload must satisfy.
         #[arg(long)]
         attestation_policy: Option<PathBuf>,
+        /// Accept a receipt for the mock backend, which encrypts nothing
+        /// (development and tests only). Refused by default.
+        #[arg(long)]
+        allow_mock: bool,
         #[command(flatten)]
         trust: attest::TrustArgs,
     },
@@ -492,6 +496,10 @@ enum KeysCmd {
         output: Option<PathBuf>,
         #[arg(long, default_value = "encrypted")]
         mode: String,
+        /// Replace an existing `secret.key` in the output directory. Results
+        /// encrypted under the old key can then no longer be decrypted.
+        #[arg(long)]
+        force: bool,
     },
     #[command(flatten)]
     Broker(Box<attest::BrokerCmd>),
@@ -567,19 +575,49 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             Error::new(Code::WrongKey, format!("{}: {e}", dir.join(f).display()))
                         })
                     };
-                    let mut client =
-                        ClientSession::restore(m.ids(), m.compiled(), &read("secret.key")?)?;
-                    let eval_keys = read("eval.keys").ok();
-                    // Needed to verify execution proofs by re-execution.
-                    if let Some(k) = &eval_keys {
-                        client.attach_evaluation_keys(k)?;
+                    let secret = encompute_verification::read_secret_file(
+                        &dir.join("secret.key"),
+                        encompute_verification::SecretFile::Private,
+                        |e| {
+                            Error::new(
+                                Code::WrongKey,
+                                format!("{}: {e}", dir.join("secret.key").display()),
+                            )
+                        },
+                    )?;
+                    let mut client = ClientSession::restore(m.ids(), m.compiled(), &secret)?;
+                    // Evaluation keys (about 525 MiB for exact programs) are
+                    // read now only to verify an execution proof by
+                    // re-execution; otherwise only if the evaluator lacks
+                    // them (run_with_keys_file).
+                    if m.compiled().proof_required() {
+                        if let Ok(k) = read("eval.keys") {
+                            client.attach_evaluation_keys(&k)?;
+                        }
                     }
                     let remote = Remote::new(&url);
                     let trusted = trusted_evaluator(&remote, &dir, trust_evaluator.as_deref())?;
-                    let run = remote.run(
+                    // Before the program, evaluation keys or ciphertexts
+                    // go anywhere: an evaluator announcing another identity
+                    // is refused now. The announcement is unauthenticated;
+                    // the receipt check after execution stays the binding
+                    // one.
+                    let announced = remote.evaluator_identity()?;
+                    if announced.public_key() != trusted.public_key() {
+                        return Err(Error::new(
+                            Code::Receipt,
+                            format!(
+                                "the evaluator at {url} announces enc-eval:{}, not the trusted \
+                                 enc-eval:{}; nothing was sent",
+                                announced.evaluator_id(),
+                                trusted.evaluator_id()
+                            ),
+                        ));
+                    }
+                    let run = remote.run_with_keys_file(
                         &client,
                         m.program(),
-                        eval_keys.as_deref(),
+                        &dir.join("eval.keys"),
                         &inputs,
                         &trusted,
                     )?;
@@ -593,6 +631,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         stats.round_trip_ms
                     );
                     eprintln!("Evaluator receipt       verified");
+                    if client.kind() == BackendKind::Mock {
+                        eprintln!(
+                            "Backend                 mock: the inputs were NOT encrypted \
+                             (development and tests only)"
+                        );
+                    }
                     match (&run.state, &run.proof) {
                         (VerificationState::ExecutionVerified(v), _) => {
                             eprintln!(
@@ -885,6 +929,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             evaluation_keys,
             attestation,
             attestation_policy,
+            allow_mock,
             trust,
         } => verify(
             &receipt,
@@ -900,6 +945,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 policy: attestation_policy.as_deref(),
                 trust: &trust,
             },
+            allow_mock,
         ),
         Cmd::Attest { cmd } => attest::attest(cmd),
         Cmd::Aggregate { cmd } => aggregate::aggregate(*cmd),
@@ -914,12 +960,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     model,
                     output,
                     mode,
+                    force,
                 },
         } => {
             let m = load(&model)?;
-            let client = m.new_client(mode.parse()?)?;
             let dir = output
                 .unwrap_or_else(|| model.with_file_name(format!("{}.keys", m.program().name())));
+            // Before generating (seconds and gigabytes for exact programs):
+            // never replace a secret key unless asked.
+            let secret = dir.join("secret.key");
+            if !force && std::fs::symlink_metadata(&secret).is_ok() {
+                return Err(Error::new(
+                    Code::WrongKey,
+                    format!(
+                        "{} exists: replacing it would make every result encrypted under it \
+                         undecryptable. Use another directory, or --force to replace it",
+                        secret.display()
+                    ),
+                ));
+            }
+            let client = m.new_client(mode.parse()?)?;
             write_keys(&dir, &client)?;
             println!("wrote {} (key {})", dir.display(), &client.key_id()[..16]);
             Ok(ExitCode::SUCCESS)
@@ -1202,8 +1262,21 @@ fn trusted_evaluator(
     if let Some(hex) = flag {
         return EvaluatorIdentity::from_public_key_hex(hex.trim());
     }
-    if let Ok(hex) = std::fs::read_to_string(&pin) {
-        return EvaluatorIdentity::from_public_key_hex(hex.trim());
+    match std::fs::read_to_string(&pin) {
+        Ok(hex) => return EvaluatorIdentity::from_public_key_hex(hex.trim()),
+        // Only a missing pin means first use. A pin that exists but cannot
+        // be read is refused: replacing it would trust whoever answers now.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(Error::new(
+                Code::Receipt,
+                format!(
+                    "{}: the pinned evaluator key cannot be read ({e}); restore it, remove it \
+                     to pin again on first use, or pass --trust-evaluator",
+                    pin.display()
+                ),
+            ))
+        }
     }
     let announced = remote.evaluator_identity()?;
     // Public: readable by all, whatever the umask.
@@ -1277,6 +1350,7 @@ fn verify(
     proof: Option<&Path>,
     evaluation_keys: Option<&Path>,
     attested: Attested<'_>,
+    allow_mock: bool,
 ) -> Result<ExitCode> {
     let read = |p: &Path| {
         std::fs::read(p).map_err(|e| Error::new(Code::Artifact, format!("{}: {e}", p.display())))
@@ -1575,7 +1649,21 @@ fn verify(
         }
         None => {}
     }
+    // The mock backend encrypts nothing. A valid receipt for a mock run is
+    // still only a mock run, and the expected backend may come from a
+    // request envelope someone else made: refused unless asked for.
+    let mock = r.backend == "mock" || kind == Some(BackendKind::Mock);
+    if mock && !allow_mock && result.is_ok() {
+        result = Err(Error::new(
+            Code::Receipt,
+            "the receipt is for the mock backend, which encrypts nothing: pass --allow-mock to \
+             accept it (development and tests only)",
+        ));
+    }
     section("Receipt");
+    if mock {
+        println!("MOCK BACKEND: the inputs were NOT encrypted (development and tests only)");
+    }
     if matches!(attestation, Some(Ok(_))) && result.is_ok() {
         println!("WORKLOAD ATTESTATION VALID");
     }
@@ -1698,34 +1786,54 @@ fn compile(source: &str, output: Option<PathBuf>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Write a key pair. Each file is written to a new temporary file (the
+/// secret one created 0600) and renamed into place, evaluation keys first
+/// and the secret key last: a failure part way leaves any existing secret
+/// key whole, never truncated.
 fn write_keys(dir: &Path, client: &ClientSession) -> Result<()> {
-    let io = |e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", dir.display()));
-    std::fs::create_dir_all(dir).map_err(io)?;
-    let secret = dir.join("secret.key");
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    use std::io::Write;
-    let envelope = client.secret_key_envelope()?;
-    let mut f = opts.open(&secret).map_err(io)?;
-    // The mode above applies only to a new file: an existing secret.key
-    // keeps its own, so set it before writing the key.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        f.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(io)?;
-    }
-    f.write_all(&envelope).map_err(io)?;
+    let io =
+        |p: &Path, e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", p.display()));
+    std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+    let envelope = zeroize::Zeroizing::new(client.secret_key_envelope()?);
     let keys = client
         .evaluation_keys()
         .expect("fresh client has evaluation keys");
-    std::fs::write(dir.join("eval.keys"), keys).map_err(io)?;
-    Ok(())
+    replace_file(&dir.join("eval.keys"), keys, false).map_err(|(p, e)| io(&p, e))?;
+    replace_file(&dir.join("secret.key"), &envelope, true).map_err(|(p, e)| io(&p, e))
+}
+
+/// Write `bytes` to `path` through a temporary file in the same directory,
+/// synced, then renamed over `path` (removed again on any error).
+fn replace_file(
+    path: &Path,
+    bytes: &[u8],
+    secret: bool,
+) -> std::result::Result<(), (PathBuf, std::io::Error)> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .map_or_else(Default::default, |n| n.to_owned());
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(&name);
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if secret {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = secret;
+    let written = opts
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        (path.to_owned(), e)
+    })
 }
 
 fn parse_inputs(args: &[String], file: Option<&Path>) -> Result<Inputs> {

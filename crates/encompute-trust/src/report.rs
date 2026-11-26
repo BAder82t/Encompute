@@ -93,7 +93,14 @@ pub struct TrustReport {
     /// Why the requirements are not satisfied, if they are not.
     pub unmet: Vec<String>,
     pub satisfied: bool,
+    /// Rows backed by checked evidence: what a satisfied report vouches for.
+    pub covered: Vec<String>,
+    /// Rows with no evidence at all: what the report says nothing about.
+    pub not_present: Vec<String>,
 }
+
+/// Rows that record a run: an execution, an aggregation round or training.
+pub const RUN_ROWS: [&str; 3] = ["Execution", "Private aggregation", "Training"];
 
 /// Keys the caller trusts, obtained out of band (never from the bundle).
 #[derive(Clone, Debug, Default)]
@@ -128,6 +135,15 @@ pub struct ReportOptions<'a> {
     pub execution_policy: Option<&'a AttestationPolicy>,
     /// Rows (see [`ROWS`]) that must be present; "Program" always must.
     pub require: Vec<String>,
+    /// Require evidence of a run (one of [`RUN_ROWS`] present). Without
+    /// it a bundle holding only a program and its policy can satisfy the
+    /// report, which then vouches for no execution at all. The CLI sets it
+    /// unless `--allow-no-run`.
+    pub require_run: bool,
+    /// Accept execution receipts from the mock backend, which encrypts
+    /// nothing (development and tests only). Off: such a receipt fails the
+    /// Execution row, so it is never evidence of a confidential run.
+    pub allow_mock: bool,
     /// Time for authorization expiry (default: now).
     pub now: Option<u64>,
     /// The weakest plan the caller accepts. A plan's context (profile,
@@ -295,7 +311,6 @@ impl TrustGraph {
         let programs: Vec<_> = g.of(NodeKind::Program).collect();
         for (id, n) in &programs {
             prog.present = true;
-            policy.present = true;
             let Some(Evidence::Program(text)) = &n.evidence else {
                 prog.fail(format!("{id} has no program text"));
                 continue;
@@ -314,7 +329,10 @@ impl TrustGraph {
             if p.to_string() != *text {
                 prog.fail(format!("{id}: its text is not canonical"));
             }
+            // A program without confidentiality declarations has no policy
+            // to verify: the row stays NOT PRESENT rather than VERIFIED.
             if let Some(c) = p.confidentiality() {
+                policy.present = true;
                 let want = node_id(NodeKind::Policy, &PolicyId::of(c).hex());
                 if !g.out(id, EdgeKind::GovernedBy).any(|x| x == want) {
                     policy.fail(format!("{id} is not governed by its own policy"));
@@ -670,6 +688,18 @@ impl TrustGraph {
             if own.and_then(|k| r.verify_signature(&k)).is_err() {
                 ex.fail(format!("{id}: invalid receipt signature"));
             }
+            if r.receipt.backend == "mock" {
+                if opts.allow_mock {
+                    ex.note(format!(
+                        "{id}: mock backend: the inputs were not encrypted (allowed)"
+                    ));
+                } else {
+                    ex.fail(format!(
+                        "{id}: a receipt for the mock backend, which encrypts nothing \
+                         (--allow-mock accepts it for development and tests)"
+                    ));
+                }
+            }
             for x in g.out(id, EdgeKind::AttestedBy) {
                 if let Some(Evidence::Attestation(rec)) =
                     g.node(x).and_then(|n| n.evidence.as_ref())
@@ -753,7 +783,33 @@ impl TrustGraph {
                 _ => {}
             }
         }
+        if opts.require_run
+            && !rows
+                .iter()
+                .any(|r| RUN_ROWS.contains(&r.name) && r.status != Status::NotPresent)
+        {
+            unmet.push(
+                "no evidence of a run: no execution, aggregation round or training is recorded, \
+                 so the report would vouch only for the program (--allow-no-run accepts that)"
+                    .to_owned(),
+            );
+        }
         unmet.dedup();
+        let covered = rows
+            .iter()
+            .filter(|r| {
+                !matches!(
+                    r.status,
+                    Status::NotPresent | Status::Unchecked | Status::Failed
+                )
+            })
+            .map(|r| r.name.to_owned())
+            .collect();
+        let not_present = rows
+            .iter()
+            .filter(|r| r.status == Status::NotPresent)
+            .map(|r| r.name.to_owned())
+            .collect();
         let revoked = revoked_at
             .keys()
             .map(|x| (x.clone(), g.downstream(x)))
@@ -764,6 +820,8 @@ impl TrustGraph {
             rows,
             revoked,
             unmet,
+            covered,
+            not_present,
         })
     }
 }
@@ -1277,6 +1335,13 @@ impl fmt::Display for TrustReport {
                 )?;
             }
         }
+        let list = |v: &[String]| {
+            if v.is_empty() {
+                "none".to_owned()
+            } else {
+                v.join(", ")
+            }
+        };
         if self.satisfied {
             writeln!(f, "\nRESULT\nTRUST REQUIREMENTS SATISFIED")?;
             if self
@@ -1286,6 +1351,9 @@ impl fmt::Display for TrustReport {
             {
                 writeln!(f, "PLAN SATISFIED BY OBSERVED EXECUTION")?;
             }
+            // What the verdict vouches for, and what it says nothing about.
+            writeln!(f, "COVERS     {}", list(&self.covered))?;
+            writeln!(f, "ABSENT     {}", list(&self.not_present))?;
             Ok(())
         } else {
             writeln!(f, "\nRESULT\nTRUST REQUIREMENTS NOT SATISFIED")?;

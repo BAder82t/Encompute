@@ -1,6 +1,8 @@
 //! HTTP client for a remote `encompute-evaluator`.
 
+use std::borrow::Cow;
 use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -221,6 +223,18 @@ impl Remote {
         key_id: &str,
         keys: Option<&[u8]>,
     ) -> Result<usize> {
+        self.ensure_keys_with(program_id, key_id, || Ok(keys.map(Cow::Borrowed)))
+    }
+
+    /// [`Remote::ensure_keys`], obtaining the keys from `load` only if the
+    /// evaluator lacks them: exact programs' keys are about 525 MiB, and an
+    /// evaluator that already holds them needs none of it.
+    fn ensure_keys_with<'k>(
+        &self,
+        program_id: &str,
+        key_id: &str,
+        load: impl FnOnce() -> Result<Option<Cow<'k, [u8]>>>,
+    ) -> Result<usize> {
         let grant = self.upload_header(UploadKind::Keys, Some(key_id))?;
         match self
             .get(
@@ -233,7 +247,7 @@ impl Remote {
             Err(ureq::Error::Status(404, _)) => {}
             Err(e) => return Err(remote_err(e)),
         }
-        let keys = keys.ok_or_else(|| {
+        let keys = load()?.ok_or_else(|| {
             Error::new(
                 Code::WrongKey,
                 "the evaluator lacks this client's evaluation keys; provide eval.keys",
@@ -241,7 +255,7 @@ impl Remote {
         })?;
         let got = self.post(
             &format!("/v1/programs/{program_id}/keys"),
-            keys,
+            &keys,
             grant.as_deref(),
         )?;
         if got["key_id"] != key_id {
@@ -384,6 +398,45 @@ impl Remote {
         self.run(client, program, eval_keys, inputs, &identity)
     }
 
+    /// [`Remote::run_scheduled`] with [`Remote::run_with_keys_file`]'s
+    /// lazy key loading.
+    pub fn run_scheduled_with_keys_file(
+        &self,
+        client: &ClientSession,
+        program: &Program,
+        keys_file: &Path,
+        inputs: &encompute_ir::Inputs,
+        receipt_key: &str,
+        trusted: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<RemoteRun> {
+        Self::check_trusted_evaluator(trusted, receipt_key)?;
+        let identity = EvaluatorIdentity::from_public_key_hex(receipt_key)?;
+        self.run_with_keys_file(client, program, keys_file, inputs, &identity)
+    }
+
+    /// [`Remote::run`], reading the evaluation keys from `keys_file` only
+    /// if the evaluator does not hold them yet (keys attached to `client`
+    /// are used first). A missing file is as if no keys were given.
+    pub fn run_with_keys_file(
+        &self,
+        client: &ClientSession,
+        program: &Program,
+        keys_file: &Path,
+        inputs: &encompute_ir::Inputs,
+        trusted: &EvaluatorIdentity,
+    ) -> Result<RemoteRun> {
+        self.run_with(
+            client,
+            program,
+            || match client.evaluation_keys() {
+                Some(k) => Ok(Some(Cow::Borrowed(k))),
+                None => read_keys_file(keys_file).map(|k| k.map(Cow::Owned)),
+            },
+            inputs,
+            trusted,
+        )
+    }
+
     /// Full remote run: program and keys ensured, encrypted request, then
     /// the receipt verified against `trusted` before the result is
     /// decrypted. A receipt is a signed claim by the evaluator, not a proof
@@ -396,15 +449,28 @@ impl Remote {
         inputs: &encompute_ir::Inputs,
         trusted: &EvaluatorIdentity,
     ) -> Result<RemoteRun> {
+        self.run_with(
+            client,
+            program,
+            || Ok(eval_keys.or(client.evaluation_keys()).map(Cow::Borrowed)),
+            inputs,
+            trusted,
+        )
+    }
+
+    fn run_with<'k>(
+        &self,
+        client: &ClientSession,
+        program: &Program,
+        load_keys: impl FnOnce() -> Result<Option<Cow<'k, [u8]>>>,
+        inputs: &encompute_ir::Inputs,
+        trusted: &EvaluatorIdentity,
+    ) -> Result<RemoteRun> {
         encompute_evaluator::refuse_aggregation(program)?;
         let t = std::time::Instant::now();
         let ids = client.ids();
         self.ensure_program(program, &ids.program_id)?;
-        let uploaded = self.ensure_keys(
-            &ids.program_id,
-            client.key_id(),
-            eval_keys.or(client.evaluation_keys()),
-        )?;
+        let uploaded = self.ensure_keys_with(&ids.program_id, client.key_id(), load_keys)?;
         let request = client.encrypt(program, inputs)?;
         let (response, job) = self.execute(&ids.program_id, &request)?;
         let receipt: SignedExecutionReceipt = serde_json::from_value(job["receipt"].clone())
@@ -451,6 +517,18 @@ impl Remote {
             request,
             response,
         })
+    }
+}
+
+/// An evaluation-key file, or `None` if it does not exist.
+fn read_keys_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::new(
+            Code::WrongKey,
+            format!("{}: {e}", path.display()),
+        )),
     }
 }
 

@@ -87,6 +87,6 @@ curl -s "http://127.0.0.1:$P3/v1/attestation" > record.json
 PK=$(curl -s "http://127.0.0.1:$P3/v1/info" | sed 's/.*"public_key":"\([0-9a-f]*\)".*/\1/')
 "$E" verify receipt.json --model step.encompute --request env/request.bin \
   --response env/response.bin --trust-evaluator "$PK" --attestation record.json \
-  --attestation-policy policy.json --mock-root "$ROOT" | sed -n '/Workload attestation/,$p'
+  --attestation-policy policy.json --mock-root "$ROOT" --allow-mock | sed -n '/Workload attestation/,$p'
 
 PIDS=$(jobs -p); disown -a; kill $PIDS 2>/dev/null || true

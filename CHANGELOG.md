@@ -29,6 +29,77 @@ The notes in the next section (production mode: native TLS) also ship in
 this unreleased work. Draft notes:
 [docs/release-notes-0.4.0-rc.1.md](docs/release-notes-0.4.0-rc.1.md).
 
+- **`run --remote` checks the evaluator's identity before sending
+  anything.** With a pinned key (`keys/evaluator.pub`) or
+  `--trust-evaluator`, an evaluator that announces another identity is
+  refused (ENC1606) before the program, the evaluation keys or any
+  ciphertext is uploaded. Before, the job ran there first and only its
+  receipt was refused. The receipt check after execution is unchanged and
+  stays the binding one: the announcement is not authenticated. Only a
+  missing `keys/evaluator.pub` means first use: a pin file that exists but
+  cannot be read (for example corrupted, non-UTF-8 content) is refused,
+  where it used to be replaced by whatever key the evaluator announced.
+  INV-302.
+- **Secret key files are checked before use (ENC2605).** A client's
+  `secret.key` (`run --remote`, `jobs run`, the Python SDK's remote runs),
+  a party identity key (`aggregate`, `trust authorize`) and an
+  organization's governance key (`governance sign`, `witness`, head
+  signing, `governance countersign`, `governance export --sign-key`) must
+  be accessible to their owner only (`chmod 600`), as the
+  evaluator identity and the broker's KEK already were. Service keys read
+  from mounted secrets (`ENCOMPUTE_SERVICE_KEY_FILE`,
+  `ENCOMPUTE_SIGNING_KEY_FILE`) may stay readable through the mount (0644,
+  as `deploy/docker-compose/init.sh` writes them) but must be regular files
+  that nobody else can write, the rule the OpenBao token file already
+  followed. **Upgrade note:** a `secret.key`, party key or governance key
+  with group or other access is now refused; `chmod 600` it. Files made by
+  `keys generate`, `aggregate identity` and `governance keygen` are already
+  0600. INV-303.
+- **`keys generate` no longer replaces an existing secret key.** If the
+  output directory already holds a `secret.key`, it refuses (ENC1605)
+  before generating anything; `--force` replaces it. Every result encrypted
+  under the old key would otherwise become undecryptable without warning.
+  Keys are now written to temporary files and renamed into place
+  (evaluation keys first, the secret key last), so an interrupted run never
+  leaves a truncated or empty `secret.key`. **Upgrade note:** scripts that
+  regenerate keys into the same directory must add `--force`. INV-304.
+- **`verify` refuses mock-backend receipts unless `--allow-mock`.** A
+  receipt for the mock backend (from the receipt, the request envelope or
+  `--backend`) is `INVALID`, exit 1: the mock backend encrypts nothing, and
+  the request envelope may have been made by someone else. `--allow-mock`
+  accepts it for development and tests and prints that the inputs were not
+  encrypted; `run --remote` with mock keys prints the same notice.
+  **Upgrade note:** scripts that verify mock receipts need `--allow-mock`.
+  INV-306.
+- **A trust report needs evidence of a run.** `trust report`, `lineage` and
+  `export` no longer say `TRUST REQUIREMENTS SATISFIED` for a bundle that
+  records no execution, aggregation round or training: the report would
+  vouch only for the program. `--allow-no-run` accepts such a bundle
+  explicitly. A program without confidentiality declarations has `Policy
+  NOT PRESENT`, not `VERIFIED`. A satisfied report prints `COVERS` (rows
+  backed by checked evidence) and `ABSENT` (rows with no evidence); `--json`
+  adds `covered` and `not_present`. The library's
+  `ReportOptions::require_run` is off by default; the CLI turns it on. The
+  control plane's job trust report is separate and unchanged. **Upgrade
+  note:** scripts that check a bundle before any run need `--allow-no-run`.
+  INV-305.
+- **A mock-backend execution receipt fails the trust report's `Execution`
+  row** unless `--allow-mock` is given (`ReportOptions::allow_mock` in the
+  library, off by default): its receipt is not evidence of a confidential
+  run, and it does not count as the run a report requires. With
+  `--allow-mock` the row notes that the inputs were not encrypted. A
+  governance bundle's report (`governance verify`, `export`,
+  `countersign`) applies the same rule and has no opt-in. **Upgrade
+  note:** bundles built from mock runs need `--allow-mock`. INV-306.
+- **Evaluation keys are read only when needed.** `run --remote`, `jobs run`
+  and the Python SDK's remote runs read `eval.keys` only when the evaluator
+  lacks the keys, or up front for a program that requires an execution
+  proof (verified by re-execution). Exact programs' evaluation keys are
+  about 525 MiB; they used to be read (and copied) on every run. A missing
+  `eval.keys` behaves as before; an unreadable one is now an error only
+  when it is actually needed. The runtime's `Remote` gains
+  `run_with_keys_file` and `run_scheduled_with_keys_file`; `run` and
+  `run_scheduled` are unchanged.
 - **Production topology: the evaluator image is required.**
   `deploy/production/compose.yaml` defaulted the evaluator to an image
   published with v0.3.0. No released evaluator, up to v0.3.3, accepts the
