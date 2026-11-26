@@ -93,11 +93,18 @@ fn broker_url_of<'a>(
     })
 }
 
+/// A key or seed file (a party's or the coordinator's key, a mock
+/// attestation seed), accessible to its owner only like the CLI's secret
+/// key files: ENC2605 otherwise, before it is used.
 fn seed32(path: &str) -> PyResult<[u8; 32]> {
-    std::fs::read(path)
-        .map_err(|e| bad(format!("{path}: {e}")))?
-        .try_into()
-        .map_err(|_| bad(format!("{path}: a key or seed file is 32 bytes")))
+    use encompute_runtime::verification::{read_secret_file, SecretFile};
+    read_secret_file(Path::new(path), SecretFile::Private, |e| {
+        Error::new(Code::BadInput, format!("{path}: {e}"))
+    })
+    .map_err(err)?
+    .as_slice()
+    .try_into()
+    .map_err(|_| bad(format!("{path}: a key or seed file is 32 bytes")))
 }
 
 fn bytes(py: Python<'_>, b: &[u8]) -> Py<PyBytes> {

@@ -430,7 +430,12 @@ impl Remote {
             program,
             || match client.evaluation_keys() {
                 Some(k) => Ok(Some(Cow::Borrowed(k))),
-                None => read_keys_file(keys_file).map(|k| k.map(Cow::Owned)),
+                None => read_keys_file(keys_file)?
+                    .map(|k| {
+                        check_keys_file(client, keys_file, &k)?;
+                        Ok(Cow::Owned(k))
+                    })
+                    .transpose(),
             },
             inputs,
             trusted,
@@ -530,6 +535,29 @@ fn read_keys_file(path: &Path) -> Result<Option<Vec<u8>>> {
             format!("{}: {e}", path.display()),
         )),
     }
+}
+
+/// Before an evaluation-key file is uploaded (about 525 MiB for exact
+/// programs): its header names this client's key. A file of another key
+/// pair, as an interrupted `keys generate --force` leaves, is refused here
+/// and is not sent (the program may already have been). The header is not
+/// verified; the evaluator checks the payload's digest against the key ID.
+fn check_keys_file(client: &ClientSession, path: &Path, keys: &[u8]) -> Result<()> {
+    let header = encompute_protocol::Envelope::peek_header(keys)
+        .map_err(|e| Error::new(Code::WrongKey, format!("{}: {}", path.display(), e.message)))?;
+    if header.kind != encompute_protocol::Kind::EvaluationKeys
+        || header.key_id.as_deref() != Some(client.key_id())
+    {
+        return Err(Error::new(
+            Code::WrongKey,
+            format!(
+                "{}: {}; the evaluation keys were not uploaded",
+                path.display(),
+                crate::client::MISMATCHED_KEYS
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
