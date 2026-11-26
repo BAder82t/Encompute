@@ -179,6 +179,7 @@ def test_asset_brokers_must_cover_pin_and_bind_each_key_once():
 def test_a_key_outside_the_binding_is_refused_before_any_broker(tmp_path):
     seed = tmp_path / "mock.seed"
     seed.write_bytes(bytes([9] * 32))
+    seed.chmod(0o600)  # a seed file is accessible to its owner only
     spec = json.dumps(_bound(**{"hospital-a": "hospital-a-broker"}))
 
     def acquire(assets, urls=None):
