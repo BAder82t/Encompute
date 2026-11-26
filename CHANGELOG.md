@@ -46,23 +46,37 @@ this unreleased work. Draft notes:
   organization's governance key (`governance sign`, `witness`, head
   signing, `governance countersign`, `governance export --sign-key`) must
   be accessible to their owner only (`chmod 600`), as the
-  evaluator identity and the broker's KEK already were. Service keys read
+  evaluator identity and the broker's KEK already were. The Python SDK's
+  training bindings (`acquire_training_keys`, `acquire_session_keys`,
+  `attest_contribution`, `sign_adapter_record`) read a party's or the
+  coordinator's key and a mock attestation seed under the same owner-only
+  rule. Service keys read
   from mounted secrets (`ENCOMPUTE_SERVICE_KEY_FILE`,
   `ENCOMPUTE_SIGNING_KEY_FILE`) may stay readable through the mount (0644,
   as `deploy/docker-compose/init.sh` writes them) but must be regular files
   that nobody else can write, the rule the OpenBao token file already
   followed. **Upgrade note:** a `secret.key`, party key or governance key
-  with group or other access is now refused; `chmod 600` it. Files made by
-  `keys generate`, `aggregate identity` and `governance keygen` are already
-  0600. INV-303.
+  with group or other access is now refused, and so is a training key or
+  seed file written by hand with the default umask; `chmod 600` it (a key
+  mounted from a secret store needs an owner-only mode, such as
+  Kubernetes `defaultMode: 0400`). Files
+  made by `keys generate`, `aggregate identity`, `attest mock-root` and
+  `governance keygen` are already 0600. INV-303.
 - **`keys generate` no longer replaces an existing secret key.** If the
   output directory already holds a `secret.key`, it refuses (ENC1605)
   before generating anything; `--force` replaces it. Every result encrypted
   under the old key would otherwise become undecryptable without warning.
-  Keys are now written to temporary files and renamed into place
-  (evaluation keys first, the secret key last), so an interrupted run never
-  leaves a truncated or empty `secret.key`. **Upgrade note:** scripts that
-  regenerate keys into the same directory must add `--force`. INV-304.
+  Both files are now written in full to temporary files before either is
+  renamed into place (evaluation keys first, the secret key last), so a
+  failed write leaves the previous pair as it was and an interrupted run
+  never leaves a truncated or empty `secret.key`. A crash between the two
+  renames leaves the previous secret key beside the new evaluation keys:
+  `run --remote`, `jobs run` and the Python SDK now refuse such an
+  `eval.keys` (ENC1605, saying to run `keys generate --force` again) before
+  uploading it, where the evaluator used to refuse it only after the whole
+  file (about 525 MiB for exact programs) had been sent. **Upgrade note:**
+  scripts that regenerate keys into the same directory must add `--force`.
+  INV-304.
 - **`verify` refuses mock-backend receipts unless `--allow-mock`.** A
   receipt for the mock backend (from the receipt, the request envelope or
   `--backend`) is `INVALID`, exit 1: the mock backend encrypts nothing, and

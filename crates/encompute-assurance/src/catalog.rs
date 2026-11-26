@@ -311,17 +311,22 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::evaluator_trust_is_checked_before_sending_and_a_bad_pin_fails_closed"),
         (EndToEnd, "script:examples/04_execution_receipts/run.sh"),
     ]),
-    inv!("INV-303", "leakage", "The CLI checks a secret key file before using its key: the secret.key of run --remote, a party identity key (aggregate identity, trust authorize) and an organization's governance key (governance sign, governance countersign) must be accessible to their owner only, and a service key read from a mounted secret must be a regular file that the group and others cannot write; otherwise ENC2605.", [
+    inv!("INV-303", "leakage", "The CLI checks a secret key file before using its key: the secret.key of run --remote, a party identity key (aggregate identity, trust authorize) and an organization's governance key (governance sign, governance countersign) must be accessible to their owner only, and a service key read from a mounted secret must be a regular file that the group and others cannot write; otherwise ENC2605. The Python SDK's training bindings read their key and seed files (a party's or the coordinator's key, a mock attestation seed) under the same owner-only rule.", [
         (Positive, "test:crates/encompute-verification/src/secret_file.rs::private_files_are_owner_only"),
+        (Positive, "test:python/tests/test_key_files.py::test_owner_only_key_files_are_used"),
         (Negative, "test:crates/encompute-verification/src/secret_file.rs::mounted_secrets_may_be_readable_but_never_writable_by_others"),
         (Negative, "test:crates/encompute-verification/src/secret_file.rs::only_regular_files_and_io_errors_keep_the_callers_code"),
+        (Negative, "test:python/tests/test_key_files.py::test_a_missing_or_wrong_length_file_keeps_its_error"),
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::secret_key_files_readable_by_others_are_refused"),
         (Adversarial, "test:crates/encompute-cli/tests/governance.rs::a_governance_key_readable_by_others_is_refused"),
         (Adversarial, "test:crates/encompute-cli/tests/governance_bundle.rs::a_countersign_key_readable_by_others_is_refused"),
+        (Adversarial, "test:python/tests/test_key_files.py::test_a_key_file_others_can_read_is_refused"),
     ]),
-    inv!("INV-304", "keys", "keys generate never replaces an existing secret key without --force: it refuses (ENC1605) before generating anything, and a key replaced with --force is owner only.", [
+    inv!("INV-304", "keys", "keys generate never replaces an existing secret key without --force: it refuses (ENC1605) before generating anything, and a key replaced with --force is owner only. Both files of a pair are written before either replaces anything, so a failed write leaves the previous pair as it was; evaluation keys of another key pair, as a crash between the two renames leaves beside the previous secret key, are refused (ENC1605) before run --remote uploads them, and the evaluator never receives them.", [
         (Positive, "test:crates/encompute-cli/tests/cli.rs::keys_and_audit"),
+        (Negative, "test:crates/encompute-cli/src/main.rs::a_key_pair_is_written_whole_or_not_at_all"),
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::keys_generate_never_replaces_a_secret_key_without_force"),
+        (Adversarial, "test:crates/encompute-cli/tests/cli.rs::a_mismatched_key_pair_is_refused_before_upload"),
     ]),
     inv!("INV-305", "trust", "The CLI's trust report, lineage and export are satisfied only with evidence of a run (an execution, an aggregation round or training) unless --allow-no-run is given; a program without confidentiality declarations has Policy NOT PRESENT; and a satisfied report lists the rows its evidence covers and the rows with none.", [
         (Positive, "test:crates/encompute-trust/tests/report_coverage.rs::a_report_lists_what_it_covered_and_what_was_not_present"),
