@@ -1635,3 +1635,81 @@ fn evaluation_keys_are_read_only_when_the_evaluator_lacks_them() {
     let (code, _, err) = run(&fresh);
     assert_eq!(code, 0, "{err}");
 }
+
+/// Evaluation keys of another key pair, as an interrupted `keys generate
+/// --force` leaves beside the previous secret key, are refused before they
+/// are uploaded, with the remedy; the evaluator never receives them.
+#[test]
+fn a_mismatched_key_pair_is_refused_before_upload() {
+    let dir = std::env::temp_dir().join(format!("encompute-cli-mismatch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = |f: &str| dir.join(f).to_str().unwrap().to_owned();
+    std::fs::write(dir.join("adult.eir"), ADULT).unwrap();
+    let (code, _, err) = encompute(&["compile", &p("adult.eir"), "-o", &p("adult.encompute")]);
+    assert_eq!(code, 0, "{err}");
+    for out in ["keys", "other"] {
+        let (code, _, err) = encompute(&[
+            "keys",
+            "generate",
+            &p("adult.encompute"),
+            "-o",
+            &p(out),
+            "--mode",
+            "mock",
+        ]);
+        assert_eq!(code, 0, "{err}");
+    }
+    // The key ID an evaluation-key file's header names.
+    let key_id = |f: &str| -> String {
+        let b = std::fs::read(dir.join(f)).unwrap();
+        let hlen = u32::from_le_bytes(b[6..10].try_into().unwrap()) as usize;
+        let h: serde_json::Value = serde_json::from_slice(&b[10..10 + hlen]).unwrap();
+        h["key_id"].as_str().unwrap().to_owned()
+    };
+    let (ours, theirs) = (key_id("keys/eval.keys"), key_id("other/eval.keys"));
+    let program_id = encompute_runtime::Model::load(&dir.join("adult.encompute"))
+        .unwrap()
+        .ids()
+        .program_id;
+    let url = serve();
+    let registered =
+        |kid: &str| match ureq::get(&format!("{url}/v1/programs/{program_id}/keys/{kid}")).call() {
+            Ok(_) => true,
+            Err(ureq::Error::Status(404, _)) => false,
+            Err(e) => panic!("{e}"),
+        };
+    let run = || {
+        encompute(&[
+            "run",
+            &p("adult.encompute"),
+            "--remote",
+            &url,
+            "--keys",
+            &p("keys"),
+            "--input",
+            "age=30",
+        ])
+    };
+
+    let good = std::fs::read(dir.join("keys/eval.keys")).unwrap();
+    std::fs::copy(dir.join("other/eval.keys"), dir.join("keys/eval.keys")).unwrap();
+    let (code, out, err) = run();
+    assert_ne!(code, 0, "a mismatched pair was used: {out}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("ENC1605")
+            && err.contains("another key pair")
+            && err.contains("keys generate --force")
+            && err.contains("the evaluation keys were not uploaded"),
+        "{err}"
+    );
+    assert!(!registered(&theirs), "the other pair's keys were uploaded");
+
+    // The matching pair runs, and its keys are registered.
+    std::fs::write(dir.join("keys/eval.keys"), &good).unwrap();
+    let (code, _, err) = run();
+    assert_eq!(code, 0, "{err}");
+    assert!(registered(&ours));
+    assert!(!registered(&theirs));
+}

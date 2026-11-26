@@ -12,6 +12,15 @@ use encompute_verification::{
     VerificationState, VerifiedReceipt,
 };
 
+/// Evaluation keys that are not this secret key's. `keys generate` writes
+/// both files and then renames them, the secret key last: a crash between
+/// the two renames leaves the previous secret key beside new evaluation
+/// keys.
+pub(crate) const MISMATCHED_KEYS: &str =
+    "these evaluation keys belong to another key pair than the secret key: both files must \
+     come from one `encompute keys generate` (an interrupted `keys generate --force` can \
+     leave them mismatched: run it again)";
+
 /// The concrete client, so the secret key can be exported.
 enum Client {
     Mock(MockClient),
@@ -376,10 +385,7 @@ impl ClientSession {
     pub fn attach_evaluation_keys(&mut self, envelope: &[u8]) -> Result<()> {
         let env = Envelope::decode(envelope)?;
         if sha256_hex(&env.payload) != self.key_id {
-            return Err(Error::new(
-                Code::WrongKey,
-                "these evaluation keys belong to another key pair",
-            ));
+            return Err(Error::new(Code::WrongKey, MISMATCHED_KEYS));
         }
         self.evaluation_keys = Some(envelope.to_vec());
         Ok(())

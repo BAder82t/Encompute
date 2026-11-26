@@ -1788,52 +1788,114 @@ fn compile(source: &str, output: Option<PathBuf>) -> Result<ExitCode> {
 
 /// Write a key pair. Each file is written to a new temporary file (the
 /// secret one created 0600) and renamed into place, evaluation keys first
-/// and the secret key last: a failure part way leaves any existing secret
-/// key whole, never truncated.
+/// and the secret key last: an existing secret key is never truncated.
 fn write_keys(dir: &Path, client: &ClientSession) -> Result<()> {
-    let io =
-        |p: &Path, e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", p.display()));
-    std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
     let envelope = zeroize::Zeroizing::new(client.secret_key_envelope()?);
     let keys = client
         .evaluation_keys()
         .expect("fresh client has evaluation keys");
-    replace_file(&dir.join("eval.keys"), keys, false).map_err(|(p, e)| io(&p, e))?;
-    replace_file(&dir.join("secret.key"), &envelope, true).map_err(|(p, e)| io(&p, e))
+    write_key_pair(dir, keys, &envelope)
 }
 
-/// Write `bytes` to `path` through a temporary file in the same directory,
-/// synced, then renamed over `path` (removed again on any error).
-fn replace_file(
-    path: &Path,
-    bytes: &[u8],
-    secret: bool,
-) -> std::result::Result<(), (PathBuf, std::io::Error)> {
-    use std::io::Write;
-    let name = path
-        .file_name()
-        .map_or_else(Default::default, |n| n.to_owned());
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(&name);
-    tmp_name.push(format!(".tmp-{}", std::process::id()));
-    let tmp = path.with_file_name(tmp_name);
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
+fn write_key_pair(dir: &Path, keys: &[u8], envelope: &[u8]) -> Result<()> {
+    let io =
+        |p: &Path, e: std::io::Error| Error::new(Code::Artifact, format!("{}: {e}", p.display()));
+    std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+    // Both files are written and synced before either replaces anything,
+    // so a failure while writing (a full disk) leaves the previous pair
+    // untouched. The secret key is renamed last: a crash between the two
+    // renames leaves the previous secret key, and what was encrypted under
+    // it, beside the new evaluation keys, which are refused before any
+    // upload (`run --remote`, `jobs run`, the Python SDK) and replaced by
+    // running `keys generate --force` again.
+    let eval = Staged::write(&dir.join("eval.keys"), keys, false).map_err(|(p, e)| io(&p, e))?;
+    let secret =
+        Staged::write(&dir.join("secret.key"), envelope, true).map_err(|(p, e)| io(&p, e))?;
+    eval.commit().map_err(|(p, e)| io(&p, e))?;
+    secret.commit().map_err(|(p, e)| {
+        Error::new(
+            Code::Artifact,
+            format!(
+                "{}: {e}. The new eval.keys is already in place beside the previous secret \
+                 key, which stays usable for what was encrypted under it; the pair is \
+                 mismatched until `encompute keys generate --force` runs again",
+                p.display()
+            ),
+        )
+    })?;
+    sync_dir(dir);
+    Ok(())
+}
+
+/// A file written and synced under a temporary name in its directory,
+/// renamed over its path by [`Staged::commit`]; removed if never committed.
+struct Staged {
+    tmp: PathBuf,
+    path: PathBuf,
+    committed: bool,
+}
+
+impl Staged {
+    fn write(
+        path: &Path,
+        bytes: &[u8],
+        secret: bool,
+    ) -> std::result::Result<Self, (PathBuf, std::io::Error)> {
+        use std::io::Write;
+        let name = path
+            .file_name()
+            .map_or_else(Default::default, |n| n.to_owned());
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(&name);
+        tmp_name.push(format!(".tmp-{}", std::process::id()));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        if secret {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = secret;
+        let tmp = path.with_file_name(tmp_name);
+        let mut f = opts.open(&tmp).map_err(|e| (tmp.clone(), e))?;
+        // From here on the temporary file is ours: dropped, it is removed.
+        let staged = Self {
+            tmp,
+            path: path.to_owned(),
+            committed: false,
+        };
+        f.write_all(bytes)
+            .and_then(|()| f.sync_all())
+            .map_err(|e| (staged.path.clone(), e))?;
+        Ok(staged)
+    }
+
+    fn commit(mut self) -> std::result::Result<(), (PathBuf, std::io::Error)> {
+        std::fs::rename(&self.tmp, &self.path).map_err(|e| (self.path.clone(), e))?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// Make the renames in `dir` durable where the file system can sync a
+/// directory. Best effort: the pair is already in place, and some file
+/// systems (network and FUSE mounts) refuse to sync directories.
+fn sync_dir(dir: &Path) {
     #[cfg(unix)]
-    if secret {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
     }
     #[cfg(not(unix))]
-    let _ = secret;
-    let written = opts
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
-        .and_then(|()| std::fs::rename(&tmp, path));
-    written.map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        (path.to_owned(), e)
-    })
+    let _ = dir;
 }
 
 fn parse_inputs(args: &[String], file: Option<&Path>) -> Result<Inputs> {
@@ -1885,6 +1947,66 @@ fn parse_inputs(args: &[String], file: Option<&Path>) -> Result<Inputs> {
 #[cfg(test)]
 mod tests {
     use super::plain_http_to_remote_host as warned;
+
+    /// Both files of a pair are written before either replaces anything:
+    /// when the secret key cannot be written, the previous pair stays as it
+    /// was and no temporary file is left behind.
+    #[test]
+    fn a_key_pair_is_written_whole_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("encompute-keypair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::write_key_pair(&dir, b"eval 1", b"secret 1").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                |f: &str| std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode("secret.key"), 0o600);
+        }
+
+        // The secret key's temporary name is taken: it cannot be written.
+        let blocked = dir.join(format!(".secret.key.tmp-{}", std::process::id()));
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(super::write_key_pair(&dir, b"eval 2", b"secret 2").is_err());
+        let read = |f: &str| std::fs::read(dir.join(f)).unwrap();
+        assert_eq!(read("eval.keys"), b"eval 1");
+        assert_eq!(read("secret.key"), b"secret 1");
+        std::fs::remove_dir(&blocked).unwrap();
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["eval.keys", "secret.key"]);
+
+        super::write_key_pair(&dir, b"eval 2", b"secret 2").unwrap();
+        assert_eq!(read("eval.keys"), b"eval 2");
+        assert_eq!(read("secret.key"), b"secret 2");
+
+        // The secret key cannot be renamed into place after the evaluation
+        // keys were: the error says the pair is mismatched and how to fix
+        // it, and no temporary file is left behind.
+        let other =
+            std::env::temp_dir().join(format!("encompute-keypair-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&other);
+        std::fs::create_dir_all(other.join("secret.key")).unwrap();
+        std::fs::write(other.join("secret.key").join("x"), b"").unwrap();
+        let e = super::write_key_pair(&other, b"eval 3", b"secret 3").unwrap_err();
+        assert!(
+            e.message.contains("mismatched") && e.message.contains("keys generate --force"),
+            "{}",
+            e.message
+        );
+        assert_eq!(std::fs::read(other.join("eval.keys")).unwrap(), b"eval 3");
+        let mut left: Vec<_> = std::fs::read_dir(&other)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["eval.keys", "secret.key"]);
+        let _ = std::fs::remove_dir_all(&other);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn pinning_over_plain_http_to_another_host_is_warned() {
