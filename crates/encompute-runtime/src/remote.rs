@@ -66,6 +66,14 @@ pub struct RemoteStats {
 /// trusted to keep them small).
 const MAX_JSON: u64 = 16 << 20;
 
+/// How long a client waits before it asks for a new upload grant after an
+/// evaluator refused one issued before it started (ENC2609). Grants carry
+/// whole seconds, and the evaluator refuses a grant of the second it
+/// started in, so a grant asked for one second after the refusal is issued
+/// after the start only when the two clocks agree exactly. Two seconds
+/// also cover a control plane clock up to a second behind the evaluator's.
+const RESTART_PAUSE: Duration = Duration::from_secs(2);
+
 fn read_json(resp: ureq::Response) -> Result<Value> {
     let mut body = Vec::new();
     resp.into_reader()
@@ -124,6 +132,38 @@ impl Remote {
             .as_ref()
             .map(|s| s.upload_grant(kind, key_id).map(|g| g.to_header()))
             .transpose()
+    }
+
+    /// Runs `op` with a fresh upload grant (none without a source). An
+    /// evaluator that started after the grant was issued, or in the same
+    /// second, refuses it (ENC2609): a restart forgets which grants were
+    /// spent, so it takes only grants issued after its start. Then `op` runs
+    /// once more with a new grant, asked for [`RESTART_PAUSE`] later, which
+    /// the evaluator checks like the first. Nothing else is retried.
+    fn with_upload_grant<T>(
+        &self,
+        kind: UploadKind,
+        key_id: Option<&str>,
+        mut op: impl FnMut(Option<&str>) -> Result<T>,
+    ) -> Result<T> {
+        let grant = self.upload_header(kind, key_id)?;
+        match op(grant.as_deref()) {
+            Err(e) if e.code == Code::UploadGrantBeforeStart && grant.is_some() => {
+                std::thread::sleep(RESTART_PAUSE);
+                let grant = self.upload_header(kind, key_id)?;
+                op(grant.as_deref()).map_err(|mut e| {
+                    if e.code == Code::UploadGrantBeforeStart {
+                        e.message = format!(
+                            "{}; a new grant, asked for two seconds later, was refused too: \
+                             check that the control plane's clock is not behind the evaluator's",
+                            e.message
+                        );
+                    }
+                    e
+                })
+            }
+            r => r,
+        }
     }
 
     /// Sends `grant` with the job: evaluators managed by a control plane run
@@ -193,26 +233,23 @@ impl Remote {
     pub fn ensure_program(&self, program: &Program, program_id: &str) -> Result<()> {
         // One grant: it lets the evaluator list the program, and admits one
         // upload of it.
-        let grant = self.upload_header(UploadKind::Program, None)?;
-        let info = self.info_with(grant.as_deref())?;
-        let loaded = info["programs"]
-            .as_array()
-            .is_some_and(|ps| ps.iter().any(|p| p["program_id"] == program_id));
-        if loaded {
-            return Ok(());
-        }
-        let got = self.post(
-            "/v1/programs",
-            program.to_string().as_bytes(),
-            grant.as_deref(),
-        )?;
-        if got["program_id"] != program_id {
-            return Err(Error::new(
-                Code::WrongProgram,
-                "the evaluator compiled the program to a different ID",
-            ));
-        }
-        Ok(())
+        self.with_upload_grant(UploadKind::Program, None, |grant| {
+            let info = self.info_with(grant)?;
+            let loaded = info["programs"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().any(|p| p["program_id"] == program_id));
+            if loaded {
+                return Ok(());
+            }
+            let got = self.post("/v1/programs", program.to_string().as_bytes(), grant)?;
+            if got["program_id"] != program_id {
+                return Err(Error::new(
+                    Code::WrongProgram,
+                    "the evaluator compiled the program to a different ID",
+                ));
+            }
+            Ok(())
+        })
     }
 
     /// Upload evaluation keys if the evaluator does not have them. Returns
@@ -235,36 +272,39 @@ impl Remote {
         key_id: &str,
         load: impl FnOnce() -> Result<Option<Cow<'k, [u8]>>>,
     ) -> Result<usize> {
-        let grant = self.upload_header(UploadKind::Keys, Some(key_id))?;
-        match self
-            .get(
-                &format!("/v1/programs/{program_id}/keys/{key_id}"),
-                grant.as_deref(),
-            )
-            .call()
-        {
-            Ok(_) => return Ok(0),
-            Err(ureq::Error::Status(404, _)) => {}
-            Err(e) => return Err(remote_err(e)),
-        }
-        let keys = load()?.ok_or_else(|| {
-            Error::new(
-                Code::WrongKey,
-                "the evaluator lacks this client's evaluation keys; provide eval.keys",
-            )
-        })?;
-        let got = self.post(
-            &format!("/v1/programs/{program_id}/keys"),
-            &keys,
-            grant.as_deref(),
-        )?;
-        if got["key_id"] != key_id {
-            return Err(Error::new(
-                Code::WrongKey,
-                "the evaluator registered a different key ID",
-            ));
-        }
-        Ok(keys.len())
+        // The keys are loaded once, when the evaluator first turns out to
+        // lack them, and kept if the upload is asked for again.
+        let mut load = Some(load);
+        let mut loaded: Option<Cow<'k, [u8]>> = None;
+        self.with_upload_grant(UploadKind::Keys, Some(key_id), |grant| {
+            match self
+                .get(&format!("/v1/programs/{program_id}/keys/{key_id}"), grant)
+                .call()
+            {
+                Ok(_) => return Ok(0),
+                Err(ureq::Error::Status(404, _)) => {}
+                Err(e) => return Err(remote_err(e)),
+            }
+            if loaded.is_none() {
+                if let Some(load) = load.take() {
+                    loaded = load()?;
+                }
+            }
+            let keys = loaded.as_deref().ok_or_else(|| {
+                Error::new(
+                    Code::WrongKey,
+                    "the evaluator lacks this client's evaluation keys; provide eval.keys",
+                )
+            })?;
+            let got = self.post(&format!("/v1/programs/{program_id}/keys"), keys, grant)?;
+            if got["key_id"] != key_id {
+                return Err(Error::new(
+                    Code::WrongKey,
+                    "the evaluator registered a different key ID",
+                ));
+            }
+            Ok(keys.len())
+        })
     }
 
     /// Submit an inputs envelope and fetch the outputs envelope; the job

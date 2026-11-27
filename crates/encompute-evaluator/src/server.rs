@@ -150,8 +150,9 @@ fn error_reply(e: &Error) -> Reply {
         Code::WrongProgram => 404,
         Code::Unsupported | Code::DepthExceeded | Code::PrecisionUnreachable => 422,
         Code::Remote => 413,
-        // A job the control plane did not grant (or refused to start).
-        Code::ServiceAuthentication | Code::Unauthenticated => 401,
+        // A job the control plane did not grant (or refused to start), or
+        // an upload grant issued before this evaluator started.
+        Code::ServiceAuthentication | Code::Unauthenticated | Code::UploadGrantBeforeStart => 401,
         Code::Forbidden => 403,
         Code::NotFound => 404,
         Code::Conflict => 409,
