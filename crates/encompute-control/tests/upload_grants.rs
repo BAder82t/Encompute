@@ -27,6 +27,7 @@ const NOT_FOUND: &str = "ENC2603";
 const CONFLICT: &str = "ENC2604";
 const SERVICE_AUTH: &str = "ENC2607";
 const REPLAYED: &str = "ENC2608";
+const BEFORE_START: &str = "ENC2609";
 const BAD_INPUT: &str = "ENC1102";
 
 /// An evaluator service that took the control plane's key and counts as
@@ -284,7 +285,7 @@ fn a_control_plane_upload_grant_is_spent_by_one_upload() {
         let (s, v) = upload(&restarted, EXACT, Some((H_UPLOAD_GRANT, &g.to_header())));
         assert_eq!(
             (s, v["code"].as_str()),
-            (401, Some(SERVICE_AUTH)),
+            (401, Some(BEFORE_START)),
             "{what}: {v}"
         );
         assert!(

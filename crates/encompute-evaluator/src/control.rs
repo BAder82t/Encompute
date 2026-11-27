@@ -238,10 +238,12 @@ impl ControlLink {
         // A restart forgets which grants were spent. Everything it does not
         // remember was issued before it, so none of those is accepted: a
         // spent grant stays spent while it could still be used. (`<=`: a
-        // grant of the second the process started in is refused too.)
+        // grant of the second the process started in is refused too.) Its
+        // own code, so a client knows a new grant, asked for a second
+        // later, is the remedy.
         if g.issued_at <= self.started_at {
             return Err(Error::new(
-                Code::ServiceAuthentication,
+                Code::UploadGrantBeforeStart,
                 "the upload grant was issued before this evaluator started: ask the control plane for a new one",
             ));
         }
