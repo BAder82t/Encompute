@@ -311,7 +311,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::evaluator_trust_is_checked_before_sending_and_a_bad_pin_fails_closed"),
         (EndToEnd, "script:examples/04_execution_receipts/run.sh"),
     ]),
-    inv!("INV-303", "leakage", "The CLI checks a secret key file before using its key: the secret.key of run --remote, a party identity key (aggregate identity, trust authorize), an organization's governance key (governance sign, governance countersign), a mock root seed (attest mock-root, --attester mock --mock-seed) and a workload's evaluator identity (workload keys, workload attest) must be accessible to their owner only, and a service key read from a mounted secret must be a regular file that the group and others cannot write; otherwise ENC2605. The Python SDK's training bindings read their key and seed files (a party's or the coordinator's key, a mock attestation seed) under the same owner-only rule.", [
+    inv!("INV-303", "leakage", "The CLI checks a secret key file before using its key: the secret.key of run --remote, a party identity key (aggregate identity, trust authorize), an organization's governance key (governance sign, governance countersign), a mock root seed (attest mock-root, --attester mock --mock-seed), a workload's evaluator identity (workload keys, workload attest) and an asset key given to keys protect --key-file (checked before any broker state or KEK is created) must be accessible to their owner only, and a service key read from a mounted secret must be a regular file that the group and others cannot write; otherwise ENC2605. The Python SDK's training bindings read their key and seed files (a party's or the coordinator's key, a mock attestation seed) under the same owner-only rule.", [
         (Positive, "test:crates/encompute-verification/src/secret_file.rs::private_files_are_owner_only"),
         (Positive, "test:python/tests/test_key_files.py::test_owner_only_key_files_are_used"),
         (Negative, "test:crates/encompute-verification/src/secret_file.rs::mounted_secrets_may_be_readable_but_never_writable_by_others"),
@@ -319,6 +319,7 @@ pub const INVARIANTS: &[Invariant] = &[
         (Negative, "test:python/tests/test_key_files.py::test_a_missing_or_wrong_length_file_keeps_its_error"),
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::secret_key_files_readable_by_others_are_refused"),
         (Adversarial, "test:crates/encompute-cli/tests/cli.rs::mock_seeds_and_workload_identities_are_owner_only"),
+        (Adversarial, "test:crates/encompute-cli/tests/keys_lifecycle.rs::keys_protect_refuses_a_key_file_others_can_access"),
         (Adversarial, "test:crates/encompute-cli/tests/governance.rs::a_governance_key_readable_by_others_is_refused"),
         (Adversarial, "test:crates/encompute-cli/tests/governance_bundle.rs::a_countersign_key_readable_by_others_is_refused"),
         (Adversarial, "test:python/tests/test_key_files.py::test_a_key_file_others_can_read_is_refused"),

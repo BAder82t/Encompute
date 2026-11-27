@@ -544,7 +544,8 @@ pub enum BrokerCmd {
         /// Attestation policy (from `encompute attest policy`).
         #[arg(long)]
         policy: PathBuf,
-        /// Key file to protect (default: a fresh random 32-byte key).
+        /// Key file to protect (default: a fresh random 32-byte key),
+        /// accessible to its owner only (chmod 600).
         #[arg(long)]
         key_file: Option<PathBuf>,
         /// The broker's ID, and the audience workloads attest to (first use).
@@ -900,6 +901,19 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             development,
             file,
         } => {
+            // The asset key is a secret key file, accessible to its owner
+            // only (ENC2605 otherwise), checked before any broker state or
+            // KEK is created.
+            let key = match &key_file {
+                Some(p) => Some(KeyMaterial::from_bytes(
+                    &encompute_verification::read_secret_file(
+                        p,
+                        encompute_verification::SecretFile::Private,
+                        |e| io(p, e),
+                    )?,
+                )?),
+                None => None,
+            };
             let mut b = if file.broker.exists() {
                 open_broker(&file, None)?
             } else {
@@ -920,10 +934,6 @@ pub fn broker(cmd: BrokerCmd) -> Result<ExitCode> {
             if let Some(org) = &file.organization {
                 b.set_organization(org)?;
             }
-            let key = match &key_file {
-                Some(p) => Some(KeyMaterial::from_bytes(&zeroize::Zeroizing::new(read(p)?))?),
-                None => None,
-            };
             let v = b.add_secret(&asset, key, read_policy(&policy)?)?;
             b.save(&file.broker)?;
             println!(

@@ -572,6 +572,47 @@ fn revoking_through_the_cli_replaces_the_kek() {
     assert!(e.contains("open it with that store"), "{e}");
 }
 
+/// The key file given to `keys protect --key-file` is a secret key file:
+/// one the group or others can access is refused (ENC2605) before the
+/// broker state or its KEK is created, so nothing is protected under it.
+#[cfg(unix)]
+#[test]
+fn keys_protect_refuses_a_key_file_others_can_access() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Dir::new("keyfile");
+    setup(&d);
+    let (kek, b, key) = (d.p("k.kek"), d.p("b.json"), d.p("asset.key"));
+    std::fs::write(&key, [7u8; 32]).unwrap();
+    let chmod =
+        |mode: u32| std::fs::set_permissions(&key, std::fs::Permissions::from_mode(mode)).unwrap();
+    let a = protect(&d, "prod-policy.json", &["--kek", &kek, "--key-file", &key]);
+    for mode in [0o644, 0o640, 0o604] {
+        chmod(mode);
+        let e = refused(&strs(&a), &[], "ENC2605");
+        assert!(e.contains(&key) && e.contains("chmod 600"), "{e}");
+        assert!(!Path::new(&b).exists(), "broker state created");
+        assert!(!Path::new(&kek).exists(), "KEK created");
+    }
+    // A key file that cannot be read keeps its own error.
+    let absent = d.p("absent.key");
+    let e = refused(
+        &strs(&protect(
+            &d,
+            "prod-policy.json",
+            &["--kek", &kek, "--key-file", &absent],
+        )),
+        &[],
+        "ENC1401",
+    );
+    assert!(e.contains(&absent), "{e}");
+    assert!(!Path::new(&b).exists() && !Path::new(&kek).exists());
+    // Owner only, it is protected.
+    chmod(0o600);
+    let out = ok(&strs(&a), &[]);
+    assert!(out.contains("weights"), "{out}");
+    assert!(Path::new(&b).exists() && Path::new(&kek).exists());
+}
+
 /// Review finding KB-2 (ENC-SF-2026-043): a broker state file without its authentication tag
 /// (one written before 0.3.0-rc.4, or with the tag stripped) is refused, and
 /// opens again only after its owner has checked and confirmed it.

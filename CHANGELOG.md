@@ -53,15 +53,18 @@ this unreleased work. Draft notes:
   rule, and so does the CLI for its mock root seed (`attest mock-root`,
   `--attester mock --mock-seed`) and a workload's evaluator identity
   (`workload keys`, `workload attest`; `encompute-evaluator serve
-  --identity` already refused that file unless owner only). Service keys
+  --identity` already refused that file unless owner only). `keys
+  protect --key-file` refuses an asset key file that others can access
+  before it creates any broker state or KEK. Service keys
   read from mounted secrets (`ENCOMPUTE_SERVICE_KEY_FILE`,
   `ENCOMPUTE_SIGNING_KEY_FILE`) may stay readable through the mount (0644,
   as `deploy/docker-compose/init.sh` writes them) but must be regular files
   that nobody else can write, the rule the OpenBao token file already
   followed. **Upgrade note:** a `secret.key`, party key or governance key
   with group or other access is now refused, and so is a training key,
-  mock root seed or workload identity written by hand with the default
-  umask; `chmod 600` it (a key
+  mock root seed, workload identity or `keys protect --key-file` key
+  written by hand with the default umask (`head -c 32 /dev/urandom >
+  model.key`); `chmod 600` it or write it under `umask 077` (a key
   mounted from a secret store needs an owner-only mode, such as
   Kubernetes `defaultMode: 0400`). Files
   made by `keys generate`, `aggregate identity`, `attest mock-root`,

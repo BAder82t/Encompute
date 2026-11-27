@@ -74,7 +74,8 @@ approve() {
 protect_model_key() {
   "$E" attest policy collab.encompute --backend mock --image "$IMAGE" --tee mock \
     --development > model-policy.json
-  head -c 32 /dev/urandom > model.key
+  rm -f model.key  # a new file: umask sets the mode only on creation
+  (umask 077 && head -c 32 /dev/urandom > model.key)
   "$E" keys protect --asset base-model --policy model-policy.json --key-file model.key \
     --broker-id modelco --development --broker broker.json >/dev/null
 }

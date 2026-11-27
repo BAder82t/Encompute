@@ -64,7 +64,8 @@ if [ "$VARIANT" = approved ]; then
     attest policy /app/model.encompute --backend mock --image "$DIGEST" \
     --tee "$POLICY_TEE" > attestation-policy.json
   if ! grep -q '"test-key"' broker.json; then
-    head -c 32 /dev/urandom > test.key
+    rm -f test.key  # a new file: umask sets the mode only on creation
+    (umask 077 && head -c 32 /dev/urandom > test.key)
     encompute keys protect --asset test-key --policy attestation-policy.json \
       --key-file test.key --broker broker.json
     rm test.key

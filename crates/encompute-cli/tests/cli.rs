@@ -610,6 +610,12 @@ fn attestation_and_key_release() {
     assert!(err.contains("ENC2002"), "{err}");
     let key = "k".repeat(32);
     std::fs::write(p("asset.key"), &key).unwrap();
+    #[cfg(unix)]
+    {
+        // A key file to protect is accessible to its owner only.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p("asset.key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     ok(&[
         "keys",
         "protect",

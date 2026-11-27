@@ -933,7 +933,11 @@ def _setup(project, model, data, privacy, verification, cfg, infrastructure,
                    ["--broker-id", broker_id, "--kek", str(target["kek"])])
     for asset, (key, policy) in scoped.items():
         kf = mc / f"{asset}.key"
-        kf.write_bytes(key)
+        kf.unlink(missing_ok=True)
+        # Owner only: `keys protect` refuses a key file others can access.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        with os.fdopen(os.open(kf, flags, 0o600), "wb") as f:
+            f.write(key)
         _run([cli, "keys", "protect", "--asset", asset, "--policy", policy,
               "--key-file", kf.name, *broker_args, "--broker", "broker.json"], mc)
         kf.unlink()  # the broker holds it now
